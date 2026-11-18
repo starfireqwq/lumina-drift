@@ -358,9 +358,9 @@ const PanelHeader: React.FC<{
   </div>
 );
 
-/** Where a panel shows: floating panels dock on the right where floating is off (touch tablets without 桌面模式) */
+/** Where a panel shows: floating panels dock on the right where floating is off, except lightweight transient panels (members, oplog) */
 const placeOf = (layout: ReturnType<typeof useDockLayout>, id: PanelId, floats: boolean): PanelPlace =>
-  layout.panels[id].place === 'float' && !floats ? 'right' : layout.panels[id].place;
+  layout.panels[id].place === 'float' && !floats && id !== 'members' && id !== 'oplog' ? 'right' : layout.panels[id].place;
 
 const visiblePanels = (panels: PanelDef[], place: PanelPlace, layout: ReturnType<typeof useDockLayout>, floats = true) =>
   layout.order

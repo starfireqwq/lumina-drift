@@ -8,8 +8,6 @@ import { sampleVectors } from './share-preview-vector';
 
 const WIDTH = 1200;
 const HEIGHT = 630;
-const ART_WIDTH = 1152;
-const ART_HEIGHT = 528;
 const SINGLE_SAMPLE = [0.5];
 const REDUCED_SAMPLES = [0.25, 0.75];
 
@@ -108,9 +106,12 @@ function sampleLayer(tiles: TileData[], width: number, height: number, scale: nu
 
 export function renderSharePreview(source: SharePreviewSource, snapshots: LayerTileSnapshot[], brand: Buffer): Buffer | null {
   const { canvas, layers } = source;
-  const scale = Math.min(ART_WIDTH / canvas.width, ART_HEIGHT / canvas.height, 4);
-  const width = Math.max(1, Math.round(canvas.width * scale));
-  const height = Math.max(1, Math.round(canvas.height * scale));
+  // Center-fill (cover) the entire 1200x630 OG preview card with the artwork.
+  const scale = Math.max(WIDTH / canvas.width, HEIGHT / canvas.height);
+  const width = WIDTH;
+  const height = HEIGHT;
+  const offsetX = (WIDTH / scale - canvas.width) / 2;
+  const offsetY = (HEIGHT / scale - canvas.height) / 2;
   const content = new Map(snapshots.map((layer) => [layer.layerId, layer]));
   const byId = new Map(layers.map((layer) => [layer.id, layer]));
   const drawable = layers.filter((layer) => layer.layerType !== 'group');
@@ -133,6 +134,10 @@ export function renderSharePreview(source: SharePreviewSource, snapshots: LayerT
     const matrix = parent ? multiplyAffine(matrixFor(parent, depth + 1), local) : local;
     world.set(layer.id, matrix);
     return matrix;
+  };
+  const coverMatrix = (layer: LayerModel): Affine2D => {
+    const m = matrixFor(layer);
+    return { ...m, tx: m.tx + offsetX, ty: m.ty + offsetY };
   };
 
   const sampledMasks = new Map<string, Uint8ClampedArray>();
@@ -162,7 +167,7 @@ export function renderSharePreview(source: SharePreviewSource, snapshots: LayerT
       if (mask) {
         let data = sampledMasks.get(mask.id);
         if (!data) {
-          data = sampleLayer(content.get(mask.id)?.tiles ?? [], width, height, scale, matrixFor(mask));
+          data = sampleLayer(content.get(mask.id)?.tiles ?? [], width, height, scale, coverMatrix(mask));
           sampledMasks.set(mask.id, data);
         }
         layerMasks.push({ data, inverted: Boolean(mask.meta?.maskInverted) });
@@ -172,9 +177,9 @@ export function renderSharePreview(source: SharePreviewSource, snapshots: LayerT
     const snapshot = content.get(layer.id);
     let paint: Uint8ClampedArray | null = null;
     if (opacity > 0 && layer.layerType === 'vector' && snapshot?.vectorStrokes?.length) {
-      paint = sampleVectors(snapshot.vectorStrokes, width, height, scale, matrixFor(layer));
+      paint = sampleVectors(snapshot.vectorStrokes, width, height, scale, coverMatrix(layer));
     } else if (opacity > 0 && snapshot?.tiles.length) {
-      paint = sampleLayer(snapshot.tiles, width, height, scale, matrixFor(layer));
+      paint = sampleLayer(snapshot.tiles, width, height, scale, coverMatrix(layer));
     }
     if (!layer.clipToBelow) clipBase = paint;
     if (!paint) continue;
@@ -214,23 +219,39 @@ export function renderSharePreview(source: SharePreviewSource, snapshots: LayerT
   if (!hasArtwork) return null;
 
   const card = new PNG({ width: WIDTH, height: HEIGHT });
-  for (let i = 0; i < card.data.length; i += 4) card.data.writeUInt32BE(0x141329ff, i);
-  const left = Math.floor((WIDTH - width) / 2);
-  const top = 16 + Math.floor((ART_HEIGHT - height) / 2);
-  const artwork = Buffer.from(pixels.buffer);
-  for (let y = 0; y < height; y++) {
-    artwork.copy(card.data, ((top + y) * WIDTH + left) * 4, y * width * 4, (y + 1) * width * 4);
-  }
+  Buffer.from(pixels.buffer).copy(card.data);
 
-  // Reuse the mark and wordmark in the existing Lumina Drift brand card.
+  // Place the Lumina Drift mark & wordmark inside a subtle bottom-left badge so it stays crisp on any artwork.
   const original = PNG.sync.read(brand);
   if (original.width === WIDTH && original.height === HEIGHT) {
+    const bx = 14, by = 541, bw = 320, bh = 80, br = 14;
+    for (let y = by; y < by + bh; y++) {
+      for (let x = bx; x < bx + bw; x++) {
+        const dx = Math.max(0, bx + br - x, x - (bx + bw - 1 - br));
+        const dy = Math.max(0, by + br - y, y - (by + bh - 1 - br));
+        if (dx * dx + dy * dy > br * br) continue;
+        const i = (y * WIDTH + x) * 4;
+        const a = 0.88;
+        card.data[i] = Math.round(card.data[i] * (1 - a) + 14 * a);
+        card.data[i + 1] = Math.round(card.data[i + 1] * (1 - a) + 16 * a);
+        card.data[i + 2] = Math.round(card.data[i + 2] * (1 - a) + 37 * a);
+        card.data[i + 3] = 255;
+      }
+    }
     const copy = (sx: number, sy: number, sw: number, sh: number, dx: number, dy: number, size: number) => {
       const h = Math.round((size * sh) / sw);
       for (let y = 0; y < h; y++) {
         for (let x = 0; x < size; x++) {
           const from = ((sy + Math.floor((y * sh) / h)) * WIDTH + sx + Math.floor((x * sw) / size)) * 4;
-          original.data.copy(card.data, ((dy + y) * WIDTH + dx + x) * 4, from, from + 4);
+          const r = original.data[from], g = original.data[from + 1], b = original.data[from + 2];
+          // Alpha-fade the dark backdrop around the mark/wordmark into the badge.
+          const delta = Math.max(0, r - 14, g - 16, b - 37);
+          const alpha = Math.min(1, delta / 40);
+          if (!alpha) continue;
+          const to = ((dy + y) * WIDTH + dx + x) * 4;
+          card.data[to] = Math.round(card.data[to] * (1 - alpha) + r * alpha);
+          card.data[to + 1] = Math.round(card.data[to + 1] * (1 - alpha) + g * alpha);
+          card.data[to + 2] = Math.round(card.data[to + 2] * (1 - alpha) + b * alpha);
         }
       }
     };

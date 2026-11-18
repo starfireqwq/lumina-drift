@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { PluginAction } from '../plugins/pluginApi';
 import { Application, Container, type Filter, Graphics, MaskFilter, Rectangle, RenderTexture, Sprite, Texture, UPDATE_PRIORITY } from 'pixi.js';
 import {
@@ -127,6 +127,15 @@ const isTypingTarget = (target: EventTarget | null) => {
   if (el.closest('textarea, select, [contenteditable]:not([contenteditable="false"])')) return true;
   const input = el.closest('input');
   return Boolean(input && !['range', 'checkbox', 'radio', 'button', 'color', 'submit', 'reset', 'file'].includes(input.type));
+};
+
+const ViewportConsumer: React.FC<{
+  subscribe: (cb: () => void) => () => void;
+  getSnapshot: () => ViewportState;
+  children: (vp: ViewportState) => React.ReactNode;
+}> = ({ subscribe, getSnapshot, children }) => {
+  const vp = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  return <>{children(vp)}</>;
 };
 
 // Opened rarely and heavy (WebGL filter editors, brush packs, timeline, modals): loaded on first use
@@ -306,10 +315,27 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const dockLayout = useDockLayout();
   const railRight = !isPhone && dockLayout.railSide === 'right';
   const [mobileSheet, setMobileSheet] = useState<PanelId | null>(null);
+  const openMobileSheet = (id: PanelId) => {
+    if (dockLayout.panels.members.visible) dockActions.hide('members');
+    if (dockLayout.panels.oplog.visible) dockActions.hide('oplog');
+    setMobileSheet(id);
+  };
   const openBrushToolset = () => {
-    if (isPhone) setMobileSheet('brushToolset');
+    if (isPhone) openMobileSheet('brushToolset');
     else dockActions.activate('brushToolset');
   };
+  const membersPanelVisible = dockLayout.panels.members.visible;
+  const oplogPanelVisible = dockLayout.panels.oplog.visible;
+  useEffect(() => {
+    if (!isPhone) return;
+    if (membersPanelVisible) setMobileSheet('members');
+    else setMobileSheet((curr) => (curr === 'members' ? null : curr));
+  }, [isPhone, membersPanelVisible]);
+  useEffect(() => {
+    if (!isPhone) return;
+    if (oplogPanelVisible) setMobileSheet('oplog');
+    else setMobileSheet((curr) => (curr === 'oplog' ? null : curr));
+  }, [isPhone, oplogPanelVisible]);
 
   const workspaceRef = useRef<HTMLDivElement>(null);
   const hasCanvas = Boolean(canvas);
@@ -684,13 +710,23 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const [canUndoState, setCanUndoState] = useState<boolean>(false);
   const [canRedoState, setCanRedoState] = useState<boolean>(false);
 
-  const [viewportState, setViewportState] = useState<ViewportState>({
+  const viewportStateRef = useRef<ViewportState>({
     zoom: 1.0,
     panX: 0,
     panY: 0,
     rotation: 0,
     mirrorX: false,
   });
+  const viewportSubsRef = useRef(new Set<() => void>());
+  const subscribeViewport = useCallback((cb: () => void) => {
+    viewportSubsRef.current.add(cb);
+    return () => { viewportSubsRef.current.delete(cb); };
+  }, []);
+  const getViewportSnapshot = useCallback(() => viewportStateRef.current, []);
+  const notifyViewportSubs = useCallback((next: ViewportState) => {
+    viewportStateRef.current = next;
+    viewportSubsRef.current.forEach((cb) => cb());
+  }, []);
   const shortcutActionsRef = useRef({
     createLayer: onCreateLayer,
     deleteLayer: async (_layerId: string) => {},
@@ -1036,6 +1072,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     let resizeObserver: ResizeObserver | null = null;
     let handleKeyDown: ((ev: KeyboardEvent) => void) | null = null;
     let handleKeyUp: ((ev: KeyboardEvent) => void) | null = null;
+    let vpSyncRaf = 0;
     const invalidateContainerRect = () => { containerRectRef.current = null; };
     window.addEventListener('resize', invalidateContainerRect, { passive: true });
     window.addEventListener('scroll', invalidateContainerRect, { capture: true, passive: true });
@@ -1130,13 +1167,31 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         const h = app.screen.height || viewHeight;
         layerManager.setViewportBounds(computeViewportBounds(viewport, w, h));
       };
-      viewport.setOnChange((st) => {
-        setViewportState(st);
+      let pendingVpState: ViewportState | null = null;
+      let lastDispatchedZoom = viewport.getState().zoom;
+      const flushViewportSync = () => {
+        vpSyncRaf = 0;
+        if (destroyed || !pendingVpState) return;
+        const st = pendingVpState;
+        pendingVpState = null;
+        notifyViewportSubs(st);
         syncViewportBounds();
-        if (typeof window !== 'undefined') {
-          window.dispatchEvent(new CustomEvent('atelier:zoom', { detail: st.zoom }));
+        if (Math.abs(st.zoom - lastDispatchedZoom) > 1e-6) {
+          lastDispatchedZoom = st.zoom;
+          layerManager.setPixelated(
+            st.zoom >= 2 || (st.zoom > 1 && brushPropsRef.current?.antiAlias === 'none')
+          );
+          selectionEngineRef.current?.setViewScale(st.zoom);
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('atelier:zoom', { detail: st.zoom }));
+          }
         }
+      };
+      viewport.setOnChange((st) => {
+        pendingVpState = st;
+        if (!vpSyncRaf) vpSyncRaf = requestAnimationFrame(flushViewportSync);
       });
+      notifyViewportSubs(viewport.getState());
       syncViewportBounds();
       layerManager.setActiveLayer(activeLayerRef.current?.id ?? null);
       // Thumbnails of parked layers are decoded when the page is idle
@@ -1598,6 +1653,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       lastReplayedCanvasIdRef.current = null;
       isReplayingRef.current = false;
       replayedSeqRef.current = 0;
+      if (vpSyncRaf) cancelAnimationFrame(vpSyncRaf);
       if (resizeObserver) resizeObserver.disconnect();
       window.removeEventListener('resize', invalidateContainerRect);
       window.removeEventListener('scroll', invalidateContainerRect, true);
@@ -1740,11 +1796,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   // From 200 % up (or above 100 % when anti-aliasing is disabled) canvas pixels show as sharp squares
   useEffect(() => {
+    const zoom = viewportStateRef.current.zoom;
     layerManagerRef.current?.setPixelated(
-      viewportState.zoom >= 2 || (viewportState.zoom > 1 && brushProps.antiAlias === 'none')
+      zoom >= 2 || (zoom > 1 && brushProps.antiAlias === 'none')
     );
-    selectionEngineRef.current?.setViewScale(viewportState.zoom);
-  }, [viewportState.zoom, brushProps.antiAlias, isEngineReady]);
+    selectionEngineRef.current?.setViewScale(zoom);
+  }, [brushProps.antiAlias, isEngineReady]);
 
   // Sync Active Layer in pipeline; its before-state buffer must exist before any tool edits it
   useEffect(() => {
@@ -4667,85 +4724,91 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               {/* Dedicated Pixi Canvas Host Layer (isolated from React DOM reconciler) */}
               <div ref={canvasMountRef} data-canvas-presented={isCanvasPresented}
                 className="atelier-canvas-surface pointer-events-none absolute inset-0 z-0 select-none" />
-              {showBrushCursor && (
-                <div ref={brushCursorRef} aria-hidden="true" className={`pointer-events-none absolute left-0 top-0 z-20 rounded-full border ${vectorCursorClass || 'border-white shadow-[0_0_0_1px_#111]'}`}
-                  style={{ width: Math.max(2, brushDiameter * viewportState.zoom), height: Math.max(2, brushDiameter * viewportState.zoom) }}>
-                  {showBrushSize && <span style={{ color: '#fff' }} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded bg-black/80 px-1.5 py-0.5 text-xs">{brushDiameter} px</span>}
-                </div>
-              )}
+              <ViewportConsumer subscribe={subscribeViewport} getSnapshot={getViewportSnapshot}>
+                {(viewportState) => (
+                  <>
+                    {showBrushCursor && (
+                      <div ref={brushCursorRef} aria-hidden="true" className={`pointer-events-none absolute left-0 top-0 z-20 rounded-full border ${vectorCursorClass || 'border-white shadow-[0_0_0_1px_#111]'}`}
+                        style={{ width: Math.max(2, brushDiameter * viewportState.zoom), height: Math.max(2, brushDiameter * viewportState.zoom) }}>
+                        {showBrushSize && <span style={{ color: '#fff' }} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded bg-black/80 px-1.5 py-0.5 text-xs">{brushDiameter} px</span>}
+                      </div>
+                    )}
 
-              {sizeDragging && (
-                <div aria-hidden="true" className="pointer-events-none absolute left-1/2 top-1/2 z-30 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-[0_0_0_1px_#111]"
-                  style={{ width: Math.max(2, brushDiameter * viewportState.zoom), height: Math.max(2, brushDiameter * viewportState.zoom) }}>
-                  <span style={{ color: '#fff' }} className="absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded bg-black/80 px-1.5 py-0.5 text-xs">{brushDiameter} px</span>
-                </div>
-              )}
+                    {sizeDragging && (
+                      <div aria-hidden="true" className="pointer-events-none absolute left-1/2 top-1/2 z-30 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-[0_0_0_1px_#111]"
+                        style={{ width: Math.max(2, brushDiameter * viewportState.zoom), height: Math.max(2, brushDiameter * viewportState.zoom) }}>
+                        <span style={{ color: '#fff' }} className="absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded bg-black/80 px-1.5 py-0.5 text-xs">{brushDiameter} px</span>
+                      </div>
+                    )}
 
-              <RemoteCursorsLayer viewport={viewportRef.current} viewportState={viewportState} selfId={user?.id} />
+                    <RemoteCursorsLayer viewport={viewportRef.current} viewportState={viewportState} selfId={user?.id} />
 
-              {textEdit && (
-                <Suspense fallback={null}>
-                  <TextCanvasEditor meta={textEdit.meta} isNew={!textEdit.layerId} viewport={viewportRef.current} viewportState={viewportState}
-                    onChange={(meta) => setTextEdit((t) => (t ? { ...t, meta } : t))}
-                    onCommit={() => (textEdit.meta.content.trim() ? void commitText(textEdit.meta) : endTextEdit())}
-                    onCancel={endTextEdit} />
-                </Suspense>
-              )}
+                    {textEdit && (
+                      <Suspense fallback={null}>
+                        <TextCanvasEditor meta={textEdit.meta} isNew={!textEdit.layerId} viewport={viewportRef.current} viewportState={viewportState}
+                          onChange={(meta) => setTextEdit((t) => (t ? { ...t, meta } : t))}
+                          onCommit={() => (textEdit.meta.content.trim() ? void commitText(textEdit.meta) : endTextEdit())}
+                          onCancel={endTextEdit} />
+                      </Suspense>
+                    )}
 
-              <CanvasStickersOverlay
-                stickers={stickers}
-                currentUserId={user?.id}
-                zoom={viewportState.zoom}
-                pan={{ x: viewportState.panX, y: viewportState.panY }}
-                onAddSticker={addSticker}
-                onUpdateSticker={updateSticker}
-                onRemoveSticker={removeSticker}
-              />
+                    <CanvasStickersOverlay
+                      stickers={stickers}
+                      currentUserId={user?.id}
+                      zoom={viewportState.zoom}
+                      pan={{ x: viewportState.panX, y: viewportState.panY }}
+                      onAddSticker={addSticker}
+                      onUpdateSticker={updateSticker}
+                      onRemoveSticker={removeSticker}
+                    />
 
-              {isTransformActive && distortMode === 'transform' && (
-                <Suspense fallback={null}>
-                  <TransformOverlay
-                    isActive
-                    box={transformBox}
-                    onChangeBox={setTransformBox}
-                    // The selection moves with the pixels (a marquee left behind would clip brushes to an empty spot)
-                    onApply={() => { applyTransform(); selection.refreshSelection(); }}
-                    onCancel={cancelTransform}
-                    onChangeMode={setDistortMode}
-                    canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
-                    screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
-                    viewportZoom={viewportState.zoom}
-                    previewUrl={transformPreviewUrl}
-                  />
-                </Suspense>
-              )}
+                    {isTransformActive && distortMode === 'transform' && (
+                      <Suspense fallback={null}>
+                        <TransformOverlay
+                          isActive
+                          box={transformBox}
+                          onChangeBox={setTransformBox}
+                          // The selection moves with the pixels (a marquee left behind would clip brushes to an empty spot)
+                          onApply={() => { applyTransform(); selection.refreshSelection(); }}
+                          onCancel={cancelTransform}
+                          onChangeMode={setDistortMode}
+                          canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
+                          screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
+                          viewportZoom={viewportState.zoom}
+                          previewUrl={transformPreviewUrl}
+                        />
+                      </Suspense>
+                    )}
 
-              {isResizeModalOpen && (
-                <Suspense fallback={null}>
-                  <CanvasResizeOverlay
-                    isActive
-                    oldWidth={canvas.width}
-                    oldHeight={canvas.height}
-                    box={resizeBox}
-                    lockAspect={resizeLockAspect}
-                    onChangeBox={(next, hint) => {
-                      setResizeBox(next);
-                      setResizeAnchor(hint);
-                    }}
-                    onModifiersChange={setResizeModifiers}
-                    canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
-                    screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
-                  />
-                </Suspense>
-              )}
+                    {isResizeModalOpen && (
+                      <Suspense fallback={null}>
+                        <CanvasResizeOverlay
+                          isActive
+                          oldWidth={canvas.width}
+                          oldHeight={canvas.height}
+                          box={resizeBox}
+                          lockAspect={resizeLockAspect}
+                          onChangeBox={(next, hint) => {
+                            setResizeBox(next);
+                            setResizeAnchor(hint);
+                          }}
+                          onModifiersChange={setResizeModifiers}
+                          canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
+                          screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
+                        />
+                      </Suspense>
+                    )}
 
-              <RulerOverlay
-                canvasWidth={canvas.width}
-                canvasHeight={canvas.height}
-                canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
-                screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
-                viewportZoom={viewportState.zoom}
-              />
+                    <RulerOverlay
+                      canvasWidth={canvas.width}
+                      canvasHeight={canvas.height}
+                      canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
+                      screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
+                      viewportZoom={viewportState.zoom}
+                    />
+                  </>
+                )}
+              </ViewportConsumer>
 
               {isMeshWarpActive && (
                 <Suspense fallback={null}>
@@ -4766,35 +4829,41 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               )}
             </div>
 
-            <Suspense fallback={null}>
-              <ComicStudioOverlay
-                key={canvas.id}
-                currentTool={currentTool}
-                canvasWidth={canvas.width}
-                canvasHeight={canvas.height}
-                canvasToScreen={(cx, cy) => viewportRef.current?.canvasToScreen(cx, cy) ?? { x: cx, y: cy }}
-                getCanvasViewCenter={() => {
-                  const center = getViewCenter();
-                  return center && viewportRef.current
-                    ? viewportRef.current.screenToCanvas(center.x, center.y)
-                    : { x: canvas.width / 2, y: canvas.height / 2 };
-                }}
-                viewportZoom={viewportState.zoom}
-                onBakeToLayer={handleBakeComicToLayer}
-                onClose={() => handleSelectTool('brush')}
-              />
-            </Suspense>
-            <VectorOverlay
-              viewport={viewportRef.current}
-              viewportState={viewportState}
-              strokes={activeLayer ? (vectorEngineRef.current?.getStrokes(activeLayer.id) || vectorStrokesList) : []}
-              currentTool={currentTool}
-              isVectorLayer={activeLayer?.layerType === 'vector' || currentTool.startsWith('vector')}
-              selectedStrokeId={vectorSel?.strokeId ?? null}
-              selectedAnchorIndex={vectorSel?.index ?? -1}
-              previewStroke={vectorPreview ?? penPreview}
-              penPoints={currentTool === 'vector_bezier' ? penPoints : []}
-            />
+            <ViewportConsumer subscribe={subscribeViewport} getSnapshot={getViewportSnapshot}>
+              {(viewportState) => (
+                <>
+                  <Suspense fallback={null}>
+                    <ComicStudioOverlay
+                      key={canvas.id}
+                      currentTool={currentTool}
+                      canvasWidth={canvas.width}
+                      canvasHeight={canvas.height}
+                      canvasToScreen={(cx, cy) => viewportRef.current?.canvasToScreen(cx, cy) ?? { x: cx, y: cy }}
+                      getCanvasViewCenter={() => {
+                        const center = getViewCenter();
+                        return center && viewportRef.current
+                          ? viewportRef.current.screenToCanvas(center.x, center.y)
+                          : { x: canvas.width / 2, y: canvas.height / 2 };
+                      }}
+                      viewportZoom={viewportState.zoom}
+                      onBakeToLayer={handleBakeComicToLayer}
+                      onClose={() => handleSelectTool('brush')}
+                    />
+                  </Suspense>
+                  <VectorOverlay
+                    viewport={viewportRef.current}
+                    viewportState={viewportState}
+                    strokes={activeLayer ? (vectorEngineRef.current?.getStrokes(activeLayer.id) || vectorStrokesList) : []}
+                    currentTool={currentTool}
+                    isVectorLayer={activeLayer?.layerType === 'vector' || currentTool.startsWith('vector')}
+                    selectedStrokeId={vectorSel?.strokeId ?? null}
+                    selectedAnchorIndex={vectorSel?.index ?? -1}
+                    previewStroke={vectorPreview ?? penPreview}
+                    penPoints={currentTool === 'vector_bezier' ? penPoints : []}
+                  />
+                </>
+              )}
+            </ViewportConsumer>
             {engineError && (
               <div role="alert" className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-neutral-950 text-sm text-neutral-200">
                 <p>無法載入畫布。</p>
@@ -4872,27 +4941,31 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             </Suspense>
           )}
 
-          <ViewportToolbar
-            viewportState={viewportState}
-            width={canvas.width}
-            height={canvas.height}
-            onZoomIn={() => zoomAtViewCenter(1.25)}
-            onZoomOut={() => zoomAtViewCenter(1 / 1.25)}
-            onResetZoom={() => zoomAtViewCenter(1 / (viewportRef.current?.getState().zoom ?? 1))}
-            onFitView={() => fitViewport()}
-            onRotate={(rad) => viewportRef.current?.rotateBy(rad)}
-            onResetRotation={() => viewportRef.current?.resetRotation()}
-            onToggleMirror={() => viewportRef.current?.toggleMirrorX()}
-            onOpenRuler={() => setIsRulerModalOpen(true)}
-            onOpenReference={() => setIsReferenceHUDOpen(true)}
-            onOpenFilters={() => openFilterRef.current()}
-            onOpenResize={() => setIsResizeModalOpen(true)}
-            onOpenRadial={() => {
-              if (transformLayerIdRef.current || filterModalOpenRef.current) return;
-              setRadialMenuPos(getViewCenter() ?? { x: window.innerWidth / 2, y: window.innerHeight / 2 });
-              setIsRadialMenuOpen(true);
-            }}
-          />
+          <ViewportConsumer subscribe={subscribeViewport} getSnapshot={getViewportSnapshot}>
+            {(viewportState) => (
+              <ViewportToolbar
+                viewportState={viewportState}
+                width={canvas.width}
+                height={canvas.height}
+                onZoomIn={() => zoomAtViewCenter(1.25)}
+                onZoomOut={() => zoomAtViewCenter(1 / 1.25)}
+                onResetZoom={() => zoomAtViewCenter(1 / (viewportRef.current?.getState().zoom ?? 1))}
+                onFitView={() => fitViewport()}
+                onRotate={(rad) => viewportRef.current?.rotateBy(rad)}
+                onResetRotation={() => viewportRef.current?.resetRotation()}
+                onToggleMirror={() => viewportRef.current?.toggleMirrorX()}
+                onOpenRuler={() => setIsRulerModalOpen(true)}
+                onOpenReference={() => setIsReferenceHUDOpen(true)}
+                onOpenFilters={() => openFilterRef.current()}
+                onOpenResize={() => setIsResizeModalOpen(true)}
+                onOpenRadial={() => {
+                  if (transformLayerIdRef.current || filterModalOpenRef.current) return;
+                  setRadialMenuPos(getViewCenter() ?? { x: window.innerWidth / 2, y: window.innerHeight / 2 });
+                  setIsRadialMenuOpen(true);
+                }}
+              />
+            )}
+          </ViewportConsumer>
           {!isPhone && <DockRow panels={panelDefs} />}
         </div>
 
@@ -4904,21 +4977,28 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           <div className="min-w-0 flex-1">
             <ToolRail orientation="horizontal" currentTool={currentTool} onSelectTool={handleSelectTool} />
           </div>
-          <div className="atelier-chrome flex shrink-0 items-center gap-1 border-l border-t px-1.5">
-            <button type="button" onClick={() => setMobileSheet('color')} aria-label="色彩" className="atelier-icon-btn h-10 w-10">
+          <div className="atelier-chrome flex shrink-0 items-center gap-1 overflow-x-auto border-l border-t px-1.5 no-scrollbar">
+            <button type="button" onClick={() => openMobileSheet('color')} aria-label="色彩" className="atelier-icon-btn h-10 w-10 shrink-0">
               <span className="h-6 w-6 rounded-full border-2 border-white/80 shadow" style={{ backgroundColor: brushProps.color }} />
             </button>
-            <button type="button" onClick={() => setMobileSheet('toolProps')} aria-label="工具屬性" className="atelier-icon-btn h-10 w-10"><Sliders className="h-5 w-5" /></button>
-            <button type="button" onClick={openBrushToolset} aria-label={t.brushPreset.toolset} className="atelier-icon-btn h-10 w-10"><Paintbrush className="h-5 w-5" /></button>
-            <button type="button" onClick={() => setMobileSheet('layers')} aria-label="圖層" className="atelier-icon-btn h-10 w-10"><Layers className="h-5 w-5" /></button>
-            <button type="button" onClick={() => setMobileSheet('quickKeys')} aria-label="快捷鍵面板" className="atelier-icon-btn h-10 w-10"><Keyboard className="h-5 w-5" /></button>
+            <button type="button" onClick={() => openMobileSheet('toolProps')} aria-label="工具屬性" className="atelier-icon-btn h-10 w-10 shrink-0"><Sliders className="h-5 w-5" /></button>
+            <button type="button" onClick={openBrushToolset} aria-label={t.brushPreset.toolset} className="atelier-icon-btn h-10 w-10 shrink-0"><Paintbrush className="h-5 w-5" /></button>
+            <button type="button" onClick={() => openMobileSheet('layers')} aria-label="圖層" className="atelier-icon-btn h-10 w-10 shrink-0"><Layers className="h-5 w-5" /></button>
+            <button type="button" onClick={() => dockActions.toggle('members')} aria-label="成員" className="atelier-icon-btn h-10 w-10 shrink-0"><Users className="h-5 w-5" /></button>
+            <button type="button" onClick={() => openMobileSheet('quickKeys')} aria-label="快捷鍵面板" className="atelier-icon-btn h-10 w-10 shrink-0"><Keyboard className="h-5 w-5" /></button>
           </div>
         </div>
       )}
 
-      {/* Floating windows: only panels the user floated (members by default) */}
-      <FloatingPanels panels={isPhone ? panelDefs.filter((p) => p.id === 'members' || p.id === 'oplog') : panelDefs} />
-      <MobilePanelSheet def={isPhone ? panelDefs.find((p) => p.id === mobileSheet) ?? null : null} onClose={() => setMobileSheet(null)} />
+      {/* Floating windows: phones use MobilePanelSheet for members/oplog; tablets/desktops float */}
+      <FloatingPanels panels={isPhone ? [] : panelDefs} />
+      <MobilePanelSheet
+        def={isPhone ? panelDefs.find((p) => p.id === mobileSheet) ?? null : null}
+        onClose={() => {
+          if (mobileSheet === 'members' || mobileSheet === 'oplog') dockActions.hide(mobileSheet);
+          setMobileSheet(null);
+        }}
+      />
 
       {isResizeModalOpen && (
         <Suspense fallback={null}>

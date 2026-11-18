@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import QRCode from 'qrcode';
 import { Check, Cloud, Copy, Globe, QrCode, Share2, Wifi, X } from 'lucide-react';
 import { useCloudflareTunnel } from '../context/useCloudflareTunnel';
@@ -33,6 +34,8 @@ export function WorkspaceCloudflareToggle({
   const [addresses, setAddresses] = useState<ShareAddressItem[]>([]);
   const [selectedOptionId, setSelectedOptionId] = useState<string>('primary');
   const containerRef = useRef<HTMLDivElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const [popoverPos, setPopoverPos] = useState<{ top: number; right: number }>({ top: 48, right: 8 });
 
   const activeServer = (
     serverUrl ||
@@ -130,12 +133,27 @@ export function WorkspaceCloudflareToggle({
     };
   }, [shareOpen, showQr, selectedShareUrl]);
 
+  useLayoutEffect(() => {
+    if (!shareOpen && !error) return;
+    const updatePos = () => {
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      setPopoverPos({
+        top: Math.max(4, Math.min(window.innerHeight - 120, rect.bottom + 6)),
+        right: Math.max(8, Math.min(window.innerWidth - 40, window.innerWidth - rect.right)),
+      });
+    };
+    updatePos();
+    window.addEventListener('resize', updatePos);
+    return () => window.removeEventListener('resize', updatePos);
+  }, [shareOpen, error]);
+
   useEffect(() => {
     if (!shareOpen) return;
     const onPointerDown = (e: PointerEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setShareOpen(false);
-      }
+      const target = e.target as Node;
+      if (containerRef.current?.contains(target) || popoverRef.current?.contains(target)) return;
+      setShareOpen(false);
     };
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setShareOpen(false);
@@ -240,18 +258,22 @@ export function WorkspaceCloudflareToggle({
         <span className="hidden xl:inline">{t.gateway.shareRoomLink}</span>
       </button>
 
-      {error && (
-        <span role="alert" className="atelier-popover absolute right-0 top-full z-[75] mt-1 w-56 p-2 text-xs text-rose-300">
+      {error && typeof document !== 'undefined' && createPortal(
+        <span role="alert" style={{ top: popoverPos.top, right: popoverPos.right }}
+          className="atelier-popover fixed z-[85] w-56 max-w-[calc(100vw-16px)] p-2 text-xs text-rose-300">
           {error}
-        </span>
+        </span>,
+        document.body
       )}
 
-      {shareOpen && selectedShareUrl && (
+      {shareOpen && selectedShareUrl && typeof document !== 'undefined' && createPortal(
         <div
+          ref={popoverRef}
           role="dialog"
           aria-label={t.gateway.shareRoomLink}
           data-workspace-share-popover=""
-          className="atelier-popover atelier-menu-in absolute right-0 top-full z-[75] mt-1.5 w-80 space-y-2.5 p-3 shadow-2xl"
+          style={{ top: popoverPos.top, right: popoverPos.right }}
+          className="atelier-popover atelier-menu-in fixed z-[85] w-80 max-w-[calc(100vw-16px)] max-h-[80dvh] overflow-y-auto space-y-2.5 p-3 shadow-2xl"
         >
           <div className="flex items-center justify-between gap-2">
             <span className="flex items-center gap-1.5 text-xs font-bold text-neutral-100">
@@ -348,7 +370,8 @@ export function WorkspaceCloudflareToggle({
               />
             </div>
           )}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

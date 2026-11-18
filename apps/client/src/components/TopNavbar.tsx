@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Archive,
   Check,
@@ -101,16 +102,42 @@ const getPanelTitle = (id: PanelId, t: Translations): string => {
   }
 };
 
-/** A small dropdown menu (click to open, Esc / outside click to close). */
+/** A small dropdown menu (click to open, Esc / outside click to close). Portaled so horizontal scroll never clips it. */
 const DropdownMenu: React.FC<{ label: React.ReactNode; title: string; items?: MenuItem[]; children?: React.ReactNode; align?: 'left' | 'right'; width?: string; buttonClass?: string; protectCanvas?: boolean }> = ({
   label, title, items, children, align = 'left', width = 'w-56', buttonClass = 'atelier-icon-btn h-8 gap-1 px-2 text-xs font-medium', protectCanvas,
 }) => {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left?: number; right?: number } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setPos(null);
+      return;
+    }
+    const updatePos = () => {
+      const rect = ref.current?.getBoundingClientRect();
+      if (!rect) return;
+      const top = Math.max(4, Math.min(window.innerHeight - 80, rect.bottom + 4));
+      if (align === 'right') {
+        const right = Math.max(8, Math.min(window.innerWidth - 40, window.innerWidth - rect.right));
+        setPos({ top, right });
+      } else {
+        const left = Math.max(8, Math.min(window.innerWidth - 200, rect.left));
+        setPos({ top, left });
+      }
+    };
+    updatePos();
+    window.addEventListener('resize', updatePos);
+    return () => window.removeEventListener('resize', updatePos);
+  }, [open, align]);
+
   useEffect(() => {
     if (!open) return;
     const onDown = (e: PointerEvent) => {
-      if (document.documentElement.classList.contains('atelier-theme-vt') || ref.current?.contains(e.target as Node)) return;
+      const target = e.target as Node;
+      if (document.documentElement.classList.contains('atelier-theme-vt') || ref.current?.contains(target) || menuRef.current?.contains(target)) return;
       if (protectCanvas && e.target instanceof Element && e.target.closest('.atelier-canvas-viewport')) {
         e.preventDefault();
         e.stopPropagation();
@@ -130,26 +157,31 @@ const DropdownMenu: React.FC<{ label: React.ReactNode; title: string; items?: Me
       <button type="button" title={title} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((v) => !v)} className={buttonClass}>
         {label}
       </button>
-      <OverlayPresence open={open} kind="popover">
-        <div role="menu" className={`atelier-popover absolute top-10 z-[75] ${width} max-w-[calc(100vw-16px)] max-h-[70dvh] overflow-y-auto p-1.5 ${align === 'right' ? 'right-0' : 'left-0'}`}>
-          {children}
-          {items?.map((item, i) => {
-            if (item.kind === 'sep') return <div key={i} className="my-1 h-px bg-neutral-700/70" />;
-            if (item.kind === 'title') return <div key={i} className="px-2 pb-1 pt-1.5 text-[10px] font-bold uppercase tracking-wider text-neutral-500">{item.label}</div>;
-            return (
-              <button key={i} type="button" role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'} aria-checked={item.checked}
-                title={item.title}
-                onClick={() => { item.onSelect(); setOpen(false); }}
-                className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-neutral-200 hover:bg-neutral-800">
-                <span className="flex h-4 w-4 items-center justify-center text-neutral-400 [&>svg]:h-3.5 [&>svg]:w-3.5">{item.icon}</span>
-                <span className="flex-1">{item.label}</span>
-                {item.hint && <kbd className="atelier-kbd">{item.hint}</kbd>}
-                {item.checked !== undefined && <Check className={`h-3.5 w-3.5 ${item.checked ? 'text-indigo-400' : 'text-transparent'}`} />}
-              </button>
-            );
-          })}
-        </div>
-      </OverlayPresence>
+      {typeof document !== 'undefined' && createPortal(
+        <OverlayPresence open={open} kind="popover">
+          <div ref={menuRef} role="menu"
+            style={pos ? { top: pos.top, ...(pos.right !== undefined ? { right: pos.right } : { left: pos.left }) } : { top: 48, left: 8 }}
+            className={`atelier-popover fixed z-[85] ${width} max-w-[calc(100vw-16px)] max-h-[70dvh] overflow-y-auto p-1.5`}>
+            {children}
+            {items?.map((item, i) => {
+              if (item.kind === 'sep') return <div key={i} className="my-1 h-px bg-neutral-700/70" />;
+              if (item.kind === 'title') return <div key={i} className="px-2 pb-1 pt-1.5 text-[10px] font-bold uppercase tracking-wider text-neutral-500">{item.label}</div>;
+              return (
+                <button key={i} type="button" role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'} aria-checked={item.checked}
+                  title={item.title}
+                  onClick={() => { item.onSelect(); setOpen(false); }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-neutral-200 hover:bg-neutral-800">
+                  <span className="flex h-4 w-4 items-center justify-center text-neutral-400 [&>svg]:h-3.5 [&>svg]:w-3.5">{item.icon}</span>
+                  <span className="flex-1">{item.label}</span>
+                  {item.hint && <kbd className="atelier-kbd">{item.hint}</kbd>}
+                  {item.checked !== undefined && <Check className={`h-3.5 w-3.5 ${item.checked ? 'text-indigo-400' : 'text-transparent'}`} />}
+                </button>
+              );
+            })}
+          </div>
+        </OverlayPresence>,
+        document.body
+      )}
     </div>
   );
 };
@@ -284,10 +316,11 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   }, [docInfoFull]);
 
   const brand = (compact: boolean) => {
+    const subBrand = !compact && t.brand && t.brand !== 'Lumina Drift' ? t.brand : '';
     const content = <>
       <img src={`${(import.meta as any).env?.BASE_URL || './'}logo.svg`} alt="" className={`${compact ? 'h-3.5 w-3.5' : 'h-7 w-7'} shrink-0`} />
-      <span className={compact ? 'font-semibold text-neutral-100' : 'hidden text-sm font-semibold text-white lg:inline'}>
-        Lumina Drift{!compact && <span className="font-normal text-neutral-400"> {t.brand}</span>}
+      <span className={compact ? 'font-semibold text-neutral-100' : 'hidden whitespace-nowrap text-sm font-semibold text-white lg:inline'}>
+        Lumina Drift{subBrand && <span className="font-normal text-neutral-400"> {subBrand}</span>}
       </span>
     </>;
     const layout = `flex shrink-0 items-center gap-1.5 ${compact ? 'px-1' : 'pr-1'}`;
@@ -335,32 +368,41 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
       {brand(false)}
 
       {/* Menus: full on tablet / desktop, one ☰ on phones */}
-      <div className="hidden items-center sm:flex">
+      <div className="hidden shrink-0 items-center sm:flex">
         <DropdownMenu label={<>{t.navbar.file}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.file} items={fileItems} />
         <DropdownMenu label={<>{t.navbar.window}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.window} items={windowItems} />
         <DropdownMenu label={<>{pluginText.menu}<ChevronDown className="h-3 w-3" /></>} title={pluginText.menu} items={pluginItems} width="w-64" />
         <DropdownMenu label={<>{t.navbar.help}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.help} items={helpItems} />
       </div>
-      <div className="sm:hidden">
+      <div className="shrink-0 sm:hidden">
         <DropdownMenu label={<Menu className="h-4 w-4" />} title={t.navbar.file} buttonClass="atelier-icon-btn h-8 w-8"
-          items={[{ kind: 'title', label: t.navbar.file }, ...fileItems, { kind: 'sep' }, ...windowItems, { kind: 'sep' },
-            { kind: 'title', label: pluginText.menu }, ...pluginItems, { kind: 'sep' }, ...helpItems]} />
+          items={[
+            ...(!isOffline && !isLocalDesktop ? [{
+              kind: 'title' as const,
+              label: isGuest ? t.navbar.loginRegister : (user?.displayName || user?.username || t.navbar.userProfile),
+            }, ...(isGuest
+              ? [{ kind: 'item' as const, label: t.navbar.loginRegister, icon: <LogIn />, onSelect: onOpenAuth }]
+              : [
+                  ...(onOpenProfile ? [{ kind: 'item' as const, label: t.navbar.userProfile, icon: <Users />, onSelect: onOpenProfile }] : []),
+                  { kind: 'item' as const, label: t.navbar.logout, icon: <LogOut />, onSelect: logout },
+                ]), { kind: 'sep' as const }] : []),
+            { kind: 'title', label: t.navbar.file }, ...fileItems, { kind: 'sep' },
+            ...windowItems, { kind: 'sep' },
+            { kind: 'title', label: pluginText.menu }, ...pluginItems, { kind: 'sep' }, ...helpItems,
+          ]} />
       </div>
 
       {currentCanvas && (
-        <div className="ml-1 hidden min-w-0 items-center gap-1.5 rounded-md bg-neutral-950/50 px-2 py-1 text-xs sm:flex" title={currentCanvas.title}>
+        <div className="ml-1 hidden min-w-0 max-w-[220px] items-center gap-1.5 overflow-hidden rounded-md bg-neutral-950/50 px-2 py-1 text-xs lg:flex" title={currentCanvas.title}>
           {currentCanvas.hasPassword && <span title={t.navbar.passwordProtected} className="inline-flex shrink-0"><Lock className="h-3 w-3 shrink-0 text-amber-400" aria-label={t.navbar.passwordRoom} /></span>}
-          <span className="truncate font-medium text-neutral-100">{currentCanvas.title}</span>
-          <span className="hidden shrink-0 tabular-nums text-neutral-400 md:inline">
-            {formatCanvasDimensions(currentCanvas.width, currentCanvas.height, docUnit, docDpi)} · {docDpi}dpi
-          </span>
+          <span className="min-w-0 truncate font-medium text-neutral-100">{currentCanvas.title}</span>
         </div>
       )}
 
-      <div className="ml-auto flex shrink-0 items-center gap-1">
+      <div className="ml-auto flex min-w-0 items-center gap-1 overflow-x-auto py-0.5 no-scrollbar">
         {/* Who is here: opens the floating members window */}
         <button type="button" onClick={() => dockActions.toggle('members')} aria-pressed={membersOpen}
-          title={t.navbar.onlineUsers} className="atelier-icon-btn h-8 gap-1.5 px-1.5">
+          title={t.navbar.onlineUsers} className="atelier-icon-btn h-8 shrink-0 gap-1.5 px-1.5">
           <span className="flex -space-x-1.5">
             {memberCards.slice(0, 3).map((m) => (
               <span key={memberCardKey(m)} className="flex h-5 w-5 items-center justify-center overflow-hidden rounded-full border-2 border-neutral-900 text-[9px] font-bold"
@@ -374,21 +416,21 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
         </button>
 
         {onOpenChat && (
-          <button type="button" onClick={onOpenChat} title={t.collab.liveChat} aria-label={t.collab.liveChat} className="atelier-icon-btn relative h-8 w-8">
+          <button type="button" onClick={onOpenChat} title={t.collab.liveChat} aria-label={t.collab.liveChat} className="atelier-icon-btn relative h-8 w-8 shrink-0">
             <MessageSquare className="h-4 w-4" />
             {hasUnreadChat && <span data-chat-unread="" aria-hidden="true" className="absolute right-1 top-1 h-2 w-2 rounded-full bg-indigo-400" />}
           </button>
         )}
 
         {!isOffline && (
-          <div className="hidden md:block">
+          <div className="hidden shrink-0 md:block">
             <VoiceChatBar voiceState={voiceState} onJoinVoice={joinVoice} onLeaveVoice={leaveVoice} onToggleMute={toggleVoiceMute} currentUserName={user?.displayName} />
           </div>
         )}
 
         <WorkspaceCloudflareToggle enabled={!isOffline} serverUrl={serverUrl} canvasId={currentCanvas?.id} />
 
-        <DropdownMenu label={<Palette className="h-4 w-4" />} title={t.settings.themeSelect} align="right" width="w-80" buttonClass="atelier-icon-btn h-8 w-8" protectCanvas>
+        <DropdownMenu label={<Palette className="h-4 w-4" />} title={t.settings.themeSelect} align="right" width="w-80" buttonClass="atelier-icon-btn h-8 w-8 shrink-0" protectCanvas>
           <div className="p-1.5">
             <div className="mb-2 text-[11px] font-semibold text-neutral-300">{t.settings.themeSelect}</div>
             <ThemePicker compact />
@@ -396,7 +438,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
         </DropdownMenu>
 
         {onOpenHelp && (
-          <button type="button" onClick={onOpenHelp} title={`${t.navbar.help} (F1)`} aria-label={t.navbar.help} className="atelier-icon-btn hidden h-8 w-8 sm:inline-flex">
+          <button type="button" onClick={onOpenHelp} title={`${t.navbar.help} (F1)`} aria-label={t.navbar.help} className="atelier-icon-btn hidden h-8 w-8 shrink-0 sm:inline-flex">
             <HelpCircle className="h-4 w-4" />
           </button>
         )}
@@ -411,7 +453,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
         )}
 
         {user?.serverRole === 'admin' && onOpenAdmin && (
-          <button type="button" onClick={onOpenAdmin} title={t.navbar.adminDashboard} aria-label={t.navbar.adminDashboard} className="atelier-icon-btn h-8 w-8 !text-amber-400">
+          <button type="button" onClick={onOpenAdmin} title={t.navbar.adminDashboard} aria-label={t.navbar.adminDashboard} className="atelier-icon-btn h-8 w-8 shrink-0 !text-amber-400">
             <Crown className="h-4 w-4" />
           </button>
         )}
@@ -421,7 +463,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
             type="button"
             onClick={onOpenGateway ?? onOpenServer}
             title={t.server.switchMode}
-            className="mx-1 flex items-center gap-1 rounded-md border border-cyan-500/40 bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold text-cyan-300 transition hover:bg-cyan-500/25"
+            className="mx-1 flex shrink-0 items-center gap-1 rounded-md border border-cyan-500/40 bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold text-cyan-300 transition hover:bg-cyan-500/25"
           >
             <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
             <span>{t.navbar.offlineBadge}</span>
@@ -432,7 +474,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
             onClick={onOpenGateway ?? onOpenServer}
             title={t.server.switchMode}
             aria-label={t.server.switchMode}
-            className={`mx-1 flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-semibold transition ${
+            className={`mx-1 flex shrink-0 items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-semibold transition ${
               isConnected
                 ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
                 : 'border-rose-500/40 bg-rose-500/15 text-rose-300 hover:bg-rose-500/25'
@@ -444,7 +486,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
         )}
 
         {user && (
-          <button type="button" onClick={onOpenProfile} title={t.navbar.userProfile} className="atelier-icon-btn h-8 gap-1.5 px-1.5">
+          <button type="button" onClick={onOpenProfile} title={t.navbar.userProfile} className="atelier-icon-btn h-8 shrink-0 gap-1.5 px-1.5">
             <span className="flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full border text-[10px] font-black"
               style={{ borderColor: getUserColor(user.id).hex, backgroundColor: `${getUserColor(user.id).hex}25`, color: getUserColor(user.id).hex }}>
               {user.avatarUrl ? <img src={user.avatarUrl} alt="" className="h-full w-full object-cover" /> : (user.displayName || user.username || '畫')[0].toUpperCase()}
@@ -459,7 +501,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
             <LogIn className="h-3.5 w-3.5" /><span className="hidden sm:inline">{t.navbar.loginRegister}</span>
           </button>
         ) : (
-          <button type="button" onClick={logout} title={t.navbar.logout} aria-label={t.navbar.logout} className="atelier-icon-btn h-8 w-8 hover:!text-rose-400">
+          <button type="button" onClick={logout} title={t.navbar.logout} aria-label={t.navbar.logout} className="atelier-icon-btn h-8 w-8 shrink-0 hover:!text-rose-400">
             <LogOut className="h-4 w-4" />
           </button>
         ))}

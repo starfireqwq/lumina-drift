@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Mic,
   MicOff,
@@ -20,8 +21,40 @@ export const VoiceDevices: React.FC<{ voice: VoiceChatState }> = ({ voice }) => 
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [pos, setPos] = useState<{ top: number; right: number }>({ top: 48, right: 8 });
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
   const media = navigator.mediaDevices;
   const canSelectOutput = 'setSinkId' in HTMLMediaElement.prototype;
+  useLayoutEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const r = btnRef.current?.getBoundingClientRect();
+      if (!r) return;
+      setPos({
+        top: Math.max(4, Math.min(window.innerHeight - 120, r.bottom + 4)),
+        right: Math.max(8, Math.min(window.innerWidth - 40, window.innerWidth - r.right)),
+      });
+    };
+    update();
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: PointerEvent) => {
+      const target = e.target as Node;
+      if (btnRef.current?.contains(target) || popRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    window.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
   useEffect(() => {
     if (!open || !media) return;
     let active = true;
@@ -52,18 +85,23 @@ export const VoiceDevices: React.FC<{ voice: VoiceChatState }> = ({ voice }) => 
     );
   };
   return (
-    <details className="relative" onToggle={(event) => setOpen(event.currentTarget.open)}>
-      <summary title={t.collab.audioDevices} aria-label={t.collab.audioDevices} className="atelier-btn !h-6 !px-1.5 cursor-pointer list-none">
+    <div className="relative">
+      <button ref={btnRef} type="button" title={t.collab.audioDevices} aria-label={t.collab.audioDevices}
+        aria-expanded={open} onClick={() => setOpen((v) => !v)} className="atelier-btn !h-6 !px-1.5 cursor-pointer">
         <Settings2 className="h-3.5 w-3.5" />
-      </summary>
-      <div className="atelier-popover absolute right-0 top-full z-50 mt-1 grid w-56 gap-2 p-3 text-xs">
-        {deviceSelect('audioinput', t.collab.microphoneDevice, voice.inputDeviceId, setVoiceInputDevice)}
-        {canSelectOutput
-          ? deviceSelect('audiooutput', t.collab.outputDevice, voice.outputDeviceId, setVoiceOutputDevice)
-          : <span className="whitespace-normal text-neutral-400">{t.collab.outputSelectionUnavailable}</span>}
-        {failed && <p role="alert" className="whitespace-normal text-rose-300">{t.collab.deviceSwitchFailed}</p>}
-      </div>
-    </details>
+      </button>
+      {open && typeof document !== 'undefined' && createPortal(
+        <div ref={popRef} style={{ top: pos.top, right: pos.right }}
+          className="atelier-popover fixed z-[85] grid w-56 max-w-[calc(100vw-16px)] gap-2 p-3 text-xs">
+          {deviceSelect('audioinput', t.collab.microphoneDevice, voice.inputDeviceId, setVoiceInputDevice)}
+          {canSelectOutput
+            ? deviceSelect('audiooutput', t.collab.outputDevice, voice.outputDeviceId, setVoiceOutputDevice)
+            : <span className="whitespace-normal text-neutral-400">{t.collab.outputSelectionUnavailable}</span>}
+          {failed && <p role="alert" className="whitespace-normal text-rose-300">{t.collab.deviceSwitchFailed}</p>}
+        </div>,
+        document.body
+      )}
+    </div>
   );
 };
 

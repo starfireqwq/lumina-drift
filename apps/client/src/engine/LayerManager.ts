@@ -323,6 +323,8 @@ export class LayerManager {
   private thumbBlobUrls = new Set<string>();
   private viewBounds: { x0: number; y0: number; x1: number; y1: number } | null = null;
   private cullSuspended = 0;
+  private tileStructureVersion = 0;
+  private lastViewGridKey = '';
   private evictingOffscreen = false;
   private thumbsPaused = false;
   private destroyed = false;
@@ -744,11 +746,14 @@ export class LayerManager {
    */
   public setViewportBounds(bounds: { x0: number; y0: number; x1: number; y1: number } | null) {
     this.viewBounds = bounds;
-    const now = performance.now();
     const c0 = bounds ? Math.max(0, Math.floor((bounds.x0 - TS) / TS)) : 0;
     const c1 = bounds ? Math.min(this.cols - 1, Math.floor((bounds.x1 + TS) / TS)) : this.cols - 1;
     const r0 = bounds ? Math.max(0, Math.floor((bounds.y0 - TS) / TS)) : 0;
     const r1 = bounds ? Math.min(this.rows - 1, Math.floor((bounds.y1 + TS) / TS)) : this.rows - 1;
+    const gridKey = bounds ? `${c0},${r0},${c1},${r1}:${this.cullSuspended}:${this.tileStructureVersion}` : `all:${this.cullSuspended}:${this.tileStructureVersion}`;
+    if (this.lastViewGridKey === gridKey) return;
+    this.lastViewGridKey = gridKey;
+    const now = performance.now();
     for (const item of this.layersMap.values()) {
       if (item.gpu) {
         for (const t of item.gpu.values()) {
@@ -852,6 +857,7 @@ export class LayerManager {
   }
 
   private makeTile(item: LayerItem, col: number, row: number, slot?: Slot): GpuTile {
+    this.tileStructureVersion++;
     const { w, h } = this.tileSize(col, row);
     const s = slot ?? this.atlas.alloc(item.lastPage >= 0 ? [item.lastPage] : undefined);
     item.lastPage = s.page;
@@ -864,6 +870,7 @@ export class LayerManager {
   }
 
   private freeTile(t: GpuTile) {
+    this.tileStructureVersion++;
     this.flushPendingReads();
     t.sprite.texture.destroy(false);
     t.sprite.destroy();
@@ -1487,6 +1494,7 @@ export class LayerManager {
     });
     if (this.job?.item === item) this.abortJob();
     item.gpu = gpu;
+    this.tileStructureVersion++;
     // item.cpu stays: an exact copy while the tiles are not edited, so going cold again costs nothing
     this.rebuildDisplay(item);
   }
@@ -1514,6 +1522,7 @@ export class LayerManager {
     }
     if (this.job?.item === item) this.abortJob();
     item.gpu = gpu;
+    this.tileStructureVersion++;
     this.rebuildDisplay(item);
   }
 

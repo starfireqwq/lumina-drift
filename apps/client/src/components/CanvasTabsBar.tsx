@@ -184,9 +184,9 @@ export const CanvasTabsBar: React.FC<CanvasTabsBarProps> = ({
         onClick={() => onSelectCanvas(canvas.id)}
         onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onSelectCanvas(canvas.id); }}
         className={`group flex w-36 shrink-0 cursor-pointer flex-col overflow-hidden rounded-lg border transition ${active ? 'border-indigo-500 ring-2 ring-indigo-500/40' : 'border-neutral-700 hover:border-neutral-500'}`}>
-        <div className="relative flex h-20 items-center justify-center bg-neutral-950" style={{ backgroundImage: 'repeating-conic-gradient(rgb(var(--n-800)) 0% 25%, transparent 0% 50%)', backgroundSize: '12px 12px' }}>
+        <div className="relative flex h-20 items-center justify-center overflow-hidden bg-neutral-950" style={{ backgroundImage: 'repeating-conic-gradient(rgb(var(--n-800)) 0% 25%, transparent 0% 50%)', backgroundSize: '12px 12px' }}>
           {thumb
-            ? <img src={thumb} alt={`${canvas.title}`} className="max-h-full max-w-full object-contain shadow" />
+            ? <img src={thumb} alt={`${canvas.title}`} className="h-full w-full object-cover object-center" />
             : (
               <div className="flex flex-col items-center gap-1 text-[10px] text-neutral-500">
                 <span className="h-8 w-12 rounded-sm shadow ring-1 ring-neutral-600" style={{ background: canvas.bgColor || '#fff', aspectRatio: `${canvas.width} / ${canvas.height}` }} />
