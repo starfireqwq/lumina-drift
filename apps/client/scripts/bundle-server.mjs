@@ -38,9 +38,13 @@ function findFile(base, filterFn) {
 }
 
 const pnpmDir = path.join(rootDir, 'node_modules/.pnpm');
-const esbuildExe = findFile(pnpmDir, (full, name) => name === (process.platform === 'win32' ? 'esbuild.exe' : 'esbuild'));
+const esbuildPlatform = `${process.platform}-${process.arch}`;
+const esbuildBinary = process.platform === 'win32'
+  ? path.join('@esbuild', esbuildPlatform, 'esbuild.exe')
+  : path.join('@esbuild', esbuildPlatform, 'bin', 'esbuild');
+const esbuildExe = findFile(pnpmDir, (full) => full.endsWith(esbuildBinary) && fs.statSync(full).isFile());
 if (!esbuildExe) {
-  throw new Error('Could not find esbuild.exe in node_modules/.pnpm');
+  throw new Error(`Missing the esbuild binary for ${esbuildPlatform}. Install dependencies on the build platform first.`);
 }
 
 console.log('[bundle-server] Bundling apps/server/src/server.ts with esbuild...');

@@ -11,6 +11,8 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/macos-packages.yml'
+      - 'apps/client/scripts/bundle-server.mjs'
+      - 'apps/client/electron-builder.json5'
 
 permissions:
   contents: read
