@@ -30,11 +30,17 @@ export async function buildApp(): Promise<FastifyInstance> {
     trustProxy: true,
   });
 
-  // Enable CORS
+  // Enable CORS (including Private Network Access preflight for Android WebView -> LAN hosts)
   await app.register(cors, {
     origin: true,
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE', 'OPTIONS'],
+  });
+  app.addHook('onSend', async (request, reply, payload) => {
+    if (request.headers['access-control-request-private-network'] === 'true') {
+      reply.header('Access-Control-Allow-Private-Network', 'true');
+    }
+    return payload;
   });
 
   // Register Fastify JWT
@@ -63,7 +69,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     return {
       status: 'ok',
       service: 'atelier-sync-server',
-      version: '1.1.0',
+      version: '1.1.1',
       connectedClients: app.roomManager ? app.roomManager.getConnectedClientsCount() : 0,
       timestamp: Date.now(),
     };
