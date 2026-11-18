@@ -1,6 +1,6 @@
 {
   "name": "@atelier/server",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "license": "MIT",
   "private": true,
   "description": "AtelierSync Fastify + WebSocket + SQLite backend",
