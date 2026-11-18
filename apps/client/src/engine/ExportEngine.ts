@@ -3,6 +3,13 @@ import JSZip from 'jszip';
 import { writePsd, Psd, Layer as PsdLayer } from 'ag-psd';
 
 import { LayerCanvasItem, LayerTree, compositeLayers, maskCoverage } from './layerComposite';
+import {
+  buildVideoRecorderCandidates,
+  createMediaRecorderForStream,
+  stopMediaStream,
+  unwrapMediaRecorderError,
+  type VideoRecorderCandidate,
+} from './videoExport';
 export type { LayerCanvasItem } from './layerComposite';
 
 /** PSD layer masks are greyscale; an inverted mask is written as its negative (PSD has no invert flag) */
@@ -135,25 +142,47 @@ export class ExportEngine {
     format: 'mp4' | 'webm' = 'mp4'
   ): Promise<Blob> {
     if (frameCount <= 0) throw new Error('No animation frames to export');
-    const animCanvas = document.createElement('canvas');
-    animCanvas.width = width;
-    animCanvas.height = height;
-    const ctx = animCanvas.getContext('2d')!;
+    const candidates = buildVideoRecorderCandidates(width, height, format);
+    let lastError: Error | null = null;
 
-    const stream = animCanvas.captureStream(fps);
-    let mimeType = 'video/webm';
-    if (format === 'mp4' && MediaRecorder.isTypeSupported('video/mp4;codecs=avc1')) {
-      mimeType = 'video/mp4;codecs=avc1';
-    } else if (MediaRecorder.isTypeSupported('video/mp4')) {
-      mimeType = 'video/mp4';
-    } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
-      mimeType = 'video/webm;codecs=vp9';
+    for (let i = 0; i < candidates.length; i++) {
+      try {
+        return await this.recordVideoAnimationAttempt(candidates[i], nextFrame, frameCount, fps);
+      } catch (err) {
+        lastError = unwrapMediaRecorderError(err);
+        if (i === candidates.length - 1) throw lastError;
+        console.warn(
+          `[ExportEngine] Video candidate failed (${candidates[i].mimeType || 'default'} ${candidates[i].width}x${candidates[i].height}), trying fallback:`,
+          lastError.message
+        );
+      }
     }
 
+    throw lastError ?? new Error('Unable to initialize video recorder');
+  }
+
+  private static async recordVideoAnimationAttempt(
+    candidate: VideoRecorderCandidate,
+    nextFrame: (i: number) => Promise<{ canvas: HTMLCanvasElement; hold: number }>,
+    frameCount: number,
+    fps: number
+  ): Promise<Blob> {
+    const animCanvas = document.createElement('canvas');
+    animCanvas.width = candidate.width;
+    animCanvas.height = candidate.height;
+    const ctx = animCanvas.getContext('2d')!;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+
+    const stream = animCanvas.captureStream(fps);
     const recordedChunks: Blob[] = [];
-    const recorder = mimeType
-      ? new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 6000000 })
-      : new MediaRecorder(stream);
+    let recorder: MediaRecorder;
+    try {
+      recorder = createMediaRecorderForStream(stream, candidate.mimeType, 6000000);
+    } catch (err) {
+      stopMediaStream(stream);
+      throw unwrapMediaRecorderError(err);
+    }
 
     recorder.ondataavailable = (e) => {
       if (e.data && e.data.size > 0) recordedChunks.push(e.data);
@@ -161,14 +190,25 @@ export class ExportEngine {
 
     return new Promise<Blob>((resolve, reject) => {
       let aborted = false;
+      let settled = false;
       recorder.onstop = () => {
-        stream.getTracks().forEach((tr) => tr.stop());
-        resolve(new Blob(recordedChunks, { type: mimeType || 'video/webm' }));
+        if (settled) return;
+        settled = true;
+        stopMediaStream(stream);
+        const blobType = recorder.mimeType || candidate.mimeType || 'video/webm';
+        const blob = new Blob(recordedChunks, { type: blobType });
+        if (blob.size === 0) {
+          reject(new Error(`Video recorder produced empty output (${blobType})`));
+          return;
+        }
+        resolve(blob);
       };
       recorder.onerror = (err) => {
+        if (settled) return;
         aborted = true;
-        stream.getTracks().forEach((tr) => tr.stop());
-        reject(err);
+        settled = true;
+        stopMediaStream(stream);
+        reject(unwrapMediaRecorderError(err));
       };
 
       const frameDelay = 1000 / Math.max(1, fps);
@@ -178,8 +218,9 @@ export class ExportEngine {
         try {
           // Paint first frame before starting recorder so frame 0 isn't blank
           const first = await nextFrame(0);
-          ctx.clearRect(0, 0, width, height);
-          ctx.drawImage(first.canvas, 0, 0);
+          if (aborted) return;
+          ctx.clearRect(0, 0, candidate.width, candidate.height);
+          ctx.drawImage(first.canvas, 0, 0, candidate.width, candidate.height);
           recorder.start(200);
           const startTime = performance.now();
           let logicalFrames = Math.max(1, first.hold);
@@ -189,8 +230,8 @@ export class ExportEngine {
           for (let i = 1; i < frameCount && !aborted; i++) {
             const { canvas, hold } = await nextFrame(i);
             if (aborted) break;
-            ctx.clearRect(0, 0, width, height);
-            ctx.drawImage(canvas, 0, 0);
+            ctx.clearRect(0, 0, candidate.width, candidate.height);
+            ctx.drawImage(canvas, 0, 0, candidate.width, candidate.height);
             logicalFrames += Math.max(1, hold);
             const targetTime = startTime + logicalFrames * frameDelay;
             const remaining = targetTime - performance.now();
@@ -198,11 +239,18 @@ export class ExportEngine {
           }
 
           await sleep(Math.min(250, frameDelay + 60));
-          if (recorder.state === 'recording') recorder.stop();
+          if (!aborted && recorder.state === 'recording') {
+            try { recorder.requestData(); } catch {}
+            recorder.stop();
+          }
         } catch (err) {
           aborted = true;
+          stopMediaStream(stream);
           try { if (recorder.state === 'recording') recorder.stop(); } catch {}
-          reject(err);
+          if (!settled) {
+            settled = true;
+            reject(unwrapMediaRecorderError(err));
+          }
         }
       })();
     });

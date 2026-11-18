@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { AtelierModal, modalButton } from './AtelierModal';
 import { getUserColor } from '../utils/userColors';
+import { getVideoExtensionFromBlob, unwrapMediaRecorderError } from '../engine/videoExport';
 import { useI18n } from '../context/I18nContext';
 
 /** What to put in a GIF / video: one folder (solo), every animation folder (team), or the whole picture */
@@ -394,11 +395,11 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
         setExportProgress(t.animation.recordingVideo);
         blob = await ExportEngine.exportVideoAnimation(next, total, plan.width, plan.height, fps, 'mp4');
       }
-      const ext = blob.type.includes('webm') ? 'webm' : exportFormat;
+      const ext = exportFormat === 'gif' ? 'gif' : getVideoExtensionFromBlob(blob, 'mp4');
       ExportEngine.downloadBlob(blob, `animation_${Date.now()}.${ext}`);
       setShowExportModal(false);
-    } catch (err: any) {
-      alert(`${t.animation.exportFailed}: ${err?.message ?? err}`);
+    } catch (err: unknown) {
+      alert(`${t.animation.exportFailed}: ${unwrapMediaRecorderError(err).message}`);
     } finally {
       plan.done();
       setExportProgress(null);

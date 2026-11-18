@@ -16,6 +16,14 @@ import {
   resolveTileDimensions,
   unpremultiplyRgba,
 } from './timeLapseHelpers';
+import {
+  buildVideoRecorderCandidates,
+  createMediaRecorderForStream,
+  createScaledRecordingSurface,
+  stopMediaStream,
+  unwrapMediaRecorderError,
+  type VideoRecorderCandidate,
+} from './videoExport';
 
 export type ReplayStatus =
   | 'idle'
@@ -115,6 +123,8 @@ export class TimeLapseEngine {
 
   // Video recording
   private mediaRecorder: MediaRecorder | null = null;
+  private recordingStream: MediaStream | null = null;
+  private recordingCancelled: boolean = false;
   private recordedChunks: Blob[] = [];
 
   private options: ReplayEngineOptions;
@@ -923,29 +933,60 @@ export class TimeLapseEngine {
       throw new Error('畫布無操作紀錄可供匯出影片');
     }
 
+    const candidates = buildVideoRecorderCandidates(this.width, this.height, format);
+    const originalSpeed = this.speed;
+    this.recordingCancelled = false;
+    let lastError: Error | null = null;
+
+    try {
+      for (let i = 0; i < candidates.length; i++) {
+        if (this.recordingCancelled) {
+          throw new Error('縮時影片匯出已取消');
+        }
+        try {
+          return await this.recordTimeLapseAttempt(candidates[i], onProgress);
+        } catch (err) {
+          lastError = unwrapMediaRecorderError(err);
+          if (this.recordingCancelled || i === candidates.length - 1) {
+            throw lastError;
+          }
+          console.warn(
+            `[TimeLapseEngine] Video candidate failed (${candidates[i].mimeType || 'default'} ${candidates[i].width}x${candidates[i].height}), trying fallback:`,
+            lastError.message
+          );
+        }
+      }
+      throw lastError ?? new Error('無法初始化視訊編碼器');
+    } finally {
+      this.speed = originalSpeed;
+    }
+  }
+
+  private async recordTimeLapseAttempt(
+    candidate: VideoRecorderCandidate,
+    onProgress?: (percent: number) => void
+  ): Promise<Blob> {
     this.pause();
     this.seek(0);
     this.setStatus('recording');
 
-    const stream = this.previewCanvas.captureStream(30);
+    const surface = createScaledRecordingSurface(this.previewCanvas, candidate.width, candidate.height);
+    surface.syncFrame();
 
-    let mimeType = 'video/webm;codecs=vp9';
-    if (format === 'mp4' && MediaRecorder.isTypeSupported('video/mp4;codecs=avc1')) {
-      mimeType = 'video/mp4;codecs=avc1';
-    } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
-      mimeType = 'video/webm;codecs=vp9';
-    } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) {
-      mimeType = 'video/webm;codecs=vp8';
-    } else if (MediaRecorder.isTypeSupported('video/webm')) {
-      mimeType = 'video/webm';
-    } else {
-      mimeType = '';
-    }
-
+    const stream = surface.canvas.captureStream(30);
+    this.recordingStream = stream;
     this.recordedChunks = [];
-    const recorder = mimeType
-      ? new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 4000000 })
-      : new MediaRecorder(stream);
+
+    let recorder: MediaRecorder;
+    try {
+      recorder = createMediaRecorderForStream(stream, candidate.mimeType, 6000000);
+    } catch (err) {
+      stopMediaStream(stream);
+      this.recordingStream = null;
+      this.setStatus('paused');
+      this.emitProgress();
+      throw unwrapMediaRecorderError(err);
+    }
 
     this.mediaRecorder = recorder;
 
@@ -956,30 +997,74 @@ export class TimeLapseEngine {
     };
 
     return new Promise<Blob>((resolve, reject) => {
+      let settled = false;
+      let rafId: number | null = null;
+      let stopTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = () => {
+        if (rafId !== null) {
+          cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+        if (stopTimer !== null) {
+          clearTimeout(stopTimer);
+          stopTimer = null;
+        }
+        stopMediaStream(stream);
+        if (this.recordingStream === stream) {
+          this.recordingStream = null;
+        }
+        if (this.mediaRecorder === recorder) {
+          this.mediaRecorder = null;
+        }
+      };
+
       recorder.onstop = () => {
-        const finalBlob = new Blob(this.recordedChunks, {
-          type: mimeType || 'video/webm',
-        });
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (this.recordingCancelled) {
+          reject(new Error('縮時影片匯出已取消'));
+          return;
+        }
+        const blobType = recorder.mimeType || candidate.mimeType || 'video/webm';
+        const finalBlob = new Blob(this.recordedChunks, { type: blobType });
+        if (finalBlob.size === 0) {
+          this.setStatus('paused');
+          this.emitProgress();
+          reject(new Error(`視訊編碼器未輸出有效影像資料 (${blobType})`));
+          return;
+        }
         this.setStatus('completed');
         this.emitProgress();
         resolve(finalBlob);
       };
 
       recorder.onerror = (e) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         this.setStatus('paused');
         this.emitProgress();
-        reject(e);
+        reject(unwrapMediaRecorderError(e));
       };
 
-      recorder.start(100);
+      try {
+        recorder.start(100);
+      } catch (err) {
+        settled = true;
+        cleanup();
+        this.setStatus('paused');
+        this.emitProgress();
+        reject(unwrapMediaRecorderError(err));
+        return;
+      }
 
-      const originalSpeed = this.speed;
       this.speed = 16;
       const batch = Math.max(2, Math.min(48, Math.ceil(this.ops.length / 360)));
 
       const checkCompletion = (now: number) => {
-        if (this.status !== 'recording') {
-          this.speed = originalSpeed;
+        if (settled || this.recordingCancelled || this.status !== 'recording') {
           return;
         }
         if (this.currentOpIndex < this.ops.length) {
@@ -991,26 +1076,33 @@ export class TimeLapseEngine {
           }
           this.stepCursorSmoothing(now);
           this.compositePreview(now);
+          surface.syncFrame();
           this.emitProgress();
 
           const pct = Math.round((this.currentOpIndex / this.ops.length) * 100);
           if (onProgress) onProgress(pct);
 
-          requestAnimationFrame(checkCompletion);
+          rafId = requestAnimationFrame(checkCompletion);
         } else {
           this.compositePreview(now);
+          surface.syncFrame();
           if (onProgress) onProgress(100);
 
-          setTimeout(() => {
-            if (recorder.state !== 'inactive') {
+          stopTimer = setTimeout(() => {
+            if (settled) return;
+            if (recorder.state === 'recording') {
+              try {
+                recorder.requestData();
+              } catch {
+                // Ignore if requestData is unsupported right before stop
+              }
               recorder.stop();
             }
-            this.speed = originalSpeed;
           }, 1000);
         }
       };
 
-      requestAnimationFrame(checkCompletion);
+      rafId = requestAnimationFrame(checkCompletion);
     });
   }
 
@@ -1042,6 +1134,7 @@ export class TimeLapseEngine {
   }
 
   public destroy() {
+    this.recordingCancelled = true;
     this.abortController?.abort();
     this.abortController = null;
     if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
@@ -1051,6 +1144,8 @@ export class TimeLapseEngine {
         // Ignore recorder stop failures during teardown
       }
     }
+    stopMediaStream(this.recordingStream);
+    this.recordingStream = null;
     this.stop();
     this.layerCanvases.clear();
     this.imageDataPool.clear();

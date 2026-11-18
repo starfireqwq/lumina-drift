@@ -21,6 +21,7 @@ import {
   SeedParticipantInput,
   TimeLapseEngine,
 } from '../engine/TimeLapseEngine';
+import { getVideoExtensionFromBlob, unwrapMediaRecorderError } from '../engine/videoExport';
 import { useI18n } from '../context/I18nContext';
 
 interface TimeLapseModalProps {
@@ -60,6 +61,7 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [recordProgress, setRecordProgress] = useState<number>(0);
   const [recordedVideoUrl, setRecordedVideoUrl] = useState<string | null>(null);
+  const [recordedExtension, setRecordedExtension] = useState<'webm' | 'mp4'>('webm');
   const [videoFormat, setVideoFormat] = useState<'webm' | 'mp4'>('webm');
 
   const seedRef = useRef(seedParticipants);
@@ -169,9 +171,11 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
 
       const url = URL.createObjectURL(blob);
       recordedVideoUrlRef.current = url;
+      setRecordedExtension(getVideoExtensionFromBlob(blob, videoFormat));
       setRecordedVideoUrl(url);
-    } catch (err: any) {
-      alert(`匯出縮時影片失敗: ${err.message || err}`);
+    } catch (err: unknown) {
+      const error = unwrapMediaRecorderError(err);
+      alert(`匯出縮時影片失敗: ${error.message}`);
     } finally {
       setIsRecording(false);
     }
@@ -438,7 +442,7 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
               </div>
               <a
                 href={recordedVideoUrl}
-                download={`atelier_timelapse_${canvas?.title || 'drawing'}.${videoFormat}`}
+                download={`atelier_timelapse_${canvas?.title || 'drawing'}.${recordedExtension}`}
                 className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg shadow transition"
               >
                 <Download className="w-3.5 h-3.5" />
