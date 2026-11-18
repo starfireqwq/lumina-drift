@@ -1668,6 +1668,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       const selection = selectionEngineRef.current;
       const layerManager = layerManagerRef.current;
       const viewport = viewportRef.current;
+      const tileEngine = tileEngineRef.current;
       pixiAppRef.current = null;
       viewportRef.current = null;
       strokePipelineRef.current = null;
@@ -1683,6 +1684,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       if ((window as any).__debugPixi?.app === app) delete (window as any).__debugPixi;
       pipeline?.destroy();
       selection?.destroy();
+      tileEngine?.destroy();
       layerManager?.destroy();
       viewport?.destroy();
       // The retired renderer owns its view, while Pixi assets can be in use by the next one.
