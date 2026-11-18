@@ -278,7 +278,10 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
     const request = ++pingRequest.current;
     setPing({ testing: true, ok: null });
     const start = performance.now();
-    const health = await ApiService.checkServerHealth(target);
+    let health = await ApiService.checkServerHealth(target);
+    if (!health.ok && isLocalTunnel) {
+      health = await ApiService.checkServerHealth(here);
+    }
     if (request !== pingRequest.current) return;
     const ok = health.ok && health.status === 'ok';
     setPing(ok ? { testing: false, ok: true, ms: Math.round(performance.now() - start) } : { testing: false, ok: false, error: health.error || t.gateway.connectionFailed });
@@ -484,12 +487,33 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
   };
 
   const tabBtn = (id: 'join' | 'create' | 'create-group', icon: React.ReactNode, label: string, hint: string) => (
-    <button type="button" role="tab" aria-selected={tab === id} aria-controls={`gateway-${id}`} id={`gateway-tab-${id}`} onClick={() => { userChoseTabRef.current = true; setTab(id); }} aria-label={`${label}：${hint}`}
-      className={`flex flex-1 items-center gap-3 rounded-xl border px-3 py-3 text-left transition ${tab === id ? 'border-indigo-400 bg-indigo-600/20 text-white' : 'border-neutral-800 bg-neutral-900/60 text-neutral-300 hover:border-neutral-600'}`}>
-      <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${tab === id ? 'bg-indigo-600 text-white' : 'bg-neutral-800 text-neutral-300'}`}>{icon}</span>
-      <span className="min-w-0">
-        <span className="block text-sm font-bold">{label}</span>
-        <span className="block truncate text-[11px] text-neutral-400">{hint}</span>
+    <button
+      type="button"
+      role="tab"
+      aria-selected={tab === id}
+      aria-controls={`gateway-${id}`}
+      id={`gateway-tab-${id}`}
+      onClick={() => {
+        userChoseTabRef.current = true;
+        setTab(id);
+      }}
+      aria-label={`${label}：${hint}`}
+      className={`flex min-w-0 items-start gap-2.5 rounded-2xl border p-3 text-left transition ${
+        tab === id
+          ? 'border-indigo-400 bg-indigo-600/20 text-white shadow-lg shadow-indigo-500/10'
+          : 'border-neutral-800 bg-neutral-900/60 text-neutral-300 hover:border-neutral-600 hover:bg-neutral-900'
+      }`}
+    >
+      <span
+        className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition ${
+          tab === id ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/30' : 'bg-neutral-800 text-neutral-300'
+        }`}
+      >
+        {icon}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block whitespace-nowrap text-[13px] font-bold leading-snug">{label}</span>
+        <span className="mt-0.5 block text-[11px] leading-snug text-neutral-400">{hint}</span>
       </span>
     </button>
   );
@@ -518,7 +542,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
         </div>
       </div>
 
-      <form onSubmit={submit} className="mx-auto flex min-h-full w-full max-w-xl flex-col gap-4 px-4 py-6 sm:py-10">
+      <form onSubmit={submit} className="mx-auto flex min-h-full w-full max-w-2xl flex-col gap-4 px-4 py-6 sm:py-10">
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
             <img src={`${(import.meta as any).env?.BASE_URL || './'}logo.svg`} alt="" aria-hidden="true" className="h-11 w-11 shrink-0" />
@@ -732,22 +756,34 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                   </div>
                 </div>
               )}
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 {where === 'internet' && (
                   <input value={internetUrl} onChange={(e) => handlePasteOrTypeRemoteLink(e.target.value)}
                     placeholder="https://example.trycloudflare.com" aria-label={t.gateway.serverUrlAria}
-                    className="atelier-field h-9 min-w-0 flex-1 px-3 text-xs" />
+                    className="atelier-field h-9 min-w-0 flex-1 px-3 text-xs font-mono" />
                 )}
-                <button type="button" onClick={testConnection} disabled={ping.testing}
-                  className="flex h-9 shrink-0 items-center gap-1 rounded-xl border border-indigo-500/50 bg-indigo-600/25 px-3 text-xs font-semibold text-indigo-100 hover:bg-indigo-600/40">
-                  <RefreshCw className={'h-3.5 w-3.5' + (ping.testing ? ' animate-spin' : '')} />
-                  <span>{t.gateway.testConnection}</span>
-                </button>
-                {isDesktop && (
-                  <button type="button" onClick={toggleServer} aria-pressed={serverRunning} className="ml-auto rounded-md border border-neutral-700 px-2 py-1 text-[11px] text-neutral-200 hover:bg-neutral-800">
-                    {t.gateway.localServer}{serverRunning ? t.gateway.serverRunningClickStop : t.gateway.serverStoppedClickStart}
+                <div className="flex flex-wrap items-center gap-2">
+                  <button type="button" onClick={testConnection} disabled={ping.testing}
+                    className="flex h-9 shrink-0 items-center gap-1.5 rounded-xl border border-indigo-500/50 bg-indigo-600/25 px-3.5 text-xs font-semibold text-indigo-100 transition hover:bg-indigo-600/40">
+                    <RefreshCw className={'h-3.5 w-3.5' + (ping.testing ? ' animate-spin' : '')} />
+                    <span>{t.gateway.testConnection}</span>
                   </button>
-                )}
+                  {isDesktop && (
+                    <button
+                      type="button"
+                      onClick={toggleServer}
+                      aria-pressed={serverRunning}
+                      className={`flex h-9 items-center gap-1.5 rounded-xl border px-3 text-[11px] font-medium transition ${
+                        serverRunning
+                          ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-200 hover:bg-emerald-950/50'
+                          : 'border-neutral-700 bg-neutral-800/80 text-neutral-300 hover:bg-neutral-800'
+                      }`}
+                    >
+                      <span className={`h-2 w-2 rounded-full ${serverRunning ? 'bg-emerald-400' : 'bg-neutral-500'}`} aria-hidden="true" />
+                      <span>{t.gateway.localServer}{serverRunning ? t.gateway.serverRunningClickStop : t.gateway.serverStoppedClickStart}</span>
+                    </button>
+                  )}
+                </div>
               </div>
               {ping.ok === true && (
                 <p className="text-[11px] text-emerald-300">{t.gateway.connectedMs.replace('{ms}', String(ping.ms ?? 0))}</p>
@@ -808,10 +844,10 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
             </section>
 
             {/* What to do */}
-            <div role="tablist" aria-label={t.gateway.tabActionAria} className="flex flex-col gap-2 sm:flex-row">
+            <div role="tablist" aria-label={t.gateway.tabActionAria} className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
               {tabBtn('join', <DoorOpen className="h-5 w-5" />, t.gateway.joinRoom, t.gateway.joinTabDesc)}
               {tabBtn('create', <Plus className="h-5 w-5" />, t.gateway.createRoom, t.gateway.createTabDesc)}
-              {tabBtn('create-group', <Folder className="h-5 w-5" />, '建立畫布組房間', '設密碼開啟畫布組，預設給 2048×2048 畫布')}
+              {tabBtn('create-group', <Folder className="h-5 w-5" />, '建立畫布組房間', '設密碼開畫布組，預設 2048×2048')}
             </div>
 
             {tab === 'join' ? (
