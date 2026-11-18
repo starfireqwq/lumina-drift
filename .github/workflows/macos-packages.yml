@@ -1,0 +1,104 @@
+name: macOS packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Git tag or commit to package (defaults to this workflow's commit)
+        required: false
+        type: string
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/macos-packages.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            cpu: arm64
+          - runner: macos-15-intel
+            arch: x64
+            cpu: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      EXPECTED_ARCH: ${{ matrix.arch }}
+      MACH_ARCH: ${{ matrix.cpu }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Install workspace
+        run: |
+          test "$(node -p process.arch)" = "$EXPECTED_ARCH"
+          npm install --global pnpm@12.18.0
+          pnpm install --frozen-lockfile
+      - name: Build macOS installer
+        run: |
+          pnpm --filter @atelier/shared build
+          pnpm --filter @atelier/client build:electron
+          pnpm --filter @atelier/client exec electron-builder --mac pkg "--$EXPECTED_ARCH" --publish never \
+            --config.npmRebuild=false --config.mac.identity=- --config.mac.hardenedRuntime=false --config.mac.notarize=false
+      - name: Verify package and native addons
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          installers=(apps/client/release/*-Mac-*-"$EXPECTED_ARCH".pkg)
+          test "${#installers[@]}" -eq 1
+          installer="${installers[0]}"
+          work_dir="$(mktemp -d "${RUNNER_TEMP}/lumina-pkg.XXXXXX")"
+          pkgutil --expand-full "$installer" "$work_dir/expanded"
+          app_path="$(find "$work_dir/expanded" -type d -name '*.app' -prune -print | head -n 1)"
+          test -n "$app_path"
+          contents="$app_path/Contents"
+          program="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$contents/Info.plist")"
+          executable="$contents/MacOS/$program"
+          resources="$contents/Resources"
+          test -s "$resources/app.asar"
+          test -s "$resources/server/dist/server.js"
+          lipo -verify_arch "$MACH_ARCH" "$executable"
+          lipo -verify_arch "$MACH_ARCH" "$resources/server/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+          lipo -verify_arch "$MACH_ARCH" "$resources/cloudflared"
+          export APPDATA="$work_dir/roaming" LOCALAPPDATA="$work_dir/local" LUMINA_RESOURCES="$resources" LUMINA_PROFILE="$work_dir/profile"
+          mkdir -p "$APPDATA" "$LOCALAPPDATA" "$LUMINA_PROFILE"
+          ELECTRON_RUN_AS_NODE=1 "$executable" -e '
+            const assert = require("node:assert/strict");
+            const path = require("node:path");
+            const { createRequire } = require("node:module");
+            const load = createRequire(path.join(process.env.LUMINA_RESOURCES, "server/dist/server.js"));
+            const Database = load("better-sqlite3");
+            const argon2 = load("@node-rs/argon2");
+            const db = new Database(":memory:");
+            assert.equal(db.prepare("SELECT 1 AS value").get().value, 1);
+            db.close();
+            assert.ok(argon2.verifySync(argon2.hashSync("package-smoke-test"), "package-smoke-test"));
+            console.log("SQLite and Argon2 loaded inside Electron:", process.arch);
+          ' -- --user-data-dir="$LUMINA_PROFILE"
+          codesign --verify --deep "$app_path"
+          "$resources/cloudflared" --version
+          cd apps/client/release
+          shasum -a 256 "$(basename "$installer")" > "SHA256SUMS-macOS-$EXPECTED_ARCH.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: lumina-drift-macos-${{ matrix.arch }}
+          path: |
+            apps/client/release/*-Mac-*-${{ matrix.arch }}.pkg
+            apps/client/release/SHA256SUMS-macOS-${{ matrix.arch }}.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
