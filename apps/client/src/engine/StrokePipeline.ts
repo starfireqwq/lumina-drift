@@ -50,6 +50,12 @@ export class StrokePipeline {
   private strokeInk?: StrokeInk;
   private strokeProps?: BrushProperties;
   private lastEventTime = 0;
+  private strokePeakPressure = 0;
+  private prevPositivePressure = 0;
+  private inTailTaper = false;
+  private taperLowPressure = 1;
+  private taperLowTime = 0;
+  private pendingSpikePoints: RawPoint[] = [];
 
   // Throttled preview dab buffer for socket streaming
   private pendingPreviewDabs: Array<{ x: number; y: number; pressure: number }> = [];
@@ -302,6 +308,7 @@ export class StrokePipeline {
       time,
     };
     this.lastValidPoint = initialPoint;
+    this.resetTailTaperState(initialPoint);
 
     const dabs = this.engine.initStroke(
       {
@@ -379,17 +386,117 @@ export class StrokePipeline {
 
       if (index > 0) {
         // Finish the last known path without drawing across the location gap. Both runs stay in one undo step.
+        this.flushPendingSpikePoints(true);
         this.flushFrameDabs();
         this.emitDabs(this.engine.finishStroke(this.lastValidPoint ?? undefined), this.strokeId, false, false);
+        this.resetTailTaperState(points[0]);
         this.emitDabs(this.engine.startSegment(points[0]), this.strokeId, false, false);
+        this.lastValidPoint = points[0];
       }
       this.lastEventTime = points[points.length - 1].time ?? this.lastEventTime;
-      this.lastValidPoint = points[points.length - 1];
-      this.queueFrameDabs(this.engine.addRawPoints(index > 0 ? points.slice(1) : points));
+      const filteredPoints = this.filterPenTailPoints(index > 0 ? points.slice(1) : points, tablet.isPen);
+      if (filteredPoints.length > 0) {
+        this.lastValidPoint = filteredPoints[filteredPoints.length - 1];
+        this.queueFrameDabs(this.engine.addRawPoints(filteredPoints));
+      }
     });
 
     // Release ends the stroke at its last recorded contact point.
     if (lifted) this.finishInterruptedStroke(tablet.pointerId);
+  }
+
+  private resetTailTaperState(initialPoint?: RawPoint) {
+    const p = initialPoint?.pressure ?? 0;
+    this.strokePeakPressure = p;
+    this.prevPositivePressure = p > 0 ? p : 0;
+    this.inTailTaper = false;
+    this.taperLowPressure = 1;
+    this.taperLowTime = initialPoint?.time ?? this.lastEventTime;
+    this.pendingSpikePoints = [];
+  }
+
+  private filterPenTailPoints(points: RawPoint[], isPen: boolean): RawPoint[] {
+    if (!isPen) return points;
+    const accepted: RawPoint[] = [];
+    for (const pt of points) {
+      const p = pt.pressure;
+      const t = pt.time ?? this.lastEventTime;
+
+      if (this.inTailTaper) {
+        const spikeCeiling = Math.max(this.taperLowPressure + 0.035, this.taperLowPressure * 1.35);
+        if (p <= spikeCeiling && p < 0.18) {
+          if (this.pendingSpikePoints.length > 0) {
+            for (const sp of this.pendingSpikePoints) {
+              accepted.push({ ...sp, pressure: Math.min(sp.pressure, this.taperLowPressure) });
+            }
+            this.pendingSpikePoints = [];
+          }
+          if (p > 0 && p < this.taperLowPressure) {
+            this.taperLowPressure = p;
+          }
+          this.taperLowTime = t;
+          if (p > 0) this.prevPositivePressure = p;
+          accepted.push(pt);
+          continue;
+        }
+
+        const dt = t - this.taperLowTime;
+        if (this.pendingSpikePoints.length < 2 && dt <= 32) {
+          this.pendingSpikePoints.push(pt);
+          continue;
+        }
+
+        for (const sp of this.pendingSpikePoints) {
+          this.strokePeakPressure = Math.max(this.strokePeakPressure, sp.pressure);
+          if (sp.pressure > 0) this.prevPositivePressure = sp.pressure;
+          accepted.push(sp);
+        }
+        this.pendingSpikePoints = [];
+        if (p > 0 && p < 0.18) {
+          this.inTailTaper = true;
+          this.taperLowPressure = p;
+          this.taperLowTime = t;
+        } else {
+          this.inTailTaper = false;
+          this.taperLowPressure = 1;
+        }
+        this.strokePeakPressure = Math.max(this.strokePeakPressure, p);
+        if (p > 0) this.prevPositivePressure = p;
+        accepted.push(pt);
+        continue;
+      }
+
+      if (
+        this.strokePeakPressure >= 0.12 &&
+        p > 0 &&
+        p < 0.18 &&
+        p <= this.strokePeakPressure * 0.65 &&
+        p <= this.prevPositivePressure
+      ) {
+        this.inTailTaper = true;
+        this.taperLowPressure = p;
+        this.taperLowTime = t;
+      } else {
+        this.strokePeakPressure = Math.max(this.strokePeakPressure, p);
+      }
+      if (p > 0) this.prevPositivePressure = p;
+      accepted.push(pt);
+    }
+    return accepted;
+  }
+
+  private flushPendingSpikePoints(clamp: boolean) {
+    if (this.pendingSpikePoints.length === 0) return;
+    const toFlush = clamp
+      ? this.pendingSpikePoints.map((sp) => ({
+          ...sp,
+          pressure: Math.min(sp.pressure, this.taperLowPressure),
+        }))
+      : this.pendingSpikePoints;
+    this.pendingSpikePoints = [];
+    this.lastValidPoint = toFlush[toFlush.length - 1];
+    this.lastEventTime = this.lastValidPoint.time ?? this.lastEventTime;
+    this.queueFrameDabs(this.engine.addRawPoints(toFlush));
   }
 
   public finishInterruptedStroke(pointerId: number) {
@@ -400,13 +507,16 @@ export class StrokePipeline {
     this.motionPending = false;
     this.tabletStroke = null;
     tablet.finish();
+    this.flushPendingSpikePoints(true);
     if (!this.lastValidPoint) return;
     const props = this.strokeProps!;
     if (props.snapToRuler !== false) RulerManager.getInstance().onStrokeEnd();
     const endPt = tablet.isPen
       ? { ...this.lastValidPoint, pressure: props.brushType === 'pen' || props.minSize === 0
         ? 0
-        : tablet.hasNativeMotion ? this.lastValidPoint.pressure : Math.max(0.04, this.lastValidPoint.pressure * 0.55) }
+        : tablet.hasNativeMotion
+          ? this.lastValidPoint.pressure
+          : Math.min(this.lastValidPoint.pressure, Math.max(0.04, this.lastValidPoint.pressure * 0.55)) }
       : this.lastValidPoint;
     this.flushFrameDabs();
     this.emitDabs(this.engine.finishStroke(endPt), this.strokeId, false, true);
@@ -525,6 +635,7 @@ export class StrokePipeline {
     this.pendingPreviewDabs = [];
     this.lastValidPoint = null;
     this.eraserProps = undefined;
+    this.resetTailTaperState();
   }
 
   /** Points stamped so far in the stroke being drawn (live outline preview); not a copy */

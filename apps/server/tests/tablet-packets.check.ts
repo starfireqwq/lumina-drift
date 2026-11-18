@@ -56,14 +56,14 @@ async function main() {
       'reported loss still splits the run, while a short interval with no reported loss is continuous');
     assert.equal(gaps.runs.at(-1)?.at(-1)?.nativePressure, 0.02);
 
-    update([packet(490, 53, 0.06, timeStamp + 152)]);
-    assert.deepEqual(stroke.nativeMotion()?.runs.map(run => run.map(point => point.clientX)), [[], [490]],
+    update([packet(720, 53, 0.06, timeStamp + 300)]);
+    assert.deepEqual(stroke.nativeMotion()?.runs.map(run => run.map(point => point.clientX)), [[], [720]],
       'a large inferred gap in native pen history still splits the run');
 
-    update([packet(492, 53, 0.03, timeStamp + 154)]);
+    update([packet(722, 53, 0.03, timeStamp + 302)]);
     generation++;
     update([]);
-    update([packet(494, 54, 0.98, timeStamp + 156)]);
+    update([packet(724, 54, 0.98, timeStamp + 304)]);
     const interrupted = stroke.nativeMotion()!;
     assert.equal(interrupted.lifted, true);
     assert.deepEqual(interrupted.runs.flat().map(point => point.nativePressure), [0.03]);
@@ -102,11 +102,11 @@ async function main() {
   assert.deepEqual(mouseStroke.consumeMotion()?.runs.flat().map(p => [p.clientX, p.clientY]),
     [[30, 40], [80, 40], [80, 90]], 'native mouse moves draw without any DOM moves');
   reportMouse([
-    mousePacket(30, 90, 205), { ...mousePacket(5, 5, 211), contact: false }, mousePacket(150, 150, 215),
+    mousePacket(450, 90, 280), { ...mousePacket(5, 5, 286), contact: false }, mousePacket(150, 150, 290),
   ]);
   const finalMouseMotion = mouseStroke.consumeMotion();
   assert.equal(finalMouseMotion?.lifted, true);
-  assert.deepEqual(finalMouseMotion?.runs.map(run => run.map(p => p.clientX)), [[], [30]],
+  assert.deepEqual(finalMouseMotion?.runs.map(run => run.map(p => p.clientX)), [[], [450]],
     'a missing interval breaks the path and release discards later coordinates');
   mouseStroke.finish();
   const handover = startTabletStroke({ ...down, timeStamp: start + 250 });

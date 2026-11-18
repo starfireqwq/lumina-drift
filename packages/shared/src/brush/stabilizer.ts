@@ -138,8 +138,8 @@ export class DynamicStabilizer {
     let prevX = this.bx;
     let prevY = this.by;
     const startP = this.bp;
-    // Target end pressure: smoothly taper slightly on lift without dropping instantaneously to 0.02
-    const endP = raw.pressure > 0.01 ? Math.min(startP, raw.pressure) : Math.max(0.04, startP * 0.4);
+    // Target end pressure: smoothly taper slightly on lift without dropping instantaneously to 0.02 or rebounding above startP
+    const endP = raw.pressure > 0.01 ? Math.min(startP, raw.pressure) : Math.min(startP, Math.max(0.04, startP * 0.4));
 
     let totalDist = 0;
     for (let i = 0; i < 120 && Math.hypot(raw.x - this.bx, raw.y - this.by) > 0.35; i++) {

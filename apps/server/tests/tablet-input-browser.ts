@@ -571,8 +571,8 @@ async function main() {
         element.dispatchEvent(event);
       };
       send('pointerdown', 75, 0);
-      send('pointermove', 345, 90);
-      send('pointerup', 345, 95);
+      send('pointermove', 345, 260);
+      send('pointerup', 345, 265);
     });
     await simulated.waitForFunction(() => (window as any).__debugPixi?.undo.getUndoCount() === 6);
     assert.ok((await alphaRow(simulated, layer.id, 75, 470))[0] > 0);

@@ -196,6 +196,7 @@ export class TabletStroke {
   private readonly contactMask: number;
   private readonly expectsEraser: boolean;
   private lastNativePressure: number;
+  private lastInkPressure?: number;
   private previousPoint: TabletPoint;
   private nativeLast?: WinTabSample;
   private nativeSource?: NativeSource;
@@ -220,6 +221,11 @@ export class TabletStroke {
     this.penCurve = this.isPen || pendingNative.some(source => source !== 'mouse')
       ? readStylusPressureCurve() ?? DEFAULT_PRESSURE_CURVE : undefined;
     this.lastNativePressure = sample?.pressure ?? 0;
+    if (reportsInkPressure(event)) {
+      const id = deviceId(event);
+      if (id) inkDevices.add(id);
+      this.lastInkPressure = event.pressure;
+    }
     this.initialPoint = sample ? this.nativePoint(sample, event) : event;
     this.previousPoint = this.initialPoint;
     this.latestEvent = event;
@@ -255,12 +261,17 @@ export class TabletStroke {
     if (reportsInkPressure(event)) {
       const id = deviceId(event);
       if (id) inkDevices.add(id);
+      this.lastInkPressure = event.pressure;
     }
     if (this.nativeSource && this.nativeSource !== 'mouse' && this.generation === generation) {
       const pressure = matchedSample(event, this.nativeLast?.cursor, this.nativeSource === 'ink' ? nativeInk : samples)?.pressure;
       if (pressure !== undefined) this.lastNativePressure = pressure;
     }
-    const raw = this.nativeSource ? this.lastNativePressure : event.pressure;
+    const raw = this.nativeSource
+      ? this.lastNativePressure
+      : this.isPen && event.pressure === 0.5 && this.lastInkPressure !== undefined
+        ? this.lastInkPressure
+        : event.pressure;
     if (!this.isPen) return { raw, normalized: raw > 0 ? raw : 0.5 };
     return { raw, normalized: Number.isFinite(raw) ? raw : 0.02 };
   }
@@ -282,11 +293,18 @@ export class TabletStroke {
     }
 
     let points = this.pointerSamples(event, lifted);
-    if (this.rawThrough && event.isTrusted && event.type === 'pointermove') {
+    if (this.rawThrough && event.isTrusted && (event.type === 'pointermove' || event.type === 'pointerup' || event.type === 'pointercancel')) {
       const through = this.rawThrough;
-      // pointermove repeats the preceding raw samples, sometimes with several at the same timestamp.
-      const overlap = points.findIndex(point => point.timeStamp === through.timeStamp &&
-        point.clientX === through.clientX && point.clientY === through.clientY && point.pressure === through.pressure);
+      // pointermove and pointerup can repeat preceding raw samples, sometimes with several at the same timestamp.
+      let overlap = -1;
+      for (let i = points.length - 1; i >= 0; i--) {
+        const point = points[i];
+        if (point.timeStamp === through.timeStamp &&
+            point.clientX === through.clientX && point.clientY === through.clientY && point.pressure === through.pressure) {
+          overlap = i;
+          break;
+        }
+      }
       points = overlap >= 0 ? points.slice(overlap + 1) : points.filter(point => point.timeStamp > through.timeStamp);
     }
     return { runs: this.splitMotion(this.takeRawPoints().concat(points)), lifted };
@@ -414,9 +432,13 @@ export class TabletStroke {
   hasPositionGap(next: TabletPoint) {
     const previous = this.previousPoint;
     if (!this.isPen && next.pointerType !== 'mouse') return false;
-    // Only split on severe missed-release teleports so brief frame hitches never punch holes in fast strokes.
+    if (!this.isPen) {
+      return next.timeStamp - previous.timeStamp >= 64 &&
+        Math.hypot(next.clientX - previous.clientX, next.clientY - previous.clientY) > 24;
+    }
+    // Only split pen strokes on severe missed-release teleports so brief frame hitches never punch holes in fast strokes.
     return next.timeStamp - previous.timeStamp >= 250 &&
-      Math.hypot(next.clientX - previous.clientX, next.clientY - previous.clientY) > 320;
+      Math.hypot(next.clientX - previous.clientX, next.clientY - previous.clientY) > 250;
   }
 
   private splitMotion(points: TabletPoint[], freshRun = false) {
