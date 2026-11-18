@@ -11,6 +11,8 @@ import { getUserColor } from '../utils/userColors';
 import {
   computeSeekReplayPlan,
   extractOpCursorTarget,
+  filterTimeLapseOps,
+  isMaskTimeLapseOp,
   normalizeReplayTileBytes,
   ReplayParticipantInfo,
   resolveTileDimensions,
@@ -20,8 +22,10 @@ import {
   buildVideoRecorderCandidates,
   createMediaRecorderForStream,
   createScaledRecordingSurface,
+  getVideoBitrateForResolution,
   stopMediaStream,
   unwrapMediaRecorderError,
+  type VideoExportResolution,
   type VideoRecorderCandidate,
 } from './videoExport';
 
@@ -89,6 +93,7 @@ export class TimeLapseEngine {
   private bgColor: string = '#FFFFFF';
   private layers: LayerModel[] = [];
   private knownLayerIds: Set<string> = new Set();
+  private maskLayerIds: Set<string> = new Set();
   private ops: any[] = [];
 
   // Rendering canvases
@@ -217,8 +222,11 @@ export class TimeLapseEngine {
     this.width = Math.max(1, width);
     this.height = Math.max(1, height);
     this.bgColor = bgColor || '#FFFFFF';
-    this.layers = [...layers].sort((a, b) => a.sortOrder - b.sortOrder);
+    this.layers = [...layers]
+      .filter((l) => l.layerType !== 'mask')
+      .sort((a, b) => a.sortOrder - b.sortOrder);
     this.knownLayerIds = new Set(this.layers.map((l) => l.id));
+    this.maskLayerIds = new Set(layers.filter((l) => l.layerType === 'mask').map((l) => l.id));
     this.layerCanvases.clear();
     this.imageDataPool.clear();
     this.activeCursors.clear();
@@ -249,7 +257,9 @@ export class TimeLapseEngine {
 
       if (controller.signal.aborted) return 0;
 
-      this.ops = Array.isArray(res?.ops) ? res.ops : [];
+      const filtered = filterTimeLapseOps(Array.isArray(res?.ops) ? res.ops : [], layers);
+      this.ops = filtered.ops;
+      this.maskLayerIds = filtered.maskLayerIds;
       this.loadedOps = this.ops.length;
       this.expectedTotalOps = this.ops.length;
       this.buildParticipantsIndex(res?.participants || {});
@@ -353,6 +363,7 @@ export class TimeLapseEngine {
   }
 
   private ensureLayerCanvas(layerId: string): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null {
+    if (this.maskLayerIds.has(layerId)) return null;
     const existing = this.layerCanvases.get(layerId);
     if (existing) return existing;
 
@@ -414,18 +425,9 @@ export class TimeLapseEngine {
     const items: LayerCanvasItem[] = [];
     for (const layer of shown) {
       if (layer.layerType === 'mask') continue;
-      const maskLayer = this.layers.find((m) => m.layerType === 'mask' && m.parentId === layer.id);
-      const maskCanvas = maskLayer && this.layerCanvases.get(maskLayer.id)?.canvas;
       items.push({
         layer,
         canvas: this.layerCanvases.get(layer.id)?.canvas ?? this.emptyCanvas,
-        mask: maskLayer && maskCanvas
-          ? {
-              canvas: maskCanvas,
-              enabled: maskLayer.isVisible,
-              inverted: Boolean(maskLayer.meta?.maskInverted),
-            }
-          : undefined,
       });
     }
     compositeLayers(items, this.width, this.height, this.bgColor, this.previewCanvas);
@@ -834,7 +836,7 @@ export class TimeLapseEngine {
    * Executes a single operation on the designated layer canvas
    */
   private executeOp(op: any) {
-    if (!op || !op.layerId) return;
+    if (!op || !op.layerId || isMaskTimeLapseOp(op, this.maskLayerIds)) return;
 
     const targetLayer = this.ensureLayerCanvas(op.layerId);
     if (!targetLayer) return;
@@ -927,13 +929,14 @@ export class TimeLapseEngine {
    */
   public async exportTimeLapseVideo(
     format: 'webm' | 'mp4' = 'webm',
-    onProgress?: (percent: number) => void
+    onProgress?: (percent: number) => void,
+    resolution: VideoExportResolution = '4k'
   ): Promise<Blob> {
     if (this.ops.length === 0) {
       throw new Error('畫布無操作紀錄可供匯出影片');
     }
 
-    const candidates = buildVideoRecorderCandidates(this.width, this.height, format);
+    const candidates = buildVideoRecorderCandidates(this.width, this.height, format, resolution);
     const originalSpeed = this.speed;
     this.recordingCancelled = false;
     let lastError: Error | null = null;
@@ -944,7 +947,7 @@ export class TimeLapseEngine {
           throw new Error('縮時影片匯出已取消');
         }
         try {
-          return await this.recordTimeLapseAttempt(candidates[i], onProgress);
+          return await this.recordTimeLapseAttempt(candidates[i], onProgress, resolution);
         } catch (err) {
           lastError = unwrapMediaRecorderError(err);
           if (this.recordingCancelled || i === candidates.length - 1) {
@@ -964,7 +967,8 @@ export class TimeLapseEngine {
 
   private async recordTimeLapseAttempt(
     candidate: VideoRecorderCandidate,
-    onProgress?: (percent: number) => void
+    onProgress?: (percent: number) => void,
+    resolution: VideoExportResolution = '4k'
   ): Promise<Blob> {
     this.pause();
     this.seek(0);
@@ -979,8 +983,13 @@ export class TimeLapseEngine {
 
     let recorder: MediaRecorder;
     try {
-      recorder = createMediaRecorderForStream(stream, candidate.mimeType, 6000000);
+      recorder = createMediaRecorderForStream(
+        stream,
+        candidate.mimeType,
+        getVideoBitrateForResolution(resolution)
+      );
     } catch (err) {
+      surface.dispose();
       stopMediaStream(stream);
       this.recordingStream = null;
       this.setStatus('paused');
@@ -1011,6 +1020,7 @@ export class TimeLapseEngine {
           stopTimer = null;
         }
         stopMediaStream(stream);
+        surface.dispose();
         if (this.recordingStream === stream) {
           this.recordingStream = null;
         }
@@ -1147,6 +1157,10 @@ export class TimeLapseEngine {
     stopMediaStream(this.recordingStream);
     this.recordingStream = null;
     this.stop();
+    for (const { canvas } of this.layerCanvases.values()) {
+      canvas.width = 0;
+      canvas.height = 0;
+    }
     this.layerCanvases.clear();
     this.imageDataPool.clear();
     this.activeCursors.clear();

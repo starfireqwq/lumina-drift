@@ -15,7 +15,12 @@ import {
 } from 'lucide-react';
 import { AtelierModal, modalButton } from './AtelierModal';
 import { getUserColor } from '../utils/userColors';
-import { getVideoExtensionFromBlob, unwrapMediaRecorderError } from '../engine/videoExport';
+import {
+  computeVideoExportDimensionsForResolution,
+  getVideoExtensionFromBlob,
+  unwrapMediaRecorderError,
+  type VideoExportResolution,
+} from '../engine/videoExport';
 import { useI18n } from '../context/I18nContext';
 
 /** What to put in a GIF / video: one folder (solo), every animation folder (team), or the whole picture */
@@ -145,6 +150,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   const [gridViewport, setGridViewport] = useState({ left: 0, width: 960 });
   const [showExportModal, setShowExportModal] = useState(false);
   const [exportFormat, setExportFormat] = useState<'gif' | 'mp4'>('gif');
+  const [exportResolution, setExportResolution] = useState<VideoExportResolution>('4k');
   const [exportScope, setExportScope] = useState<AnimationExportScope>('folder');
   const [exportRangeOnly, setExportRangeOnly] = useState(false);
   const [exportProgress, setExportProgress] = useState<string | null>(null);
@@ -393,7 +399,15 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
         blob = await ExportEngine.exportGifAnimation(next, total, plan.width, plan.height, fps);
       } else {
         setExportProgress(t.animation.recordingVideo);
-        blob = await ExportEngine.exportVideoAnimation(next, total, plan.width, plan.height, fps, 'mp4');
+        blob = await ExportEngine.exportVideoAnimation(
+          next,
+          total,
+          plan.width,
+          plan.height,
+          fps,
+          'mp4',
+          exportResolution
+        );
       }
       const ext = exportFormat === 'gif' ? 'gif' : getVideoExtensionFromBlob(blob, 'mp4');
       ExportEngine.downloadBlob(blob, `animation_${Date.now()}.${ext}`);
@@ -854,6 +868,28 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 </button>
               ))}
             </div>
+            {exportFormat === 'mp4' && (
+              <div className="flex items-center justify-between gap-2 rounded-xl border border-neutral-800 bg-neutral-900/60 px-3 py-2">
+                <span className="text-xs text-neutral-300">{t.replay.resolution}</span>
+                <select
+                  aria-label={t.replay.resolution}
+                  value={exportResolution}
+                  onChange={(e) => setExportResolution(e.target.value as VideoExportResolution)}
+                  disabled={Boolean(exportProgress)}
+                  className="rounded-lg border border-neutral-700 bg-neutral-800 px-2 py-1 font-mono text-xs text-neutral-200 outline-none"
+                >
+                  {(['1080p', '2k', '4k'] as const).map((tier) => {
+                    const dims = computeVideoExportDimensionsForResolution(canvasWidth, canvasHeight, tier);
+                    const label = tier === '1080p' ? '1080p' : tier.toUpperCase();
+                    return (
+                      <option key={tier} value={tier}>
+                        {label} ({dims.width}×{dims.height})
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+            )}
             <div role="radiogroup" aria-label={t.animation.exportContent} className="space-y-1.5">
               {([
                 ['folder', active?.name ?? t.animation.timeline, '1'],

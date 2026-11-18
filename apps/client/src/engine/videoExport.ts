@@ -1,4 +1,5 @@
 export type VideoExportFormat = 'mp4' | 'webm';
+export type VideoExportResolution = '1080p' | '2k' | '4k';
 
 export interface VideoSizeLimits {
   maxLongSide: number;
@@ -16,34 +17,67 @@ export interface VideoRecorderCandidate {
 export interface ScaledRecordingSurface {
   canvas: HTMLCanvasElement;
   syncFrame: () => void;
+  dispose: () => void;
 }
 
-export const MP4_4K_LIMITS: VideoSizeLimits = {
-  maxLongSide: 3840,
-  maxShortSide: 2160,
-  maxPixels: 3840 * 2160,
-};
-
-export const MP4_1080_LIMITS: VideoSizeLimits = {
+export const VIDEO_1080P_LIMITS: VideoSizeLimits = {
   maxLongSide: 1920,
   maxShortSide: 1080,
   maxPixels: 1920 * 1080,
 };
 
-export const WEBM_4K_LIMITS: VideoSizeLimits = {
-  maxLongSide: 4096,
-  maxShortSide: 4096,
-  maxPixels: 4096 * 4096,
+export const VIDEO_2K_LIMITS: VideoSizeLimits = {
+  maxLongSide: 2560,
+  maxShortSide: 1440,
+  maxPixels: 2560 * 1440,
 };
 
+export const VIDEO_4K_LIMITS: VideoSizeLimits = {
+  maxLongSide: 3840,
+  maxShortSide: 2160,
+  maxPixels: 3840 * 2160,
+};
+
+export const MP4_4K_LIMITS: VideoSizeLimits = VIDEO_4K_LIMITS;
+export const MP4_1080_LIMITS: VideoSizeLimits = VIDEO_1080P_LIMITS;
+export const WEBM_4K_LIMITS: VideoSizeLimits = VIDEO_4K_LIMITS;
+
+export function getVideoLimitsForResolution(
+  resolution: VideoExportResolution = '4k'
+): VideoSizeLimits {
+  switch (resolution) {
+    case '1080p':
+      return VIDEO_1080P_LIMITS;
+    case '2k':
+      return VIDEO_2K_LIMITS;
+    case '4k':
+    default:
+      return VIDEO_4K_LIMITS;
+  }
+}
+
+export function getVideoBitrateForResolution(
+  resolution: VideoExportResolution = '4k'
+): number {
+  switch (resolution) {
+    case '1080p':
+      return 4_500_000;
+    case '2k':
+      return 7_000_000;
+    case '4k':
+    default:
+      return 10_000_000;
+  }
+}
+
 function toEvenDimension(value: number): number {
-  return Math.max(2, Math.floor(value / 2) * 2);
+  return Math.max(2, Math.floor((value + 1e-6) / 2) * 2);
 }
 
 /**
  * Computes aspect-ratio-preserving even pixel dimensions within encoder bounds.
- * H.264 (`avc1`) requires even width/height and fails with `EncodingError` on canvases
- * exceeding ~8.29M pixels (e.g., 4000x4000 or 8000x8000).
+ * Caps oversized or non-standard aspect ratios proportionally inside the selected
+ * 1080p / 2K / 4K (3840x2160) envelope without upscaling smaller canvases.
  */
 export function computeVideoExportDimensions(
   srcWidth: number,
@@ -73,24 +107,43 @@ export function computeVideoExportDimensions(
   };
 }
 
+export function computeVideoExportDimensionsForResolution(
+  srcWidth: number,
+  srcHeight: number,
+  resolution: VideoExportResolution = '4k'
+): { width: number; height: number } {
+  return computeVideoExportDimensions(srcWidth, srcHeight, getVideoLimitsForResolution(resolution));
+}
+
 /**
  * Returns an ordered list of MIME + dimension candidates supported by `MediaRecorder`.
- * Falls back gracefully from 2160p/4K H.264 -> 1080p H.264 -> MP4 VP9 -> WebM VP9/VP8.
+ * Caps all exports at the requested tier (at most 4K 3840x2160) and steps down
+ * gracefully if the encoder rejects the highest tier.
  */
 export function buildVideoRecorderCandidates(
   srcWidth: number,
   srcHeight: number,
   format: VideoExportFormat,
+  resolutionOrSupport?: VideoExportResolution | ((mimeType: string) => boolean),
   isTypeSupported?: (mimeType: string) => boolean
 ): VideoRecorderCandidate[] {
+  const resolution: VideoExportResolution =
+    typeof resolutionOrSupport === 'string' ? resolutionOrSupport : '4k';
+  const supportFn =
+    typeof resolutionOrSupport === 'function' ? resolutionOrSupport : isTypeSupported;
   const supports =
-    isTypeSupported ??
+    supportFn ??
     ((mimeType: string) =>
       typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mimeType));
 
-  const mp4Primary = computeVideoExportDimensions(srcWidth, srcHeight, MP4_4K_LIMITS);
-  const mp4Fallback1080 = computeVideoExportDimensions(srcWidth, srcHeight, MP4_1080_LIMITS);
-  const webmDims = computeVideoExportDimensions(srcWidth, srcHeight, WEBM_4K_LIMITS);
+  const primaryDims = computeVideoExportDimensionsForResolution(srcWidth, srcHeight, resolution);
+  const tierChain: Array<{ width: number; height: number }> = [primaryDims];
+  if (resolution === '4k') {
+    tierChain.push(computeVideoExportDimensions(srcWidth, srcHeight, VIDEO_2K_LIMITS));
+    tierChain.push(computeVideoExportDimensions(srcWidth, srcHeight, VIDEO_1080P_LIMITS));
+  } else if (resolution === '2k') {
+    tierChain.push(computeVideoExportDimensions(srcWidth, srcHeight, VIDEO_1080P_LIMITS));
+  }
 
   const candidates: VideoRecorderCandidate[] = [];
   const seen = new Set<string>();
@@ -108,30 +161,27 @@ export function buildVideoRecorderCandidates(
   };
 
   if (format === 'mp4') {
-    for (const mime of ['video/mp4;codecs=avc1', 'video/mp4;codecs=avc1.42E01E']) {
-      addIfSupported(mime, 'mp4', mp4Primary);
-    }
-    if (mp4Fallback1080.width < mp4Primary.width || mp4Fallback1080.height < mp4Primary.height) {
+    for (const dims of tierChain) {
       for (const mime of ['video/mp4;codecs=avc1', 'video/mp4;codecs=avc1.42E01E']) {
-        addIfSupported(mime, 'mp4', mp4Fallback1080);
+        addIfSupported(mime, 'mp4', dims);
       }
     }
-    addIfSupported('video/mp4;codecs=vp9', 'mp4', mp4Primary);
-    addIfSupported('video/mp4', 'mp4', mp4Primary);
+    addIfSupported('video/mp4;codecs=vp9', 'mp4', primaryDims);
+    addIfSupported('video/mp4', 'mp4', primaryDims);
     for (const mime of ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']) {
-      addIfSupported(mime, 'webm', webmDims);
+      addIfSupported(mime, 'webm', primaryDims);
     }
   } else {
     for (const mime of ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']) {
-      addIfSupported(mime, 'webm', webmDims);
+      addIfSupported(mime, 'webm', primaryDims);
     }
     for (const mime of ['video/mp4;codecs=avc1', 'video/mp4']) {
-      addIfSupported(mime, 'mp4', mp4Primary);
+      addIfSupported(mime, 'mp4', primaryDims);
     }
   }
 
   if (candidates.length === 0) {
-    addIfSupported('', 'webm', webmDims, false);
+    addIfSupported('', 'webm', primaryDims, false);
   }
 
   return candidates;
@@ -195,6 +245,7 @@ export function createScaledRecordingSurface(
     return {
       canvas: sourceCanvas,
       syncFrame: () => {},
+      dispose: () => {},
     };
   }
 
@@ -213,6 +264,10 @@ export function createScaledRecordingSurface(
       if (!ctx) return;
       ctx.clearRect(0, 0, targetWidth, targetHeight);
       ctx.drawImage(sourceCanvas, 0, 0, targetWidth, targetHeight);
+    },
+    dispose: () => {
+      recordCanvas.width = 0;
+      recordCanvas.height = 0;
     },
   };
 }

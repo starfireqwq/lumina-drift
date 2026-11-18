@@ -6,8 +6,10 @@ import { LayerCanvasItem, LayerTree, compositeLayers, maskCoverage } from './lay
 import {
   buildVideoRecorderCandidates,
   createMediaRecorderForStream,
+  getVideoBitrateForResolution,
   stopMediaStream,
   unwrapMediaRecorderError,
+  type VideoExportResolution,
   type VideoRecorderCandidate,
 } from './videoExport';
 export type { LayerCanvasItem } from './layerComposite';
@@ -139,15 +141,16 @@ export class ExportEngine {
     width: number,
     height: number,
     fps: number = 12,
-    format: 'mp4' | 'webm' = 'mp4'
+    format: 'mp4' | 'webm' = 'mp4',
+    resolution: VideoExportResolution = '4k'
   ): Promise<Blob> {
     if (frameCount <= 0) throw new Error('No animation frames to export');
-    const candidates = buildVideoRecorderCandidates(width, height, format);
+    const candidates = buildVideoRecorderCandidates(width, height, format, resolution);
     let lastError: Error | null = null;
 
     for (let i = 0; i < candidates.length; i++) {
       try {
-        return await this.recordVideoAnimationAttempt(candidates[i], nextFrame, frameCount, fps);
+        return await this.recordVideoAnimationAttempt(candidates[i], nextFrame, frameCount, fps, resolution);
       } catch (err) {
         lastError = unwrapMediaRecorderError(err);
         if (i === candidates.length - 1) throw lastError;
@@ -165,7 +168,8 @@ export class ExportEngine {
     candidate: VideoRecorderCandidate,
     nextFrame: (i: number) => Promise<{ canvas: HTMLCanvasElement; hold: number }>,
     frameCount: number,
-    fps: number
+    fps: number,
+    resolution: VideoExportResolution = '4k'
   ): Promise<Blob> {
     const animCanvas = document.createElement('canvas');
     animCanvas.width = candidate.width;
@@ -178,8 +182,14 @@ export class ExportEngine {
     const recordedChunks: Blob[] = [];
     let recorder: MediaRecorder;
     try {
-      recorder = createMediaRecorderForStream(stream, candidate.mimeType, 6000000);
+      recorder = createMediaRecorderForStream(
+        stream,
+        candidate.mimeType,
+        getVideoBitrateForResolution(resolution)
+      );
     } catch (err) {
+      animCanvas.width = 0;
+      animCanvas.height = 0;
       stopMediaStream(stream);
       throw unwrapMediaRecorderError(err);
     }
@@ -191,10 +201,15 @@ export class ExportEngine {
     return new Promise<Blob>((resolve, reject) => {
       let aborted = false;
       let settled = false;
+      const cleanupSurface = () => {
+        stopMediaStream(stream);
+        animCanvas.width = 0;
+        animCanvas.height = 0;
+      };
       recorder.onstop = () => {
         if (settled) return;
         settled = true;
-        stopMediaStream(stream);
+        cleanupSurface();
         const blobType = recorder.mimeType || candidate.mimeType || 'video/webm';
         const blob = new Blob(recordedChunks, { type: blobType });
         if (blob.size === 0) {
@@ -207,7 +222,7 @@ export class ExportEngine {
         if (settled) return;
         aborted = true;
         settled = true;
-        stopMediaStream(stream);
+        cleanupSurface();
         reject(unwrapMediaRecorderError(err));
       };
 

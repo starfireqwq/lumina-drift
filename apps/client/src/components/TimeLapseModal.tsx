@@ -21,7 +21,12 @@ import {
   SeedParticipantInput,
   TimeLapseEngine,
 } from '../engine/TimeLapseEngine';
-import { getVideoExtensionFromBlob, unwrapMediaRecorderError } from '../engine/videoExport';
+import {
+  computeVideoExportDimensionsForResolution,
+  getVideoExtensionFromBlob,
+  unwrapMediaRecorderError,
+  type VideoExportResolution,
+} from '../engine/videoExport';
 import { useI18n } from '../context/I18nContext';
 
 interface TimeLapseModalProps {
@@ -63,6 +68,7 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
   const [recordedVideoUrl, setRecordedVideoUrl] = useState<string | null>(null);
   const [recordedExtension, setRecordedExtension] = useState<'webm' | 'mp4'>('webm');
   const [videoFormat, setVideoFormat] = useState<'webm' | 'mp4'>('webm');
+  const [videoResolution, setVideoResolution] = useState<VideoExportResolution>('4k');
 
   const seedRef = useRef(seedParticipants);
   seedRef.current = seedParticipants;
@@ -165,9 +171,13 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
       }
       setRecordedVideoUrl(null);
 
-      const blob = await engineRef.current.exportTimeLapseVideo(videoFormat, (pct) => {
-        setRecordProgress(pct);
-      });
+      const blob = await engineRef.current.exportTimeLapseVideo(
+        videoFormat,
+        (pct) => {
+          setRecordProgress(pct);
+        },
+        videoResolution
+      );
 
       const url = URL.createObjectURL(blob);
       recordedVideoUrlRef.current = url;
@@ -185,6 +195,11 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
 
   const loadedCount = progress.loadedOps ?? 0;
   const expectedCount = progress.expectedTotalOps ?? 0;
+  const srcWidth = canvas?.width || 2048;
+  const srcHeight = canvas?.height || 2048;
+  const res1080 = computeVideoExportDimensionsForResolution(srcWidth, srcHeight, '1080p');
+  const res2k = computeVideoExportDimensionsForResolution(srcWidth, srcHeight, '2k');
+  const res4k = computeVideoExportDimensionsForResolution(srcWidth, srcHeight, '4k');
 
   return (
     <div role="dialog" aria-modal="true" className="atelier-modal-backdrop fixed inset-0 z-[70] flex items-center justify-center p-4 animate-in fade-in duration-200">
@@ -401,14 +416,29 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
             </div>
 
             {/* Video Export Button */}
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <select
+                aria-label={t.replay.resolution}
+                value={videoResolution}
+                onChange={(e) => setVideoResolution(e.target.value as VideoExportResolution)}
+                disabled={isRecording}
+                title={t.replay.resolution}
+                className="bg-neutral-800 border border-neutral-700 text-neutral-300 rounded-lg text-xs px-2 py-1.5 outline-none font-mono"
+              >
+                <option value="1080p">1080p ({res1080.width}×{res1080.height})</option>
+                <option value="2k">2K ({res2k.width}×{res2k.height})</option>
+                <option value="4k">4K ({res4k.width}×{res4k.height})</option>
+              </select>
+
+              <select
+                aria-label={t.replay.format}
                 value={videoFormat}
                 onChange={(e) => setVideoFormat(e.target.value as 'webm' | 'mp4')}
                 disabled={isRecording}
+                title={t.replay.format}
                 className="bg-neutral-800 border border-neutral-700 text-neutral-300 rounded-lg text-xs px-2 py-1.5 outline-none font-mono"
               >
-                <option value="webm">WebM (VP9 4K支援)</option>
+                <option value="webm">WebM (VP9)</option>
                 <option value="mp4">MP4 (AVC相容)</option>
               </select>
 
