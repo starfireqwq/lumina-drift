@@ -1,4 +1,4 @@
-import { DEFAULT_TILE_SIZE, getTileBounds, TileData } from '@atelier/shared';
+import { DEFAULT_TILE_SIZE, getTileBounds, LayerModel, TileData } from '@atelier/shared';
 
 export interface ReplayParticipantInfo {
   userId: string;
@@ -215,6 +215,50 @@ export function extractOpCursorTarget(
   }
 
   return null;
+}
+
+const MASK_ACTION_DESCS = new Set(['加圖層蒙版', '復原：蒙版回來了', '貼上圖層蒙版']);
+
+/**
+ * Returns true if an op targets or creates a layer mask (`layerType === 'mask'`),
+ * including legacy mask patches whose mask layer was later deleted/undone via Ctrl+Z.
+ */
+export function isMaskTimeLapseOp(op: any, maskLayerIds?: ReadonlySet<string>): boolean {
+  if (!op || typeof op !== 'object') return false;
+  if (typeof op.layerId === 'string' && maskLayerIds?.has(op.layerId)) return true;
+  const opType = typeof op.opType === 'string' ? op.opType.toUpperCase() : '';
+  if (opType === 'MASK') return true;
+  if (op.layerType === 'mask' || op.payload?.layerType === 'mask' || op.payload?.isMask === true) {
+    return true;
+  }
+  const desc = typeof op.payload?.actionDesc === 'string' ? op.payload.actionDesc : '';
+  return MASK_ACTION_DESCS.has(desc);
+}
+
+/**
+ * Filters out all operations belonging to mask layers (both active and deleted/Ctrl+Z'd)
+ * so Time-Lapse Replay only displays actual artwork strokes, colors, and canvas operations.
+ */
+export function filterTimeLapseOps(
+  ops: any[],
+  layers: ReadonlyArray<Pick<LayerModel, 'id' | 'layerType'>> = []
+): { ops: any[]; maskLayerIds: Set<string> } {
+  const maskLayerIds = new Set<string>();
+  for (const layer of layers) {
+    if (layer?.layerType === 'mask' && layer.id) {
+      maskLayerIds.add(layer.id);
+    }
+  }
+  if (!Array.isArray(ops) || ops.length === 0) {
+    return { ops: [], maskLayerIds };
+  }
+  for (const op of ops) {
+    if (op && typeof op.layerId === 'string' && isMaskTimeLapseOp(op)) {
+      maskLayerIds.add(op.layerId);
+    }
+  }
+  const filtered = ops.filter((op) => Boolean(op) && !isMaskTimeLapseOp(op, maskLayerIds));
+  return { ops: filtered, maskLayerIds };
 }
 
 /**

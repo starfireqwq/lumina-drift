@@ -76,6 +76,7 @@ function slimOfflineOpPayload(payload: any): any {
   if (typeof payload.tool === 'string') slim.tool = payload.tool;
   if (typeof payload.actionDesc === 'string') slim.actionDesc = payload.actionDesc;
   if (typeof payload.isUndo === 'boolean') slim.isUndo = payload.isUndo;
+  if (payload.layerType === 'mask') slim.layerType = 'mask';
   if (payload.bounds && typeof payload.bounds === 'object') slim.bounds = payload.bounds;
   if (Array.isArray(payload.tiles) && payload.tiles.length > 0) {
     slim.tiles = payload.tiles
@@ -1331,12 +1332,24 @@ class OfflineSessionStoreImpl {
     rec.seq += 1;
     rec.canvas.latestSeq = rec.seq;
     rec.updatedAt = now;
-    this.recordOfflineOp(canvasId, rec.seq, layerId, opType || 'STROKE', payload, now);
+    const isMask = rec.layers.find((l) => l.id === layerId)?.layerType === 'mask';
+    const storedPayload =
+      isMask && payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? { ...(payload as Record<string, unknown>), layerType: 'mask' }
+        : payload;
+    this.recordOfflineOp(canvasId, rec.seq, layerId, opType || 'STROKE', storedPayload, now);
     this.schedulePersist(canvasId);
     return rec.seq;
   }
 
-  public commitLocalTilePatch(canvasId: string, layerId: string, tiles: TileData[]): number {
+  public commitLocalTilePatch(
+    canvasId: string,
+    layerId: string,
+    tiles: TileData[],
+    actionDesc?: string,
+    isUndo?: boolean,
+    layerType?: string
+  ): number {
     const rec = this.ensureRecord(canvasId);
     const map = rec.tilesByLayer[layerId] || (rec.tilesByLayer[layerId] = {});
     for (const t of tiles) {
@@ -1351,7 +1364,20 @@ class OfflineSessionStoreImpl {
     rec.seq += 1;
     rec.canvas.latestSeq = rec.seq;
     rec.updatedAt = now;
-    this.recordOfflineOp(canvasId, rec.seq, layerId, 'TILE_PATCH', { tiles }, now);
+    const isMask = layerType === 'mask' || rec.layers.find((l) => l.id === layerId)?.layerType === 'mask';
+    this.recordOfflineOp(
+      canvasId,
+      rec.seq,
+      layerId,
+      'TILE_PATCH',
+      {
+        tiles,
+        ...(typeof actionDesc === 'string' ? { actionDesc } : {}),
+        ...(typeof isUndo === 'boolean' ? { isUndo } : {}),
+        ...(isMask ? { layerType: 'mask' } : {}),
+      },
+      now
+    );
     this.schedulePersist(canvasId);
     return rec.seq;
   }
@@ -1394,6 +1420,7 @@ class OfflineSessionStoreImpl {
       let synthSeq = 0;
       const synthesized: any[] = [];
       for (const l of rec.layers) {
+        if (l.layerType === 'mask') continue;
         const tiles = Object.values(rec.tilesByLayer[l.id] || {});
         const vectors = rec.vectorsByLayer[l.id] || [];
         if (tiles.length === 0 && vectors.length === 0) continue;

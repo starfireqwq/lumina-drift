@@ -40,6 +40,7 @@ export interface EventLogItem {
 type TilePatchMeta = Pick<TilePatchPacket, 'targetOpSeq' | 'historyTiles'> & {
   baseSeq?: number;
   clientOpId?: string;
+  layerType?: LayerModel['layerType'];
 };
 
 /** Delay of one other painter's live previews (ms, last ~200 packets) */
@@ -969,7 +970,14 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         typeof meta?.clientOpId === 'string'
           ? meta.clientOpId
           : `cop_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      const seq = OfflineSessionStore.commitLocalTilePatch(canvasId, layerId, tiles);
+      const seq = OfflineSessionStore.commitLocalTilePatch(
+        canvasId,
+        layerId,
+        tiles,
+        actionDesc,
+        isUndo,
+        meta?.layerType
+      );
       latestSeqRef.current = seq;
       ownOpSeqListenersRef.current.forEach((cb) => cb(clientOpId, seq, layerId));
       if (!isUndo) {
@@ -1004,7 +1012,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       p2pManagerRef.current.broadcastTiles(layerId, tiles, actionDesc, clientOpId, baseSeq);
     }
 
-    const packet: TilePatchPacket & { baseSeq?: number; clientOpId?: string } = {
+    const packet: TilePatchPacket & { baseSeq?: number; clientOpId?: string; layerType?: LayerModel['layerType'] } = {
       type: 'TILE_PATCH',
       canvasId,
       layerId,
@@ -1013,6 +1021,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       actionDesc,
       baseSeq,
       clientOpId,
+      ...(meta?.layerType ? { layerType: meta.layerType } : {}),
       targetOpSeq: meta?.targetOpSeq,
       historyTiles: meta?.historyTiles,
     };

@@ -986,6 +986,10 @@ export class RealtimeRoomManager {
       }
     }
 
+    if (layer.layerType === 'mask' && payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      payload = { ...(payload as Record<string, unknown>), layerType: 'mask' };
+    }
+
     // 5. Encode payload as binary MessagePack blob for SQLite canvas_ops table
     const now = Date.now();
     const payloadBytes = Buffer.from(encodePacket({

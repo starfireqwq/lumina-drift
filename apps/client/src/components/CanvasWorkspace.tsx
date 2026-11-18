@@ -613,7 +613,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         trackLocalCommit(layerId, clientOpId, baseSeq, latestUndo.beforeTiles, tiles, historyOp);
       }
     }
-    emitOp(layerId, opType, pObj ? { ...pObj, baseSeq, clientOpId } : payload);
+    const targetLayer = layersRef.current.find((l) => l.id === layerId);
+    const layerMeta = targetLayer?.layerType === 'mask' ? { layerType: 'mask' as const } : {};
+    emitOp(layerId, opType, pObj ? { ...pObj, ...layerMeta, baseSeq, clientOpId } : payload);
   };
   const commitTilePatch = (
     layerId: string,
@@ -638,7 +640,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         trackLocalCommit(layerId, clientOpId, baseSeq, before, tiles, historyOp);
       }
     }
-    emitTilePatch(layerId, tiles, isUndo, actionDesc, { baseSeq, clientOpId, ...history });
+    const targetLayer = layersRef.current.find((l) => l.id === layerId);
+    emitTilePatch(layerId, tiles, isUndo, actionDesc, {
+      baseSeq,
+      clientOpId,
+      ...(targetLayer?.layerType === 'mask' ? { layerType: 'mask' as const } : {}),
+      ...history,
+    });
   };
 
   // Initial snapshot/op replay bookkeeping for the live op queue (see applyRemoteOp)
@@ -2561,7 +2569,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         commitOp(created.id, 'VECTOR_EDIT', payload);
       } else if (tiles.length) {
         lm?.applyTiles(created.id, tiles);
-        commitTilePatch(created.id, tiles, false, '復原：圖層回來了');
+        commitTilePatch(created.id, tiles, false, model.layerType === 'mask' ? '復原：蒙版回來了' : '復原：圖層回來了');
       }
       if (!tiles.length) refreshLayerThumbnail(created.id);
       lm?.syncPingPong(created.id);

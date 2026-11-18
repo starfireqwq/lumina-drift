@@ -227,6 +227,7 @@ export function slimTimeLapsePayload(
   if (typeof payload.tool === 'string') slim.tool = payload.tool;
   if (typeof payload.actionDesc === 'string') slim.actionDesc = payload.actionDesc;
   if (typeof payload.isUndo === 'boolean') slim.isUndo = payload.isUndo;
+  if (payload.layerType === 'mask') slim.layerType = 'mask';
   if (payload.bounds && typeof payload.bounds === 'object') {
     slim.bounds = payload.bounds;
   }

@@ -242,6 +242,47 @@ async function runPhase17Tests() {
     assert.strictEqual(unlocked.status, 200, 'Locked room must allow X-Room-Password timelapse fetch');
     console.log('✓ Password-locked room access control verified on timelapse endpoint');
 
+    // 8. Verify mask layer ops are tagged with payload.layerType === 'mask' even after mask deletion (Ctrl+Z)
+    const maskLayerRes = await fetch(`${baseUrl}/api/canvases/${canvasId}/layers`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminLogin.token}`,
+      },
+      body: JSON.stringify({ name: 'Mask', layerType: 'mask', parentId: layerId, aboveLayerId: layerId }),
+    }).then((r) => r.json());
+    const maskId = maskLayerRes.layer.id as string;
+    const maskSeq = app.roomManager.commitOp(
+      { user: adminLogin.user, reject: (r) => { throw new Error(r.reason); } },
+      {
+        canvasId,
+        layerId: maskId,
+        opType: 'STROKE',
+        payload: {
+          color: '#FFFFFF',
+          size: 32,
+          tiles: [{ col: 0, row: 0, width: 256, height: 256, compression: fullComp.compression, data: fullComp.data }],
+        },
+      }
+    );
+    assert.strictEqual(maskSeq, totalOps + 1);
+    const delMaskRes = await fetch(`${baseUrl}/api/canvases/${canvasId}/layers/${maskId}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${adminLogin.token}` },
+    });
+    assert.strictEqual(delMaskRes.status, 200);
+
+    const maskOpsRes = await fetch(
+      `${baseUrl}/api/canvases/${canvasId}/ops?sinceSeq=${totalOps}&limit=10&view=timelapse&format=msgpack`,
+      { headers: { Authorization: `Bearer ${adminLogin.token}` } }
+    );
+    assert.strictEqual(maskOpsRes.status, 200);
+    const maskDecoded = decodePacket(new Uint8Array(await maskOpsRes.arrayBuffer())) as any;
+    assert.strictEqual(maskDecoded.ops.length, 1);
+    assert.strictEqual(maskDecoded.ops[0].layerId, maskId);
+    assert.strictEqual(maskDecoded.ops[0].payload.layerType, 'mask');
+    console.log('✓ Mask layer op tagging preserved across deletion and timelapse slimming');
+
     console.log('\n====================================================');
     console.log('🎉 ALL PHASE 17 TIME-LAPSE REPLAY TESTS PASSED!');
     console.log('====================================================\n');

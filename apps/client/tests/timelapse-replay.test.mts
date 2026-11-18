@@ -4,6 +4,8 @@ import { compressTileBuffer, DEFAULT_TILE_SIZE } from '@atelier/shared';
 import {
   computeSeekReplayPlan,
   extractOpCursorTarget,
+  filterTimeLapseOps,
+  isMaskTimeLapseOp,
   normalizeReplayTileBytes,
   resolveTileDimensions,
   unpremultiplyRgba,
@@ -150,6 +152,58 @@ test('OfflineSessionStore records local ops for Time-Lapse Replay without breaki
   assert.equal(replay.ops[0].opType, 'STROKE');
   assert.equal(replay.ops[1].opType, 'TILE_PATCH');
   assert.ok(replay.participants[LOCAL_ARTIST_ID]);
+
+  await OfflineSessionStore.deleteCanvas(canvasId);
+});
+
+test('filterTimeLapseOps excludes active and Ctrl+Z deleted mask layers while keeping brush, fill, filter, and liquify ops', () => {
+  const activeMaskId = 'layer_mask_active';
+  const deletedMaskId = 'layer_mask_undone';
+  const rasterId = 'layer_raster_1';
+
+  const layers = [
+    { id: rasterId, layerType: 'raster' as const },
+    { id: activeMaskId, layerType: 'mask' as const },
+  ];
+
+  const rawOps = [
+    { seq: 1, layerId: rasterId, opType: 'STROKE', payload: { color: '#3B82F6', size: 12 } },
+    // Mask created & edited, then deleted via Ctrl+Z (no longer present in `layers`)
+    { seq: 2, layerId: deletedMaskId, opType: 'TILE_PATCH', payload: { actionDesc: '加圖層蒙版', tiles: [{ col: 0, row: 0 }] } },
+    { seq: 3, layerId: deletedMaskId, opType: 'STROKE', payload: { color: '#FFFFFF', size: 40 } },
+    { seq: 4, layerId: deletedMaskId, opType: 'TILE_PATCH', payload: { actionDesc: 'UNDO', isUndo: true, tiles: [{ col: 0, row: 0 }] } },
+    // Active mask edited with explicit layerType tag
+    { seq: 5, layerId: activeMaskId, opType: 'STROKE', payload: { color: '#000000', layerType: 'mask' } },
+    // Real drawing ops: liquify, blur/filter, bucket fill
+    { seq: 6, layerId: rasterId, opType: 'LIQUIFY', payload: { tiles: [{ col: 0, row: 0 }] } },
+    { seq: 7, layerId: rasterId, opType: 'FILTER', payload: { tiles: [{ col: 0, row: 0 }] } },
+    { seq: 8, layerId: rasterId, opType: 'TILE_PATCH', payload: { actionDesc: '油漆桶填充', tiles: [{ col: 0, row: 0 }] } },
+  ];
+
+  const filtered = filterTimeLapseOps(rawOps, layers);
+  assert.deepEqual(filtered.ops.map((o) => o.seq), [1, 6, 7, 8]);
+  assert.ok(filtered.maskLayerIds.has(activeMaskId));
+  assert.ok(filtered.maskLayerIds.has(deletedMaskId));
+  assert.equal(isMaskTimeLapseOp({ layerId: deletedMaskId, opType: 'STROKE' }, filtered.maskLayerIds), true);
+  assert.equal(isMaskTimeLapseOp({ layerId: rasterId, opType: 'STROKE' }, filtered.maskLayerIds), false);
+});
+
+test('OfflineSessionStore tags mask tile patches so Ctrl+Z deleted offline masks are filtered from Time-Lapse', async () => {
+  const canvasId = `local_mask_${Date.now()}`;
+  const raster = await OfflineSessionStore.createLayer(canvasId, { name: 'Layer 1', layerType: 'raster' });
+  const mask = await OfflineSessionStore.createLayer(canvasId, { name: 'Mask', layerType: 'mask', parentId: raster.id });
+  const lz = compressTileBuffer(new Uint8Array(256 * 256 * 4), 'lz4');
+  const tile = { col: 0, row: 0, width: 256, height: 256, compression: lz.compression, data: lz.data };
+
+  OfflineSessionStore.commitLocalOp(canvasId, raster.id, 'STROKE', { color: '#111111', tiles: [tile] });
+  OfflineSessionStore.commitLocalTilePatch(canvasId, mask.id, [tile], '加圖層蒙版', false);
+  OfflineSessionStore.commitLocalOp(canvasId, mask.id, 'STROKE', { color: '#FFFFFF', tiles: [tile] });
+  await OfflineSessionStore.deleteLayer(canvasId, mask.id);
+
+  const replay = await OfflineSessionStore.getTimeLapseOps(canvasId);
+  const filtered = filterTimeLapseOps(replay.ops, [raster]);
+  assert.equal(filtered.ops.length, 1);
+  assert.equal(filtered.ops[0].layerId, raster.id);
 
   await OfflineSessionStore.deleteCanvas(canvasId);
 });
