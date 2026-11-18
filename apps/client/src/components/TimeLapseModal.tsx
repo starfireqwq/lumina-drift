@@ -1,17 +1,26 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  AlertCircle,
   Download,
   Film,
   FastForward,
   Loader2,
+  MousePointer,
   Pause,
   Play,
+  RefreshCw,
   RotateCcw,
   Video,
   X,
 } from 'lucide-react';
 import { CanvasModel, LayerModel } from '@atelier/shared';
-import { TimeLapseEngine, ReplayProgress, ReplayStatus } from '../engine/TimeLapseEngine';
+import {
+  ReplayParticipantInfo,
+  ReplayProgress,
+  ReplayStatus,
+  SeedParticipantInput,
+  TimeLapseEngine,
+} from '../engine/TimeLapseEngine';
 import { useI18n } from '../context/I18nContext';
 
 interface TimeLapseModalProps {
@@ -19,6 +28,7 @@ interface TimeLapseModalProps {
   onClose: () => void;
   canvas: CanvasModel | null;
   layers: LayerModel[];
+  seedParticipants?: SeedParticipantInput[];
 }
 
 export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
@@ -26,10 +36,12 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
   onClose,
   canvas,
   layers,
+  seedParticipants = [],
 }) => {
   const { t } = useI18n();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<TimeLapseEngine | null>(null);
+  const recordedVideoUrlRef = useRef<string | null>(null);
 
   const [status, setStatus] = useState<ReplayStatus>('idle');
   const [progress, setProgress] = useState<ReplayProgress>({
@@ -38,12 +50,47 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
     currentSeq: 0,
     progressPercent: 0,
     status: 'idle',
+    loadedOps: 0,
+    expectedTotalOps: 0,
+    error: null,
   });
+  const [participants, setParticipants] = useState<ReplayParticipantInfo[]>([]);
+  const [showCursors, setShowCursors] = useState<boolean>(true);
   const [speed, setSpeed] = useState<number>(4);
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [recordProgress, setRecordProgress] = useState<number>(0);
   const [recordedVideoUrl, setRecordedVideoUrl] = useState<string | null>(null);
   const [videoFormat, setVideoFormat] = useState<'webm' | 'mp4'>('webm');
+
+  const seedRef = useRef(seedParticipants);
+  seedRef.current = seedParticipants;
+
+  const layersRef = useRef(layers);
+  layersRef.current = layers;
+
+  const startLoad = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine || !canvas) return;
+    setParticipants([]);
+    setProgress({
+      currentOpIndex: 0,
+      totalOps: 0,
+      currentSeq: 0,
+      progressPercent: 0,
+      status: 'loading',
+      loadedOps: 0,
+      expectedTotalOps: 0,
+      error: null,
+    });
+    void engine.loadCanvasHistory(
+      canvas.id,
+      canvas.width,
+      canvas.height,
+      canvas.bgColor,
+      layersRef.current,
+      seedRef.current
+    );
+  }, [canvas?.id, canvas?.width, canvas?.height, canvas?.bgColor]);
 
   // Initialize engine when modal opens
   useEffect(() => {
@@ -52,27 +99,33 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
     const engine = new TimeLapseEngine(canvasRef.current, {
       onProgress: (p) => setProgress(p),
       onStatusChange: (s) => setStatus(s),
+      onParticipantsChange: (list) => setParticipants(list),
+      showCursors,
     });
 
     engineRef.current = engine;
     engine.setSpeed(speed);
-
-    engine.loadCanvasHistory(
-      canvas.id,
-      canvas.width,
-      canvas.height,
-      canvas.bgColor,
-      layers
-    );
+    startLoad();
 
     return () => {
       engine.destroy();
       engineRef.current = null;
-      if (recordedVideoUrl) {
-        URL.revokeObjectURL(recordedVideoUrl);
+      if (recordedVideoUrlRef.current) {
+        URL.revokeObjectURL(recordedVideoUrlRef.current);
+        recordedVideoUrlRef.current = null;
       }
     };
-  }, [isOpen, canvas?.id]);
+  }, [isOpen, canvas?.id, startLoad]);
+
+  // Keep seed participants updated while modal stays open
+  useEffect(() => {
+    engineRef.current?.setSeedParticipants(seedParticipants);
+  }, [seedParticipants]);
+
+  // Sync cursor overlay toggle
+  useEffect(() => {
+    engineRef.current?.setShowCursors(showCursors);
+  }, [showCursors]);
 
   const handlePlayPause = () => {
     if (!engineRef.current) return;
@@ -104,6 +157,10 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
     try {
       setIsRecording(true);
       setRecordProgress(0);
+      if (recordedVideoUrlRef.current) {
+        URL.revokeObjectURL(recordedVideoUrlRef.current);
+        recordedVideoUrlRef.current = null;
+      }
       setRecordedVideoUrl(null);
 
       const blob = await engineRef.current.exportTimeLapseVideo(videoFormat, (pct) => {
@@ -111,6 +168,7 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
       });
 
       const url = URL.createObjectURL(blob);
+      recordedVideoUrlRef.current = url;
       setRecordedVideoUrl(url);
     } catch (err: any) {
       alert(`匯出縮時影片失敗: ${err.message || err}`);
@@ -121,9 +179,12 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
 
   if (!isOpen) return null;
 
+  const loadedCount = progress.loadedOps ?? 0;
+  const expectedCount = progress.expectedTotalOps ?? 0;
+
   return (
     <div role="dialog" aria-modal="true" className="atelier-modal-backdrop fixed inset-0 z-[70] flex items-center justify-center p-4 animate-in fade-in duration-200">
-      <div className="atelier-modal w-full max-w-4xl  flex flex-col overflow-hidden max-h-[92vh]">
+      <div className="atelier-modal w-full max-w-4xl flex flex-col overflow-hidden max-h-[92vh]">
         {/* Modal Header */}
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-neutral-800 bg-neutral-900">
           <div className="flex items-center gap-2.5">
@@ -159,30 +220,97 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
             />
 
             {status === 'loading' && (
-              <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-2 text-neutral-300">
+              <div className="absolute inset-0 bg-black/65 flex flex-col items-center justify-center gap-2 text-neutral-300 px-4">
                 <Loader2 className="w-7 h-7 animate-spin text-indigo-400" />
-                <span className="text-xs font-medium">正在載入歷史操作日誌...</span>
+                <span className="text-xs font-medium">{t.replay.loadingOps}</span>
+                {loadedCount > 0 && (
+                  <span className="text-[11px] font-mono text-indigo-300">
+                    {expectedCount > 0
+                      ? `${loadedCount.toLocaleString()} / ${expectedCount.toLocaleString()}`
+                      : loadedCount.toLocaleString()}
+                  </span>
+                )}
               </div>
             )}
 
-            {progress.totalOps === 0 && status !== 'loading' && (
+            {status === 'error' && (
+              <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center gap-3 text-center px-6">
+                <div className="p-2.5 rounded-full bg-rose-500/20 text-rose-400 border border-rose-500/30">
+                  <AlertCircle className="w-6 h-6" />
+                </div>
+                <div className="space-y-1 max-w-md">
+                  <p className="text-xs font-semibold text-rose-300">{t.replay.loadError}</p>
+                  <p className="text-xs text-neutral-300 break-words">
+                    {progress.error || t.replay.loadError}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={startLoad}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium transition"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>{t.replay.retry}</span>
+                </button>
+              </div>
+            )}
+
+            {progress.totalOps === 0 && status !== 'loading' && status !== 'error' && (
               <div className="absolute inset-0 bg-black/40 flex items-center justify-center text-neutral-400 text-xs">
                 {t.replay.noOpsWarning}
               </div>
             )}
           </div>
 
+          {/* Contributors strip */}
+          {participants.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 px-3 py-2 rounded-xl bg-neutral-900/60 border border-neutral-800/80 text-[11px]">
+              <span className="text-neutral-400 font-medium mr-1">{t.replay.contributors}:</span>
+              {participants.map((p) => (
+                <div
+                  key={p.userId}
+                  className="flex items-center gap-1.5 rounded-full px-2 py-0.5 bg-neutral-800/90 border border-neutral-700/80 text-neutral-200"
+                >
+                  {p.avatarUrl ? (
+                    <img
+                      src={p.avatarUrl}
+                      alt={p.displayName}
+                      className="w-4 h-4 rounded-full object-cover border border-white/40 shrink-0"
+                    />
+                  ) : (
+                    <span
+                      className="w-4 h-4 rounded-full flex items-center justify-center text-[9px] font-bold text-white shrink-0"
+                      style={{ backgroundColor: p.color }}
+                    >
+                      {(p.displayName || '畫').charAt(0).toUpperCase()}
+                    </span>
+                  )}
+                  <span
+                    className="w-1.5 h-1.5 rounded-full shrink-0"
+                    style={{ backgroundColor: p.color }}
+                  />
+                  <span className="font-medium max-w-[120px] truncate">{p.displayName}</span>
+                  {typeof p.opCount === 'number' && p.opCount > 0 && (
+                    <span className="text-neutral-400 font-mono text-[10px]">
+                      {p.opCount.toLocaleString()}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
           {/* Timeline & Scrubber Bar */}
           <div className="flex flex-col gap-1.5 bg-neutral-900/60 p-3 rounded-xl border border-neutral-800">
             <div className="flex items-center justify-between text-xs text-neutral-400 font-mono">
               <span>
-                {t.replay.currentOp}: #{progress.currentOpIndex}
+                {t.replay.currentOp}: #{progress.currentOpIndex.toLocaleString()}
               </span>
               <span className="text-indigo-400 font-semibold">
                 {progress.progressPercent}%
               </span>
               <span>
-                {t.replay.totalOps}: {progress.totalOps}
+                {t.replay.totalOps}: {progress.totalOps.toLocaleString()}
               </span>
             </div>
 
@@ -199,8 +327,8 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
 
           {/* Playback Controls & Speed Selectors */}
           <div className="flex flex-wrap items-center justify-between gap-3">
-            {/* Play, Pause, Rewind */}
-            <div className="flex items-center gap-2">
+            {/* Play, Pause, Rewind, Cursor Toggle */}
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={handlePlayPause}
@@ -228,6 +356,21 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
                 className="p-2 bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-neutral-300 hover:text-white rounded-xl transition"
               >
                 <RotateCcw className="w-4 h-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowCursors((prev) => !prev)}
+                disabled={isRecording}
+                aria-pressed={showCursors}
+                className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-xl border transition ${
+                  showCursors
+                    ? 'bg-indigo-600/20 border-indigo-500/50 text-indigo-300'
+                    : 'bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white'
+                }`}
+              >
+                <MousePointer className="w-3.5 h-3.5" />
+                <span>{t.replay.showCursors}</span>
               </button>
             </div>
 

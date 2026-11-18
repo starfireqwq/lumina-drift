@@ -877,6 +877,11 @@ export const zhCN: Translations = {
     resolution: '视频输出分辨率',
     downloadVideo: '下载重播视频',
     noOpsWarning: '此画布尚无任何历史绘画动作可供重播。',
+    loadingOps: '正在加载历史操作日志…',
+    loadError: '无法加载历史操作日志',
+    retry: '重试加载',
+    showCursors: '显示画笔与头像',
+    contributors: '参与协作画师',
   },
 
   export: {

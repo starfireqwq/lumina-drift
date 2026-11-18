@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { BlendMode, CanvasModel, CanvasUnit, CreateCanvasDto, LayerMeta, LayerModel, LayerType, clampDpi } from '@atelier/shared';
 import { ApiService } from './services/api';
 import { OfflineSessionStore } from './services/offlineStore';
@@ -66,6 +66,7 @@ export const App: React.FC = () => {
     activeCanvasId,
     joinCanvas,
     members,
+    offlineMembers,
     releaseLayer,
     claimLayer,
     transferLayer,
@@ -996,6 +997,24 @@ export const App: React.FC = () => {
     };
   }, []);
 
+  const replaySeedParticipants = useMemo(() => {
+    const byId = new Map<string, { userId: string; displayName?: string | null; avatarUrl?: string | null }>();
+    for (const m of offlineMembers) {
+      byId.set(m.userId, { userId: m.userId, displayName: m.displayName });
+    }
+    for (const m of members) {
+      byId.set(m.userId, { userId: m.userId, displayName: m.displayName, avatarUrl: m.avatarUrl ?? null });
+    }
+    if (user?.id) {
+      byId.set(user.id, {
+        userId: user.id,
+        displayName: user.displayName || user.username,
+        avatarUrl: user.avatarUrl ?? null,
+      });
+    }
+    return Array.from(byId.values());
+  }, [offlineMembers, members, user]);
+
   // If gateway is active, render ConnectionGateway first.
   if (showGateway) {
     return (
@@ -1247,6 +1266,7 @@ export const App: React.FC = () => {
             onClose={() => setIsReplayModalOpen(false)}
             canvas={currentCanvas}
             layers={layers}
+            seedParticipants={replaySeedParticipants}
           />
             </Suspense>
       </OverlayPresence>

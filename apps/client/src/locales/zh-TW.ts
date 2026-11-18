@@ -877,6 +877,11 @@ export const zhTW: Translations = {
     resolution: '影片輸出解析度',
     downloadVideo: '下載重播影片檔',
     noOpsWarning: '此畫布尚無任何歷史繪圖動作可供重播。',
+    loadingOps: '正在載入歷史操作日誌…',
+    loadError: '無法載入歷史操作日誌',
+    retry: '重試載入',
+    showCursors: '顯示畫筆與頭像',
+    contributors: '參與協作畫師',
   },
 
   export: {

@@ -894,6 +894,11 @@ export interface Translations {
     resolution: string;
     downloadVideo: string;
     noOpsWarning: string;
+    loadingOps: string;
+    loadError: string;
+    retry: string;
+    showCursors: string;
+    contributors: string;
   };
 
   export: {

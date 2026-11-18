@@ -877,6 +877,11 @@ export const enUS: Translations = {
     resolution: 'Output Resolution',
     downloadVideo: 'Download Video File',
     noOpsWarning: 'This canvas has no stroke history to replay.',
+    loadingOps: 'Loading operation history…',
+    loadError: 'Failed to load stroke history',
+    retry: 'Retry',
+    showCursors: 'Show Painter Brushes & Avatars',
+    contributors: 'Collaborators',
   },
 
   export: {

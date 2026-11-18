@@ -877,6 +877,11 @@ export const jaJP: Translations = {
     resolution: '動画解像度',
     downloadVideo: '動画をダウンロード',
     noOpsWarning: 'このキャンバスにはまだ操作ログが記録されていません。',
+    loadingOps: '操作履歴を読み込み中…',
+    loadError: '操作履歴の読み込みに失敗しました',
+    retry: '再試行',
+    showCursors: 'ブラシカーソルとアイコンを表示',
+    contributors: '参加クリエイター',
   },
 
   export: {
