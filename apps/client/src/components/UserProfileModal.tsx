@@ -87,10 +87,10 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onCl
 
   return (
     <>
-      <div role="dialog" aria-modal="true" className="atelier-modal-backdrop fixed inset-0 z-[70] flex items-center justify-center p-4 animate-in fade-in duration-150">
-        <div className="atelier-modal  max-w-md w-full overflow-hidden flex flex-col">
+      <div role="dialog" aria-modal="true" className="atelier-modal-backdrop fixed inset-0 z-[70] flex items-center justify-center p-2 sm:p-4 animate-in fade-in duration-150">
+        <div className="atelier-modal max-h-[calc(100dvh-1rem)] max-w-md w-full overflow-hidden flex flex-col">
           {/* Header */}
-          <div className="px-5 py-4 border-b border-neutral-800/80 bg-neutral-900/40 flex items-center justify-between">
+          <div className="px-5 py-4 border-b border-neutral-800/80 bg-neutral-900/40 flex shrink-0 items-center justify-between">
             <div className="flex items-center gap-2.5 text-white font-bold text-sm">
               <div
                 className="p-1.5 rounded-xl border flex items-center justify-center"
@@ -115,7 +115,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({ isOpen, onCl
           </div>
 
           {/* Content */}
-          <div className="p-5 flex flex-col gap-4">
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-5 flex flex-col gap-4">
             {/* Avatar Upload / Selector */}
             <div className="flex flex-col items-center gap-2.5 py-2">
               <div className="relative group">

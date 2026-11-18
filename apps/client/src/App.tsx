@@ -1048,7 +1048,15 @@ export const App: React.FC = () => {
   );
 
   return (
-    <div className="atelier-app flex h-screen h-dvh w-screen flex-col overflow-hidden font-sans">
+    <div
+      className="atelier-app flex h-screen h-dvh w-screen flex-col overflow-hidden font-sans"
+      style={{
+        paddingTop: 'env(safe-area-inset-top, 0px)',
+        paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+        paddingLeft: 'env(safe-area-inset-left, 0px)',
+        paddingRight: 'env(safe-area-inset-right, 0px)',
+      }}
+    >
       <input
         ref={luminaInputRef}
         type="file"

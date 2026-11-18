@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { MAX_STABILIZER_LEVEL, STABILIZER_LEVEL_STEP, ToolType, VectorEraserMode, VectorWidthMode } from '@atelier/shared';
 import {
   ClipboardPaste,
@@ -29,6 +30,7 @@ import { CORNER_RADIUS_SHAPES, ShapeSubtype } from './tools/useShapeTools';
 import { useWheelStep } from '../../hooks/useWheelStep';
 import { getUiScale } from '../../theme/uiScale';
 import { useI18n } from '../../context/I18nContext';
+import { useAnchoredPopover } from '../../utils/popoverPosition';
 
 export type SelectionMode = 'replace' | 'add' | 'subtract';
 export type BezierMode = 'pen' | 'curve';
@@ -42,38 +44,39 @@ const Sep = () => <div aria-hidden className="mx-1 h-6 w-px shrink-0 bg-neutral-
  * eyedropper). Fixed-position so the scrolling options bar does not clip it.
  */
 export const ColorPopoverButton: React.FC<{ color: string; onChange: (hex: string) => void; onPick?: () => void; label?: string }> = ({ color, onChange, onPick, label = '描邊顏色' }) => {
-  const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const pos = useAnchoredPopover(open, btnRef, popRef, { align: 'left', gap: 6, margin: 8, fallbackWidth: Math.round(240 * getUiScale()) });
   useEffect(() => {
-    if (!anchor) return;
+    if (!open) return;
     const close = (e: PointerEvent) => {
-      if (!(e.target as HTMLElement).closest?.('[data-outline-color]')) setAnchor(null);
+      if (!(e.target as HTMLElement).closest?.('[data-outline-color]')) setOpen(false);
     };
-    const esc = (e: KeyboardEvent) => e.key === 'Escape' && setAnchor(null);
+    const esc = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
     window.addEventListener('pointerdown', close);
     window.addEventListener('keydown', esc);
     return () => {
       window.removeEventListener('pointerdown', close);
       window.removeEventListener('keydown', esc);
     };
-  }, [anchor]);
+  }, [open]);
   return (
     <>
-      <button type="button" data-outline-color aria-label={label} aria-expanded={Boolean(anchor)} title={`${label}（色輪與滴管）`}
-        onClick={(e) => {
-          const r = e.currentTarget.getBoundingClientRect();
-          const popW = Math.round(240 * getUiScale()) + 8;
-          setAnchor(anchor ? null : { x: Math.max(8, Math.min(window.innerWidth - popW, r.left)), y: r.bottom + 6 });
-        }}
+      <button ref={btnRef} type="button" data-outline-color aria-label={label} aria-expanded={open} title={`${label}（色輪與滴管）`}
+        onClick={() => setOpen((v) => !v)}
         className="h-7 w-8 shrink-0 rounded border-2 border-neutral-600" style={{ backgroundColor: color }} />
-      {anchor && (
-        <div data-outline-color role="dialog" aria-label={label} style={{ left: anchor.x, top: anchor.y }}
-          className="fixed z-[95] w-60 atelier-popover atelier-menu-in p-3">
+      {open && typeof document !== 'undefined' && createPortal(
+        <div ref={pos.setPopoverEl} data-outline-color role="dialog" aria-label={label}
+          style={{ left: pos.left, top: pos.top, maxHeight: pos.maxHeight }}
+          className="fixed z-[95] w-60 max-w-[calc(100vw-16px)] overflow-y-auto atelier-popover atelier-menu-in p-3">
           <div className="mb-2 text-[11px] font-bold text-neutral-300">{label}</div>
-          <ColorWheelStudio isOpen embedded single onClose={() => setAnchor(null)}
+          <ColorWheelStudio isOpen embedded single onClose={() => setOpen(false)}
             brushProps={{ color } as BrushProperties}
             onUpdateBrushProps={(props) => props.color && onChange(props.color)}
-            onActivateCanvasEyedropper={onPick ? () => { setAnchor(null); onPick(); } : undefined} />
-        </div>
+            onActivateCanvasEyedropper={onPick ? () => { setOpen(false); onPick(); } : undefined} />
+        </div>,
+        document.body
       )}
     </>
   );

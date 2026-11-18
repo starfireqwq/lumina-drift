@@ -63,6 +63,29 @@ export const ReferenceViewportHUD: React.FC<ReferenceViewportHUDProps> = ({
   const isPanningRef = useRef<boolean>(false);
   const panStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
+  const clampHud = useCallback((pos: { x: number; y: number }, size: { w: number; h: number }) => {
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1280;
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 800;
+    const w = Math.max(200, Math.min(size.w, vw - 18));
+    const h = Math.max(160, Math.min(size.h, vh - 140));
+    const x = Math.max(8, Math.min(vw - w - 10, pos.x));
+    const y = Math.max(8, Math.min(vh - 96, pos.y));
+    return { pos: { x, y }, size: { w, h } };
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const fit = () => {
+      const next = clampHud(windowPos, viewSize);
+      if (next.size.w !== viewSize.w || next.size.h !== viewSize.h) setViewSize(next.size);
+      if (next.pos.x !== windowPos.x || next.pos.y !== windowPos.y) setWindowPos(next.pos);
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
   // Load image when imageSrc changes
   useEffect(() => {
     if (!imageSrc) {

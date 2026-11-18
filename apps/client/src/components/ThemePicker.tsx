@@ -103,9 +103,9 @@ export const ThemePicker: React.FC<{ compact?: boolean }> = ({ compact }) => {
 
       {themeId === 'custom' && (
         <div className="flex flex-col gap-2.5 rounded-lg border border-neutral-700 bg-neutral-950/50 p-3 text-xs">
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="text-neutral-300">明暗</span>
-            <div className="flex rounded-md border border-neutral-700 p-0.5">
+            <div className="flex shrink-0 rounded-md border border-neutral-700 p-0.5">
               {(['dark', 'gray', 'light'] as ThemeBase[]).map((b) => (
                 <button key={b} type="button" aria-pressed={draft.base === b}
                   onClick={(e) => { if (draft.base !== b) switchTo(() => { const next = { ...draftRef.current, base: b }; draftRef.current = next; setDraft(next); setCustomTheme(next); }, e); }}
@@ -143,9 +143,9 @@ export const ThemePicker: React.FC<{ compact?: boolean }> = ({ compact }) => {
         </div>
       )}
 
-      <div className="flex items-center justify-between gap-2 text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
         <span className="text-neutral-400">切換動畫</span>
-        <div className="flex rounded-md border border-neutral-700 p-0.5" role="radiogroup" aria-label="切換動畫">
+        <div className="flex shrink-0 rounded-md border border-neutral-700 p-0.5" role="radiogroup" aria-label="切換動畫">
           {THEME_ANIMS.map((a) => (
             <button key={a.id} type="button" role="radio" aria-checked={anim === a.id}
               onClick={() => { setAnim(a.id); saveThemeAnim(a.id); }}

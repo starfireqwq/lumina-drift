@@ -129,8 +129,8 @@ export const ServerModal: React.FC<ServerModalProps> = ({ isOpen, onClose, onOpe
   if (!isOpen) return null;
 
   return (
-    <div role="dialog" aria-modal="true" className="atelier-modal-backdrop fixed inset-0 z-[70] flex items-center justify-center p-4 animate-in fade-in duration-200">
-      <div className="atelier-modal w-full max-w-2xl  flex flex-col overflow-hidden">
+    <div role="dialog" aria-modal="true" className="atelier-modal-backdrop fixed inset-0 z-[70] flex items-center justify-center p-2 sm:p-4 animate-in fade-in duration-200">
+      <div className="atelier-modal max-h-[calc(100dvh-1rem)] w-full max-w-2xl flex flex-col overflow-hidden">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-neutral-800 bg-neutral-900">
           <div className="flex items-center gap-2.5">

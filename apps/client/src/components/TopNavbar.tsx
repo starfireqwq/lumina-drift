@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Archive,
@@ -47,6 +47,7 @@ import { getPluginLabels } from '../plugins/pluginLabels';
 import type { InstalledPlugin } from '../plugins/pluginStore';
 import { getUserColor } from '../utils/userColors';
 import { dockActions, PANEL_IDS, PANEL_TITLES, PanelId, useDockLayout } from './workspace/dockStore';
+import { useAnchoredPopover } from '../utils/popoverPosition';
 
 const PainterLevelBadge: React.FC = () => {
   const { painterLevel } = useSocketTelemetry();
@@ -107,31 +108,10 @@ const DropdownMenu: React.FC<{ label: React.ReactNode; title: string; items?: Me
   label, title, items, children, align = 'left', width = 'w-56', buttonClass = 'atelier-icon-btn h-8 gap-1 px-2 text-xs font-medium', protectCanvas,
 }) => {
   const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; left?: number; right?: number } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-
-  useLayoutEffect(() => {
-    if (!open) {
-      setPos(null);
-      return;
-    }
-    const updatePos = () => {
-      const rect = ref.current?.getBoundingClientRect();
-      if (!rect) return;
-      const top = Math.max(4, Math.min(window.innerHeight - 80, rect.bottom + 4));
-      if (align === 'right') {
-        const right = Math.max(8, Math.min(window.innerWidth - 40, window.innerWidth - rect.right));
-        setPos({ top, right });
-      } else {
-        const left = Math.max(8, Math.min(window.innerWidth - 200, rect.left));
-        setPos({ top, left });
-      }
-    };
-    updatePos();
-    window.addEventListener('resize', updatePos);
-    return () => window.removeEventListener('resize', updatePos);
-  }, [open, align]);
+  const fallbackWidth = width === 'w-80' ? 320 : width === 'w-64' ? 256 : 224;
+  const pos = useAnchoredPopover(open, ref, menuRef, { align, gap: 4, margin: 8, fallbackWidth });
 
   useEffect(() => {
     if (!open) return;
@@ -159,9 +139,9 @@ const DropdownMenu: React.FC<{ label: React.ReactNode; title: string; items?: Me
       </button>
       {typeof document !== 'undefined' && createPortal(
         <OverlayPresence open={open} kind="popover">
-          <div ref={menuRef} role="menu"
-            style={pos ? { top: pos.top, ...(pos.right !== undefined ? { right: pos.right } : { left: pos.left }) } : { top: 48, left: 8 }}
-            className={`atelier-popover fixed z-[85] ${width} max-w-[calc(100vw-16px)] max-h-[70dvh] overflow-y-auto p-1.5`}>
+          <div ref={pos.setPopoverEl} role="menu"
+            style={{ top: pos.top, left: pos.left, maxHeight: pos.maxHeight }}
+            className={`atelier-popover fixed z-[85] ${width} max-w-[calc(100vw-16px)] overflow-y-auto p-1.5`}>
             {children}
             {items?.map((item, i) => {
               if (item.kind === 'sep') return <div key={i} className="my-1 h-px bg-neutral-700/70" />;

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import QRCode from 'qrcode';
 import { Check, Cloud, Copy, Globe, QrCode, Share2, Wifi, X } from 'lucide-react';
@@ -6,6 +6,7 @@ import { useCloudflareTunnel } from '../context/useCloudflareTunnel';
 import { useI18n } from '../context/I18nContext';
 import { ApiService } from '../services/api';
 import { buildRoomShareUrl, isLoopbackServer, publicServerOrigin } from '../utils/serverLinks';
+import { useAnchoredPopover } from '../utils/popoverPosition';
 
 interface ShareAddressItem {
   name: string;
@@ -34,8 +35,11 @@ export function WorkspaceCloudflareToggle({
   const [addresses, setAddresses] = useState<ShareAddressItem[]>([]);
   const [selectedOptionId, setSelectedOptionId] = useState<string>('primary');
   const containerRef = useRef<HTMLDivElement>(null);
+  const shareBtnRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
-  const [popoverPos, setPopoverPos] = useState<{ top: number; right: number }>({ top: 48, right: 8 });
+  const errorRef = useRef<HTMLSpanElement>(null);
+  const popoverPos = useAnchoredPopover(shareOpen, shareBtnRef, popoverRef, { align: 'right', gap: 6, margin: 8, fallbackWidth: 320 });
+  const errorPos = useAnchoredPopover(Boolean(error), containerRef, errorRef, { align: 'right', gap: 6, margin: 8, fallbackWidth: 224, fallbackHeight: 56 });
 
   const activeServer = (
     serverUrl ||
@@ -133,21 +137,6 @@ export function WorkspaceCloudflareToggle({
     };
   }, [shareOpen, showQr, selectedShareUrl]);
 
-  useLayoutEffect(() => {
-    if (!shareOpen && !error) return;
-    const updatePos = () => {
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      setPopoverPos({
-        top: Math.max(4, Math.min(window.innerHeight - 120, rect.bottom + 6)),
-        right: Math.max(8, Math.min(window.innerWidth - 40, window.innerWidth - rect.right)),
-      });
-    };
-    updatePos();
-    window.addEventListener('resize', updatePos);
-    return () => window.removeEventListener('resize', updatePos);
-  }, [shareOpen, error]);
-
   useEffect(() => {
     if (!shareOpen) return;
     const onPointerDown = (e: PointerEvent) => {
@@ -244,6 +233,7 @@ export function WorkspaceCloudflareToggle({
       )}
 
       <button
+        ref={shareBtnRef}
         type="button"
         data-workspace-share-btn=""
         aria-expanded={shareOpen}
@@ -259,8 +249,8 @@ export function WorkspaceCloudflareToggle({
       </button>
 
       {error && typeof document !== 'undefined' && createPortal(
-        <span role="alert" style={{ top: popoverPos.top, right: popoverPos.right }}
-          className="atelier-popover fixed z-[85] w-56 max-w-[calc(100vw-16px)] p-2 text-xs text-rose-300">
+        <span ref={errorPos.setPopoverEl} role="alert" style={{ top: errorPos.top, left: errorPos.left, maxHeight: errorPos.maxHeight }}
+          className="atelier-popover fixed z-[85] w-56 max-w-[calc(100vw-16px)] overflow-y-auto p-2 text-xs text-rose-300">
           {error}
         </span>,
         document.body
@@ -268,12 +258,12 @@ export function WorkspaceCloudflareToggle({
 
       {shareOpen && selectedShareUrl && typeof document !== 'undefined' && createPortal(
         <div
-          ref={popoverRef}
+          ref={popoverPos.setPopoverEl}
           role="dialog"
           aria-label={t.gateway.shareRoomLink}
           data-workspace-share-popover=""
-          style={{ top: popoverPos.top, right: popoverPos.right }}
-          className="atelier-popover atelier-menu-in fixed z-[85] w-80 max-w-[calc(100vw-16px)] max-h-[80dvh] overflow-y-auto space-y-2.5 p-3 shadow-2xl"
+          style={{ top: popoverPos.top, left: popoverPos.left, maxHeight: popoverPos.maxHeight }}
+          className="atelier-popover atelier-menu-in fixed z-[85] w-80 max-w-[calc(100vw-16px)] overflow-y-auto space-y-2.5 p-3 shadow-2xl"
         >
           <div className="flex items-center justify-between gap-2">
             <span className="flex items-center gap-1.5 text-xs font-bold text-neutral-100">

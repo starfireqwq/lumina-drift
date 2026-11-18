@@ -7,6 +7,9 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Bundle;
+import android.view.ViewGroup;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.webkit.JsPromptResult;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
@@ -16,6 +19,7 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.net.URLConnection;
@@ -34,18 +38,34 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         files = new ProjectFiles(this);
+        // Wrap WebView inside a padded FrameLayout because WebView ignores View.setPadding() for HTML viewport bounds;
+        // on Android 15+ (edge-to-edge) this keeps the status bar, camera cutout, and nav bar clear of app buttons.
+        FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(0xFF0A0A0D);
         web = new WebView(this);
-        setContentView(web);
+        root.addView(web, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        setContentView(root);
         if (android.os.Build.VERSION.SDK_INT >= 30) {
             getWindow().setDecorFitsSystemWindows(false);
-            web.setOnApplyWindowInsetsListener((view, insets) -> {
+            WindowInsetsController controller = getWindow().getInsetsController();
+            if (controller != null) {
+                controller.setSystemBarsAppearance(0,
+                    WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
+                    | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS);
+            }
+            root.setOnApplyWindowInsetsListener((view, insets) -> {
                 android.graphics.Insets bars = insets.getInsets(
-                    android.view.WindowInsets.Type.systemBars()
-                    | android.view.WindowInsets.Type.displayCutout()
-                    | android.view.WindowInsets.Type.ime());
+                    WindowInsets.Type.systemBars()
+                    | WindowInsets.Type.displayCutout()
+                    | WindowInsets.Type.ime());
                 view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
-                return insets;
+                return WindowInsets.CONSUMED;
             });
+            root.requestApplyInsets();
+        } else if (android.os.Build.VERSION.SDK_INT >= 26) {
+            getWindow().setStatusBarColor(0xFF0A0A0D);
+            getWindow().setNavigationBarColor(0xFF0A0A0D);
         }
         WebSettings settings = web.getSettings();
         settings.setJavaScriptEnabled(true);

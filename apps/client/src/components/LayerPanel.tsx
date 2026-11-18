@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { createPortal } from 'react-dom';
 import { BlendMode, LayerModel, LayerType } from '@atelier/shared';
 import { FolderAccessPanel } from './FolderAccessPanel';
 import type { FolderAccess } from './workspace/useFolderAccess';
@@ -43,6 +44,7 @@ import type { Translations } from '../locales';
 import { AdminConfirmModal } from './AdminConfirmModal';
 import { getUserColor } from '../utils/userColors';
 import { nextGroupName } from '../utils/canvasName';
+import { useAnchoredPopover } from '../utils/popoverPosition';
 import { useWheelStep } from '../hooks/useWheelStep';
 
 /** Public / ownerless layers: neutral, so they never look like one painter's (every user colour is saturated) */
@@ -266,14 +268,16 @@ const BlendModeDropdown: React.FC<{
   const { t } = useI18n();
   const [isOpen, setIsOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const pos = useAnchoredPopover(isOpen, containerRef, popRef, { align: 'left', gap: 4, margin: 8, fallbackWidth: 240, fallbackHeight: 288 });
   const groups = getLocalizedBlendModeGroups(t);
 
   useEffect(() => {
     if (!isOpen) return;
     const handleClickOutside = (e: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setIsOpen(false);
-      }
+      const target = e.target as Node;
+      if (containerRef.current?.contains(target) || popRef.current?.contains(target)) return;
+      setIsOpen(false);
     };
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setIsOpen(false);
@@ -307,8 +311,13 @@ const BlendModeDropdown: React.FC<{
         <ChevronDown className="w-2.5 h-2.5 text-neutral-400 shrink-0" />
       </button>
 
-      {isOpen && (
-        <div className="absolute left-0 bottom-full mb-1 w-60 max-h-72 overflow-y-auto bg-neutral-900/95 backdrop-blur-xl border border-neutral-700 rounded-xl shadow-2xl p-1 z-50 animate-in fade-in zoom-in-95">
+      {isOpen && typeof document !== 'undefined' && createPortal(
+        <div
+          ref={pos.setPopoverEl}
+          onClick={(e) => e.stopPropagation()}
+          style={{ top: pos.top, left: pos.left, maxHeight: Math.min(288, pos.maxHeight) }}
+          className="fixed w-60 max-w-[calc(100vw-16px)] overflow-y-auto bg-neutral-900/95 backdrop-blur-xl border border-neutral-700 rounded-xl shadow-2xl p-1 z-[95] animate-in fade-in zoom-in-95"
+        >
           {groups.map((grp) => (
             <div key={grp.category} className="mb-1.5 last:mb-0">
               <div className="px-2 py-0.5 text-[9px] font-bold text-neutral-500 uppercase tracking-wider flex items-center gap-1 border-b border-neutral-800">
@@ -345,7 +354,8 @@ const BlendModeDropdown: React.FC<{
               </div>
             </div>
           ))}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -461,6 +471,11 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
 
   // Transfer Ownership popover state: layerId -> boolean
   const [transferLayerId, setTransferLayerId] = useState<string | null>(null);
+  const transferBtnRef = useRef<HTMLButtonElement>(null);
+  const transferPopRef = useRef<HTMLDivElement>(null);
+  const transferPos = useAnchoredPopover(Boolean(transferLayerId), transferBtnRef, transferPopRef, { align: 'right', gap: 4, margin: 8, fallbackWidth: 208 });
+  const batchGroupBtnRef = useRef<HTMLButtonElement>(null);
+  const batchGroupPopRef = useRef<HTMLDivElement>(null);
 
   // Group selector popover state
   const [groupSelectLayerId, setGroupSelectLayerId] = useState<string | null>(null);
@@ -475,6 +490,36 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   const [isBatchMode, setIsBatchMode] = useState<boolean>(false);
   const [selectedLayerIds, setSelectedLayerIds] = useState<Set<string>>(new Set());
   const [batchGroupMenuOpen, setBatchGroupMenuOpen] = useState<boolean>(false);
+  const batchGroupPos = useAnchoredPopover(batchGroupMenuOpen, batchGroupBtnRef, batchGroupPopRef, { align: 'right', gap: 4, margin: 8, fallbackWidth: 176 });
+
+  useEffect(() => {
+    if (!transferLayerId && !batchGroupMenuOpen) return;
+    const onDown = (e: PointerEvent) => {
+      const target = e.target as Node;
+      if (
+        transferBtnRef.current?.contains(target) ||
+        transferPopRef.current?.contains(target) ||
+        batchGroupBtnRef.current?.contains(target) ||
+        batchGroupPopRef.current?.contains(target)
+      ) {
+        return;
+      }
+      setTransferLayerId(null);
+      setBatchGroupMenuOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setTransferLayerId(null);
+        setBatchGroupMenuOpen(false);
+      }
+    };
+    window.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [transferLayerId, batchGroupMenuOpen]);
 
   // Drag and Drop state
   const [draggedLayerId, setDraggedLayerId] = useState<string | null>(null);
@@ -1005,12 +1050,13 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             )}
             {active && (activeIsOwner || isAdmin) && onTransferLayer && (
               <div className="relative">
-                <button type="button" onClick={() => setTransferLayerId(transferLayerId === active.id ? null : active.id)}
+                <button ref={transferBtnRef} type="button" onClick={() => setTransferLayerId(transferLayerId === active.id ? null : active.id)}
                   title={t.layers.transferTooltip} aria-label={t.layers.transfer} className={iconBtn(transferLayerId === active.id)}>
                   <UserCheck className="h-3.5 w-3.5" />
                 </button>
-                {transferLayerId === active.id && (
-                  <div className="absolute right-0 top-7 z-50 w-52 atelier-popover atelier-menu-in p-1.5">
+                {transferLayerId === active.id && typeof document !== 'undefined' && createPortal(
+                  <div ref={transferPos.setPopoverEl} style={{ top: transferPos.top, left: transferPos.left, maxHeight: transferPos.maxHeight }}
+                    className="fixed z-[95] w-52 max-w-[calc(100vw-16px)] overflow-y-auto atelier-popover atelier-menu-in p-1.5">
                     {availableTransferMembers.length === 0 ? (
                       <div className="py-2 text-center text-[11px] text-neutral-500">{t.layers.noOtherMembers}</div>
                     ) : availableTransferMembers.map((m) => (
@@ -1021,7 +1067,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                         <span className="truncate">{m.displayName}</span>
                       </button>
                     ))}
-                  </div>
+                  </div>,
+                  document.body
                 )}
               </div>
             )}
@@ -1104,20 +1151,22 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             <button type="button" disabled={selectedLayerIds.size === 0} onClick={handleBatchGroupSelected}
               className="rounded bg-amber-600 px-2 py-0.5 text-[11px] font-semibold text-white disabled:opacity-40">{t.layers.batchGroup}</button>
             {allGroups.length > 0 && (
-              <button type="button" disabled={selectedLayerIds.size === 0} onClick={() => setBatchGroupMenuOpen(!batchGroupMenuOpen)}
+              <button ref={batchGroupBtnRef} type="button" disabled={selectedLayerIds.size === 0} onClick={() => setBatchGroupMenuOpen(!batchGroupMenuOpen)}
                 className="rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-200 disabled:opacity-40">{t.layers.batchAddToGroup} ▾</button>
             )}
             <button type="button" disabled={selectedLayerIds.size === 0} onClick={() => handleBatchMoveToGroup(null)}
               className="rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-rose-300 disabled:opacity-40">{t.layers.batchRemoveFromGroup}</button>
-            {batchGroupMenuOpen && (
-              <div className="absolute right-0 top-7 z-50 w-44 atelier-popover atelier-menu-in p-1">
+            {batchGroupMenuOpen && typeof document !== 'undefined' && createPortal(
+              <div ref={batchGroupPos.setPopoverEl} style={{ top: batchGroupPos.top, left: batchGroupPos.left, maxHeight: batchGroupPos.maxHeight }}
+                className="fixed z-[95] w-44 max-w-[calc(100vw-16px)] overflow-y-auto atelier-popover atelier-menu-in p-1">
                 {allGroups.map((g) => (
                   <button key={g.id} type="button" onClick={() => handleBatchMoveToGroup(g.id)}
                     className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left text-[11px] text-neutral-200 hover:bg-neutral-800">
                     <Folder className="h-3 w-3 text-amber-400" /><span className="truncate">{g.name}</span>
                   </button>
                 ))}
-              </div>
+              </div>,
+              document.body
             )}
           </div>
         </div>
@@ -1402,15 +1451,16 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
         const groupBlocked = ids.map((id) => byId.get(id)).some((l) => !l || !canManage(l)) ? t.layers.groupBlocked : null;
         const parent = layer.parentId ? byId.get(layer.parentId) : undefined;
         const close = (fn: () => void) => () => { setMenu(null); fn(); };
-        const x = Math.min(menu.x, window.innerWidth - 232);
+        const menuWidth = Math.min(224, window.innerWidth - 16);
+        const x = Math.max(8, Math.min(menu.x, window.innerWidth - menuWidth - 8));
         // Opens down from the click, or up from it in the lower half; never taller than the room it has (scrolls instead)
         const below = window.innerHeight - menu.y - 8;
         const place: React.CSSProperties = below >= Math.min(420, menu.y - 8)
           ? { top: Math.max(8, menu.y), maxHeight: Math.max(160, below) }
           : { bottom: Math.max(8, window.innerHeight - menu.y), maxHeight: Math.max(160, menu.y - 8) };
         return (
-          <div data-layer-menu role="menu" aria-label={t.layers.menuAria.replace('{name}', layer.name)} style={{ left: Math.max(8, x), ...place }}
-            className="fixed z-[90] w-56 overflow-y-auto overscroll-contain atelier-popover atelier-menu-in p-1">
+          <div data-layer-menu role="menu" aria-label={t.layers.menuAria.replace('{name}', layer.name)} style={{ left: x, width: menuWidth, ...place }}
+            className="fixed z-[90] overflow-y-auto overscroll-contain atelier-popover atelier-menu-in p-1">
             <div className="truncate px-2 py-1 text-[10px] text-neutral-500">{ids.length > 1 ? t.layers.selectedCountLayers.replace('{count}', String(ids.length)) : layer.name}</div>
             <MenuItem label={ids.length > 1 ? `${t.layers.groupSelected} (${ids.length})` : t.layers.addGroup} hint="Ctrl+G" disabledReason={groupBlocked}
               onClick={close(() => { onGroupLayers?.(ids); setSelectedLayerIds(new Set()); })} />

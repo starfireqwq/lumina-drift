@@ -292,7 +292,12 @@ const PanelMenu: React.FC<{ id: PanelId; place: PanelPlace }> = ({ id, place }) 
       </button>
       {anchor && createPortal(
         <div ref={menuRef} role="menu" className="atelier-popover fixed z-[100] w-40 overflow-y-auto p-1"
-          style={{ width: menuWidth, left: Math.max(4, anchor.right - menuWidth), top: Math.max(4, Math.min(anchor.bottom + 4, window.innerHeight - menuHeight - 4)), maxHeight: menuHeight }}>
+          style={{
+            width: menuWidth,
+            left: Math.max(4, Math.min(window.innerWidth - menuWidth - 4, anchor.right - menuWidth)),
+            top: Math.max(4, Math.min(anchor.bottom + 4, window.innerHeight - menuHeight - 4)),
+            maxHeight: menuHeight,
+          }}>
           {PLACE_OPTIONS.filter((o) => floats || o.place !== 'float').map((o) => (
             <button key={o.place} type="button" role="menuitemradio" aria-checked={place === o.place}
               onClick={() => { dockActions.moveTo(id, o.place); setOpen(false); }}

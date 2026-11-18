@@ -37,8 +37,8 @@ export const RoomPasswordModal: React.FC<RoomPasswordModalProps> = ({ canvasTitl
   const message = localError || error;
 
   return (
-    <div className="atelier-modal-backdrop fixed inset-0 z-[70] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="room-password-title">
-      <form onSubmit={submit} className="atelier-modal w-full max-w-sm overflow-hidden">
+    <div className="atelier-modal-backdrop fixed inset-0 z-[70] flex items-center justify-center p-2 sm:p-4" role="dialog" aria-modal="true" aria-labelledby="room-password-title">
+      <form onSubmit={submit} className="atelier-modal max-h-[calc(100dvh-1rem)] w-full max-w-sm overflow-y-auto">
         <div className="flex flex-col items-center gap-2 px-6 pb-2 pt-6 text-center">
           <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-indigo-600/20 text-indigo-300">
             <KeyRound className="h-6 w-6" />

@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Mic,
@@ -13,6 +13,7 @@ import {
 import type { VoiceChatState } from '../engine/VoiceChatManager';
 import { useI18n } from '../context/I18nContext';
 import { useSocket } from '../context/SocketContext';
+import { useAnchoredPopover } from '../utils/popoverPosition';
 
 export const VoiceDevices: React.FC<{ voice: VoiceChatState }> = ({ voice }) => {
   const { t } = useI18n();
@@ -21,25 +22,11 @@ export const VoiceDevices: React.FC<{ voice: VoiceChatState }> = ({ voice }) => 
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
-  const [pos, setPos] = useState<{ top: number; right: number }>({ top: 48, right: 8 });
   const btnRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
+  const pos = useAnchoredPopover(open, btnRef, popRef, { align: 'right', gap: 4, margin: 8, fallbackWidth: 224 });
   const media = navigator.mediaDevices;
   const canSelectOutput = 'setSinkId' in HTMLMediaElement.prototype;
-  useLayoutEffect(() => {
-    if (!open) return;
-    const update = () => {
-      const r = btnRef.current?.getBoundingClientRect();
-      if (!r) return;
-      setPos({
-        top: Math.max(4, Math.min(window.innerHeight - 120, r.bottom + 4)),
-        right: Math.max(8, Math.min(window.innerWidth - 40, window.innerWidth - r.right)),
-      });
-    };
-    update();
-    window.addEventListener('resize', update);
-    return () => window.removeEventListener('resize', update);
-  }, [open]);
   useEffect(() => {
     if (!open) return;
     const onDown = (e: PointerEvent) => {
@@ -91,8 +78,8 @@ export const VoiceDevices: React.FC<{ voice: VoiceChatState }> = ({ voice }) => 
         <Settings2 className="h-3.5 w-3.5" />
       </button>
       {open && typeof document !== 'undefined' && createPortal(
-        <div ref={popRef} style={{ top: pos.top, right: pos.right }}
-          className="atelier-popover fixed z-[85] grid w-56 max-w-[calc(100vw-16px)] gap-2 p-3 text-xs">
+        <div ref={pos.setPopoverEl} style={{ top: pos.top, left: pos.left, maxHeight: pos.maxHeight }}
+          className="atelier-popover fixed z-[85] grid w-56 max-w-[calc(100vw-16px)] overflow-y-auto gap-2 p-3 text-xs">
           {deviceSelect('audioinput', t.collab.microphoneDevice, voice.inputDeviceId, setVoiceInputDevice)}
           {canSelectOutput
             ? deviceSelect('audiooutput', t.collab.outputDevice, voice.outputDeviceId, setVoiceOutputDevice)

@@ -413,7 +413,15 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
   );
 
   return (
-    <div className={`fixed inset-0 z-50 overflow-y-auto bg-neutral-950 text-neutral-200${focusOnOpen ? ' atelier-gateway-enter' : ''}`}>
+    <div
+      className={`fixed inset-0 z-50 overflow-y-auto bg-neutral-950 text-neutral-200${focusOnOpen ? ' atelier-gateway-enter' : ''}`}
+      style={{
+        paddingTop: 'env(safe-area-inset-top, 0px)',
+        paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+        paddingLeft: 'env(safe-area-inset-left, 0px)',
+        paddingRight: 'env(safe-area-inset-right, 0px)',
+      }}
+    >
       <form onSubmit={submit} className="mx-auto flex min-h-full w-full max-w-xl flex-col gap-4 px-4 py-6 sm:py-10">
         <header className="flex items-center gap-3">
           <img src={`${(import.meta as any).env?.BASE_URL || './'}logo.svg`} alt="" aria-hidden="true" className="h-11 w-11 shrink-0" />

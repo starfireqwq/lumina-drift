@@ -85,7 +85,11 @@ export const LiveChatDrawer: React.FC<LiveChatDrawerProps> = ({ isOpen, onClose 
   return (
     <OverlayPresence open={isOpen} kind="drawer">
     <div role="dialog" aria-modal="true" aria-labelledby={titleId}
-      className="atelier-chat-backdrop fixed inset-x-0 bottom-0 z-50 flex justify-end overflow-hidden bg-black/60 backdrop-blur-sm">
+      className="atelier-chat-backdrop fixed inset-x-0 bottom-0 z-50 flex justify-end overflow-hidden bg-black/60 backdrop-blur-sm"
+      style={{
+        paddingTop: 'env(safe-area-inset-top, 0px)',
+        paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+      }}>
       <div className="atelier-chat-panel w-full sm:w-96 max-w-full h-full bg-neutral-950 border-l border-neutral-800 flex flex-col shadow-2xl">
         {/* Header */}
         <div className="px-4 py-3 border-b border-neutral-800 bg-neutral-900 flex items-center justify-between">

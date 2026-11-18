@@ -266,7 +266,7 @@ export const CanvasStickersOverlay: React.FC<CanvasStickersOverlayProps> = ({
         </button>
 
         {isPickerOpen && (
-          <div className="atelier-popover atelier-menu-in absolute bottom-12 right-0 flex w-72 flex-col gap-2 p-3 text-xs">
+          <div className="atelier-popover atelier-menu-in absolute bottom-12 right-0 flex w-72 max-w-[calc(100vw-24px)] max-h-[60dvh] overflow-y-auto flex-col gap-2 p-3 text-xs">
             <div className="flex items-center justify-between pb-1.5 border-b border-neutral-800">
               <span className="font-semibold flex items-center gap-1.5 text-white">
                 <Palette className="w-4 h-4 text-indigo-400" />

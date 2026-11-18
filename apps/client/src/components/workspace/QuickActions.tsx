@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Check, Pencil } from 'lucide-react';
 import { ShortcutItem, ShortcutManager } from '../../engine/ShortcutManager';
+import { useAnchoredPopover } from '../../utils/popoverPosition';
 
 /**
  * CSP-style customisable command bar (指令列) and shortcut panel (快捷鍵面板, like CSP's edge
@@ -92,7 +94,25 @@ export const QUICK_KEY_DEFAULTS = [
 export const CommandBar: React.FC = () => {
   const [ids, setIds] = useActionList('atelier_command_bar', COMMAND_BAR_DEFAULTS);
   const [editing, setEditing] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+  const pos = useAnchoredPopover(editing, btnRef, popRef, { align: 'right', gap: 6, margin: 8, fallbackWidth: 288 });
   const items = byId();
+  useEffect(() => {
+    if (!editing) return;
+    const onDown = (e: PointerEvent) => {
+      const target = e.target as Node;
+      if (btnRef.current?.contains(target) || popRef.current?.contains(target)) return;
+      setEditing(false);
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setEditing(false); };
+    window.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [editing]);
   return (
     <div className="relative flex shrink-0 items-center gap-0.5" role="toolbar" aria-label="指令列">
       {ids.filter((id) => !FIXED_IN_OPTIONS_BAR.has(id)).map((id) => items.get(id)).filter((s): s is ShortcutItem => Boolean(s)).map((s) => (
@@ -101,19 +121,21 @@ export const CommandBar: React.FC = () => {
           {actionLabel(s)}
         </button>
       ))}
-      <button type="button" onClick={() => setEditing(!editing)} aria-pressed={editing} aria-label="自訂指令列" title="自訂指令列：選要放哪些按鈕"
+      <button ref={btnRef} type="button" onClick={() => setEditing(!editing)} aria-pressed={editing} aria-label="自訂指令列" title="自訂指令列：選要放哪些按鈕"
         className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-neutral-500 hover:bg-neutral-800 hover:text-white">
         {editing ? <Check className="h-3.5 w-3.5" /> : <Pencil className="h-3 w-3" />}
       </button>
-      {editing && (
-        <div className="fixed right-2 top-24 z-[95] w-72 max-w-[calc(100vw-16px)] atelier-popover atelier-menu-in p-3" role="dialog" aria-label="自訂指令列">
+      {editing && typeof document !== 'undefined' && createPortal(
+        <div ref={pos.setPopoverEl} style={{ top: pos.top, left: pos.left, maxHeight: pos.maxHeight }}
+          className="atelier-popover atelier-menu-in fixed z-[95] w-72 max-w-[calc(100vw-16px)] overflow-y-auto p-3" role="dialog" aria-label="自訂指令列">
           <div className="mb-2 flex items-center justify-between text-xs font-bold text-white">
             <span>指令列要放的按鈕</span>
             <button type="button" onClick={() => setIds(COMMAND_BAR_DEFAULTS)} className="text-[10px] font-normal text-neutral-400 hover:text-white">恢復預設</button>
           </div>
           <ActionPicker ids={ids} onChange={setIds} exclude={FIXED_IN_OPTIONS_BAR} />
           <button type="button" onClick={() => setEditing(false)} className="mt-2 w-full rounded-lg bg-indigo-600 py-1.5 text-xs font-bold text-white hover:bg-indigo-500">完成</button>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );

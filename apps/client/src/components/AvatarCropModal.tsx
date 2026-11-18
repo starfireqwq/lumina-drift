@@ -215,10 +215,10 @@ export const AvatarCropModal: React.FC<AvatarCropModalProps> = ({
     : 1;
 
   return (
-    <div role="dialog" aria-modal="true" className="atelier-modal-backdrop fixed inset-0 z-[70] flex items-center justify-center p-4 animate-in fade-in duration-200 select-none">
-      <div className="atelier-modal  max-w-sm sm:max-w-md w-full overflow-hidden flex flex-col animate-in zoom-in-95 duration-200">
+    <div role="dialog" aria-modal="true" className="atelier-modal-backdrop fixed inset-0 z-[70] flex items-center justify-center p-2 sm:p-4 animate-in fade-in duration-200 select-none">
+      <div className="atelier-modal max-h-[calc(100dvh-1rem)] max-w-sm sm:max-w-md w-full overflow-hidden flex flex-col animate-in zoom-in-95 duration-200">
         {/* Header */}
-        <div className="px-5 py-3.5 border-b border-neutral-800/80 bg-neutral-900/80 flex items-center justify-between">
+        <div className="px-5 py-3.5 border-b border-neutral-800/80 bg-neutral-900/80 flex shrink-0 items-center justify-between">
           <div className="flex items-center gap-2 text-white font-bold text-sm">
             <span className="p-1 rounded-lg bg-indigo-600/30 text-indigo-400">✂️</span>
             <span>自訂頭像縮放與裁切</span>
@@ -233,7 +233,7 @@ export const AvatarCropModal: React.FC<AvatarCropModalProps> = ({
         </div>
 
         {/* Viewport Area */}
-        <div className="p-4 sm:p-5 flex flex-col items-center gap-4">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-5 flex flex-col items-center gap-4">
           <div
             ref={containerRef}
             onPointerDown={handlePointerDown}
