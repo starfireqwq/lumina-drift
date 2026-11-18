@@ -4,6 +4,8 @@ Lumina Drift Paint 是一款開源繪圖軟體。你可以在本機離線作畫�
 
 [下載最新版本](https://github.com/starfireqwq/lumina-drift/releases/latest) · [軟體介紹 PDF](https://github.com/starfireqwq/lumina-drift/releases/download/v1.1.0/Lumina-Drift-Paint-Introduction-zh-TW.pdf)
 
+![Lumina Drift Paint 多人繪茶與畫布介面範例](docs/images/screenshot.jpg)
+
 ---
 
 ## 核心功能
