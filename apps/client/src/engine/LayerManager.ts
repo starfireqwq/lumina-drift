@@ -93,6 +93,8 @@ const BIG_CANVAS_PX = 4096 * 4096;
 const SCRATCH_IDLE_MS = 10000;
 /** Main-thread time one background step (parking / freezing a layer) may take */
 const STEP_BUDGET_MS = 6;
+/** Per-frame main-thread time budget for incremental viewport cold-tile reheat */
+const REHEAT_BUDGET_MS = 3.5;
 const TILE_LABEL = 'layer-tile';
 
 /** GPU memory for tiles of layers that are not on screen (animation frames, hidden layers): over it, the least recently shown go to the CPU */
@@ -116,7 +118,7 @@ const SOFT_GPU_TILE_LIMIT = (() => {
 const VIEW_THAW_TILE_THRESHOLD = 192;
 
 /** A warm tile: its pixels in an atlas slot, shown by a sprite at its canvas position */
-interface GpuTile { slot: Slot; sprite: Sprite; w: number; h: number; lastSeenMs?: number }
+interface GpuTile { col: number; row: number; slot: Slot; sprite: Sprite; w: number; h: number; lastSeenMs?: number }
 interface CpuTile { data: Uint8Array; compression: 'lz4' | 'raw'; w: number; h: number }
 
 /** True if every byte is 0 (premultiplied: fully transparent) */
@@ -275,8 +277,8 @@ class LayerItem implements PixiLayerItem {
 }
 
 type Job =
-  | { kind: 'park'; item: LayerItem; version: number; next: number; tiles: Map<string, GpuTile> }
-  | { kind: 'freeze'; item: LayerItem; version: number; next: number; keys: string[]; tiles: Map<string, CpuTile> };
+  | { kind: 'park'; item: LayerItem; version: number; next: number; tiles: Map<string, GpuTile>; reading?: boolean }
+  | { kind: 'freeze'; item: LayerItem; version: number; next: number; keys: string[]; tiles: Map<string, CpuTile>; reading?: boolean };
 
 export class LayerManager {
   public rootContainer: Container;
@@ -285,6 +287,8 @@ export class LayerManager {
   public backgroundGraphic: Graphics;
   /** A thumbnail that had to wait (a cold layer's tiles are decoded when the page is idle) */
   public onThumbnail: ((layerId: string, url: string) => void) | null = null;
+  /** Called when visible stage contents or layer textures change so an on-demand renderer can present a frame */
+  public onStageChange: (() => void) | null = null;
 
   private renderer: Renderer;
   private canvasWidth: number;
@@ -315,6 +319,11 @@ export class LayerManager {
   private thumbTimer: ReturnType<typeof setTimeout> | null = null;
   private lastRemoteThumbExtractAt = 0;
   private lastLocalDrawAt = 0;
+  private lastInteractionAt = 0;
+
+  public markInteractive() {
+    this.lastInteractionAt = performance.now();
+  }
 
   /** Live previews (other painters' strokes in progress, text being typed): sparse like a layer */
   private preview: LayerItem;
@@ -325,6 +334,8 @@ export class LayerManager {
   private cullSuspended = 0;
   private tileStructureVersion = 0;
   private lastViewGridKey = '';
+  private reheatRaf = 0;
+  private reheatPending = false;
   private evictingOffscreen = false;
   private thumbsPaused = false;
   private destroyed = false;
@@ -397,6 +408,7 @@ export class LayerManager {
     this.backgroundGraphic
       .rect(0, 0, this.canvasWidth, this.canvasHeight)
       .fill({ color });
+    this.onStageChange?.();
   }
 
   public syncLayers(layers: LayerModel[]) {
@@ -520,21 +532,15 @@ export class LayerManager {
       if (item.shown && model.screentoneEnabled) this.structuralPins.add(model.id);
       if (item.shown && model.clipToBelow && i > 0) this.structuralPins.add(clipBaseOf(i).id);
     }
+    let needsReheat = false;
     for (const item of this.layersMap.values()) {
       if (this.isPinned(item)) this.makeResident(item);
       else if ((item.shown || this.keepWarm(item)) && !item.rt && !item.gpu) this.thaw(item);
       else if ((item.shown || this.keepWarm(item)) && item.gpu && item.coldTiles.size > 0 && this.viewBounds) {
-        const c0 = Math.max(0, Math.floor((this.viewBounds.x0 - TS) / TS));
-        const c1 = Math.min(this.cols - 1, Math.floor((this.viewBounds.x1 + TS) / TS));
-        const r0 = Math.max(0, Math.floor((this.viewBounds.y0 - TS) / TS));
-        const r1 = Math.min(this.rows - 1, Math.floor((this.viewBounds.y1 + TS) / TS));
-        for (let row = r0; row <= r1; row++) {
-          for (let col = c0; col <= c1; col++) {
-            if (item.coldTiles.has(keyOf(col, row))) this.reheatTile(item, col, row);
-          }
-        }
+        needsReheat = true;
       }
     }
+    if (needsReheat) this.drainReheat(now, false);
 
     for (const m of drawable) {
       const maskItem = m.layerType === 'mask' ? this.layersMap.get(m.id) : undefined;
@@ -635,6 +641,7 @@ export class LayerManager {
         item.display.filters = null;
       }
     }
+    this.onStageChange?.();
   }
 
   /** The last filter of a filtered layer: composites the filtered pixels with the layer's blend mode */
@@ -679,6 +686,7 @@ export class LayerManager {
     this.magFilter = mode;
     this.atlas.setMagFilter(mode);
     for (const item of this.layersMap.values()) if (item.rt) applyMagFilter(item.rt, mode);
+    this.onStageChange?.();
   }
 
   public setActiveLayer(layerId: string | null) {
@@ -742,10 +750,12 @@ export class LayerManager {
 
   /**
    * Updates the active canvas viewport rectangle so offscreen layer tiles are culled from Pixi's
-   * scene traversal and cold offscreen tiles reheat seamlessly when panned into view.
+   * scene traversal and cold offscreen tiles reheat smoothly within a per-frame time budget.
    */
   public setViewportBounds(bounds: { x0: number; y0: number; x1: number; y1: number } | null) {
     this.viewBounds = bounds;
+    const now = performance.now();
+    this.lastInteractionAt = now;
     const c0 = bounds ? Math.max(0, Math.floor((bounds.x0 - TS) / TS)) : 0;
     const c1 = bounds ? Math.min(this.cols - 1, Math.floor((bounds.x1 + TS) / TS)) : this.cols - 1;
     const r0 = bounds ? Math.max(0, Math.floor((bounds.y0 - TS) / TS)) : 0;
@@ -753,27 +763,95 @@ export class LayerManager {
     const gridKey = bounds ? `${c0},${r0},${c1},${r1}:${this.cullSuspended}:${this.tileStructureVersion}` : `all:${this.cullSuspended}:${this.tileStructureVersion}`;
     if (this.lastViewGridKey === gridKey) return;
     this.lastViewGridKey = gridKey;
-    const now = performance.now();
+    let anyColdInView = false;
     for (const item of this.layersMap.values()) {
       if (item.gpu) {
         for (const t of item.gpu.values()) {
-          const col = Math.floor(t.sprite.x / TS);
-          const row = Math.floor(t.sprite.y / TS);
-          const inView = this.cullSuspended > 0 || !bounds || (col >= c0 && col <= c1 && row >= r0 && row <= r1);
+          const inView = this.cullSuspended > 0 || !bounds || (t.col >= c0 && t.col <= c1 && t.row >= r0 && t.row <= r1);
           if (t.sprite.visible !== inView) t.sprite.visible = inView;
           if (inView) t.lastSeenMs = now;
         }
       }
       if (bounds && item.coldTiles.size > 0 && (item.shown || this.keepWarm(item))) {
-        for (let row = r0; row <= r1; row++) {
-          for (let col = c0; col <= c1; col++) {
-            if (item.coldTiles.has(keyOf(col, row))) {
-              this.reheatTile(item, col, row);
+        anyColdInView = true;
+      }
+    }
+    if (anyColdInView) {
+      this.drainReheat(now, false);
+    } else {
+      this.reheatPending = false;
+    }
+  }
+
+  private scheduleReheat() {
+    if (this.destroyed || this.reheatRaf) return;
+    if (typeof requestAnimationFrame === 'function') {
+      this.reheatRaf = requestAnimationFrame(this.pumpReheat);
+    }
+  }
+
+  private pumpReheat = () => {
+    this.reheatRaf = 0;
+    if (this.destroyed || !this.viewBounds) {
+      this.reheatPending = false;
+      return;
+    }
+    if (this.drainReheat(performance.now(), true) > 0) {
+      this.onStageChange?.();
+    }
+  };
+
+  /**
+   * Reheats visible `coldTiles` incrementally up to `REHEAT_BUDGET_MS` per frame, prioritizing
+   * strictly on-screen tiles before the 1-tile prefetch margin, and schedules follow-up rAFs if needed.
+   */
+  private drainReheat(t0: number, _fromRaf: boolean): number {
+    const bounds = this.viewBounds;
+    if (!bounds) {
+      this.reheatPending = false;
+      return 0;
+    }
+    const sc0 = Math.max(0, Math.floor(bounds.x0 / TS));
+    const sc1 = Math.min(this.cols - 1, Math.floor(bounds.x1 / TS));
+    const sr0 = Math.max(0, Math.floor(bounds.y0 / TS));
+    const sr1 = Math.min(this.rows - 1, Math.floor(bounds.y1 / TS));
+    const c0 = Math.max(0, Math.floor((bounds.x0 - TS) / TS));
+    const c1 = Math.min(this.cols - 1, Math.floor((bounds.x1 + TS) / TS));
+    const r0 = Math.max(0, Math.floor((bounds.y0 - TS) / TS));
+    const r1 = Math.min(this.rows - 1, Math.floor((bounds.y1 + TS) / TS));
+
+    let reheated = 0;
+    let remainingCold = false;
+
+    const reheatRange = (x0: number, x1: number, y0: number, y1: number) => {
+      for (const item of this.layersMap.values()) {
+        if (item.coldTiles.size === 0 || (!item.shown && !this.keepWarm(item))) continue;
+        for (let row = y0; row <= y1; row++) {
+          for (let col = x0; col <= x1; col++) {
+            const key = keyOf(col, row);
+            if (!item.coldTiles.has(key)) continue;
+            if (reheated > 0 && performance.now() - t0 >= REHEAT_BUDGET_MS) {
+              remainingCold = true;
+              return;
             }
+            if (this.reheatTile(item, col, row)) reheated++;
           }
         }
       }
+    };
+
+    reheatRange(sc0, sc1, sr0, sr1);
+    if (!remainingCold && (reheated === 0 || performance.now() - t0 < REHEAT_BUDGET_MS)) {
+      reheatRange(c0, c1, r0, r1);
     }
+
+    if (remainingCold) {
+      this.reheatPending = true;
+      this.scheduleReheat();
+    } else {
+      this.reheatPending = false;
+    }
+    return reheated;
   }
 
   /** Restores an offscreen-evicted CPU tile back into its warm GPU atlas slot */
@@ -847,9 +925,8 @@ export class LayerManager {
       if (this.cullSuspended === 0 && this.viewBounds) {
         for (const item of this.layersMap.values()) {
           if (!item.gpu) continue;
-          for (const [key, t] of item.gpu) {
-            const [col, row] = key.split('_').map(Number);
-            t.sprite.visible = this.isTileInView(col, row);
+          for (const t of item.gpu.values()) {
+            t.sprite.visible = this.isTileInView(t.col, t.row);
           }
         }
       }
@@ -866,7 +943,7 @@ export class LayerManager {
     sprite.label = TILE_LABEL;
     sprite.cullable = true;
     sprite.visible = this.cullSuspended > 0 || !this.viewBounds || this.isTileInView(col, row);
-    return { slot: s, sprite, w, h, lastSeenMs: performance.now() };
+    return { col, row, slot: s, sprite, w, h, lastSeenMs: performance.now() };
   }
 
   private freeTile(t: GpuTile) {
@@ -1045,6 +1122,7 @@ export class LayerManager {
         if (ink) this.drawStrokeInk(ink, container, col, row);
       }
     }
+    if (item.shown || item === this.preview) this.onStageChange?.();
   }
 
   /**
@@ -1314,6 +1392,7 @@ export class LayerManager {
     if (w <= 0 || h <= 0) return;
     if (item.rt && item !== this.preview) {
       this.upload(this.use(item), [{ x, y, w, h, raw: px ?? new Uint8Array(w * h * 4) }]);
+      if (item.shown) this.onStageChange?.();
       return;
     }
     if (!item.gpu) this.thaw(item);
@@ -1348,6 +1427,7 @@ export class LayerManager {
         this.atlas.writePixels(t.slot, sub, ix0 - tx, iy0 - ty, sw, sh, t.w, t.h);
       }
     }
+    if (item.shown || item === this.preview) this.onStageChange?.();
   }
 
   /* ---------- Forms ---------- */
@@ -1395,6 +1475,7 @@ export class LayerManager {
       let i = 0;
       for (const t of item.gpu.values()) d.addChildAt(t.sprite, i++);
     }
+    if (item.shown || item === this.preview) this.onStageChange?.();
   }
 
   /** Sparse → one canvas-sized texture (GPU copy of the tiles, or decoded from the CPU) */
@@ -1616,6 +1697,7 @@ export class LayerManager {
         this.upload(item.rt, rtParts);
         if (ppParts.length && item.pp) this.upload(item.pp, ppParts);
       }
+      if (item.shown) this.onStageChange?.();
       return;
     }
 
@@ -1707,8 +1789,17 @@ export class LayerManager {
           this.atlas.writePixels(tile.slot, null, 0, 0, tile.w, tile.h, tile.w, tile.h);
         }
         this.atlas.writePixels(tile.slot, finalRaw, 0, 0, t.width, t.height, tile.w, tile.h);
+        if (!common && !activeBak && t.compression === 'lz4' && t.width === tile.w && t.height === tile.h) {
+          item.cleanCache.set(key, {
+            data: normalizeTileBytes(t.data).slice(),
+            compression: 'lz4',
+            w: t.width,
+            h: t.height,
+          });
+        }
         tile.lastSeenMs = performance.now();
       }
+      if (item.shown) this.onStageChange?.();
       return;
     }
 
@@ -1742,6 +1833,8 @@ export class LayerManager {
       this.compositeRT.destroy(true);
       this.compositeRT = null;
     }
+    // Defer heavy GPU->CPU park/freeze readbacks and texture teardown while actively drawing, panning, or zooming.
+    if (this.isActivelyDrawing() || now - this.lastInteractionAt < 1200) return;
     const big = this.canvasWidth * this.canvasHeight >= BIG_CANVAS_PX;
     for (const item of this.layersMap.values()) {
       if (big && item.pp && item.ppClean && now - item.lastUsed > PINGPONG_IDLE_MS) {
@@ -1813,8 +1906,7 @@ export class LayerManager {
       const pendingAfter = this.pendingAfterSlots.get(item.model.id);
       for (const [key, tile] of item.gpu) {
         if (item.bak?.has(key) || pendingAfter?.has(tile.slot)) continue;
-        const [col, row] = key.split('_').map(Number);
-        if (this.isTileInView(col, row)) continue;
+        if (this.isTileInView(tile.col, tile.row)) continue;
         candidates.push({ item, key, tile, lastSeen: tile.lastSeenMs ?? 0 });
       }
     }
@@ -1866,8 +1958,7 @@ export class LayerManager {
             ) {
               return;
             }
-            const [col, row] = p.key.split('_').map(Number);
-            if (this.isTileInView(col, row)) return;
+            if (this.isTileInView(p.tile.col, p.tile.row)) return;
             if (raw && !isEmpty(raw)) {
               const compressed = compressTileBuffer(raw, 'lz4');
               p.item.coldTiles.set(p.key, {
@@ -1894,10 +1985,15 @@ export class LayerManager {
   private pump = () => {
     this.jobTimer = null;
     const job = this.job;
-    if (!job) return;
+    if (!job || this.destroyed) return;
+    if (job.reading) return;
+    if (this.isActivelyDrawing() || performance.now() - this.lastInteractionAt < 1200) {
+      this.jobTimer = setTimeout(this.pump, 350);
+      return;
+    }
     if (job.kind === 'park') this.stepPark(job);
     else this.stepFreeze(job);
-    if (this.job) this.jobTimer = setTimeout(this.pump, 16);
+    if (this.job && !this.job.reading) this.jobTimer = setTimeout(this.pump, 16);
   };
 
   private abortJob() {
@@ -1908,11 +2004,102 @@ export class LayerManager {
     if (job?.kind === 'park') for (const t of job.tiles.values()) this.freeTile(t);
   }
 
-  /** Resident → warm, a tile row per step: read back, copy the tiles that have pixels into atlas slots */
+  private finishPark(job: Extract<Job, { kind: 'park' }>) {
+    const { item } = job;
+    this.flushPendingReads();
+    this.job = null;
+    item.rt!.destroy(true);
+    item.pp?.destroy(true);
+    item.rt = null;
+    item.pp = null;
+    item.ppReleased = false;
+    item.ppClean = true;
+    item.sprite.texture = Texture.EMPTY;
+    item.gpu = job.tiles;
+    item.cpu = null;
+    this.rebuildDisplay(item);
+  }
+
+  /** Resident → warm, a tile row per step: read back asynchronously via PBO and pack into atlas slots */
   private stepPark(job: Extract<Job, { kind: 'park' }>) {
     const { item } = job;
     const W = this.canvasWidth;
     const H = this.canvasHeight;
+    if (this.reader) {
+      if (job.reading) return;
+      if (job.next < this.rows) {
+        if (item.destroyed || item.version !== job.version || !item.rt || this.isPinned(item)) return this.abortJob();
+        const row = job.next;
+        const version = job.version;
+        const y = row * TS;
+        const h = Math.min(TS, H - y);
+        const chunkCols = 8; // <= 2048px wide (<= 2MB) per PBO read chunk
+        const rects: Rect[] = [];
+        for (let c = 0; c < this.cols; c += chunkCols) {
+          const x = c * TS;
+          const cw = Math.min(chunkCols * TS, W - x);
+          if (cw > 0) rects.push({ x, y, w: cw, h });
+        }
+        job.reading = true;
+        this.pendingReadCount++;
+        let settled = false;
+        const settleRead = () => {
+          if (settled) return;
+          settled = true;
+          job.reading = false;
+          this.pendingReadCount = Math.max(0, this.pendingReadCount - 1);
+        };
+        void this.reader(item.rt, rects)
+          .then((chunks) => {
+            settleRead();
+            if (this.destroyed || this.job !== job || item.destroyed || item.version !== version || !item.rt || this.isPinned(item)) {
+              if (this.job === job) this.abortJob();
+              return;
+            }
+            for (let ci = 0; ci < rects.length; ci++) {
+              const strip = chunks[ci];
+              const chunkW = rects[ci].w;
+              const startCol = ci * chunkCols;
+              const endCol = Math.min(this.cols, startCol + chunkCols);
+              for (let col = startCol; col < endCol; col++) {
+                const localX = (col - startCol) * TS;
+                const w = Math.min(TS, chunkW - localX);
+                if (isEmpty(strip, chunkW, localX, w, h)) continue;
+                const tile = this.makeTile(item, col, row);
+                let tileBuf: Uint8Array;
+                if (w === chunkW) {
+                  tileBuf = strip;
+                } else {
+                  tileBuf = SCRATCH.subarray(0, w * h * 4);
+                  const rowBytes = w * 4;
+                  const srcStrideBytes = chunkW * 4;
+                  for (let ry = 0; ry < h; ry++) {
+                    const srcOff = ry * srcStrideBytes + localX * 4;
+                    tileBuf.set(strip.subarray(srcOff, srcOff + rowBytes), ry * rowBytes);
+                  }
+                }
+                this.atlas.writePixels(tile.slot, tileBuf, 0, 0, w, h, w, h);
+                job.tiles.set(keyOf(col, row), tile);
+              }
+            }
+            job.next++;
+            if (job.next >= this.rows) {
+              this.finishPark(job);
+            } else if (!this.jobTimer) {
+              const busy = this.isActivelyDrawing() || performance.now() - this.lastInteractionAt < 1200;
+              this.jobTimer = setTimeout(this.pump, busy ? 350 : 16);
+            }
+          })
+          .catch(() => {
+            settleRead();
+            if (this.job === job) this.abortJob();
+          });
+        return;
+      }
+      this.finishPark(job);
+      return;
+    }
+
     const t0 = performance.now();
     while (job.next < this.rows && performance.now() - t0 < STEP_BUDGET_MS) {
       if (item.destroyed || item.version !== job.version || !item.rt || this.isPinned(item)) return this.abortJob();
@@ -1932,23 +2119,101 @@ export class LayerManager {
       job.next++;
     }
     if (job.next < this.rows) return;
-    this.flushPendingReads();
+    this.finishPark(job);
+  }
+
+  private finishFreeze(job: Extract<Job, { kind: 'freeze' }>) {
+    const { item } = job;
+    for (const [key, t] of item.coldTiles) {
+      if (!job.tiles.has(key)) job.tiles.set(key, t);
+    }
+    item.coldTiles.clear();
     this.job = null;
-    item.rt!.destroy(true);
-    item.pp?.destroy(true);
-    item.rt = null;
-    item.pp = null;
-    item.ppReleased = false;
-    item.ppClean = true;
-    item.sprite.texture = Texture.EMPTY;
-    item.gpu = job.tiles;
-    item.cpu = null;
+    this.dropGpuTiles(item);
+    item.cpu = job.tiles;
     this.rebuildDisplay(item);
   }
 
   /** Warm and off screen → cold: tiles read back and LZ4-compressed, slots freed */
   private stepFreeze(job: Extract<Job, { kind: 'freeze' }>) {
     const { item } = job;
+    if (this.reader) {
+      if (job.reading) return;
+      const dirtyBatch: Array<{ key: string; tile: GpuTile; slot: Slot }> = [];
+      const t0 = performance.now();
+      while (job.next < job.keys.length && dirtyBatch.length < 4 && (dirtyBatch.length > 0 || performance.now() - t0 < STEP_BUDGET_MS)) {
+        if (item.destroyed || item.version !== job.version || !item.gpu || item.shown || this.isPinned(item) || this.keepWarm(item)) return this.abortJob();
+        const key = job.keys[job.next++];
+        const t = item.gpu.get(key);
+        if (!t) continue;
+        const clean = item.cleanCache.get(key);
+        if (clean) {
+          job.tiles.set(key, clean);
+        } else {
+          dirtyBatch.push({ key, tile: t, slot: t.slot });
+        }
+      }
+      if (dirtyBatch.length > 0) {
+        const version = job.version;
+        const id = item.model.id;
+        const byTex = new Map<RenderTexture, Array<(typeof dirtyBatch)[number] & { rect: Rect }>>();
+        for (const b of dirtyBatch) {
+          this.acquireAfterSlots(id, [b.slot]);
+          const tex = this.atlas.texture(b.slot);
+          const list = byTex.get(tex) ?? [];
+          list.push({ ...b, rect: { x: b.slot.x, y: b.slot.y, w: b.tile.w, h: b.tile.h } });
+          byTex.set(tex, list);
+        }
+        job.reading = true;
+        this.pendingReadCount++;
+        let settled = false;
+        const settleRead = () => {
+          if (settled) return;
+          settled = true;
+          job.reading = false;
+          this.pendingReadCount = Math.max(0, this.pendingReadCount - 1);
+          for (const b of dirtyBatch) this.releaseAfterSlots(id, [b.slot]);
+        };
+        const reader = this.reader;
+        const reads = [...byTex].map(([tex, parts]) => reader(tex, parts.map((p) => p.rect)).then((pxs) => ({ parts, pxs })));
+        void Promise.all(reads)
+          .then((results) => {
+            settleRead();
+            if (this.destroyed || this.job !== job || item.destroyed || item.version !== version || !item.gpu || item.shown || this.isPinned(item) || this.keepWarm(item)) {
+              if (this.job === job) this.abortJob();
+              return;
+            }
+            for (const { parts, pxs } of results) {
+              parts.forEach((p, idx) => {
+                const raw = pxs[idx];
+                if (raw && !isEmpty(raw)) {
+                  job.tiles.set(p.key, {
+                    data: compressTileBuffer(raw, 'lz4').data,
+                    compression: 'lz4',
+                    w: p.tile.w,
+                    h: p.tile.h,
+                  });
+                }
+              });
+            }
+            if (job.next >= job.keys.length) {
+              this.finishFreeze(job);
+            } else if (!this.jobTimer) {
+              const busy = this.isActivelyDrawing() || performance.now() - this.lastInteractionAt < 1200;
+              this.jobTimer = setTimeout(this.pump, busy ? 350 : 16);
+            }
+          })
+          .catch(() => {
+            settleRead();
+            if (this.job === job) this.abortJob();
+          });
+        return;
+      }
+      if (job.next < job.keys.length) return;
+      this.finishFreeze(job);
+      return;
+    }
+
     const t0 = performance.now();
     while (job.next < job.keys.length && performance.now() - t0 < STEP_BUDGET_MS) {
       if (item.destroyed || item.version !== job.version || !item.gpu || item.shown || this.isPinned(item) || this.keepWarm(item)) return this.abortJob();
@@ -1964,14 +2229,7 @@ export class LayerManager {
       }
     }
     if (job.next < job.keys.length) return;
-    for (const [key, t] of item.coldTiles) {
-      if (!job.tiles.has(key)) job.tiles.set(key, t);
-    }
-    item.coldTiles.clear();
-    this.job = null;
-    this.dropGpuTiles(item);
-    item.cpu = job.tiles;
-    this.rebuildDisplay(item);
+    this.finishFreeze(job);
   }
 
   /** A new texture holding a copy of src */
@@ -2108,6 +2366,7 @@ export class LayerManager {
         this.atlas.writePixels(t.slot, null, ix0 - tx, iy0 - ty, ix1 - ix0, iy1 - iy0, t.w, t.h);
       }
     }
+    this.onStageChange?.();
   }
 
   private recyclePreviewParticles(particles: Particle[]) {
@@ -2176,6 +2435,7 @@ export class LayerManager {
       added[i] = p;
     }
     entry.container.addParticle(...added);
+    this.onStageChange?.();
   }
 
   /** Removes one painter's preview particles when their stroke commits (O(1), never touches other painters) */
@@ -2196,6 +2456,7 @@ export class LayerManager {
         e.container.destroy();
       }
     }
+    this.onStageChange?.();
   }
 
   public clearPreview() {
@@ -2207,6 +2468,7 @@ export class LayerManager {
     this.previewPainters.clear();
     for (const t of this.preview.gpu!.values()) this.freeTile(t);
     this.preview.gpu!.clear();
+    this.onStageChange?.();
   }
 
   /**
@@ -2265,6 +2527,7 @@ export class LayerManager {
     if (!item) return;
     if (!item.rt) {
       this.restoreBackups(item);
+      if (item.shown) this.onStageChange?.();
       return;
     }
     if (!item.pp) return; // never allocated = nothing changed since the last sync
@@ -2278,6 +2541,7 @@ export class LayerManager {
       clearColor: [0, 0, 0, 0],
     });
     blitSprite.destroy();
+    if (item.shown) this.onStageChange?.();
   }
 
   private thumbRT: RenderTexture | null = null;
@@ -2399,6 +2663,7 @@ export class LayerManager {
       if (!picked[1].local) {
         const busy =
           now - this.lastLocalDrawAt < 1000 ||
+          now - this.lastInteractionAt < 900 ||
           this.pendingReadCount > 0 ||
           [...this.layersMap.values()].some((l) => (l.bak?.size ?? 0) > 0);
         const cooldown = busy ? 600 : 6000 - (now - this.lastRemoteThumbExtractAt);
@@ -2406,7 +2671,7 @@ export class LayerManager {
           this.thumbTimer = setTimeout(this.drainThumbs, cooldown);
           return;
         }
-      } else if (this.isActivelyDrawing() || this.pendingReadCount > 0) {
+      } else if (this.isActivelyDrawing() || now - this.lastInteractionAt < 900 || this.pendingReadCount > 0) {
         this.thumbTimer = setTimeout(this.drainThumbs, 350);
         return;
       }
@@ -2518,7 +2783,7 @@ export class LayerManager {
     const c = document.createElement('canvas');
     c.width = thumbWidth;
     c.height = thumbHeight;
-    const ctx = c.getContext('2d');
+    const ctx = c.getContext('2d', { willReadFrequently: true });
     if (!ctx) return c;
     const img = ctx.createImageData(thumbWidth, thumbHeight);
     const dst = img.data;
@@ -2584,7 +2849,7 @@ export class LayerManager {
           const canvas = document.createElement('canvas');
           canvas.width = thumbWidth;
           canvas.height = thumbHeight;
-          canvas.getContext('2d')?.putImageData(new ImageData(out, thumbWidth, thumbHeight), 0, 0);
+          canvas.getContext('2d', { willReadFrequently: true })?.putImageData(new ImageData(out, thumbWidth, thumbHeight), 0, 0);
           return canvas;
         })
         .catch((err) => {
@@ -2646,7 +2911,7 @@ export class LayerManager {
     const canvas = document.createElement('canvas');
     canvas.width = this.canvasWidth;
     canvas.height = this.canvasHeight;
-    const ctx = canvas.getContext('2d')!;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
     const put = (x: number, y: number, w: number, h: number, px: Uint8Array) => {
       const img = ctx.createImageData(w, h);
       const dst = img.data; // clamps and rounds the divisions
@@ -2693,6 +2958,7 @@ export class LayerManager {
     if (item.rt) {
       this.clearTexture(item.rt);
       if (item.pp) this.clearTexture(item.pp);
+      if (item.shown) this.onStageChange?.();
       return;
     }
     this.dropGpuTiles(item);
@@ -2740,7 +3006,7 @@ export class LayerManager {
           const c = document.createElement('canvas');
           c.width = tw;
           c.height = th;
-          c.getContext('2d')?.putImageData(new ImageData(out, tw, th), 0, 0);
+          c.getContext('2d', { willReadFrequently: true })?.putImageData(new ImageData(out, tw, th), 0, 0);
           return c.toDataURL('image/jpeg', 0.82);
         })
         .catch((err) => {
@@ -2862,6 +3128,9 @@ export class LayerManager {
     this.flushPendingReads();
     this.destroyed = true;
     clearInterval(this.tickTimer);
+    if (this.reheatRaf && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.reheatRaf);
+    this.reheatRaf = 0;
+    this.reheatPending = false;
     if (this.thumbTimer) clearTimeout(this.thumbTimer);
     for (const url of this.thumbBlobUrls) URL.revokeObjectURL(url);
     this.thumbBlobUrls.clear();

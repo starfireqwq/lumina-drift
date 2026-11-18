@@ -54,7 +54,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
   const { brush, liquify, shapes, selection, fill, vector, transform } = tools;
   const {
     currentTool, activeLayer, layers, user, brushProps, canEditPixels,
-    viewportRef, layerManagerRef, strokePipelineRef, selectionEngineRef, shapeGraphicRef, activeLayerRef, warn,
+    viewportRef, layerManagerRef, strokePipelineRef, selectionEngineRef, shapeGraphicRef, activeLayerRef, warn, requestRender,
   } = ctx;
   const {
     containerRef, filterModalOpenRef, radialMenuOpenRef, resizeModalOpenRef, updateBrushCursor, hideBrushCursor, openRadialMenu, emitCursor,
@@ -187,6 +187,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
         RulerManager.getInstance().onStrokeEnd();
         selectionEngineRef.current?.clearDraft();
         shapeGraphicRef.current?.clear();
+        requestRender();
         vector.cancelDrag();
         shapes.cancel();
         liquify.cancel();

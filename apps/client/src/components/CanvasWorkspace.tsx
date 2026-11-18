@@ -1,6 +1,23 @@
 import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { PluginAction } from '../plugins/pluginApi';
-import { Application, Container, type Filter, Graphics, MaskFilter, Rectangle, RenderTexture, Sprite, Texture, UPDATE_PRIORITY } from 'pixi.js';
+import { Application, Container, type Filter, Graphics, MaskFilter, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
+
+function parseWorkspaceBgColor(cssColor: string, fallback = 0x0d0e12): number {
+  const s = cssColor.trim();
+  if (!s) return fallback;
+  if (s.startsWith('#')) {
+    const hex = s.slice(1);
+    const full = hex.length === 3 ? hex.split('').map((c) => c + c).join('') : hex.slice(0, 6);
+    const parsed = Number.parseInt(full, 16);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+  const nums = s.match(/[\d.]+/g);
+  if (nums && nums.length >= 3) {
+    const [r, g, b] = nums.slice(0, 3).map((v) => Math.max(0, Math.min(255, Math.round(Number(v)))));
+    if (Number.isFinite(r) && Number.isFinite(g) && Number.isFinite(b)) return (r << 16) | (g << 8) | b;
+  }
+  return fallback;
+}
 import {
   AtelierBrushPreset,
   MIN_BRUSH_SPACING,
@@ -129,14 +146,35 @@ const isTypingTarget = (target: EventTarget | null) => {
   return Boolean(input && !['range', 'checkbox', 'radio', 'button', 'color', 'submit', 'reset', 'file'].includes(input.type));
 };
 
-const ViewportConsumer: React.FC<{
+function ViewportConsumer<T = ViewportState>({
+  subscribe,
+  getSnapshot,
+  children,
+}: {
+  subscribe: (cb: () => void) => () => void;
+  getSnapshot: () => T;
+  children: (vp: T) => React.ReactNode;
+}) {
+  const vp = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  return <>{children(vp)}</>;
+}
+
+const noopViewportSubscribe = () => () => {};
+
+function ConditionalViewportConsumer({
+  active,
+  subscribe,
+  getSnapshot,
+  children,
+}: {
+  active: boolean;
   subscribe: (cb: () => void) => () => void;
   getSnapshot: () => ViewportState;
   children: (vp: ViewportState) => React.ReactNode;
-}> = ({ subscribe, getSnapshot, children }) => {
-  const vp = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}) {
+  const vp = useSyncExternalStore(active ? subscribe : noopViewportSubscribe, getSnapshot, getSnapshot);
   return <>{children(vp)}</>;
-};
+}
 
 // Opened rarely and heavy (WebGL filter editors, brush packs, timeline, modals): loaded on first use
 const BrushToolset = lazy(() => import('./BrushToolset').then((m) => ({ default: m.BrushToolset })));
@@ -358,6 +396,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const lastReplayedCanvasIdRef = useRef<string | null>(null);
   const [isEngineReady, setIsEngineReady] = useState<boolean>(false);
   const [isCanvasPresented, setIsCanvasPresented] = useState(false);
+  const requestRenderRef = useRef<() => void>(() => pixiAppRef.current?.render());
   const presentCanvas = useCallback(() => {
     pixiAppRef.current?.render();
     setIsCanvasPresented(true);
@@ -717,15 +756,37 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     rotation: 0,
     mirrorX: false,
   });
+  const viewportZoomStateRef = useRef<ViewportState>({
+    zoom: 1.0,
+    panX: 0,
+    panY: 0,
+    rotation: 0,
+    mirrorX: false,
+  });
   const viewportSubsRef = useRef(new Set<() => void>());
+  const viewportZoomSubsRef = useRef(new Set<() => void>());
   const subscribeViewport = useCallback((cb: () => void) => {
     viewportSubsRef.current.add(cb);
     return () => { viewportSubsRef.current.delete(cb); };
   }, []);
+  const subscribeViewportZoom = useCallback((cb: () => void) => {
+    viewportZoomSubsRef.current.add(cb);
+    return () => { viewportZoomSubsRef.current.delete(cb); };
+  }, []);
   const getViewportSnapshot = useCallback(() => viewportStateRef.current, []);
+  const getViewportZoomSnapshot = useCallback(() => viewportZoomStateRef.current, []);
   const notifyViewportSubs = useCallback((next: ViewportState) => {
     viewportStateRef.current = next;
     viewportSubsRef.current.forEach((cb) => cb());
+    const prevZ = viewportZoomStateRef.current;
+    if (
+      Math.abs(prevZ.zoom - next.zoom) > 1e-6 ||
+      Math.abs(prevZ.rotation - next.rotation) > 1e-6 ||
+      prevZ.mirrorX !== next.mirrorX
+    ) {
+      viewportZoomStateRef.current = next;
+      viewportZoomSubsRef.current.forEach((cb) => cb());
+    }
   }, []);
   const shortcutActionsRef = useRef({
     createLayer: onCreateLayer,
@@ -809,6 +870,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     canEditPixels,
     warn,
     selectTool: (tool) => handleSelectTool(tool),
+    requestRender: () => requestRenderRef.current(),
   };
   const liquify = useLiquifyTool(toolCtx);
   const shapes = useShapeTools(toolCtx);
@@ -1070,6 +1132,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
     let destroyed = false;
     let resizeObserver: ResizeObserver | null = null;
+    let themeObserver: MutationObserver | null = null;
+    let renderRaf = 0;
     let handleKeyDown: ((ev: KeyboardEvent) => void) | null = null;
     let handleKeyUp: ((ev: KeyboardEvent) => void) | null = null;
     let vpSyncRaf = 0;
@@ -1090,14 +1154,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       const rect = container.getBoundingClientRect();
       let viewWidth = Math.max(1, rect.width);
       let viewHeight = Math.max(1, rect.height);
+      const initialBgColor = parseWorkspaceBgColor(getComputedStyle(container).getPropertyValue('--workspace-bg'));
 
       try {
         await app.init({
           width: viewWidth,
           height: viewHeight,
           preference: 'webgl',
-          backgroundColor: '#0d0e12',
-          backgroundAlpha: 0,
+          backgroundColor: initialBgColor,
+          backgroundAlpha: 1,
           // 覆蓋／柔光／加亮… are blend filters, and on WebGL they silently fall back to normal without
           // the back buffer (Pixi turns screen MSAA off with it; layers are render textures anyway)
           useBackBuffer: true,
@@ -1115,8 +1180,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           width: viewWidth,
           height: viewHeight,
           preference: 'webgl',
-          backgroundColor: '#0d0e12',
-          backgroundAlpha: 0,
+          backgroundColor: initialBgColor,
+          backgroundAlpha: 1,
           useBackBuffer: true,
           resolution: 1,
           autoDensity: true,
@@ -1130,6 +1195,25 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         return;
       }
 
+      // Render WebGL on demand so idle time, menus, and window dragging use 0% GPU/CPU.
+      app.ticker.autoStart = false;
+      app.ticker.stop();
+
+      let pipelineForRender: StrokePipeline | null = null;
+      let syncViewportPending: (() => void) | null = null;
+      const scheduleRender = () => {
+        if (destroyed || renderRaf) return;
+        renderRaf = requestAnimationFrame(() => {
+          renderRaf = 0;
+          if (destroyed) return;
+          syncViewportPending?.();
+          pipelineForRender?.renderFrame();
+          app.render();
+          if (pipelineForRender?.hasPendingWork()) scheduleRender();
+        });
+      };
+      requestRenderRef.current = scheduleRender;
+
       const currentRect = container.getBoundingClientRect();
       viewWidth = Math.max(1, currentRect.width);
       viewHeight = Math.max(1, currentRect.height);
@@ -1142,6 +1226,19 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       app.canvas.style.pointerEvents = 'none';
 
       pixiAppRef.current = app;
+
+      let currentBgColor = initialBgColor;
+      const syncWorkspaceBackground = () => {
+        if (destroyed) return;
+        const nextBg = parseWorkspaceBgColor(getComputedStyle(container).getPropertyValue('--workspace-bg'));
+        if (currentBgColor !== nextBg) {
+          currentBgColor = nextBg;
+          app.renderer.background.color = nextBg;
+          scheduleRender();
+        }
+      };
+      themeObserver = new MutationObserver(syncWorkspaceBackground);
+      themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
 
       // 1. Viewport
       const viewport = new CanvasViewport(canvas.width, canvas.height);
@@ -1168,14 +1265,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         layerManager.setViewportBounds(computeViewportBounds(viewport, w, h));
       };
       let pendingVpState: ViewportState | null = null;
+      let vpBoundsDirty = false;
       let lastDispatchedZoom = viewport.getState().zoom;
-      const flushViewportSync = () => {
-        vpSyncRaf = 0;
-        if (destroyed || !pendingVpState) return;
-        const st = pendingVpState;
-        pendingVpState = null;
-        notifyViewportSubs(st);
+      const flushViewportBoundsAndZoom = () => {
+        if (destroyed || !vpBoundsDirty) return;
+        vpBoundsDirty = false;
         syncViewportBounds();
+        const st = pendingVpState ?? viewport.getState();
         if (Math.abs(st.zoom - lastDispatchedZoom) > 1e-6) {
           lastDispatchedZoom = st.zoom;
           layerManager.setPixelated(
@@ -1187,12 +1283,25 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           }
         }
       };
+      syncViewportPending = flushViewportBoundsAndZoom;
+      const flushViewportSync = () => {
+        vpSyncRaf = 0;
+        if (destroyed || !pendingVpState) return;
+        const st = pendingVpState;
+        pendingVpState = null;
+        flushViewportBoundsAndZoom();
+        notifyViewportSubs(st);
+      };
       viewport.setOnChange((st) => {
+        layerManager.markInteractive();
         pendingVpState = st;
+        vpBoundsDirty = true;
+        scheduleRender();
         if (!vpSyncRaf) vpSyncRaf = requestAnimationFrame(flushViewportSync);
       });
       notifyViewportSubs(viewport.getState());
       syncViewportBounds();
+      layerManager.onStageChange = scheduleRender;
       layerManager.setActiveLayer(activeLayerRef.current?.id ?? null);
       // Thumbnails of parked layers are decoded when the page is idle
       layerManager.onThumbnail = (layerId, url) => {
@@ -1203,6 +1312,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
       // 3. Selection Engine Overlay
       const selectionEngine = new SelectionEngine(canvas.width, canvas.height);
+      selectionEngine.setOnStageChange(scheduleRender);
       selectionEngineRef.current = selectionEngine;
       viewport.canvasContainer.addChild(selectionEngine.rootContainer);
 
@@ -1274,9 +1384,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         onCommitStroke: (strokeData, inkTiles) => brushCommitRef.current(strokeData, inkTiles),
       });
       strokePipelineRef.current = pipeline;
+      pipelineForRender = pipeline;
+      pipeline.setOnNeedsRender(scheduleRender);
       pipeline.setActiveLayer(activeLayerRef.current?.id || null);
-      // Stamp pending points before Pixi presents this frame.
-      app.ticker.add(pipeline.renderFrame, pipeline, UPDATE_PRIORITY.HIGH);
+      scheduleRender();
 
       // Keep the point at the center in place when a dock changes the workspace size.
       resizeObserver = new ResizeObserver(([entry]) => {
@@ -1654,6 +1765,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       isReplayingRef.current = false;
       replayedSeqRef.current = 0;
       if (vpSyncRaf) cancelAnimationFrame(vpSyncRaf);
+      if (renderRaf) cancelAnimationFrame(renderRaf);
+      renderRaf = 0;
+      if (themeObserver) themeObserver.disconnect();
+      requestRenderRef.current = () => pixiAppRef.current?.render();
       if (resizeObserver) resizeObserver.disconnect();
       window.removeEventListener('resize', invalidateContainerRect);
       window.removeEventListener('scroll', invalidateContainerRect, true);
@@ -1969,6 +2084,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       });
       sprite.destroy();
       texture.destroy(true);
+      requestRenderRef.current();
     });
     lm.syncPingPong(targetLayerId);
 
@@ -2001,6 +2117,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (!preview.item.sprite.destroyed) preview.item.sprite.texture = preview.item.renderTexture;
     preview.texture.destroy(true);
     filterPreviewRef.current = null;
+    requestRenderRef.current();
   };
 
   const cancelFilterWork = () => {
@@ -2085,6 +2202,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         engine.writeRegion(texture, 0, 0, width, height, pixels);
         void item.renderTexture; // resident while previewing: its one sprite shows the preview texture
         item.sprite.texture = texture;
+        requestRenderRef.current();
         return true;
       }
 
@@ -3086,6 +3204,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       // Crucial: keep pingPongTexture and thumbnail strictly in sync after remote op is applied!
       layerManagerRef.current.refreshPingPong(latestBroadcastOp.layerId);
       refreshLayerThumbnail(latestBroadcastOp.layerId, true);
+      requestRenderRef.current();
     }
   };
 
@@ -3713,6 +3832,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       renderer.render({ container: holder, target: belowItem.renderTexture, clear: false });
       filters.forEach((f) => f.destroy());
       holder.destroy({ children: true });
+      requestRenderRef.current();
     }
     });
     lm.syncPingPong(below.id); // queued after the reads: the next edit's baseline
@@ -4335,9 +4455,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   if (!canvas) {
     return (
       <div className="flex-1 flex flex-col items-center justify-center bg-neutral-950 p-6 text-center select-none animate-in fade-in zoom-in-95 duration-200">
-        <div className="w-16 h-16 rounded-3xl bg-gradient-to-tr from-indigo-600 via-indigo-500 to-cyan-400 flex items-center justify-center shadow-2xl shadow-indigo-500/30 text-3xl mb-4 animate-bounce">
-          🎨
-        </div>
+        <img
+          src={`${(import.meta as any).env?.BASE_URL || './'}logo.svg`}
+          alt=""
+          aria-hidden="true"
+          className="w-16 h-16 shrink-0 rounded-2xl shadow-2xl shadow-indigo-500/30 mb-4"
+        />
         <h2 className="text-lg sm:text-xl font-black text-white tracking-wide">
           歡迎來到 Lumina Drift 流光
         </h2>
@@ -4726,7 +4849,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               {/* Dedicated Pixi Canvas Host Layer (isolated from React DOM reconciler) */}
               <div ref={canvasMountRef} data-canvas-presented={isCanvasPresented}
                 className="atelier-canvas-surface pointer-events-none absolute inset-0 z-0 select-none" />
-              <ViewportConsumer subscribe={subscribeViewport} getSnapshot={getViewportSnapshot}>
+              <ViewportConsumer subscribe={subscribeViewportZoom} getSnapshot={getViewportZoomSnapshot}>
                 {(viewportState) => (
                   <>
                     {showBrushCursor && (
@@ -4742,9 +4865,24 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                         <span style={{ color: '#fff' }} className="absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded bg-black/80 px-1.5 py-0.5 text-xs">{brushDiameter} px</span>
                       </div>
                     )}
+                  </>
+                )}
+              </ViewportConsumer>
 
-                    <RemoteCursorsLayer viewport={viewportRef.current} viewportState={viewportState} selfId={user?.id} />
+              <RemoteCursorsLayer
+                viewport={viewportRef.current}
+                subscribeViewport={subscribeViewport}
+                getViewportSnapshot={getViewportSnapshot}
+                selfId={user?.id}
+              />
 
+              <ConditionalViewportConsumer
+                active={Boolean(textEdit || (isTransformActive && distortMode === 'transform') || isResizeModalOpen)}
+                subscribe={subscribeViewport}
+                getSnapshot={getViewportSnapshot}
+              >
+                {(viewportState) => (
+                  <>
                     {textEdit && (
                       <Suspense fallback={null}>
                         <TextCanvasEditor meta={textEdit.meta} isNew={!textEdit.layerId} viewport={viewportRef.current} viewportState={viewportState}
@@ -4753,16 +4891,6 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                           onCancel={endTextEdit} />
                       </Suspense>
                     )}
-
-                    <CanvasStickersOverlay
-                      stickers={stickers}
-                      currentUserId={user?.id}
-                      zoom={viewportState.zoom}
-                      pan={{ x: viewportState.panX, y: viewportState.panY }}
-                      onAddSticker={addSticker}
-                      onUpdateSticker={updateSticker}
-                      onRemoveSticker={removeSticker}
-                    />
 
                     {isTransformActive && distortMode === 'transform' && (
                       <Suspense fallback={null}>
@@ -4800,17 +4928,32 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                         />
                       </Suspense>
                     )}
-
-                    <RulerOverlay
-                      canvasWidth={canvas.width}
-                      canvasHeight={canvas.height}
-                      canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
-                      screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
-                      viewportZoom={viewportState.zoom}
-                    />
                   </>
                 )}
-              </ViewportConsumer>
+              </ConditionalViewportConsumer>
+
+              <ConditionalViewportConsumer active={stickers.length > 0} subscribe={subscribeViewport} getSnapshot={getViewportSnapshot}>
+                {(viewportState) => (
+                  <CanvasStickersOverlay
+                    stickers={stickers}
+                    currentUserId={user?.id}
+                    zoom={viewportState.zoom}
+                    pan={{ x: viewportState.panX, y: viewportState.panY }}
+                    onAddSticker={addSticker}
+                    onUpdateSticker={updateSticker}
+                    onRemoveSticker={removeSticker}
+                  />
+                )}
+              </ConditionalViewportConsumer>
+
+              <RulerOverlay
+                canvasWidth={canvas.width}
+                canvasHeight={canvas.height}
+                canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
+                screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
+                subscribeViewport={subscribeViewport}
+                getViewportSnapshot={getViewportSnapshot}
+              />
 
               {isMeshWarpActive && (
                 <Suspense fallback={null}>
@@ -4831,41 +4974,52 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               )}
             </div>
 
-            <ViewportConsumer subscribe={subscribeViewport} getSnapshot={getViewportSnapshot}>
+            <ConditionalViewportConsumer
+              active={currentTool === 'comic_panel' || currentTool === 'comic_balloon'}
+              subscribe={subscribeViewport}
+              getSnapshot={getViewportSnapshot}
+            >
               {(viewportState) => (
-                <>
-                  <Suspense fallback={null}>
-                    <ComicStudioOverlay
-                      key={canvas.id}
-                      currentTool={currentTool}
-                      canvasWidth={canvas.width}
-                      canvasHeight={canvas.height}
-                      canvasToScreen={(cx, cy) => viewportRef.current?.canvasToScreen(cx, cy) ?? { x: cx, y: cy }}
-                      getCanvasViewCenter={() => {
-                        const center = getViewCenter();
-                        return center && viewportRef.current
-                          ? viewportRef.current.screenToCanvas(center.x, center.y)
-                          : { x: canvas.width / 2, y: canvas.height / 2 };
-                      }}
-                      viewportZoom={viewportState.zoom}
-                      onBakeToLayer={handleBakeComicToLayer}
-                      onClose={() => handleSelectTool('brush')}
-                    />
-                  </Suspense>
-                  <VectorOverlay
-                    viewport={viewportRef.current}
-                    viewportState={viewportState}
-                    strokes={activeLayer ? (vectorEngineRef.current?.getStrokes(activeLayer.id) || vectorStrokesList) : []}
+                <Suspense fallback={null}>
+                  <ComicStudioOverlay
+                    key={canvas.id}
                     currentTool={currentTool}
-                    isVectorLayer={activeLayer?.layerType === 'vector' || currentTool.startsWith('vector')}
-                    selectedStrokeId={vectorSel?.strokeId ?? null}
-                    selectedAnchorIndex={vectorSel?.index ?? -1}
-                    previewStroke={vectorPreview ?? penPreview}
-                    penPoints={currentTool === 'vector_bezier' ? penPoints : []}
+                    canvasWidth={canvas.width}
+                    canvasHeight={canvas.height}
+                    canvasToScreen={(cx, cy) => viewportRef.current?.canvasToScreen(cx, cy) ?? { x: cx, y: cy }}
+                    getCanvasViewCenter={() => {
+                      const center = getViewCenter();
+                      return center && viewportRef.current
+                        ? viewportRef.current.screenToCanvas(center.x, center.y)
+                        : { x: canvas.width / 2, y: canvas.height / 2 };
+                    }}
+                    viewportZoom={viewportState.zoom}
+                    onBakeToLayer={handleBakeComicToLayer}
+                    onClose={() => handleSelectTool('brush')}
                   />
-                </>
+                </Suspense>
               )}
-            </ViewportConsumer>
+            </ConditionalViewportConsumer>
+
+            <ConditionalViewportConsumer
+              active={Boolean(activeLayer?.layerType === 'vector' || currentTool.startsWith('vector'))}
+              subscribe={subscribeViewport}
+              getSnapshot={getViewportSnapshot}
+            >
+              {(viewportState) => (
+                <VectorOverlay
+                  viewport={viewportRef.current}
+                  viewportState={viewportState}
+                  strokes={activeLayer ? (vectorEngineRef.current?.getStrokes(activeLayer.id) || vectorStrokesList) : []}
+                  currentTool={currentTool}
+                  isVectorLayer={activeLayer?.layerType === 'vector' || currentTool.startsWith('vector')}
+                  selectedStrokeId={vectorSel?.strokeId ?? null}
+                  selectedAnchorIndex={vectorSel?.index ?? -1}
+                  previewStroke={vectorPreview ?? penPreview}
+                  penPoints={currentTool === 'vector_bezier' ? penPoints : []}
+                />
+              )}
+            </ConditionalViewportConsumer>
             {engineError && (
               <div role="alert" className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-neutral-950 text-sm text-neutral-200">
                 <p>無法載入畫布。</p>
@@ -4943,7 +5097,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             </Suspense>
           )}
 
-          <ViewportConsumer subscribe={subscribeViewport} getSnapshot={getViewportSnapshot}>
+          <ViewportConsumer subscribe={subscribeViewportZoom} getSnapshot={getViewportZoomSnapshot}>
             {(viewportState) => (
               <ViewportToolbar
                 viewportState={viewportState}

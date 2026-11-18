@@ -54,4 +54,5 @@ export interface ToolContext {
   /** Short notice over the canvas (permission problems, results) */
   warn: (message: string, ms?: number) => void;
   selectTool: (tool: ToolType) => void;
+  requestRender: () => void;
 }

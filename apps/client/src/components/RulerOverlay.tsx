@@ -1,5 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { RulerManager, RulerState } from '../engine/RulerManager';
+import type { ViewportState } from '../engine/Viewport';
 import { Compass, Minus, Move, Plus, RotateCw, Trash2, Sliders, X } from 'lucide-react';
 
 interface RulerOverlayProps {
@@ -7,8 +8,13 @@ interface RulerOverlayProps {
   canvasHeight: number;
   canvasToScreen: (cx: number, cy: number) => { x: number; y: number };
   screenToCanvas: (sx: number, sy: number) => { x: number; y: number };
-  viewportZoom: number;
+  viewportZoom?: number;
+  subscribeViewport?: (cb: () => void) => () => void;
+  getViewportSnapshot?: () => ViewportState;
 }
+
+const DEFAULT_VP: ViewportState = { zoom: 1, panX: 0, panY: 0, rotation: 0, mirrorX: false };
+const getDefaultVp = () => DEFAULT_VP;
 
 type DragTarget =
   | { type: 'symmetry_center' }
@@ -24,7 +30,9 @@ export const RulerOverlay: React.FC<RulerOverlayProps> = ({
   canvasHeight,
   canvasToScreen,
   screenToCanvas,
-  viewportZoom,
+  viewportZoom: propZoom,
+  subscribeViewport,
+  getViewportSnapshot,
 }) => {
   const rulerMgr = RulerManager.getInstance();
   const [state, setState] = useState<RulerState>(rulerMgr.state);
@@ -33,6 +41,14 @@ export const RulerOverlay: React.FC<RulerOverlayProps> = ({
   useEffect(() => {
     return rulerMgr.subscribe((newState) => setState({ ...newState }));
   }, []);
+
+  const noopSub = useCallback(() => () => {}, []);
+  const snap = useSyncExternalStore(
+    state.mode !== 'off' && subscribeViewport ? subscribeViewport : noopSub,
+    getViewportSnapshot ?? getDefaultVp,
+    getViewportSnapshot ?? getDefaultVp
+  );
+  const viewportZoom = getViewportSnapshot ? snap.zoom : (propZoom ?? 1);
 
   if (state.mode === 'off') return null;
 

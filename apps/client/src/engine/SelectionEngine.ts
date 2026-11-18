@@ -39,6 +39,7 @@ export class SelectionEngine {
   private antOffset: number = 0;
   private maskEdges: Array<[number, number, number, number]> = [];
   private lastAntFrame = 0;
+  private onStageChange: (() => void) | null = null;
 
   private canvasWidth: number = 2048;
   private canvasHeight: number = 2048;
@@ -53,12 +54,15 @@ export class SelectionEngine {
     this.selectionOverlaySprite.visible = false;
     this.marchingAntsGraphic = new Graphics();
     this.maskGraphic = new Graphics();
+    this.maskGraphic.containsPoint = (point: { x: number; y: number }) => this.isPointSelected(point.x, point.y);
 
     this.rootContainer.addChild(this.selectionOverlaySprite);
     this.rootContainer.addChild(this.selectionGraphic);
     this.rootContainer.addChild(this.marchingAntsGraphic);
+  }
 
-    this.startAntsAnimation();
+  public setOnStageChange(cb: (() => void) | null) {
+    this.onStageChange = cb;
   }
 
   public setCanvasDimensions(width: number, height: number) {
@@ -80,6 +84,15 @@ export class SelectionEngine {
 
   public hasSelection(): boolean {
     return this.activeMaskData !== null && this.activeMaskData.activePixelCount > 0;
+  }
+
+  public isPointSelected(x: number, y: number): boolean {
+    const mask = this.activeMaskData;
+    if (!mask || !mask.activePixelCount) return false;
+    const px = Math.floor(x);
+    const py = Math.floor(y);
+    if (px < 0 || py < 0 || px >= mask.width || py >= mask.height) return false;
+    return mask.data[py * mask.width + px] > 0;
   }
 
   public getMaskGraphic(): Graphics | null {
@@ -530,6 +543,7 @@ export class SelectionEngine {
       this.selectionGraphic.circle(cx, cy, r).fill({ color: this.brushAdds ? 0x3b82f6 : 0xef4444, alpha: 0.18 });
     }
     this.brushLast = { x, y };
+    this.onStageChange?.();
   }
 
   public isBrushing() {
@@ -560,6 +574,8 @@ export class SelectionEngine {
       this.selectionOverlaySprite.texture = Texture.EMPTY;
     }
     this.selectionOverlaySprite.visible = false;
+    this.syncAntsAnimation();
+    this.onStageChange?.();
   }
 
   public getCurrentPoints(): Array<{ x: number; y: number }> {
@@ -590,7 +606,10 @@ export class SelectionEngine {
 
   private renderDraftLasso() {
     this.selectionGraphic.clear();
-    if (this.currentPoints.length < 2) return;
+    if (this.currentPoints.length < 2) {
+      this.onStageChange?.();
+      return;
+    }
 
     // A dark halo under a light line: readable on light and dark paint alike, 1.5 screen px wide
     const w = 1.5 / this.viewScale;
@@ -602,6 +621,7 @@ export class SelectionEngine {
       }
       this.selectionGraphic.stroke({ width, color, alpha, join: 'round', cap: 'round' });
     }
+    this.onStageChange?.();
   }
 
   public updateMaskGraphic() {
@@ -709,11 +729,26 @@ export class SelectionEngine {
   private renderActiveSelection() {
     this.selectionGraphic.clear();
     this.updateMaskGraphic();
+    this.renderMarchingAnts();
+    this.syncAntsAnimation();
+    this.onStageChange?.();
   }
 
-  private startAntsAnimation() {
+  private syncAntsAnimation() {
+    if (!this.maskEdges.length) {
+      if (this.animFrameId !== null) {
+        cancelAnimationFrame(this.animFrameId);
+        this.animFrameId = null;
+      }
+      return;
+    }
+    if (this.animFrameId !== null) return;
     const animate = (time: number) => {
-      if (this.maskEdges.length && time - this.lastAntFrame >= 95) {
+      if (!this.maskEdges.length) {
+        this.animFrameId = null;
+        return;
+      }
+      if (time - this.lastAntFrame >= 95) {
         this.antOffset = (this.antOffset + 1) % 12;
         this.lastAntFrame = time;
         this.renderMarchingAnts();
@@ -725,7 +760,10 @@ export class SelectionEngine {
 
   private renderMarchingAnts() {
     this.marchingAntsGraphic.clear();
-    if (!this.maskEdges.length) return;
+    if (!this.maskEdges.length) {
+      this.onStageChange?.();
+      return;
+    }
     // 1 screen px wide, dashes 6 screen px long, whatever the zoom
     const s = this.viewScale;
     const dashCanvas = 6 / s;
@@ -756,6 +794,7 @@ export class SelectionEngine {
       }
       this.marchingAntsGraphic.stroke({ width: 1 / s, color: color ? 0xffffff : 0x111111 });
     }
+    this.onStageChange?.();
   }
 
   public destroy() {

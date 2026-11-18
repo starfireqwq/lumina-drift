@@ -282,6 +282,7 @@ export function useTransformTool(ctx: ToolContext) {
       renderer.render({ container: spr, target: item.renderTexture, clear: false });
       spr.destroy();
       tex.destroy(true);
+      ctx.requestRender();
     }, 'before');
     lm.syncPingPong(layerId); // queued after the reads: the next edit's baseline
 
@@ -375,6 +376,7 @@ export function useTransformTool(ctx: ToolContext) {
     );
     const diff = diffTilesAsync(lm, layerId, coords, () => {
       te.stampCanvas(item.renderTexture, warpedCanvas, Math.round(bounds.minX), Math.round(bounds.minY));
+      ctx.requestRender();
     }, 'before');
     lm.syncPingPong(layerId); // queued after the reads: the next edit's baseline
 

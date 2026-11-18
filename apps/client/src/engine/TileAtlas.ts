@@ -148,9 +148,9 @@ export class TileAtlas {
 
   /** write() for premultiplied RGBA bytes; null clears to transparent */
   writePixels(slot: Slot, px: Uint8Array | null, ox: number, oy: number, w: number, h: number, tileW = TS, tileH = TS) {
-    // Fast zero-alloc path for full 256×256 tile uploads: packs 1px clamped gutter on CPU
-    // and streams directly via gl.texSubImage2D when WebGL is active (no FBO switch or shader draw).
-    if (ox === 0 && oy === 0 && w === TS && h === TS && tileW === TS && tileH === TS) {
+    // Fast zero-alloc path for full-tile uploads (including clamped edge/corner tiles <= TS):
+    // packs 1px clamped gutter on CPU and streams directly via gl.texSubImage2D (no FBO switch or shader draw).
+    if (ox === 0 && oy === 0 && w === tileW && h === tileH && w > 0 && h > 0 && w <= TS && h <= TS) {
       const page = this.pages[slot.page];
       if (page) {
         const gl = (this.renderer as any).gl as WebGLRenderingContext | undefined;
@@ -161,13 +161,16 @@ export class TileAtlas {
           _premultiplyAlpha?: boolean;
         } | undefined;
         if (gl && texSys?.bindSource) {
+          const dstW = w + 2;
+          const dstH = h + 2;
           let bytes: Uint8Array;
           if (!px) {
-            bytes = this.zeroGutterBytes ??= new Uint8Array(PITCH * PITCH * 4);
+            const fullZero = (this.zeroGutterBytes ??= new Uint8Array(PITCH * PITCH * 4));
+            bytes = w === TS && h === TS ? fullZero : fullZero.subarray(0, dstW * dstH * 4);
           } else {
             this.ensurePaddedBuffers();
-            this.packFullWithGutter(px);
-            bytes = this.padded!;
+            this.packRectWithGutter(px, w, h);
+            bytes = w === TS && h === TS ? this.padded! : this.padded!.subarray(0, dstW * dstH * 4);
           }
           texSys.bindSource(page.rt.source, 0);
           // bindSource does nothing when Pixi believes the page already sits on unit 0, yet the
@@ -184,20 +187,22 @@ export class TileAtlas {
             gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
             texSys._premultiplyAlpha = false;
           }
-          gl.texSubImage2D(gl.TEXTURE_2D, 0, slot.x - 1, slot.y - 1, PITCH, PITCH, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, slot.x - 1, slot.y - 1, dstW, dstH, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
           return;
         }
-        this.ensureUploadRig();
-        if (!px) {
-          this.uploadSprite!.texture = this.zeroGutterTexture();
-        } else {
-          this.packFullWithGutter(px);
-          this.paddedSource!.update();
-          this.uploadSprite!.texture = this.paddedTex!;
+        if (w === TS && h === TS) {
+          this.ensureUploadRig();
+          if (!px) {
+            this.uploadSprite!.texture = this.zeroGutterTexture();
+          } else {
+            this.packRectWithGutter(px, TS, TS);
+            this.paddedSource!.update();
+            this.uploadSprite!.texture = this.paddedTex!;
+          }
+          this.uploadSprite!.position.set(slot.x - 1, slot.y - 1);
+          this.renderer.render({ container: this.uploadHolder!, target: page.rt, clear: false });
+          return;
         }
-        this.uploadSprite!.position.set(slot.x - 1, slot.y - 1);
-        this.renderer.render({ container: this.uploadHolder!, target: page.rt, clear: false });
-        return;
       }
     }
     if (!px) {
@@ -227,22 +232,23 @@ export class TileAtlas {
     this.uploadHolder.addChild(this.uploadSprite);
   }
 
-  private packFullWithGutter(px: Uint8Array) {
+  private packRectWithGutter(px: Uint8Array, w: number, h: number) {
+    const dstW = w + 2;
     const dst32 = this.padded32!;
     if ((px.byteOffset & 3) === 0) {
-      const src32 = new Uint32Array(px.buffer, px.byteOffset, TS * TS);
-      for (let y = 0; y < TS; y++) {
-        const s = y * TS;
-        const d = (y + 1) * PITCH;
+      const src32 = new Uint32Array(px.buffer, px.byteOffset, w * h);
+      for (let y = 0; y < h; y++) {
+        const s = y * w;
+        const d = (y + 1) * dstW;
         dst32[d] = src32[s];
-        dst32.set(src32.subarray(s, s + TS), d + 1);
-        dst32[d + TS + 1] = src32[s + TS - 1];
+        dst32.set(src32.subarray(s, s + w), d + 1);
+        dst32[d + w + 1] = src32[s + w - 1];
       }
     } else {
       const dst = this.padded!;
-      const rowBytes = TS * 4;
-      const pitchBytes = PITCH * 4;
-      for (let y = 0; y < TS; y++) {
+      const rowBytes = w * 4;
+      const pitchBytes = dstW * 4;
+      for (let y = 0; y < h; y++) {
         const s = y * rowBytes;
         const d = (y + 1) * pitchBytes;
         dst.set(px.subarray(s, s + 4), d);
@@ -250,8 +256,8 @@ export class TileAtlas {
         dst.set(px.subarray(s + rowBytes - 4, s + rowBytes), d + 4 + rowBytes);
       }
     }
-    dst32.set(dst32.subarray(PITCH, PITCH * 2), 0);
-    dst32.set(dst32.subarray(TS * PITCH, (TS + 1) * PITCH), (TS + 1) * PITCH);
+    dst32.set(dst32.subarray(dstW, dstW * 2), 0);
+    dst32.set(dst32.subarray(h * dstW, (h + 1) * dstW), (h + 1) * dstW);
   }
 
   private zeroGutterTexture(): Texture {

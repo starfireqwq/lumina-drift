@@ -367,6 +367,7 @@ export function useVectorTools(ctx: ToolContext) {
       for (let i = 1; i < traj.length; i++) g.lineTo(traj[i].x, traj[i].y);
     }
     g.stroke({ width: Math.max(1, brushProps.size || 4), color: colorNum, alpha: Math.max(0.1, brushProps.opacity || 1), cap: 'round', join: 'round' });
+    ctx.requestRender();
   };
 
   /** One step of the active drag; false when no vector drag is active. */
@@ -384,11 +385,13 @@ export function useVectorTools(ctx: ToolContext) {
       if (last) {
         const res = engine.pinchStrokes(item.renderTexture, layer.id, local, { x: local.x - last.x, y: local.y - last.y }, brushProps.size);
         commitVectorEditResult(layer.id, res, '向量修線捏線');
+        ctx.requestRender();
       }
       lastVectorPointerPosRef.current = { x: local.x, y: local.y };
     } else if (tool === 'vector_width') {
       const delta = vectorWidthMode === 'thicken' ? 1.5 : -1.5;
       commitVectorEditResult(layer.id, engine.adjustStrokesWidth(item.renderTexture, layer.id, local, brushProps.size, delta), '向量線寬微調');
+      ctx.requestRender();
     } else {
       // Vector pen: snapped to the active ruler (parallel, perspective, concentric)
       const pt = RulerManager.getInstance().snapPoint(local).point;
@@ -455,6 +458,7 @@ export function useVectorTools(ctx: ToolContext) {
     ctx.shapeGraphicRef.current?.clear();
     currentVectorPointsRef.current = [];
     lastVectorPointerPosRef.current = null;
+    ctx.requestRender();
     return true;
   };
 

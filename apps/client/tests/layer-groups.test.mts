@@ -23,7 +23,7 @@ test('duplicate layer responses cannot create duplicate Pixi children or folder 
     manager.syncLayers([raster, folder, child, child]);
     assert.equal(manager.layersContainer.children.length, 2);
     assert.equal(manager.getLayerItem(folder.id), undefined);
-    assert.equal(manager.getLayerItem(child.id)?.sprite.alpha, 0.5);
+    assert.equal(manager.getLayerItem(child.id)?.display.alpha, 0.5);
   } finally {
     manager.destroy();
   }

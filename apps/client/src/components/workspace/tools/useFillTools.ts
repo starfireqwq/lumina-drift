@@ -391,6 +391,7 @@ export function useFillTools(ctx: ToolContext) {
         const target = lm.drawTarget(layerId);
         if (target instanceof RenderTexture) pixiAppRef.current?.renderer.render({ container: holder, target, clear: false });
         else target?.draw(holder, minX, minY, patchW, patchH);
+        ctx.requestRender();
         holder.destroy({ children: true });
         patchTexture?.destroy(true);
       }, 'before');

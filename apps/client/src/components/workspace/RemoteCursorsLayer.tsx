@@ -21,9 +21,11 @@ interface SpeechBubble {
  */
 export const RemoteCursorsLayer: React.FC<{
   viewport: CanvasViewport | null;
-  viewportState: ViewportState; // re-render on zoom / pan
+  viewportState?: ViewportState;
+  subscribeViewport?: (cb: () => void) => () => void;
+  getViewportSnapshot?: () => ViewportState;
   selfId?: string;
-}> = ({ viewport, viewportState, selfId }) => {
+}> = ({ viewport, viewportState, subscribeViewport, getViewportSnapshot, selfId }) => {
   const { getRemoteCursors, subscribeRemoteCursors, chatMessages, members } = useSocket();
   // Cursor packets carry no avatar (a data URL 30 times a second); the member list has it
   const avatarOf = new Map(members.map((m) => [m.userId, m.avatarUrl]));
@@ -33,8 +35,8 @@ export const RemoteCursorsLayer: React.FC<{
   const pencilElsRef = useRef(new Map<string, HTMLSpanElement>());
   const viewportRef = useRef(viewport);
   viewportRef.current = viewport;
-  const zoomRef = useRef(viewportState.zoom);
-  zoomRef.current = viewportState.zoom;
+  const zoomRef = useRef(getViewportSnapshot?.().zoom ?? viewportState?.zoom ?? 1);
+  if (viewportState) zoomRef.current = viewportState.zoom;
   const selfIdRef = useRef(selfId);
   selfIdRef.current = selfId;
   const renderedSigRef = useRef('');
@@ -76,6 +78,14 @@ export const RemoteCursorsLayer: React.FC<{
   }, [getRemoteCursors]);
 
   useEffect(() => {
+    if (!subscribeViewport) return;
+    return subscribeViewport(() => {
+      if (getViewportSnapshot) zoomRef.current = getViewportSnapshot().zoom;
+      if (cursorElsRef.current.size > 0) syncCursorDom();
+    });
+  }, [subscribeViewport, getViewportSnapshot, syncCursorDom]);
+
+  useEffect(() => {
     let raf = 0;
     const unsubscribe = subscribeRemoteCursors(() => {
       if (!raf) {
@@ -114,7 +124,7 @@ export const RemoteCursorsLayer: React.FC<{
         const pos = viewport.canvasToScreen(c.x, c.y);
         const color = c.color || getUserColor(c.userId).hex;
         const bubble = bubbles.find((b) => b.userId === c.userId);
-        const ringSize = c.brushSize ? Math.max(6, Math.min(48, c.brushSize * viewportState.zoom)) : 8;
+        const ringSize = c.brushSize ? Math.max(6, Math.min(48, c.brushSize * zoomRef.current)) : 8;
         return (
           <div key={c.userId}
             ref={(node) => { if (node) cursorElsRef.current.set(c.userId, node); else cursorElsRef.current.delete(c.userId); }}

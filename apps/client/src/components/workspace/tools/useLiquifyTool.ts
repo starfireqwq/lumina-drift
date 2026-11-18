@@ -97,6 +97,7 @@ export function useLiquifyTool(ctx: ToolContext) {
       liquifyTouchedBoundsRef.current = touched
         ? { minX: Math.min(touched.minX, step.minX), minY: Math.min(touched.minY, step.minY), maxX: Math.max(touched.maxX, step.maxX), maxY: Math.max(touched.maxY, step.maxY) }
         : step;
+      ctx.requestRender();
     }
     return true;
   };

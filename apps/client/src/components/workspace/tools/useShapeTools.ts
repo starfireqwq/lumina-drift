@@ -184,6 +184,7 @@ export function useShapeTools(ctx: ToolContext) {
         if (shouldFill) g.fill({ color: hexNum, alpha: brushProps.opacity });
         if (shouldStroke) g.stroke(strokeStyle);
       }
+      ctx.requestRender();
       return true;
     }
 
@@ -195,6 +196,7 @@ export function useShapeTools(ctx: ToolContext) {
       g.stroke({ width: 2, color: 0x6366f1, alpha: 0.9 });
       g.circle(gradientStartPos.current.x, gradientStartPos.current.y, 5).fill({ color: 0x6366f1 });
       g.circle(local.x, local.y, 5).fill({ color: 0x38bdf8 });
+      ctx.requestRender();
       return true;
     }
     return false;
@@ -236,6 +238,7 @@ export function useShapeTools(ctx: ToolContext) {
     }
     shapeGraphicRef.current.clear();
     shapeStartPos.current = null;
+    ctx.requestRender();
     return true;
   };
 
@@ -344,6 +347,7 @@ export function useShapeTools(ctx: ToolContext) {
     }
     shapeGraphicRef.current.clear();
     gradientStartPos.current = null;
+    ctx.requestRender();
     return true;
   };
 
