@@ -5,6 +5,7 @@ import {
   CanvasUnit,
   CreateCanvasDto,
   CreateLayerDto,
+  decodePacket,
   FolderAccessRequest,
   JoinCanvasDto,
   LayerModel,
@@ -207,7 +208,11 @@ export class ApiService {
     return await res.json();
   }
 
-  private static async request<T>(endpoint: string, options: RequestInit = {}, base = this.getServerUrl()): Promise<T> {
+  private static async rawRequest(
+    endpoint: string,
+    options: RequestInit = {},
+    base = this.getServerUrl()
+  ): Promise<Response> {
     const origin = this.getServerOrigin(base);
     const isPublicAuth = ['/auth/login', '/auth/register', '/auth/guest'].includes(endpoint);
     const token = isPublicAuth ? null : this.getToken(origin);
@@ -235,8 +240,8 @@ export class ApiService {
       headers,
     });
 
-    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
       if (res.status === 401 && token && this.getToken(origin) === token) {
         this.setToken(null, origin);
         if (origin === this.getServerOrigin()) window.dispatchEvent(new Event('atelier:auth-expired'));
@@ -245,7 +250,17 @@ export class ApiService {
       err.status = res.status;
       throw err;
     }
-    return data as T;
+    return res;
+  }
+
+  private static async request<T>(endpoint: string, options: RequestInit = {}, base = this.getServerUrl()): Promise<T> {
+    const res = await this.rawRequest(endpoint, options, base);
+    if (res.status === 204) return {} as T;
+    try {
+      return (await res.json()) as T;
+    } catch {
+      throw new Error('解析伺服器回應資料失敗');
+    }
   }
 
   // Auth
@@ -555,7 +570,80 @@ export class ApiService {
     if (OfflineSessionStore.isOfflineCanvas(canvasId)) {
       return OfflineSessionStore.getOpsSince(canvasId, sinceSeq);
     }
-    return this.request<{ ops: any[]; latestSeq: number }>(`/canvases/${canvasId}/ops?sinceSeq=${sinceSeq}`);
+    const allOps: any[] = [];
+    let cursor = Math.max(0, Math.floor(sinceSeq));
+    let latestSeq = cursor;
+    while (true) {
+      const res = await this.request<{
+        ops: any[];
+        latestSeq: number;
+        hasMore?: boolean;
+        nextSeq?: number;
+      }>(`/canvases/${canvasId}/ops?sinceSeq=${cursor}&limit=250`);
+      if (typeof res.latestSeq === 'number') latestSeq = res.latestSeq;
+      const batch = Array.isArray(res.ops) ? res.ops : [];
+      for (const op of batch) allOps.push(op);
+      if (!res.hasMore || batch.length === 0 || typeof res.nextSeq !== 'number' || res.nextSeq <= cursor) {
+        break;
+      }
+      cursor = res.nextSeq;
+    }
+    return { ops: allOps, latestSeq };
+  }
+
+  static async getTimeLapseOps(
+    canvasId: string,
+    options?: {
+      onProgress?: (loaded: number, total: number) => void;
+      signal?: AbortSignal;
+    }
+  ): Promise<{
+    ops: any[];
+    latestSeq: number;
+    participants: Record<string, { userId: string; displayName: string; avatarUrl: string | null }>;
+  }> {
+    if (OfflineSessionStore.isOfflineCanvas(canvasId)) {
+      return OfflineSessionStore.getTimeLapseOps(canvasId);
+    }
+    const allOps: any[] = [];
+    const participants: Record<string, { userId: string; displayName: string; avatarUrl: string | null }> = {};
+    let cursor = 0;
+    let latestSeq = 0;
+    let expectedTotal = 0;
+
+    while (true) {
+      if (options?.signal?.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
+      const includeParticipants = cursor === 0 ? '&includeParticipants=1' : '';
+      const res = await this.rawRequest(
+        `/canvases/${canvasId}/ops?sinceSeq=${cursor}&limit=300&view=timelapse&format=msgpack${includeParticipants}`,
+        { signal: options?.signal }
+      );
+      const contentType = res.headers.get('content-type') || '';
+      const page = contentType.includes('msgpack')
+        ? (decodePacket(new Uint8Array(await res.arrayBuffer())) as any)
+        : await res.json();
+
+      if (typeof page?.latestSeq === 'number') latestSeq = page.latestSeq;
+      if (page?.participants && typeof page.participants === 'object') {
+        Object.assign(participants, page.participants);
+      }
+      if (cursor === 0 && typeof page?.totalRemaining === 'number') {
+        expectedTotal = page.totalRemaining;
+      }
+      const batch = Array.isArray(page?.ops) ? page.ops : [];
+      for (const op of batch) allOps.push(op);
+      if (expectedTotal < allOps.length) expectedTotal = allOps.length;
+      options?.onProgress?.(allOps.length, expectedTotal);
+
+      if (!page?.hasMore || batch.length === 0 || typeof page?.nextSeq !== 'number' || page.nextSeq <= cursor) {
+        break;
+      }
+      cursor = page.nextSeq;
+    }
+
+    return { ops: allOps, latestSeq, participants };
   }
 
   static async getCanvasOps(

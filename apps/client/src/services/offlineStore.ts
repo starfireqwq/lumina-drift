@@ -25,9 +25,10 @@ export const LOCAL_ARTIST_ID = 'local-artist';
 const SESSION_MODE_KEY = 'atelier_session_mode';
 const FILE_PATHS_KEY = 'lumina_canvas_file_paths';
 const IDB_NAME = 'LuminaDrift_OfflineStorage';
-const IDB_VERSION = 2;
+const IDB_VERSION = 3;
 const IDB_STORE = 'offline_canvases';
 const IDB_TILE_STORE = 'offline_tiles';
+const IDB_OPS_STORE = 'offline_ops';
 const DRAW_TIME_MAX_GAP_MS = 180_000;
 
 export interface OfflineCanvasRecord {
@@ -52,6 +53,69 @@ interface OfflineTileRow {
   layerId: string;
   tileKey: string;
   tile: TileData;
+}
+
+interface OfflineOpRow {
+  id: string;
+  canvasId: string;
+  seq: number;
+  userId: string;
+  layerId: string;
+  opType: string;
+  payload: any;
+  createdAt: number;
+}
+
+function slimOfflineOpPayload(payload: any): any {
+  if (!payload || typeof payload !== 'object') return payload;
+  const slim: Record<string, any> = {};
+  if (typeof payload.color === 'string') slim.color = payload.color;
+  if (Number.isFinite(payload.size)) slim.size = payload.size;
+  if (Number.isFinite(payload.opacity)) slim.opacity = payload.opacity;
+  if (typeof payload.isEraser === 'boolean') slim.isEraser = payload.isEraser;
+  if (typeof payload.tool === 'string') slim.tool = payload.tool;
+  if (typeof payload.actionDesc === 'string') slim.actionDesc = payload.actionDesc;
+  if (typeof payload.isUndo === 'boolean') slim.isUndo = payload.isUndo;
+  if (payload.bounds && typeof payload.bounds === 'object') slim.bounds = payload.bounds;
+  if (Array.isArray(payload.tiles) && payload.tiles.length > 0) {
+    slim.tiles = payload.tiles
+      .filter((t: any) => t && Number.isInteger(t.col) && Number.isInteger(t.row))
+      .map((t: TileData) => ({
+        col: t.col,
+        row: t.row,
+        width: t.width,
+        height: t.height,
+        compression: t.compression || 'lz4',
+        data: toUint8Array(t.data),
+      }));
+  }
+  const pts = Array.isArray(payload.samplePoints) && payload.samplePoints.length > 0
+    ? payload.samplePoints
+    : Array.isArray(payload.allPoints) && payload.allPoints.length > 0
+      ? payload.allPoints
+      : null;
+  if (pts) {
+    const maxPts = slim.tiles ? 32 : 400;
+    if (pts.length <= maxPts) {
+      slim.samplePoints = pts.map((p: any) => ({ x: p.x, y: p.y, pressure: p.pressure }));
+    } else {
+      const sampled: Array<{ x: number; y: number; pressure?: number }> = [];
+      const step = (pts.length - 1) / (maxPts - 1);
+      for (let i = 0; i < maxPts - 1; i++) {
+        const p = pts[Math.round(i * step)];
+        sampled.push({ x: p.x, y: p.y, pressure: p.pressure });
+      }
+      const end = pts[pts.length - 1];
+      sampled.push({ x: end.x, y: end.y, pressure: end.pressure });
+      slim.samplePoints = sampled;
+    }
+  }
+  if (!slim.tiles) {
+    if (Array.isArray(payload.vectorAdded)) slim.vectorAdded = payload.vectorAdded;
+    if (Array.isArray(payload.vectorRemovedIds)) slim.vectorRemovedIds = payload.vectorRemovedIds;
+    if (payload.vectorStroke) slim.vectorStroke = payload.vectorStroke;
+  }
+  return slim;
 }
 
 function toUint8Array(data: unknown): Uint8Array {
@@ -248,6 +312,9 @@ class OfflineSessionStoreImpl {
   private dirtyTileOps = new Map<string, Map<string, { layerId: string; key: string; tile: TileData }>>();
   private dirtyFullRewrite = new Set<string>();
   private deletedLayersByCanvas = new Map<string, Set<string>>();
+  private opsByCanvas = new Map<string, OfflineOpRow[]>();
+  private pendingOpsByCanvas = new Map<string, OfflineOpRow[]>();
+  private loadedOpsFromDb = new Set<string>();
   private drawClocks = new Map<string, { lastOpAt: number; drawTimeMs: number }>();
 
   constructor() {
@@ -330,6 +397,10 @@ class OfflineSessionStoreImpl {
             if (!db.objectStoreNames.contains(IDB_TILE_STORE)) {
               const tiles = db.createObjectStore(IDB_TILE_STORE, { keyPath: 'id' });
               tiles.createIndex('by_canvas', 'canvasId', { unique: false });
+            }
+            if (!db.objectStoreNames.contains(IDB_OPS_STORE)) {
+              const ops = db.createObjectStore(IDB_OPS_STORE, { keyPath: 'id' });
+              ops.createIndex('by_canvas', 'canvasId', { unique: false });
             }
           };
           req.onsuccess = () => resolve(req.result);
@@ -457,11 +528,14 @@ class OfflineSessionStoreImpl {
     const fullRewrite = this.dirtyFullRewrite.has(canvasId);
     const dirtyMap = this.dirtyTileOps.get(canvasId);
     const deletedLayers = this.deletedLayersByCanvas.get(canvasId);
+    const pendingOps = this.pendingOpsByCanvas.get(canvasId);
     const hasTileStore = db.objectStoreNames.contains(IDB_TILE_STORE);
+    const hasOpsStore = db.objectStoreNames.contains(IDB_OPS_STORE);
 
     this.dirtyFullRewrite.delete(canvasId);
     this.dirtyTileOps.delete(canvasId);
     this.deletedLayersByCanvas.delete(canvasId);
+    this.pendingOpsByCanvas.delete(canvasId);
 
     // Metadata-only payload inside offline_canvases (zero whole-canvas tile blob clone on autosave)
     const metaRecord: OfflineCanvasRecord = hasTileStore
@@ -481,9 +555,18 @@ class OfflineSessionStoreImpl {
       : rec;
 
     await new Promise<void>((resolve, reject) => {
-      const stores = hasTileStore ? [IDB_STORE, IDB_TILE_STORE] : [IDB_STORE];
+      const stores = [IDB_STORE];
+      if (hasTileStore) stores.push(IDB_TILE_STORE);
+      if (hasOpsStore && pendingOps && pendingOps.length > 0) stores.push(IDB_OPS_STORE);
       const tx = db.transaction(stores, 'readwrite');
       tx.objectStore(IDB_STORE).put(metaRecord);
+
+      if (hasOpsStore && pendingOps && pendingOps.length > 0) {
+        const opsStore = tx.objectStore(IDB_OPS_STORE);
+        for (const opRow of pendingOps) {
+          opsStore.put(opRow);
+        }
+      }
 
       if (hasTileStore) {
         const tileStore = tx.objectStore(IDB_TILE_STORE);
@@ -543,7 +626,13 @@ class OfflineSessionStoreImpl {
       tx.oncomplete = () => resolve();
       tx.onabort = () => reject(tx.error ?? new Error('Offline canvas storage was interrupted.'));
     }).catch((error: unknown) => {
-      if (this.records.has(canvasId)) this.dirtyFullRewrite.add(canvasId);
+      if (this.records.has(canvasId)) {
+        this.dirtyFullRewrite.add(canvasId);
+        if (pendingOps && pendingOps.length > 0) {
+          const cur = this.pendingOpsByCanvas.get(canvasId) ?? [];
+          this.pendingOpsByCanvas.set(canvasId, [...pendingOps, ...cur]);
+        }
+      }
       throw error;
     });
   }
@@ -552,26 +641,34 @@ class OfflineSessionStoreImpl {
     this.dirtyTileOps.delete(canvasId);
     this.dirtyFullRewrite.delete(canvasId);
     this.deletedLayersByCanvas.delete(canvasId);
+    this.opsByCanvas.delete(canvasId);
+    this.pendingOpsByCanvas.delete(canvasId);
+    this.loadedOpsFromDb.delete(canvasId);
     const db = await this.getDB();
     if (!db) return;
     const hasTileStore = db.objectStoreNames.contains(IDB_TILE_STORE);
+    const hasOpsStore = db.objectStoreNames.contains(IDB_OPS_STORE);
     await new Promise<void>((resolve) => {
       try {
-        const stores = hasTileStore ? [IDB_STORE, IDB_TILE_STORE] : [IDB_STORE];
+        const stores = [IDB_STORE];
+        if (hasTileStore) stores.push(IDB_TILE_STORE);
+        if (hasOpsStore) stores.push(IDB_OPS_STORE);
         const tx = db.transaction(stores, 'readwrite');
         tx.objectStore(IDB_STORE).delete(canvasId);
-        if (hasTileStore) {
-          const tileStore = tx.objectStore(IDB_TILE_STORE);
-          const idx = tileStore.index('by_canvas');
+        const clearByCanvas = (storeName: string) => {
+          const store = tx.objectStore(storeName);
+          const idx = store.index('by_canvas');
           const curReq = idx.openKeyCursor(IDBKeyRange.only(canvasId));
           curReq.onsuccess = () => {
             const cur = curReq.result;
             if (cur) {
-              tileStore.delete(cur.primaryKey);
+              store.delete(cur.primaryKey);
               cur.continue();
             }
           };
-        }
+        };
+        if (hasTileStore) clearByCanvas(IDB_TILE_STORE);
+        if (hasOpsStore) clearByCanvas(IDB_OPS_STORE);
         tx.oncomplete = () => resolve();
         tx.onerror = () => resolve();
       } catch {
@@ -1140,7 +1237,64 @@ class OfflineSessionStoreImpl {
     };
   }
 
-  public commitLocalOp(canvasId: string, layerId: string, _opType: string, payload: any): number {
+  private recordOfflineOp(
+    canvasId: string,
+    seq: number,
+    layerId: string,
+    opType: string,
+    payload: any,
+    createdAt: number
+  ) {
+    const row: OfflineOpRow = {
+      id: `${canvasId}\0${String(seq).padStart(10, '0')}`,
+      canvasId,
+      seq,
+      userId: LOCAL_ARTIST_ID,
+      layerId,
+      opType,
+      payload: slimOfflineOpPayload(payload),
+      createdAt,
+    };
+    const pending = this.pendingOpsByCanvas.get(canvasId) ?? [];
+    pending.push(row);
+    this.pendingOpsByCanvas.set(canvasId, pending);
+    const cached = this.opsByCanvas.get(canvasId);
+    if (cached) {
+      cached.push(row);
+    } else if (typeof indexedDB === 'undefined') {
+      this.opsByCanvas.set(canvasId, [row]);
+    }
+  }
+
+  private async loadCanvasOps(canvasId: string): Promise<OfflineOpRow[]> {
+    if (this.loadedOpsFromDb.has(canvasId)) {
+      return this.opsByCanvas.get(canvasId) ?? [];
+    }
+    const db = await this.getDB();
+    let dbRows: OfflineOpRow[] = [];
+    if (db && db.objectStoreNames.contains(IDB_OPS_STORE)) {
+      dbRows = await new Promise<OfflineOpRow[]>((resolve) => {
+        try {
+          const tx = db.transaction([IDB_OPS_STORE], 'readonly');
+          const req = tx.objectStore(IDB_OPS_STORE).index('by_canvas').getAll(IDBKeyRange.only(canvasId));
+          req.onsuccess = () => resolve((req.result || []) as OfflineOpRow[]);
+          req.onerror = () => resolve([]);
+        } catch {
+          resolve([]);
+        }
+      });
+    }
+    const bySeq = new Map<number, OfflineOpRow>();
+    for (const r of dbRows) bySeq.set(r.seq, r);
+    for (const r of this.opsByCanvas.get(canvasId) ?? []) bySeq.set(r.seq, r);
+    for (const r of this.pendingOpsByCanvas.get(canvasId) ?? []) bySeq.set(r.seq, r);
+    const merged = Array.from(bySeq.values()).sort((a, b) => a.seq - b.seq);
+    this.opsByCanvas.set(canvasId, merged);
+    this.loadedOpsFromDb.add(canvasId);
+    return merged;
+  }
+
+  public commitLocalOp(canvasId: string, layerId: string, opType: string, payload: any): number {
     const rec = this.ensureRecord(canvasId);
     if (payload && typeof payload === 'object') {
       if (Array.isArray(payload.tiles)) {
@@ -1173,9 +1327,11 @@ class OfflineSessionStoreImpl {
         }
       }
     }
+    const now = Date.now();
     rec.seq += 1;
     rec.canvas.latestSeq = rec.seq;
-    rec.updatedAt = Date.now();
+    rec.updatedAt = now;
+    this.recordOfflineOp(canvasId, rec.seq, layerId, opType || 'STROKE', payload, now);
     this.schedulePersist(canvasId);
     return rec.seq;
   }
@@ -1191,9 +1347,11 @@ class OfflineSessionStoreImpl {
       };
     }
     this.markDirtyTiles(canvasId, layerId, tiles);
+    const now = Date.now();
     rec.seq += 1;
     rec.canvas.latestSeq = rec.seq;
-    rec.updatedAt = Date.now();
+    rec.updatedAt = now;
+    this.recordOfflineOp(canvasId, rec.seq, layerId, 'TILE_PATCH', { tiles }, now);
     this.schedulePersist(canvasId);
     return rec.seq;
   }
@@ -1215,10 +1373,54 @@ class OfflineSessionStoreImpl {
     };
   }
 
-  public async getOpsSince(canvasId: string, _sinceSeq: number = 0): Promise<{ ops: any[]; latestSeq: number }> {
+  public async getOpsSince(canvasId: string, sinceSeq: number = 0): Promise<{ ops: any[]; latestSeq: number }> {
     await this.ensureInitialized();
     const rec = this.ensureRecord(canvasId);
-    return { ops: [], latestSeq: rec.seq };
+    const rows = await this.loadCanvasOps(canvasId);
+    const ops = rows.filter((r) => r.seq > sinceSeq);
+    return { ops, latestSeq: rec.seq };
+  }
+
+  public async getTimeLapseOps(canvasId: string): Promise<{
+    ops: any[];
+    latestSeq: number;
+    participants: Record<string, { userId: string; displayName: string; avatarUrl: string | null }>;
+  }> {
+    await this.ensureInitialized();
+    const rec = this.ensureRecord(canvasId);
+    let ops: any[] = await this.loadCanvasOps(canvasId);
+    // Pre-upgrade offline artworks have current tiles without stored op history: provide a snapshot fallback op
+    if (ops.length === 0) {
+      let synthSeq = 0;
+      const synthesized: any[] = [];
+      for (const l of rec.layers) {
+        const tiles = Object.values(rec.tilesByLayer[l.id] || {});
+        const vectors = rec.vectorsByLayer[l.id] || [];
+        if (tiles.length === 0 && vectors.length === 0) continue;
+        synthSeq += 1;
+        synthesized.push({
+          canvasId,
+          seq: synthSeq,
+          userId: LOCAL_ARTIST_ID,
+          layerId: l.id,
+          opType: 'TILE_PATCH',
+          payload: { tiles, ...(vectors.length ? { vectorAdded: vectors } : {}) },
+          createdAt: rec.updatedAt || Date.now(),
+        });
+      }
+      ops = synthesized;
+    }
+    return {
+      ops,
+      latestSeq: rec.seq,
+      participants: {
+        [LOCAL_ARTIST_ID]: {
+          userId: LOCAL_ARTIST_ID,
+          displayName: '本地畫師',
+          avatarUrl: null,
+        },
+      },
+    };
   }
 }
 
