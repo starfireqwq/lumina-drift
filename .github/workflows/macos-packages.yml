@@ -75,9 +75,9 @@ jobs:
           resources="$contents/Resources"
           test -s "$resources/app.asar"
           test -s "$resources/server/dist/server.js"
-          lipo -verify_arch "$MACH_ARCH" "$executable"
-          lipo -verify_arch "$MACH_ARCH" "$resources/server/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
-          lipo -verify_arch "$MACH_ARCH" "$resources/cloudflared"
+          lipo "$executable" -verify_arch "$MACH_ARCH"
+          lipo "$resources/server/node_modules/better-sqlite3/build/Release/better_sqlite3.node" -verify_arch "$MACH_ARCH"
+          lipo "$resources/cloudflared" -verify_arch "$MACH_ARCH"
           export APPDATA="$work_dir/roaming" LOCALAPPDATA="$work_dir/local" LUMINA_RESOURCES="$resources" LUMINA_PROFILE="$work_dir/profile"
           mkdir -p "$APPDATA" "$LOCALAPPDATA" "$LUMINA_PROFILE"
           ELECTRON_RUN_AS_NODE=1 "$executable" -e '
