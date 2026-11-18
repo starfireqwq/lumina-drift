@@ -65,9 +65,11 @@ public final class MainActivity extends Activity {
                 String asset = path.substring("/assets/".length());
                 try {
                     String mime = URLConnection.guessContentTypeFromName(asset);
-                    if (asset.endsWith(".js")) mime = "text/javascript";
+                    if (asset.endsWith(".js") || asset.endsWith(".mjs")) mime = "text/javascript";
                     if (asset.endsWith(".svg")) mime = "image/svg+xml";
                     if (asset.endsWith(".css")) mime = "text/css";
+                    if (asset.endsWith(".json")) mime = "application/json";
+                    if (asset.endsWith(".wasm")) mime = "application/wasm";
                     InputStream input = getAssets().open("web/" + asset);
                     return new WebResourceResponse(mime == null ? "application/octet-stream" : mime, "UTF-8", input);
                 } catch (Exception error) {

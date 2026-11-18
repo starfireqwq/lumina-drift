@@ -55,8 +55,17 @@ for (const entry of Object.values(archive.files)) {
   archive.remove(entry.name);
 }
 archive.file('classes.dex', fs.readFileSync(path.join(stage, 'dex/classes.dex')));
+const arscEntry = archive.file('resources.arsc');
+if (arscEntry) {
+  // Android 11+ (API 30+, targetSdk 35) rejects APKs whose resources.arsc is compressed.
+  archive.file('resources.arsc', await arscEntry.async('nodebuffer'), { compression: 'STORE' });
+}
+for (const entry of Object.values(archive.files)) {
+  if (entry.dir || entry.name === 'resources.arsc') continue;
+  entry.options.compression = 'DEFLATE';
+}
 const unsigned = path.join(stage, 'unsigned.apk');
-fs.writeFileSync(unsigned, await archive.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }));
+fs.writeFileSync(unsigned, await archive.generateAsync({ type: 'nodebuffer' }));
 const aligned = path.join(stage, 'aligned.apk');
 run(path.join(tools, 'zipalign.exe'), ['-f', '-p', '4', unsigned, aligned]);
 
