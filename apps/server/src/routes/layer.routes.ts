@@ -1,4 +1,5 @@
 import { FastifyPluginAsync } from 'fastify';
+import { sqlite } from '../db';
 import {
   canUserCreateLayer,
   canUserPerformLayerAction,
@@ -75,7 +76,25 @@ export const layerRoutes: FastifyPluginAsync = async (fastify) => {
     // Canvases saved before groups kept their content right below them get put in order once
     if (tidyLayerTree(id)) fastify.roomManager.broadcastLayers(id);
     const layers = getLayersByCanvasId(id);
-    return reply.send({ layers });
+    let lastDrawnLayerId: string | null = null;
+    if (request.headers.authorization) {
+      try {
+        const user = await request.jwtVerify<UserPayload>();
+        if (user?.id && user.serverRole !== 'guest') {
+          const row = sqlite
+            .prepare(
+              `SELECT layer_id AS layerId FROM canvas_ops
+               WHERE canvas_id = ? AND user_id = ? AND layer_id IS NOT NULL
+               ORDER BY seq DESC LIMIT 1`
+            )
+            .get(id, user.id) as { layerId?: string } | undefined;
+          lastDrawnLayerId = row?.layerId ?? null;
+        }
+      } catch {
+        // Public room read without a valid account token still returns the layer list.
+      }
+    }
+    return reply.send({ layers, ...(lastDrawnLayerId ? { lastDrawnLayerId } : {}) });
   });
 
   // POST /api/canvases/:id/layers - Create layer

@@ -284,8 +284,13 @@ class OfflineSessionStoreImpl {
     return this.filePaths.get(canvasId) || this.records.get(canvasId)?.filePath || null;
   }
 
+  public canUseOfflineMode(): boolean {
+    if (typeof window === 'undefined') return false;
+    return Boolean((window as any).atelierDesktop?.isElectron || (window as any).atelierMobile?.isAndroid);
+  }
+
   public getSessionMode(): 'offline' | 'collaborative' {
-    if (typeof window === 'undefined') return 'collaborative';
+    if (typeof window === 'undefined' || !this.canUseOfflineMode()) return 'collaborative';
     return localStorage.getItem(SESSION_MODE_KEY) === 'offline' ? 'offline' : 'collaborative';
   }
 
@@ -299,10 +304,11 @@ class OfflineSessionStoreImpl {
   }
 
   public setSessionMode(mode: 'offline' | 'collaborative') {
+    const resolved = mode === 'offline' && !this.canUseOfflineMode() ? 'collaborative' : mode;
     if (typeof window !== 'undefined') {
-      localStorage.setItem(SESSION_MODE_KEY, mode);
+      localStorage.setItem(SESSION_MODE_KEY, resolved);
     }
-    this.modeListeners.forEach((cb) => cb(mode));
+    this.modeListeners.forEach((cb) => cb(resolved));
   }
 
   public subscribeSessionMode(cb: (mode: 'offline' | 'collaborative') => void): () => void {

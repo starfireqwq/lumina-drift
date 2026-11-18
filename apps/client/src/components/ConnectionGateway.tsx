@@ -42,7 +42,7 @@ interface ConnectionGatewayProps {
   onResolve: (targetServerUrl: string, nickname?: string, canvasOptions?: InitialCanvasOptions) => void;
   initialServerUrl?: string;
   onOpenLuminaProject?: () => void;
-  onOpenAuth?: () => void;
+  onOpenAuth?: (serverUrl: string) => void;
   focusOnOpen?: boolean;
 }
 
@@ -58,11 +58,11 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
   const desktop = typeof window !== 'undefined' ? (window as any).atelierDesktop : null;
   const isDesktop = Boolean(desktop?.isElectron);
   const isAndroid = Boolean((window as any).atelierMobile?.isAndroid);
-
+  const supportsOfflineMode = isDesktop || isAndroid;
 
   const workspaceIsLocal = !initialServerUrl || isLoopbackServer(initialServerUrl);
   const [gatewayMode, setGatewayMode] = useState<'offline' | 'online'>(() =>
-    OfflineSessionStore.isOfflineMode() || ((isDesktop || isAndroid) && !initialServerUrl) ? 'offline' : 'online'
+    supportsOfflineMode && (OfflineSessionStore.isOfflineMode() || !initialServerUrl) ? 'offline' : 'online'
   );
   const [tab, setTab] = useState<'join' | 'create'>('join');
   const [nickname, setNickname] = useState(user?.displayName || '');
@@ -99,6 +99,8 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
   const [tunnelBusy, setTunnelBusy] = useState(false);
   const [tunnelError, setTunnelError] = useState<string | null>(null);
   const [serverRunning, setServerRunning] = useState(true);
+  const [roomsRefresh, setRoomsRefresh] = useState(0);
+  const userChoseTabRef = useRef(false);
   const [ping, setPing] = useState<{ testing: boolean; ok: boolean | null; ms?: number; error?: string }>({ testing: false, ok: null });
   const pingRequest = useRef(0);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -207,13 +209,18 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
             if (!controller.signal.aborted) setServerRunning(Boolean(started));
           }
         }
-        const res = await fetch(`${target}/api/canvases`, { signal: controller.signal });
+        let res = await fetch(`${target}/api/canvases`, { signal: controller.signal });
+        if (!res.ok && isDesktop && where === 'here') {
+          await new Promise((r) => setTimeout(r, 350));
+          res = await fetch(`${target}/api/canvases`, { signal: controller.signal });
+        }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = (await res.json()) as { canvases: CanvasModel[] };
         if (controller.signal.aborted) return;
         setRooms(data.canvases);
         if (invitedRoom) setTab('join');
         else if (data.canvases.length === 0) setTab('create');
+        else if (!userChoseTabRef.current) setTab('join');
         setPickedRoom((current) => {
           if (invitedRoom) return data.canvases.some((c) => c.id === invitedRoom) ? invitedRoom : null;
           return data.canvases.some((c) => c.id === current) ? current : data.canvases[0]?.id ?? null;
@@ -221,12 +228,12 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
       } catch {
         if (!controller.signal.aborted) setRoomsError(t.gateway.cannotConnectCheckSettings);
       }
-    }, 250);
+    }, 120);
     return () => {
       controller.abort();
       clearTimeout(timer);
     };
-  }, [target, connectionError, invitedRoom, gatewayMode, isDesktop, where, desktop, t.gateway.cannotConnectCheckSettings]);
+  }, [target, connectionError, invitedRoom, gatewayMode, isDesktop, where, desktop, t.gateway.cannotConnectCheckSettings, roomsRefresh]);
 
   useEffect(() => {
     setQr('');
@@ -248,7 +255,9 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
     const start = performance.now();
     const health = await ApiService.checkServerHealth(target);
     if (request !== pingRequest.current) return;
-    setPing(health.ok && health.status === 'ok' ? { testing: false, ok: true, ms: Math.round(performance.now() - start) } : { testing: false, ok: false, error: health.error || t.gateway.connectionFailed });
+    const ok = health.ok && health.status === 'ok';
+    setPing(ok ? { testing: false, ok: true, ms: Math.round(performance.now() - start) } : { testing: false, ok: false, error: health.error || t.gateway.connectionFailed });
+    if (ok) setRoomsRefresh((n) => n + 1);
   };
 
   const toggleTunnel = async () => {
@@ -279,7 +288,9 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
       await desktop.server.stop();
       setServerRunning(false);
     } else {
-      setServerRunning(Boolean(await desktop.server.start()));
+      const started = Boolean(await desktop.server.start());
+      setServerRunning(started);
+      if (started) setRoomsRefresh((n) => n + 1);
     }
   };
 
@@ -307,8 +318,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
 
   const openAuth = () => {
     if (!target || connectionError) return;
-    ApiService.setServerUrl(target);
-    onOpenAuth?.();
+    onOpenAuth?.(target);
   };
 
   const enter = (options: InitialCanvasOptions) => {
@@ -383,8 +393,16 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
     }
   };
 
+  const switchToOnlineMode = () => {
+    userChoseTabRef.current = false;
+    setTab('join');
+    if (isDesktop && where === 'internet' && !remoteLink) setWhere('here');
+    setGatewayMode('online');
+    setRoomsRefresh((n) => n + 1);
+  };
+
   const tabBtn = (id: 'join' | 'create', icon: React.ReactNode, label: string, hint: string) => (
-    <button type="button" role="tab" aria-selected={tab === id} aria-controls={`gateway-${id}`} id={`gateway-tab-${id}`} onClick={() => setTab(id)} aria-label={`${label}：${hint}`}
+    <button type="button" role="tab" aria-selected={tab === id} aria-controls={`gateway-${id}`} id={`gateway-tab-${id}`} onClick={() => { userChoseTabRef.current = true; setTab(id); }} aria-label={`${label}：${hint}`}
       className={`flex flex-1 items-center gap-3 rounded-xl border px-3 py-3 text-left transition ${tab === id ? 'border-indigo-400 bg-indigo-600/20 text-white' : 'border-neutral-800 bg-neutral-900/60 text-neutral-300 hover:border-neutral-600'}`}>
       <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${tab === id ? 'bg-indigo-600 text-white' : 'bg-neutral-800 text-neutral-300'}`}>{icon}</span>
       <span className="min-w-0">
@@ -400,12 +418,13 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
         <header className="flex items-center gap-3">
           <img src={`${(import.meta as any).env?.BASE_URL || './'}logo.svg`} alt="" aria-hidden="true" className="h-11 w-11 shrink-0" />
           <div>
-            <h1 ref={heading} tabIndex={-1} className="text-lg font-black text-white outline-none">Lumina Drift <span className="font-semibold text-neutral-300">{t.brand}</span></h1>
+            <h1 ref={heading} tabIndex={-1} className="text-lg font-black text-white outline-none">Lumina Drift{t.brand && t.brand !== 'Lumina Drift' && <> <span className="font-semibold text-neutral-300">{t.brand}</span></>}</h1>
             <p className="text-xs text-neutral-400">{t.gateway.tagline}</p>
           </div>
         </header>
 
-        {/* Primary Mode Selector: Solo Offline vs Online Collaborative */}
+        {/* Primary Mode Selector: Solo Offline vs Online Collaborative (Desktop / Android only) */}
+        {supportsOfflineMode && (
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           <button
             type="button"
@@ -428,7 +447,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
 
           <button
             type="button"
-            onClick={() => setGatewayMode('online')}
+            onClick={switchToOnlineMode}
             aria-pressed={gatewayMode === 'online'}
             className={`flex items-start gap-3 rounded-2xl border p-3 text-left transition ${
               gatewayMode === 'online'
@@ -445,6 +464,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
             </span>
           </button>
         </div>
+        )}
 
         {/* Who you are */}
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3">
@@ -453,11 +473,11 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
               <div className="flex items-center justify-between gap-2">
                 <div>
                   <span className="text-xs font-semibold text-neutral-200">{t.gateway.nickname}</span>
-                  {gatewayMode === 'online' && !(isDesktop && where === 'here') && (
+                  {gatewayMode === 'online' && (
                     <span className="block text-[11px] text-neutral-500">{t.gateway.guestNotice}</span>
                   )}
                 </div>
-                {onOpenAuth && gatewayMode === 'online' && !(isDesktop && where === 'here') && (
+                {onOpenAuth && gatewayMode === 'online' && (
                   <button
                     type="button"
                     onClick={openAuth}
@@ -475,7 +495,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
           ) : (
             <div className="flex items-center justify-between gap-2">
               <p className="text-xs text-neutral-300">{t.gateway.loggedInAs}<span className="font-semibold text-white">{user?.displayName}</span></p>
-              {onOpenAuth && !(isDesktop && where === 'here') && (
+              {onOpenAuth && (
                 <button
                   type="button"
                   onClick={openAuth}
@@ -524,7 +544,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                       <button type="button" key={canvas.id} onClick={() => startSoloOffline(canvas.id)}
                         className="min-w-0 rounded-lg border border-neutral-700 bg-neutral-800/60 p-2 text-left hover:border-cyan-400 focus-visible:ring-2 focus-visible:ring-cyan-400">
                         <span className="flex h-16 items-center justify-center overflow-hidden rounded bg-neutral-900">
-                          {thumbnail ? <img className="h-full w-full object-contain" src={thumbnail} alt="" /> : <Palette className="h-5 w-5 text-neutral-500" aria-hidden="true" />}
+                          {thumbnail ? <img className="h-full w-full object-cover object-center" src={thumbnail} alt="" /> : <Palette className="h-5 w-5 text-neutral-500" aria-hidden="true" />}
                         </span>
                         <span className="mt-1 block truncate text-xs font-semibold text-neutral-100" title={canvas.title}>{canvas.title}</span>
                         <span className="block text-[11px] text-neutral-400">{canvas.width} × {canvas.height}</span>

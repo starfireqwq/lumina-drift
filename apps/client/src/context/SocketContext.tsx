@@ -944,6 +944,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       );
     }
 
+    if (userRef.current?.id) ApiService.setLastDrawnLayerId(canvasId, userRef.current.id, layerId);
     const opId = (enrichedPayload as { clientOpId?: string } | null)?.clientOpId;
     if (opId) pendingCanvasWrites.current.set(canvasId, { socket: socketRef.current, opId });
     socketRef.current.emit('op_commit', {
@@ -997,6 +998,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         ? meta.clientOpId
         : `cop_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
+    if (!isUndo && userRef.current?.id) ApiService.setLastDrawnLayerId(canvasId, userRef.current.id, layerId);
     // Direct peer-to-peer distribution over WebRTC DataChannel swarm
     if (!meta?.targetOpSeq) {
       p2pManagerRef.current.broadcastTiles(layerId, tiles, actionDesc, clientOpId, baseSeq);

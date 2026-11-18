@@ -415,11 +415,27 @@ export class ApiService {
   }
 
   // Layers
-  static async listLayers(canvasId: string): Promise<LayerModel[]> {
+  static getLastDrawnLayerId(canvasId: string, userId?: string | null, origin = this.getServerOrigin()): string | null {
+    if (typeof window === 'undefined' || !canvasId || !userId) return null;
+    return localStorage.getItem(`atelier_last_layer:${origin}:${canvasId}:${userId}`);
+  }
+
+  static setLastDrawnLayerId(canvasId: string, userId: string | null | undefined, layerId: string | null, origin = this.getServerOrigin()): void {
+    if (typeof window === 'undefined' || !canvasId || !userId) return;
+    const key = `atelier_last_layer:${origin}:${canvasId}:${userId}`;
+    if (layerId) localStorage.setItem(key, layerId);
+    else localStorage.removeItem(key);
+  }
+
+  static async listLayersWithHint(canvasId: string): Promise<{ layers: LayerModel[]; lastDrawnLayerId?: string | null }> {
     if (OfflineSessionStore.isOfflineCanvas(canvasId)) {
-      return OfflineSessionStore.listLayers(canvasId);
+      return { layers: await OfflineSessionStore.listLayers(canvasId), lastDrawnLayerId: null };
     }
-    const res = await this.request<{ layers: LayerModel[] }>(`/canvases/${canvasId}/layers`);
+    return this.request<{ layers: LayerModel[]; lastDrawnLayerId?: string | null }>(`/canvases/${canvasId}/layers`);
+  }
+
+  static async listLayers(canvasId: string): Promise<LayerModel[]> {
+    const res = await this.listLayersWithHint(canvasId);
     return res.layers;
   }
 

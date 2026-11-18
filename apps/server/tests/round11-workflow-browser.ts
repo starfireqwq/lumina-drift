@@ -228,6 +228,68 @@ async function main() {
       Boolean(localStorage.getItem(`atelier_token:${a}`)), localStorage.getItem(`atelier_remembered_username:${b}`),
     ], origins), [true, null]);
     console.log('Chrome: legacy session migrated; two server origins restored their own accounts and remembered username');
+
+    await gateway();
+    assert.equal(await page.getByRole('button', { name: /Solo Offline Drawing/ }).count(), 0, 'Web gateway must not allow switching to solo offline mode');
+
+    // Verify offline -> return to gateway -> online -> login before entering room on desktop mode
+    const desktopPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await desktopPage.addInitScript(() => {
+      (window as any).__name = (f: unknown) => f;
+      (window as any).atelierDesktop = {
+        isElectron: true,
+        platform: 'win32',
+        server: {
+          getStatus: async () => ({ isRunning: true, port: 3000 }),
+          start: async () => true,
+          stop: async () => true,
+          getNetworkAddresses: async () => [],
+        },
+      };
+      localStorage.setItem('atelier_language', 'en-US');
+    });
+    await desktopPage.routeWebSocket(/\/socket\.io\//, (socket) => {
+      socket.send('0{"sid":"round11-engine2","upgrades":[],"pingInterval":25000,"pingTimeout":20000,"maxPayload":1000000}');
+      socket.onMessage((message) => {
+        if (typeof message !== 'string') return;
+        if (message.startsWith('40')) socket.send('40{"sid":"round11-socket2"}');
+        if (message.startsWith('42["join_canvas"')) socket.send('42' + JSON.stringify(['room_state', {
+          canvasId: canvas.id, latestSeq: 0, members: [], offlineMembers: [],
+        }]));
+      });
+    });
+    await desktopPage.route(/http:\/\/(localhost:31\d\d|127\.0\.0\.1:3000)\/.*/, async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const app = url.origin === 'http://127.0.0.1:3000' ? apps[0] : apps[origins.indexOf(url.origin)];
+      if (!app) return route.abort();
+      const res = await app.inject({ method: request.method() as InjectOptions['method'], url: url.pathname + url.search,
+        headers: request.headers(), payload: request.postDataBuffer() ?? undefined });
+      const headers = Object.fromEntries(Object.entries(res.headers).filter((pair): pair is [string, string] => typeof pair[1] === 'string'));
+      await route.fulfill({ status: res.statusCode, headers, body: res.rawPayload });
+    });
+    await desktopPage.goto(origins[0]);
+    await desktopPage.getByRole('button', { name: /Solo Offline Drawing/ }).click();
+    await desktopPage.getByRole('button', { name: 'Start Solo Drawing', exact: true }).click();
+    await desktopPage.waitForFunction(() => localStorage.getItem('atelier_session_mode') === 'offline');
+    await desktopPage.getByRole('button', { name: /Lumina Drift.*Return to Gateway/ }).first().click();
+    await desktopPage.getByRole('button', { name: /Online Collaborative Room/ }).click();
+    await desktopPage.getByRole('radio', { name: /Round 11 Studio/ }).waitFor({ timeout: 5000 });
+    await desktopPage.getByRole('button', { name: 'Internet', exact: true }).click();
+    await desktopPage.getByRole('textbox', { name: 'Server URL' }).fill(origins[1]);
+    await desktopPage.getByRole('button', { name: 'Sign In / Register', exact: true }).click();
+    const desktopModal = desktopPage.getByRole('dialog');
+    await desktopModal.getByRole('textbox', { name: 'Username' }).fill(remote.user.username);
+    await desktopModal.getByLabel('Password', { exact: true }).fill(password);
+    const gatewayLogin = desktopPage.waitForResponse((response) => response.url() === origins[1] + '/api/auth/login');
+    await desktopModal.getByRole('button', { name: 'Sign In', exact: true }).click();
+    assert.equal((await gatewayLogin).status(), 200);
+    await desktopModal.waitFor({ state: 'hidden', timeout: 5000 });
+    await desktopPage.getByText(/Logged in as:\s*secondpainter/).waitFor();
+    await desktopPage.getByRole('button', { name: /^Join "/ }).click();
+    await desktopPage.getByText('secondpainter', { exact: true }).first().waitFor();
+    await desktopPage.close();
+    console.log('Chrome: web hides offline mode; desktop offline artist can sign in at the gateway before entering a multiplayer room');
   } finally {
     await browser.close();
     await Promise.all(apps.map((app) => app.close()));

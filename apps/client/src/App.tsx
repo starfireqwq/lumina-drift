@@ -257,7 +257,7 @@ export const App: React.FC = () => {
     _nickname?: string,
     canvasOptions?: InitialCanvasOptions
   ) => {
-    if (targetServerUrl === 'offline' || canvasOptions?.offline) {
+    if ((targetServerUrl === 'offline' || canvasOptions?.offline) && OfflineSessionStore.canUseOfflineMode()) {
       OfflineSessionStore.setSessionMode('offline');
       reconnectServer('offline');
       setShowGateway(false);
@@ -378,19 +378,32 @@ export const App: React.FC = () => {
     unlockRoom(id, password);
   };
 
+  const lastLayerUserIdRef = useRef<string | undefined>(user?.id);
+
   // Load layers when activeCanvasId changes or user logs in
   // autoAssign (opening a canvas): an account with no layer of its own here gets one and starts on it
-  const fetchLayers = async (canvasId: string, preferredActiveId?: string | null, isCancelled = () => false, autoAssign = false) => {
+  const fetchLayers = async (
+    canvasId: string,
+    preferredActiveId?: string | null,
+    isCancelled = () => false,
+    autoAssign = false,
+    preferUserLayer = false
+  ) => {
     if (canvasIdRef.current !== canvasId) return;
     const request = ++layerRequestRef.current;
     const isCurrent = () => !isCancelled() && canvasIdRef.current === canvasId && layerRequestRef.current === request;
     try {
-      const res = await ApiService.listLayers(canvasId);
+      const { layers: res, lastDrawnLayerId: serverLastLayerId } = await ApiService.listLayersWithHint(canvasId);
       if (!isCurrent()) return;
       setLayers(res);
 
+      const localLastLayerId = !isGuest && user?.id ? ApiService.getLastDrawnLayerId(canvasId, user.id) : null;
+      const hintLayerId = [localLastLayerId, serverLastLayerId].find((id) =>
+        Boolean(id && res.some((l) => l.id === id && l.layerType !== 'group' && !l.isLocked))
+      ) ?? null;
+
       const tryKey = `${canvasId}:${user?.id}`;
-      if (autoAssign && res.length > 0 && !isGuest && user && !autoLayerTriedRef.current.has(tryKey) && !ownsDrawableLayer(res, user.id)) {
+      if (autoAssign && res.length > 0 && !isGuest && user && !hintLayerId && !autoLayerTriedRef.current.has(tryKey) && !ownsDrawableLayer(res, user.id)) {
         autoLayerTriedRef.current.add(tryKey);
         try {
           const mine = await ApiService.createLayer(canvasId, {
@@ -415,17 +428,18 @@ export const App: React.FC = () => {
           return;
         }
 
-        // Priority 2: Keep current active layer if it still exists in the canvas!
-        if (res.some((l) => l.id === activeLayerIdRef.current)) {
+        // Priority 2: Keep current active layer unless the signed-in account just changed (e.g. guest -> login)
+        if (!preferUserLayer && res.some((l) => l.id === activeLayerIdRef.current)) {
           return;
         }
 
-        // Priority 3: Select user's own UNLOCKED layer, or public unlocked layer, or top unlocked layer by default
+        // Priority 3: Jump to the user's last-drawn layer, or own UNLOCKED layer, or public unlocked layer
         const topFirst = [...res].reverse().filter((layer) => layer.layerType !== 'group' && layer.layerType !== 'mask');
+        const lastDrawnLayer = hintLayerId ? res.find((l) => l.id === hintLayerId) : undefined;
         const myUnlockedLayer = topFirst.find((l) => l.ownerId === user?.id && !l.isLocked);
         const publicUnlockedLayer = topFirst.find((l) => (l.isPublic || l.aclMode === 'shared_all' || !l.ownerId) && !l.isLocked);
         const topUnlocked = topFirst.find((l) => !l.isLocked);
-        const targetLayer = myUnlockedLayer || publicUnlockedLayer || topUnlocked || topFirst[0];
+        const targetLayer = lastDrawnLayer || myUnlockedLayer || publicUnlockedLayer || topUnlocked || topFirst[0];
         setActiveLayerId(targetLayer?.id ?? null);
       } else if (!isGuest) {
         // If canvas has zero layers, automatically create an initial collaborative layer
@@ -452,9 +466,11 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     let cancelled = false;
+    const userChanged = lastLayerUserIdRef.current !== user?.id;
+    lastLayerUserIdRef.current = user?.id;
     // A locked room's layers are refused until it is unlocked; this runs again then
     if (activeCanvasId && !roomLocked) {
-      fetchLayers(activeCanvasId, null, () => cancelled, true);
+      fetchLayers(activeCanvasId, null, () => cancelled, true, userChanged);
     }
     return () => { cancelled = true; };
   }, [activeCanvasId, user?.id, roomLocked]);
@@ -882,7 +898,7 @@ export const App: React.FC = () => {
       if (importingLumina.current) return;
       importingLumina.current = true;
       try {
-        const collaborative = !locally && !showGateway && !OfflineSessionStore.isOfflineMode();
+        const collaborative = !OfflineSessionStore.canUseOfflineMode() || (!locally && !showGateway && !OfflineSessionStore.isOfflineMode());
         const unpacked = await LuminaProjectEngine.unpackProject(data, filePath);
         if (!collaborative && !OfflineSessionStore.isOfflineMode()) {
           OfflineSessionStore.setSessionMode('offline');
@@ -1001,7 +1017,10 @@ export const App: React.FC = () => {
           onResolve={handleGatewayResolve}
           initialServerUrl={ApiService.getServerUrl()}
           onOpenLuminaProject={handleOpenLuminaProject}
-          onOpenAuth={() => setIsAuthModalOpen(true)}
+          onOpenAuth={(serverUrl) => {
+            reconnectServer(serverUrl);
+            setIsAuthModalOpen(true);
+          }}
         />
         <AuthModal
           isOpen={isAuthModalOpen}
