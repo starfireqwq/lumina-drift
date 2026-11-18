@@ -229,6 +229,7 @@ static LRESULT CALLBACK TabletWindowProc(HWND window, UINT message, WPARAM wPara
 
 static DWORD WINAPI RunTablet(LPVOID opaque) {
   auto ready = static_cast<HANDLE>(opaque);
+  SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   const auto instance = GetModuleHandleW(nullptr);
   const wchar_t name[] = L"LuminaWinTabInput";
   WNDCLASSW windowClass = {};

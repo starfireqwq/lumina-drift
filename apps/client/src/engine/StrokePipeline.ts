@@ -33,6 +33,15 @@ export class StrokePipeline {
   private lastValidPoint: RawPoint | null = null;
   private tabletStroke: TabletStroke | null = null;
   private motionPending = false;
+  private onNeedsRender: (() => void) | null = null;
+
+  public setOnNeedsRender(cb: (() => void) | null) {
+    this.onNeedsRender = cb;
+  }
+
+  public hasPendingWork(): boolean {
+    return this.motionPending || this.frameDabFloats > 0;
+  }
   private frameDabs: Float32Array[] = [];
   private frameDabFloats = 0;
   private pendingRelease?: PointerEvent;
@@ -91,6 +100,7 @@ export class StrokePipeline {
     }
     this.frameDabs.push(dabs);
     this.frameDabFloats += dabs.length;
+    this.onNeedsRender?.();
   }
 
   private flushFrameDabs() {
@@ -127,6 +137,7 @@ export class StrokePipeline {
         });
         if (target) {
           this.brushRenderer.stampDabs(target, dabsArray, count, undefined, undefined, isAlphaLocked, this.eraserProps);
+          this.onNeedsRender?.();
 
           // Collect points for preview streaming and final Op commit
           const rulerMgr = RulerManager.getInstance();
@@ -249,6 +260,7 @@ export class StrokePipeline {
     if (captureInk && !eraserProps && !this.brushRenderer.getProperties().colorMixing) this.strokeInk = new Map();
     this.strokeId++;
     this.isDrawing = true;
+    this.layerManager.markInteractive();
     this.currentStrokePoints = [];
     this.lastValidPoint = null;
     this.pendingPreviewDabs = [];
@@ -258,8 +270,12 @@ export class StrokePipeline {
 
     this.strokeProps = { ...(eraserProps ?? this.brushRenderer.getProperties()) };
     if (!tablet.awaitingNativeStart) this.beginStroke(tablet, tablet.initialPoint);
-    tablet.onMotionAvailable = () => { this.motionPending = true; };
+    tablet.onMotionAvailable = () => {
+      this.motionPending = true;
+      this.onNeedsRender?.();
+    };
     this.motionPending = tablet.hasNativeMotion;
+    if (this.motionPending) this.onNeedsRender?.();
   }
 
   private beginStroke(tablet: TabletStroke, initial: TabletPoint) {

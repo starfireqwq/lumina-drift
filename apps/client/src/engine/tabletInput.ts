@@ -202,7 +202,6 @@ export class TabletStroke {
   private unread: WinTabSample[] = [];
   private switched = false;
   private interrupted = false;
-  private pendingGap = false;
   readonly initialPoint: TabletPoint;
   private latestEvent: TabletPoint;
   private rawPoints: TabletPoint[] = [];
@@ -333,7 +332,13 @@ export class TabletStroke {
     if (!first) return;
     const switched = this.switched;
     this.switched = false;
-    const points = switched ? [this.nativePoint(first, this.latestEvent)] : [];
+    const points: TabletPoint[] = [];
+    if (switched) {
+      const pt = this.nativePoint(first, this.latestEvent);
+      // Skip duplicating the already-painted anchor when continuing from Chromium pointer events mid-stroke.
+      const dist = Math.hypot(pt.clientX - this.previousPoint.clientX, pt.clientY - this.previousPoint.clientY);
+      if (this.previousPoint === this.initialPoint || dist >= 1.5) points.push(pt);
+    }
     const unread = this.unread;
     this.unread = [];
     let lifted = this.interrupted;
@@ -345,7 +350,7 @@ export class TabletStroke {
       this.nativeLast = packet;
       points.push(this.nativePoint(packet, this.latestEvent));
     }
-    return { runs: this.splitMotion(points, switched), lifted };
+    return { runs: this.splitMotion(points, false), lifted };
   }
 
   receivePackets(changed: boolean, winTab: WinTabSample[], ink: WinTabSample[], mouse: WinTabSample[]) {
@@ -401,10 +406,7 @@ export class TabletStroke {
     const cursor = this.nativeLast?.cursor;
     for (const packet of packets) {
       if (packet.cursor === cursor) {
-        this.unread.push(this.pendingGap ? { ...packet, gapBefore: true } : packet);
-        this.pendingGap = false;
-      } else if (this.nativeSource === 'wintab' && packet.gapBefore) {
-        this.pendingGap = true;
+        this.unread.push(packet);
       }
     }
   }
@@ -412,11 +414,9 @@ export class TabletStroke {
   hasPositionGap(next: TabletPoint) {
     const previous = this.previousPoint;
     if (!this.isPen && next.pointerType !== 'mouse') return false;
-    // Chromium can miss a whole curve even when delivery is fast. Keep its
-    // gap threshold distinct from a native stream that supplies pen history.
-    const nativePen = this.isPen && this.hasNativeMotion;
-    return next.timeStamp - previous.timeStamp >= (nativePen ? 100 : 64) &&
-      Math.hypot(next.clientX - previous.clientX, next.clientY - previous.clientY) > (nativePen ? 120 : this.isPen ? 48 : 24);
+    // Only split on severe missed-release teleports so brief frame hitches never punch holes in fast strokes.
+    return next.timeStamp - previous.timeStamp >= 250 &&
+      Math.hypot(next.clientX - previous.clientX, next.clientY - previous.clientY) > 320;
   }
 
   private splitMotion(points: TabletPoint[], freshRun = false) {

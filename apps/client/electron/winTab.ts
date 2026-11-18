@@ -125,13 +125,36 @@ export function connectWinTab(window: BrowserWindow) {
   window.on('focus', () => focus(true));
   window.on('blur', () => focus(false));
 
+  let geoTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastSentGeo: { x: number; y: number; scale: number } | null = null;
+  const flushGeometry = () => {
+    geoTimer = null;
+    if (!receiving || closed) return;
+    const next = geometry();
+    if (lastSentGeo && lastSentGeo.x === next.x && lastSentGeo.y === next.y && Math.abs(lastSentGeo.scale - next.scale) < 1e-6) {
+      return;
+    }
+    lastSentGeo = next;
+    send({ type: 'geometry', geometry: next });
+  };
   const syncGeometry = () => {
-    if (receiving && !closed) send({ type: 'geometry', geometry: geometry() });
+    if (!receiving || closed) return;
+    if (geoTimer !== null) return;
+    geoTimer = setTimeout(flushGeometry, 16);
+  };
+  const flushGeometrySoon = () => {
+    if (geoTimer !== null) {
+      clearTimeout(geoTimer);
+      geoTimer = null;
+    }
+    flushGeometry();
   };
   window.on('move', syncGeometry);
   window.on('resize', syncGeometry);
-  window.webContents.on('zoom-changed', () => setImmediate(syncGeometry));
-  screen.on('display-metrics-changed', syncGeometry);
+  window.on('moved', flushGeometrySoon);
+  window.on('resized', flushGeometrySoon);
+  window.webContents.on('zoom-changed', () => setImmediate(flushGeometrySoon));
+  screen.on('display-metrics-changed', flushGeometrySoon);
   window.hookWindowMessage(0x0219, () => send({ type: 'devices' }));
 
   capture.on('exit', code => {
@@ -140,10 +163,14 @@ export function connectWinTab(window: BrowserWindow) {
   });
   window.on('closed', () => {
     closed = true;
+    if (geoTimer !== null) {
+      clearTimeout(geoTimer);
+      geoTimer = null;
+    }
     clearImmediate(inkFlush);
     ipcMain.removeListener('atelier:tablet-connect', onConnect);
     ipcMain.removeListener('atelier:wintab-configure', onConfigure);
-    screen.removeListener('display-metrics-changed', syncGeometry);
+    screen.removeListener('display-metrics-changed', flushGeometrySoon);
     capture.kill();
   });
 }

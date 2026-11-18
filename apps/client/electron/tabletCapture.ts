@@ -74,7 +74,8 @@ function capture() {
           continue;
         }
         if (distance > 0x80000000 && next !== 0) continue;
-        packet.gapBefore ||= gap || distance > 1;
+        // Only propagate real driver/ring-buffer queue overflow flags; WinTab serials can skip across hover/contexts.
+        packet.gapBefore ||= gap;
         gap = false;
         serial = next;
         if (packet.contact || contacting) {
@@ -140,7 +141,7 @@ function capture() {
     }
     flush();
     const delay = configuring || mouseCapture === 'starting' || now - lastPacketAt < 300 ? 4
-      : status === 'ready' || mouseCapture === 'ready' ? 24 : 250;
+      : status === 'ready' || mouseCapture === 'ready' ? 8 : 250;
     poll = setTimeout(tick, delay);
   }
 
