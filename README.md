@@ -1,10 +1,12 @@
-# AtelierSync — 私域多人即時協作繪茶系統
+# Lumina Drift Paint
 
-結合 **Magma 的多人即時同步與圖層權限機制**，以及 **Krita / Clip Studio Paint (CSP) 級別的專業繪圖手感、逼真混色、WebGL2 GPU 特效濾鏡與縮時錄影重播**。
+Lumina Drift Paint 是一款開源繪圖軟體。你可以在本機離線作畫，也可以加入多人繪茶，在同一張畫布上同步創作。支援電繪筆壓感、圖層、筆刷匯入，以及 JavaScript 插件。
+
+[下載最新版本](https://github.com/starfireqwq/lumina-drift/releases/latest) · [軟體介紹 PDF](https://github.com/starfireqwq/lumina-drift/releases/download/v1.1.0/Lumina-Drift-Paint-Introduction-zh-TW.pdf)
 
 ---
 
-## 核心功能特色 (Phase 5 最終發布版)
+## 核心功能
 
 ### 1. 畫布縮時錄影與操作重播引擎 (Time-Lapse Replay)
 - **歷史操作平滑回放**：利用伺服器 SQLite `canvas_ops` 單調遞增操作定序日誌與 `canvas_snapshots` 檢查點，從第 0 筆 Op 至最新畫面流暢逐筆重建繪畫過程。
@@ -38,7 +40,7 @@
   - 日文 (`ja-JP`)
   - 可於頂部導航列快速切換或至偏好設定選擇，全介面即時生效並持久化儲存於 `localStorage`。
 
-### 5. CSP 級別進階筆刷、混色與 WebGL2 濾鏡
+### 5. 進階筆刷、混色與 WebGL2 濾鏡
 - **動態重心手抖修正 (Stabilizer)**：慢速平滑刻線、快速運筆無延遲感。
 - **OKLab 減色逼真混色**：黃色 + 藍色 = 翠綠色，杜絕傳統灰泥漿感；支援水分與混色衰減。
 - **專業選區系統**：自由套索 (Lasso)、魔術棒 (Magic Wand)、擴張/縮張 (+3px/-3px)、動態雙色螞蟻線限制。
@@ -126,4 +128,4 @@ docker compose down
 
 ## 授權
 
-Lumina Drift 原始碼依 [MIT 授權](LICENSE)提供。內含元件依[各自的授權聲明](apps/client/public/THIRD_PARTY_NOTICES.txt)散布。使用者創作的畫作依創作者自己的授權管理。
+Lumina Drift Paint 原始碼依 [MIT 授權](LICENSE)提供。內含元件依[各自的授權聲明](apps/client/public/THIRD_PARTY_NOTICES.txt)散布。使用者創作的畫作依創作者自己的授權管理。
