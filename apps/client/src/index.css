@@ -1,0 +1,294 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Default (dark) theme values; src/theme/themes.ts overwrites them at startup. */
+:root {
+  --n-50: 247 247 249; --n-100: 236 238 242; --n-200: 217 220 228; --n-300: 185 189 201;
+  --n-400: 142 147 163; --n-500: 104 109 125; --n-600: 75 79 92; --n-700: 53 56 68;
+  --n-800: 38 40 50; --n-900: 26 27 35; --n-950: 17 18 23;
+  --a-50: 238 242 255; --a-100: 224 231 255; --a-200: 199 210 254; --a-300: 165 180 252;
+  --a-400: 129 140 248; --a-500: 99 102 241; --a-600: 79 70 229; --a-700: 67 56 202;
+  --a-800: 55 48 163; --a-900: 49 46 129; --a-950: 30 27 75;
+  --text-strong: 255 255 255;
+  --workspace-bg: #0d0e12;
+  --chrome: rgb(var(--n-900));
+  --chrome-2: rgb(var(--n-950));
+  --chrome-border: rgb(var(--n-700) / 0.7);
+}
+
+.atelier-app {
+  background: var(--chrome-2);
+  color: rgb(var(--n-200));
+}
+
+.atelier-workspace, .atelier-canvas-viewport { background: var(--workspace-bg); }
+
+.atelier-app :is(button, input, select, a, [tabindex]):focus-visible {
+  outline: 2px solid rgb(var(--a-400));
+  outline-offset: -2px;
+}
+
+/* Range sliders follow the accent colour in every theme */
+.atelier-app input[type='range'] { accent-color: rgb(var(--a-500)); }
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100vh;
+  height: 100dvh;
+  width: 100vw;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
+  overflow: hidden;
+  background-color: rgb(var(--n-950));
+  color: rgb(var(--n-200));
+  transition: background-color 0.35s cubic-bezier(0.4, 0, 0.2, 1), color 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Text fields stay selectable even though the app disables selection */
+input, textarea, [contenteditable] { user-select: text; -webkit-user-select: text; }
+
+.theme-transition {
+  transition: background-color 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              border-color 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              color 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.h-dvh {
+  height: 100vh;
+  height: 100dvh;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgb(var(--n-700)); border-radius: 9999px; }
+::-webkit-scrollbar-thumb:hover { background: rgb(var(--n-600)); }
+
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+@keyframes jellyBounce {
+  0% { transform: scale(1, 1); }
+  30% { transform: scale(1.28, 0.75); }
+  50% { transform: scale(0.82, 1.2); }
+  70% { transform: scale(1.08, 0.92); }
+  85% { transform: scale(0.96, 1.04); }
+  100% { transform: scale(1, 1); }
+}
+
+.animate-jelly { animation: jellyBounce 0.5s cubic-bezier(0.34, 1.56, 0.64, 1); }
+
+/* Right-click / long-press wheel: spins open from the pointer, its slices sweep in one after another */
+@keyframes atelierWheelSpinIn {
+  0% { transform: rotate(-150deg) scale(0.3); opacity: 0; }
+  70% { transform: rotate(8deg) scale(1.04); opacity: 1; }
+  100% { transform: rotate(0deg) scale(1); opacity: 1; }
+}
+@keyframes atelierWheelSliceIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes atelierWheelFadeIn { from { opacity: 0; } to { opacity: 1; } }
+.atelier-wheel-spin { animation: atelierWheelSpinIn 0.4s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.atelier-wheel-slice { animation: atelierWheelSliceIn 0.18s ease-out both; }
+@media (prefers-reduced-motion: reduce) {
+  .atelier-wheel-spin { animation: atelierWheelFadeIn 0.14s ease-out both; }
+  .atelier-wheel-slice { animation: none; }
+}
+
+/* The on-canvas text caret (TextCanvasEditor draws it where the canvas puts the next character) */
+@keyframes atelierCaretBlink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+.atelier-text-caret { animation: atelierCaretBlink 1.06s step-end infinite; }
+
+/* ---- Workspace chrome (tool rail, options bar, docks) ---- */
+.atelier-chrome { background: var(--chrome); border-color: var(--chrome-border); }
+
+.atelier-icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 8px; color: rgb(var(--n-300));
+  transition: background-color .12s, color .12s, box-shadow .12s;
+}
+.atelier-icon-btn:hover { background: rgb(var(--n-800)); color: rgb(var(--text-strong)); }
+.atelier-icon-btn[aria-pressed='true'] {
+  background: rgb(var(--a-600)); color: #fff;
+  box-shadow: 0 0 0 1px rgb(var(--a-400) / .6), 0 4px 12px -4px rgb(var(--a-600) / .7);
+}
+.atelier-icon-btn:disabled { opacity: .35; pointer-events: none; }
+
+.atelier-field {
+  background: rgb(var(--n-950)); border: 1px solid rgb(var(--n-700));
+  color: rgb(var(--text-strong)); border-radius: 6px;
+}
+.atelier-field:focus { outline: none; border-color: rgb(var(--a-500)); box-shadow: 0 0 0 2px rgb(var(--a-500) / .25); }
+
+.atelier-tooltip {
+  position: fixed; z-index: 90; pointer-events: none;
+  background: rgb(var(--n-950)); color: rgb(var(--text-strong));
+  border: 1px solid rgb(var(--n-700)); border-radius: 6px;
+  padding: 3px 8px; font-size: 11px; white-space: nowrap;
+  box-shadow: 0 8px 24px -8px rgb(0 0 0 / .5);
+}
+.atelier-kbd {
+  font-family: ui-monospace, monospace; font-size: 10px; padding: 0 4px; border-radius: 4px;
+  border: 1px solid rgb(var(--n-600)); color: rgb(var(--n-300)); background: rgb(var(--n-800));
+}
+
+/* Help centre drawings (components/help/HelpArt.tsx) */
+@keyframes atelierHelpRipple { 0% { transform: scale(1); opacity: .9; } 70%, 100% { transform: scale(2.6); opacity: 0; } }
+@keyframes atelierHelpBlink { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
+@keyframes atelierHelpDrag { 0% { transform: translate(0, 0); } 45%, 55% { transform: translate(-32px, -12px); } 100% { transform: translate(0, 0); } }
+@keyframes atelierHelpPress { 0%, 100% { opacity: 0; } 30%, 70% { opacity: 1; } }
+.atelier-help-ripple { transform-box: fill-box; transform-origin: center; animation: atelierHelpRipple 1.8s ease-out infinite; }
+.atelier-help-blink { animation: atelierHelpBlink 2.4s ease-in-out infinite; }
+.atelier-help-drag { animation: atelierHelpDrag 2.4s cubic-bezier(.45, 0, .2, 1) infinite; }
+.atelier-help-press { animation: atelierHelpPress 2.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .atelier-help-ripple, .atelier-help-blink, .atelier-help-drag, .atelier-help-press { animation: none; }
+}
+.atelier-help-mark { background: rgb(var(--a-500) / .28); color: inherit; border-radius: 3px; padding: 0 1px; }
+
+/* Theme switch (theme/themeTransition.ts drives these with the Web Animations API) */
+html.atelier-theme-vt::view-transition { pointer-events: none; }
+html.atelier-theme-vt::view-transition-old(root),
+html.atelier-theme-vt::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
+html.atelier-theme-vt::view-transition-group(root) { animation-duration: 0s; }
+html.atelier-theme-vt, html.atelier-theme-vt body { transition: none !important; }
+
+.atelier-canvas-surface[data-canvas-presented="false"] { opacity: 0; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .atelier-canvas-surface[data-canvas-presented="true"] {
+    animation: atelierCanvasReveal .42s cubic-bezier(.3,.1,.24,1) backwards;
+  }
+  @keyframes atelierCanvasReveal {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  .atelier-gateway-enter {
+    animation: atelierGatewayReveal .58s cubic-bezier(.12,.62,.88,.38) both;
+  }
+  @keyframes atelierGatewayReveal {
+    from { clip-path: circle(0 at 30px 24px); opacity: .65; }
+    to { clip-path: circle(150vmax at 30px 24px); opacity: 1; }
+  }
+}
+
+/* ---- One look for everything that floats: menus, popovers, floating windows, on-canvas bars ---- */
+.atelier-popover {
+  background: rgb(var(--n-900) / .97);
+  color: rgb(var(--n-200));
+  border: 1px solid rgb(var(--n-700));
+  border-radius: 12px;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .035), 0 18px 48px -14px rgb(0 0 0 / .55), 0 2px 8px -3px rgb(0 0 0 / .35);
+  backdrop-filter: blur(10px);
+}
+.atelier-window { border-radius: 10px; }
+@keyframes atelierMenuIn { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: none; } }
+.atelier-menu-in { animation: atelierMenuIn .14s cubic-bezier(.2, .8, .3, 1); transform-origin: top; }
+@media (prefers-reduced-motion: reduce) { .atelier-menu-in { animation: none; } }
+
+/* Buttons used on popovers and on-canvas bars */
+.atelier-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 28px; padding: 0 10px; border-radius: 8px; white-space: nowrap;
+  font-size: 12px; font-weight: 500; line-height: 1;
+  color: rgb(var(--n-200)); background: rgb(var(--n-800)); border: 1px solid rgb(var(--n-700));
+  transition: background-color .12s, border-color .12s, color .12s, transform .08s;
+}
+.atelier-btn:hover { background: rgb(var(--n-700)); color: rgb(var(--text-strong)); }
+.atelier-btn:active { transform: scale(.97); }
+.atelier-btn:disabled { opacity: .4; pointer-events: none; }
+.atelier-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
+.atelier-btn--primary { background: rgb(var(--a-600)); border-color: rgb(var(--a-500)); color: #fff; }
+.atelier-btn--primary:hover { background: rgb(var(--a-500)); color: #fff; }
+.atelier-btn--ghost { background: transparent; border-color: transparent; color: rgb(var(--n-300)); }
+.atelier-btn--ghost:hover { background: rgb(var(--n-800)); }
+.atelier-btn--danger:hover { background: rgb(var(--rose-600) / .85); border-color: rgb(var(--rose-500)); color: #fff; }
+.atelier-btn[aria-pressed='true'] { background: rgb(var(--a-600) / .2); border-color: rgb(var(--a-500) / .75); color: rgb(var(--a-200)); }
+.atelier-btn .atelier-kbd { margin-left: 2px; }
+.atelier-btn--primary .atelier-kbd { background: rgb(255 255 255 / .16); border-color: rgb(255 255 255 / .28); color: #fff; }
+
+/* Drag-and-drop docking: where the dragged panel would land */
+@keyframes atelierDropIn { from { opacity: 0; transform: scale(.985); } to { opacity: 1; transform: none; } }
+.atelier-drop-zone {
+  position: fixed; border-radius: 10px;
+  background: rgb(var(--a-500) / .14); border: 2px solid rgb(var(--a-400) / .85);
+  box-shadow: 0 0 0 4px rgb(var(--a-500) / .1), inset 0 0 24px rgb(var(--a-500) / .12);
+  transition: left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out;
+  animation: atelierDropIn .16s ease-out;
+}
+.atelier-drop-zone--float { border-style: dashed; background: rgb(var(--a-500) / .07); transition: none; }
+.atelier-drop-line { position: fixed; border-radius: 2px; background: rgb(var(--a-400)); box-shadow: 0 0 10px rgb(var(--a-400) / .8); }
+.atelier-drag-chip {
+  position: fixed; display: flex; align-items: center; gap: 6px; padding: 4px 9px;
+  border-radius: 8px; font-size: 11px; white-space: nowrap;
+  background: rgb(var(--n-950)); color: rgb(var(--text-strong)); border: 1px solid rgb(var(--n-600));
+  box-shadow: 0 10px 28px -8px rgb(0 0 0 / .6);
+}
+
+/* Modal surfaces share one look */
+.atelier-modal-backdrop { background: rgb(0 0 0 / .55); backdrop-filter: blur(3px); }
+.atelier-modal {
+  background: rgb(var(--n-900)); color: rgb(var(--n-200));
+  border: 1px solid rgb(var(--n-700)); border-radius: 14px;
+  box-shadow: 0 24px 64px -16px rgb(0 0 0 / .6);
+}
+.atelier-drag-region { -webkit-app-region: drag; app-region: drag; }
+.atelier-no-drag { -webkit-app-region: no-drag; app-region: no-drag; }
+
+.atelier-chat-backdrop { top: 0; }
+.atelier-app:has(.atelier-drag-region) .atelier-chat-backdrop {
+  top: max(28px, env(titlebar-area-height, 0px));
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-overlay-motion] > :is(.atelier-modal-backdrop, .atelier-chat-backdrop, .atelier-popover) {
+    opacity: 1;
+    animation: none;
+    transition: opacity var(--overlay-duration) ease-out;
+  }
+  [data-overlay-motion] > .atelier-modal-backdrop > .atelier-modal,
+  [data-overlay-motion] > .atelier-chat-backdrop > .atelier-chat-panel,
+  [data-overlay-motion="popover"] > .atelier-popover {
+    --overlay-offset: 0 10px;
+    --overlay-scale: .985;
+    translate: 0 0;
+    scale: 1;
+    animation: none;
+    transition: opacity var(--overlay-duration) ease-out,
+      translate var(--overlay-duration) cubic-bezier(.24,.74,.29,1),
+      scale var(--overlay-duration) cubic-bezier(.24,.74,.29,1);
+  }
+  [data-overlay-motion] > .atelier-chat-backdrop > .atelier-chat-panel {
+    --overlay-offset: 100% 0;
+    --overlay-scale: 1;
+  }
+  [data-overlay-motion="popover"] > .atelier-popover { --overlay-offset: 0 -6px; }
+
+  [data-overlay-phase="closing"] > :is(.atelier-modal-backdrop, .atelier-chat-backdrop, .atelier-popover) { opacity: 0; }
+  [data-overlay-phase="closing"] > .atelier-modal-backdrop > .atelier-modal,
+  [data-overlay-phase="closing"] > .atelier-chat-backdrop > .atelier-chat-panel,
+  [data-overlay-phase="closing"][data-overlay-motion="popover"] > .atelier-popover {
+    translate: var(--overlay-offset);
+    scale: var(--overlay-scale);
+  }
+
+  @starting-style {
+    [data-overlay-phase="open"] > :is(.atelier-modal-backdrop, .atelier-chat-backdrop, .atelier-popover) { opacity: 0; }
+    [data-overlay-phase="open"] > .atelier-modal-backdrop > .atelier-modal,
+    [data-overlay-phase="open"] > .atelier-chat-backdrop > .atelier-chat-panel,
+    [data-overlay-phase="open"][data-overlay-motion="popover"] > .atelier-popover {
+      translate: var(--overlay-offset);
+      scale: var(--overlay-scale);
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-overlay-motion] > *, [data-overlay-motion] > .atelier-modal-backdrop > .atelier-modal { animation: none; }
+}

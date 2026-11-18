@@ -1,0 +1,15 @@
+**/.git
+**/node_modules
+**/dist
+**/dist-electron
+**/release
+**/data
+**/.env
+**/.env.*
+**/*.db*
+**/*.sqlite*
+**/*.jks
+**/*.keystore
+**/*.pfx
+**/*.p12
+apps/client/resources/server

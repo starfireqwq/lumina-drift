@@ -1,0 +1,34 @@
+node_modules
+dist
+dist-electron
+apps/client/resources/wintab/
+release
+build
+.DS_Store
+*.local
+*.log
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/snapshots/*
+!data/.gitkeep
+# The server's live database and snapshots (DATA_DIR defaults to apps/server/data): never committed.
+# The rules above are anchored to the repo root, so they never matched this folder.
+apps/server/data/*.db
+apps/server/data/*.db-wal
+apps/server/data/*.db-shm
+apps/server/data/snapshots/
+**/data/session-secret
+**/data/initial-admin-password
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+*.pfx
+*.p12
+apps/client/resources/server/
+apps/client/resources/cloudflared*
+apps/client/resources/LuminaThumbProvider.*
+out
+.turbo

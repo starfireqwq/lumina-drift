@@ -1,0 +1,15 @@
+{
+  "apiVersion": 1,
+  "id": "lumina.studio-tools",
+  "name": "Studio Tools",
+  "version": "1.0.0",
+  "author": "Lumina Drift",
+  "description": "Set a blue inking brush, make a sketch layer, or generate a palette of cool tones.",
+  "permissions": ["brush", "layers", "artwork"],
+  "commands": [
+    { "id": "blue-ink", "label": "Blue Inking Brush" },
+    { "id": "sketch-layer", "label": "New Sketch Layer" },
+    { "id": "swatches", "label": "Create Cool Swatches" }
+  ],
+  "script": "function run(command, canvas) {\n  if (command === 'blue-ink') return { kind: 'brush', color: '#387BE8', size: 8 };\n  if (command === 'sketch-layer') return { kind: 'layer', name: 'Plugin Sketch' };\n  const colors = ['#151E40', '#244890', '#387BE8', '#62C5DF', '#B7F0E7'];\n  const tile = Math.floor(Math.min(42, canvas.width / colors.length, canvas.height));\n  if (tile < 2) return { kind: 'message', text: 'This canvas is too small for swatches.' };\n  return {\n    kind: 'artwork', name: 'Cool Swatches', width: tile * colors.length, height: tile,\n    shapes: colors.map((color, index) => ({ kind: 'rect', x: index * tile, y: 0, width: tile, height: tile, color }))\n  };\n}"
+}

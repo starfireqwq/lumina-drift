@@ -1,0 +1,51 @@
+# ==============================================================================
+# AtelierSync Docker Compose — Production Self-Hosting & Distribution
+# ==============================================================================
+# 支援 Linux ARM64 (Raspberry Pi / Ampere / Apple Silicon) 與 x86_64
+#
+# 快速上手指令：
+#   1. 單純啟動本地/局域網伺服器：
+#        docker compose up -d
+#   2. 搭配 Cloudflare Tunnel 公網免設定穿透（自動產出專屬 HTTPS 網址）：
+#        docker compose --profile cloudflare up -d
+#   3. 查看即時運行日誌：
+#        docker compose logs -f
+#   4. 停止服務：
+#        docker compose down
+# ==============================================================================
+
+services:
+  atelier-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ateliersync:latest
+    container_name: atelier-sync
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - HOST=0.0.0.0
+      - JWT_SECRET=${JWT_SECRET:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - DATA_DIR=/app/data # atelier.db + snapshots/ on the ./data volume
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # [選用擴充] Cloudflare Tunnel 快速免開 Port 連線 (適合外網好友點網址直接進房)
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: atelier-cloudflared
+    restart: unless-stopped
+    profiles: ["cloudflare"]
+    command: tunnel --no-autoupdate --url http://atelier-sync:3000
+    depends_on:
+      - atelier-sync

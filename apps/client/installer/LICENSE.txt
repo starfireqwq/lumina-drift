@@ -1,0 +1,43 @@
+﻿Lumina Drift 流光 — 軟體授權合約暨最終使用者同意書 (End User License Agreement)
+
+歡迎安裝與使用「Lumina Drift 流光（Lumina Drift Paint）」。請於安裝本軟體前詳細閱讀以下授權條款；勾選同意並繼續安裝，即表示您已充分閱讀、瞭解並同意遵守本合約之所有約定。
+
+================================================================================
+一、授權範圍與使用條款
+1. 本軟體（Lumina Drift 流光）的原始碼依隨附的 MIT 授權提供。您可以按該授權使用、修改和散布軟體。第三方元件適用各自的授權。
+2. 您於本軟體中創作之所有畫布內容、圖層、向量線稿、動畫作品及匯出檔案（包含但不限於 .lumina、.psd、.ora、PNG、JPG、GIF 與影片檔），其著作權與智慧財產權完全歸屬於創作者本人所有。
+3. MIT 授權不授予 Lumina Drift 名稱與標誌的商標權。
+
+二、本機資料與協同連線隱私說明
+1. 離線本機繪圖模式下的所有畫布與圖層資料皆僅儲存於您的裝置本機儲存空間（IndexedDB / 本機磁碟），不會自動上傳至任何第三方伺服器。
+2. 啟用多人即時協作繪茶、P2P 語音或自架／通道連線時，僅在您主動連線至指定房主或伺服器期間傳送必要之畫作同步資料與暱稱。
+
+三、免責聲明
+本軟體係依「現況（AS IS）」提供。在法律允許的最大範圍內，開發團隊對於任何直接、間接、附帶或衍生之資料損毀或業務中斷不負擔保責任；進行大型作品創作期間建議定期透過匯出或 .lumina 專案存檔保留備份。
+
+================================================================================
+四、隱私權聲明
+
+單人離線模式：畫布、圖層與作品存於本機瀏覽器儲存空間或您選擇的專案檔。離線繪圖不經過協作伺服器或 Cloudflare Tunnel。
+
+多人協作：您連線的房主伺服器會接收帳號、顯示名稱、連線與房間活動，以及同步所需的作品、操作與聊天內容。伺服器保存帳號及協作資料。資料的存取、備份、保存與刪除由伺服器管理者負責；如需查詢或刪除，請聯絡該房主。勾選「記住帳號」會在本機保存帳號名稱，登入憑證也依伺服器分開存於本機，應用程式不會儲存您在登入表單輸入的密碼。
+
+Cloudflare 通道：房主可自行啟用 Cloudflare Quick Tunnel。透過公開通道存取房主伺服器時，登入、即時協作與其他房間請求會經過 Cloudflare，再轉交自架伺服器。Cloudflare 依其隱私權政策處理連線資訊，例如 IP 位址及請求資訊。知道通道網址的人可以嘗試連線到伺服器，房主可透過房間權限限制進入。關閉通道會讓該臨時網址失效。
+
+語音通話：加入時由瀏覽器或作業系統授予麥克風權限。聲音透過 WebRTC 傳送給通話中的其他參與者，房主伺服器傳遞連線訊號，連線建立可能使用 STUN 服務。
+
+Cloudflare 隱私權政策 https://www.cloudflare.com/privacypolicy/
+Cloudflare Quick Tunnels 說明 https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/
+
+================================================================================
+ENGLISH SUMMARY (END USER LICENSE AGREEMENT)
+
+1. License Grant:
+   Lumina Drift Paint is available under the bundled MIT License. Third-party components have their own licenses. Artists retain rights to their artwork.
+2. Local Privacy:
+   Offline mode stores all canvas and layer data strictly locally on your device. Network transmission occurs only when you explicitly join or host a collaborative session.
+   An optional Cloudflare Quick Tunnel routes collaborative requests via Cloudflare to the host. The host manages retention and deletion of server-side data. See https://www.cloudflare.com/privacypolicy/.
+3. Warranty Disclaimer:
+   THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+請勾選下方的同意核取方塊（「我接受「授權合約」中的條款」），方得進行下一步安裝。

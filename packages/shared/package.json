@@ -1,0 +1,29 @@
+{
+  "name": "@atelier/shared",
+  "version": "1.1.0",
+  "license": "MIT",
+  "description": "Shared TypeScript types, layer ACL permissions, and MessagePack protocol for AtelierSync",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.2",
+    "lz4js": "^0.2.0"
+  },
+  "devDependencies": {
+    "@types/lz4js": "^0.2.2",
+    "tsup": "^8.3.6",
+    "typescript": "^5.7.3"
+  }
+}

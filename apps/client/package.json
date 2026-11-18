@@ -1,0 +1,52 @@
+{
+  "name": "@atelier/client",
+  "version": "1.1.0",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "description": "AtelierSync Electron + Vite + React desktop client",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "dev:electron": "vite",
+    "build": "tsc && vite build",
+    "bundle:server": "node scripts/bundle-server.mjs",
+    "build:electron": "tsc && vite build && tsc -p tsconfig.electron.json && node -e \"require('fs').writeFileSync('dist-electron/package.json', JSON.stringify({type:'commonjs'}, null, 2))\" && node scripts/bundle-server.mjs",
+    "build:wintab": "powershell -NoProfile -ExecutionPolicy Bypass -File native/wintab/build.ps1",
+    "pack:electron": "pnpm build:wintab && pnpm build:electron && electron-builder --win --dir",
+    "dist:win": "pnpm build:wintab && pnpm build:electron && electron-builder --win",
+    "dist:mac": "pnpm build:electron && electron-builder --mac pkg",
+    "dist:android": "pnpm build && node ../../scripts/package-android.mjs",
+    "dist:linux": "pnpm build:electron && electron-builder --linux",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@atelier/shared": "workspace:*",
+    "@jitl/quickjs-singlefile-mjs-release-sync": "0.32.0",
+    "ag-psd": "^34.1.0",
+    "gifenc": "^1.0.3",
+    "jszip": "^3.10.2",
+    "lucide-react": "^0.475.0",
+    "pixi.js": "^8.22.0",
+    "qrcode": "^1.5.4",
+    "quickjs-emscripten-core": "0.32.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "socket.io-client": "^4.8.1",
+    "socket.io-parser": "^4.2.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "electron": "^34.2.0",
+    "electron-builder": "^26.18.0",
+    "postcss": "^8.5.2",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0"
+  }
+}

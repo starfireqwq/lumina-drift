@@ -1,0 +1,83 @@
+{
+  appId: "com.luminadrift.paint",
+  productName: "Lumina-Drift-Paint",
+  directories: {
+    output: "release",
+    buildResources: "resources"
+  },
+  files: [
+    "dist/**/*",
+    "dist-electron/**/*",
+    "!node_modules/**/*"
+  ],
+  extraResources: [
+    {
+      from: "resources/icon.ico",
+      to: "icon.ico"
+    },
+    {
+      from: "resources/lumina-file.ico",
+      to: "lumina-file.ico"
+    },
+    {
+      from: "resources/server/dist",
+      to: "server/dist"
+    },
+    {
+      from: "resources/server/node_modules",
+      to: "server/node_modules"
+    }
+  ],
+  fileAssociations: [
+    {
+      ext: "lumina",
+      name: "Lumina Drift Project",
+      description: "Lumina Drift Artwork Project (.lumina)",
+      role: "Editor",
+      icon: "resources/lumina-file.ico"
+    }
+  ],
+  win: {
+    icon: "resources/icon.ico",
+    extraResources: [
+      { from: "resources/wintab/wintab.node", to: "wintab/wintab.node" },
+      { from: "resources/LuminaThumbProvider.dll", to: "LuminaThumbProvider.dll" },
+      { from: "resources/cloudflared.exe", to: "cloudflared.exe" }
+    ],
+    target: [
+      {
+        target: "nsis",
+        arch: ["x64"]
+      },
+      {
+        target: "portable",
+        arch: ["x64"]
+      }
+    ],
+    artifactName: "${productName}-Setup-${version}.${ext}"
+  },
+  nsis: {
+    oneClick: false,
+    allowToChangeInstallationDirectory: true,
+    createDesktopShortcut: true,
+    createStartMenuShortcut: true,
+    shortcutName: "Lumina-Drift-Paint",
+    license: "installer/LICENSE.txt",
+    include: "installer/installer.nsh"
+  },
+  portable: {
+    artifactName: "${productName}-Portable-${version}.${ext}"
+  },
+  mac: {
+    icon: "resources/icon-source.png",
+    target: ["pkg"],
+    extraResources: [{ from: "resources/cloudflared", to: "cloudflared" }],
+    category: "public.app-category.graphics-design",
+    artifactName: "${productName}-Mac-${version}-${arch}.${ext}"
+  },
+  linux: {
+    target: ["AppImage", "tar.gz"],
+    category: "Graphics",
+    artifactName: "${productName}-Linux-${version}.${ext}"
+  }
+}

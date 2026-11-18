@@ -1,0 +1,5023 @@
+import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { PluginAction } from '../plugins/pluginApi';
+import { Application, Container, type Filter, Graphics, MaskFilter, Rectangle, RenderTexture, Sprite, Texture, UPDATE_PRIORITY } from 'pixi.js';
+import {
+  AtelierBrushPreset,
+  MIN_BRUSH_SPACING,
+  CanvasModel,
+  computeSmartEncloseFillMask,
+  expandSelectionMask,
+  floodFillMagicWand,
+  hexToRgb,
+  getTileBounds,
+  hitTestVectorStroke,
+  LayerMeta,
+  LayerModel,
+  LayerTextMeta,
+  tileToRgba,
+  rasterizeLassoMask,
+  OpBroadcastPacket,
+  PreviewDabPacket,
+  ScopedUndoOp,
+  TileCoord,
+  TileData,
+  TilePatchPacket,
+  ToolType,
+  CanvasUnit,
+  clampDpi,
+} from '@atelier/shared';
+import { useAuth } from '../context/AuthContext';
+import { useSocket } from '../context/SocketContext';
+import { useI18n } from '../context/I18nContext';
+import { CanvasViewport, ViewportState } from '../engine/Viewport';
+import { LayerManager, type TileConcurrencyContext } from '../engine/LayerManager';
+import { compressTiles, decodeTiles, warmUpCommitWorkers } from '../engine/commitWorkers';
+import { commitInOrder, diffTilesAsync, tilesAsync, whenToolCommitsDone } from './workspace/tools/asyncTiles';
+import { BrushProperties, BrushRenderer } from '../engine/BrushRenderer';
+import { StrokePipeline } from '../engine/StrokePipeline';
+import { normalizeTileBytes, TileEngine } from '../engine/TileEngine';
+import { OFFLINE_UNDO_LIMIT, ONLINE_UNDO_LIMIT, ScopedUndoManager } from '../engine/ScopedUndoManager';
+import { OfflineSessionStore } from '../services/offlineStore';
+import { SelectionEngine } from '../engine/SelectionEngine';
+import { WebGLFilterEngine } from '../engine/WebGLFilterEngine';
+import { ShortcutManager } from '../engine/ShortcutManager';
+import { FloatingStudioPanel } from './FloatingStudioPanel';
+import type { FolderAccess } from './workspace/useFolderAccess';
+import { roomMemberCards } from '../utils/roomMembers';
+import { BRUSH_TOOL_DEFAULTS, isBrushTool, loadBrushTool, saveBrushTool } from '../engine/brushToolSettings';
+import {
+  boxFromAnchor,
+  type AnchorKey,
+  type ResizeBox,
+} from '../utils/canvasResize';
+import { ViewportToolbar } from './ViewportToolbar';
+import { CanvasStickersOverlay } from './CanvasStickersOverlay';
+import { ColorWheelStudio } from './ColorWheelStudio';
+import { UserListPanel } from './UserListPanel';
+import { ToolRail } from './workspace/ToolRail';
+import { BrushSideSliders } from './workspace/BrushSideSliders';
+import { BezierMode, SelectionMode, ToolOptionsBar } from './workspace/ToolOptionsBar';
+import { DockColumn, DockRow, FloatingPanels, MobilePanelSheet, PanelDef } from './workspace/DockSystem';
+import { dockActions, PanelId, PANEL_TITLES, useDockLayout } from './workspace/dockStore';
+import { ALL_TOOLS, MAX_BRUSH_SIZE, nextSizeStep } from './workspace/toolCatalog';
+import { RemoteCursorsLayer } from './workspace/RemoteCursorsLayer';
+import { OpLogPanel } from './workspace/OpLogPanel';
+import { QuickKeysPanel } from './workspace/QuickActions';
+import { useMediaQuery } from './workspace/useMediaQuery';
+import { playWorkspaceEntrance } from './workspace/workspaceEntrance';
+import type { ToolContext } from './workspace/tools/toolContext';
+import { LIQUIFY_TOOLS, useLiquifyTool } from './workspace/tools/useLiquifyTool';
+import { SHAPE_TOOLS, useShapeTools } from './workspace/tools/useShapeTools';
+import { useSelectionTools } from './workspace/tools/useSelectionTools';
+import { useFillTools } from './workspace/tools/useFillTools';
+import { useVectorTools } from './workspace/tools/useVectorTools';
+import { useBrushTool } from './workspace/tools/useBrushTool';
+import { useTransformTool } from './workspace/tools/useTransformTool';
+import { useCanvasPointer } from './workspace/tools/useCanvasPointer';
+import { findContentBounds } from '../utils/pixelBounds';
+import { VectorEditResult } from '../engine/VectorEngine';
+import {
+  buildPenStroke,
+  deleteAnchor,
+  hitTestNodes,
+  moveAnchor,
+  moveHandle,
+  PenPoint,
+  toggleCorner,
+  VectorHit,
+} from '../engine/vectorEditing';
+import type { TransformBox } from './TransformOverlay';
+import { RulerManager } from '../engine/RulerManager';
+import { RulerOverlay } from './RulerOverlay';
+import { TouchRadialMenu } from './TouchRadialMenu';
+import type { DistortMode } from '../utils/distortModes';
+import { LiquifyEngine } from '../engine/LiquifyEngine';
+import { BlurSmudgeEngine } from '../engine/BlurSmudgeEngine';
+import { ApiService } from '../services/api';
+import type { LayerCanvasItem } from '../engine/layerComposite';
+import { LayerPanel } from './LayerPanel';
+import { getUserColor } from '../utils/userColors';
+import {
+  AnimationEngine, AnimationTrack, animationDisplay, celEntriesOf, celLayerOf, celOfLayer, entryIndexAt, entryStart, isAnimationFolder, MAX_HOLD, placeEntries, trackLength,
+} from '../engine/AnimationEngine';
+import { DEFAULT_TEXT, renderText, textBounds } from '../engine/textLayer';
+import { nextGroupName } from '../utils/canvasName';
+import type { AnimationExportPlan, AnimationExportScope } from './AnimationTimelineBar';
+import {
+  BlendMode,
+  ColorCurvesOptions,
+  GradientPresetName,
+  GradientStop,
+  LayerType,
+  RemovedLayer,
+  VectorEraserMode,
+  VectorStroke,
+  VectorWidthMode,
+} from '@atelier/shared';
+import { VectorOverlay } from './VectorOverlay';
+import { VectorEngine } from '../engine/VectorEngine';
+import { LAYER_FILTERS, type LayerFilter, type LayerFilterId } from '../utils/layerFilters';
+import { AlertCircle, ImagePlus, Keyboard, Layers, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
+import { type DroppedImages, type ImageDropTarget, ImageImportError, imageEntries, isImageDrag, loadImageEntry, readDroppedImages } from '../utils/imageImport';
+
+/** Where a key types text (a text field), unlike a focused button, slider, checkbox or the page */
+const isTypingTarget = (target: EventTarget | null) => {
+  const el = target as HTMLElement | null;
+  if (!el?.closest) return false;
+  if (el.closest('textarea, select, [contenteditable]:not([contenteditable="false"])')) return true;
+  const input = el.closest('input');
+  return Boolean(input && !['range', 'checkbox', 'radio', 'button', 'color', 'submit', 'reset', 'file'].includes(input.type));
+};
+
+// Opened rarely and heavy (WebGL filter editors, brush packs, timeline, modals): loaded on first use
+const BrushToolset = lazy(() => import('./BrushToolset').then((m) => ({ default: m.BrushToolset })));
+const BrushSettingsModal = lazy(() => import('./BrushSettingsModal').then((m) => ({ default: m.BrushSettingsModal })));
+const ResizeCanvasModal = lazy(() => import('./ResizeCanvasModal').then((m) => ({ default: m.ResizeCanvasModal })));
+const CanvasResizeOverlay = lazy(() => import('./CanvasResizeOverlay').then((m) => ({ default: m.CanvasResizeOverlay })));
+const RulerControlsModal = lazy(() => import('./RulerControlsModal').then((m) => ({ default: m.RulerControlsModal })));
+const ReferenceViewportHUD = lazy(() => import('./ReferenceViewportHUD').then((m) => ({ default: m.ReferenceViewportHUD })));
+const TransformOverlay = lazy(() => import('./TransformOverlay').then((m) => ({ default: m.TransformOverlay })));
+const MeshWarpOverlay = lazy(() => import('./MeshWarpOverlay').then((m) => ({ default: m.MeshWarpOverlay })));
+const TextCanvasEditor = lazy(() => import('./TextCanvasEditor').then((m) => ({ default: m.TextCanvasEditor })));
+const ComicStudioOverlay = lazy(() => import('./ComicStudioOverlay').then((m) => ({ default: m.ComicStudioOverlay })));
+const AnimationTimelineBar = lazy(() => import('./AnimationTimelineBar').then((m) => ({ default: m.AnimationTimelineBar })));
+const LayerFilterDialog = lazy(() => import('./LayerFilterDialog').then((m) => ({ default: m.LayerFilterDialog })));
+const ColorCurvesModal = lazy(() => import('./ColorCurvesModal').then((m) => ({ default: m.ColorCurvesModal })));
+const GradientMapModal = lazy(() => import('./GradientMapModal').then((m) => ({ default: m.GradientMapModal })));
+
+/** A copied layer (複製圖層) with everything needed to paste it, here or on another canvas */
+interface CopiedLayer {
+  model: LayerModel;
+  tiles: TileData[];
+  mask?: { model: LayerModel; tiles: TileData[] };
+  strokes?: VectorStroke[];
+  children: CopiedLayer[];
+}
+type LayerClipboard = { items: CopiedLayer[]; width: number; height: number };
+type DeletedLayers = { deleted: string[]; lifted: string[] };
+// This tab's memory; with 「重新整理後保留」 also localStorage (tile bytes as base64)
+let layerClipboard: LayerClipboard | null = null;
+/** While an animation plays, the cels of this many upcoming frames are decoded ahead (in workers) */
+const ANIM_PREFETCH_FRAMES = 6;
+const KEEP_CLIPBOARD_KEY = 'atelier_keep_layer_clipboard';
+const CLIPBOARD_KEY = 'atelier_layer_clipboard';
+const keepsLayerClipboard = () => {
+  try {
+    return localStorage.getItem(KEEP_CLIPBOARD_KEY) === '1';
+  } catch {
+    return false;
+  }
+};
+/** Saves the clipboard; false when it does not fit (localStorage holds about 5 MB) */
+const saveLayerClipboard = (clip: LayerClipboard | null): boolean => {
+  try {
+    if (!clip) {
+      localStorage.removeItem(CLIPBOARD_KEY);
+      return true;
+    }
+    localStorage.setItem(CLIPBOARD_KEY, JSON.stringify(clip, (_k, v) => (v instanceof Uint8Array ? { b64: bytesToBase64(v) } : v)));
+    return true;
+  } catch {
+    try { localStorage.removeItem(CLIPBOARD_KEY); } catch { /* storage unavailable */ }
+    return false;
+  }
+};
+const loadLayerClipboard = (): LayerClipboard | null => {
+  try {
+    const text = keepsLayerClipboard() ? localStorage.getItem(CLIPBOARD_KEY) : null;
+    return text ? JSON.parse(text, (_k, v) => (v && typeof v.b64 === 'string' ? Uint8Array.from(atob(v.b64), (c) => c.charCodeAt(0)) : v)) : null;
+  } catch {
+    return null;
+  }
+};
+const bytesToBase64 = (bytes: Uint8Array) => {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+};
+
+export interface CanvasProjectAccess {
+  canvasId: string;
+  ready: boolean;
+  readLayers: () => Promise<LayerCanvasItem[]>;
+  flushEdits: () => Promise<void>;
+}
+
+export interface CanvasPluginAccess {
+  canvasId: string;
+  apply(action: Exclude<PluginAction, { kind: 'message' }>): Promise<boolean>;
+}
+
+interface CanvasWorkspaceProps {
+  canvas: CanvasModel | null;
+  activeLayer: LayerModel | null;
+  layers: LayerModel[];
+  layersLoaded: boolean;
+  onCanvasResized?: (width: number, height: number, dpi?: number, unit?: CanvasUnit) => void;
+  /** Small composite preview of the canvas, for the canvas switcher */
+  onCanvasThumbnail?: (canvasId: string, dataUrl: string) => void;
+  /** Bumped by the parent to request "open the canvas resize dialog" (menu item) */
+  resizeRequest?: number;
+  /** 檔案 → 匯入圖片: files picked there, each becomes a new layer (a new id = a new request) */
+  importImagesRequest?: { files: File[]; id: number } | null;
+  onRequestCreateMyLayer?: () => void;
+  onSelectLayer?: (layerId: string) => void;
+  onCreateLayer?: (
+    name: string,
+    blendMode?: BlendMode,
+    layerType?: LayerType,
+    aboveLayerId?: string | null,
+    parentId?: string | null,
+    extra?: { meta?: LayerMeta | null; select?: boolean; belowLayerId?: string }
+  ) => Promise<LayerModel | null> | void;
+  onToggleLock?: (layer: LayerModel) => void;
+  onToggleVisibility?: (layer: LayerModel) => void;
+  /** A group goes with its content: returns what was deleted and what (others' layers) moved up out of it */
+  onDeleteLayer?: (layerId: string, opts?: { keepContents?: boolean }) => void | boolean | DeletedLayers | Promise<void | boolean | DeletedLayers>;
+  onReleaseLayer?: (layerId: string) => void;
+  onClaimLayer?: (layerId: string, force?: boolean) => void;
+  onTransferLayer?: (layerId: string, targetUserId: string) => void;
+  roomMembers?: Array<{ userId: string; displayName: string; role?: string }>;
+  folderAccess: FolderAccess;
+  onReorderLayer?: (layerId: string, newSortOrder: number, ascendingIds?: string[]) => void | Promise<void>;
+  onUpdateLayerProps?: (layerId: string, props: Partial<LayerModel>) => void | Promise<void>;
+  onRegisterGetLayerCanvases?: (access: CanvasProjectAccess | null) => void;
+  onRegisterPluginAccess?: (access: CanvasPluginAccess | null) => void;
+  onRegisterBakeScreentone?: (fn: (layerId: string, params: { density: number; angleRad: number; dotScale: number }) => void) => void;
+  onQuickEnterCanvas?: () => void;
+  onQuickCreateCanvas?: () => void;
+  onOpenChat?: () => void;
+  onThumbnailsChange?: (thumbnails: Record<string, string>) => void;
+}
+
+export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
+  canvas,
+  activeLayer,
+  layers,
+  layersLoaded,
+  onCanvasResized,
+  onCanvasThumbnail,
+  resizeRequest = 0,
+  importImagesRequest = null,
+  onRegisterPluginAccess,
+  onRequestCreateMyLayer,
+  onSelectLayer,
+  onCreateLayer,
+  onToggleLock,
+  onToggleVisibility,
+  onDeleteLayer,
+  onReleaseLayer,
+  onClaimLayer,
+  onTransferLayer,
+  roomMembers = [],
+  folderAccess,
+  onReorderLayer,
+  onUpdateLayerProps,
+  onRegisterGetLayerCanvases,
+  onRegisterBakeScreentone,
+  onQuickEnterCanvas,
+  onQuickCreateCanvas,
+  onOpenChat,
+  onThumbnailsChange,
+}) => {
+  const { isGuest, user } = useAuth();
+  const isAdmin = user?.serverRole === 'admin' || Boolean(canvas && user?.id && canvas.ownerId === user.id);
+
+  const {
+    members,
+    emitCursor,
+    emitPreviewDab,
+    commitOp: emitOp,
+    commitTilePatch: emitTilePatch,
+    takeBroadcastOps,
+    subscribeOps,
+    subscribePreviewDabs,
+    getLatestSeq,
+    subscribeOwnOpSeq,
+    canvasResizedEvent,
+    stickers,
+    addSticker,
+    updateSticker,
+    removeSticker,
+    toggleVoiceMute,
+  } = useSocket();
+  const isPhone = useMediaQuery('(max-width: 767px)');
+  const { t } = useI18n();
+  const dockLayout = useDockLayout();
+  const railRight = !isPhone && dockLayout.railSide === 'right';
+  const [mobileSheet, setMobileSheet] = useState<PanelId | null>(null);
+  const openBrushToolset = () => {
+    if (isPhone) setMobileSheet('brushToolset');
+    else dockActions.activate('brushToolset');
+  };
+
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const hasCanvas = Boolean(canvas);
+  useLayoutEffect(() => {
+    if (hasCanvas && workspaceRef.current) return playWorkspaceEntrance(workspaceRef.current);
+  }, [hasCanvas]);
+
+  const containerRef = useRef<HTMLDivElement>(null);
+  const canvasMountRef = useRef<HTMLDivElement>(null);
+  const pixiAppRef = useRef<Application | null>(null);
+  const viewportRef = useRef<CanvasViewport | null>(null);
+  const layerManagerRef = useRef<LayerManager | null>(null);
+  const brushRendererRef = useRef<BrushRenderer | null>(null);
+  const strokePipelineRef = useRef<StrokePipeline | null>(null);
+  const tileEngineRef = useRef<TileEngine | null>(null);
+  const undoByCanvasRef = useRef(new Map<string, ScopedUndoManager>());
+  const selectionEngineRef = useRef<SelectionEngine | null>(null);
+  const webglFilterEngineRef = useRef<WebGLFilterEngine | null>(null);
+  const vectorEngineRef = useRef<VectorEngine | null>(null);
+  const lastReplayedCanvasIdRef = useRef<string | null>(null);
+  const [isEngineReady, setIsEngineReady] = useState<boolean>(false);
+  const [isCanvasPresented, setIsCanvasPresented] = useState(false);
+  const presentCanvas = useCallback(() => {
+    pixiAppRef.current?.render();
+    setIsCanvasPresented(true);
+  }, []);
+  const [engineError, setEngineError] = useState(false);
+  const [engineAttempt, setEngineAttempt] = useState(0);
+
+  // References to keep callbacks fresh and avoid stale closures
+  const activeLayerRef = useRef(activeLayer);
+  activeLayerRef.current = activeLayer;
+  const userRef = useRef(user);
+  userRef.current = user;
+  const brushPropsRef = useRef<BrushProperties | null>(null);
+  const layersRef = useRef(layers);
+  layersRef.current = layers;
+
+  // Personal eye: this viewer's own show/hide overrides, kept on this device per canvas, never synced
+  const localVisKey = canvas ? `atelier_local_vis_${canvas.id}` : '';
+  const [localVisibility, setLocalVisibility] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    try {
+      setLocalVisibility(localVisKey ? JSON.parse(localStorage.getItem(localVisKey) || '{}') : {});
+    } catch {
+      setLocalVisibility({});
+    }
+  }, [localVisKey]);
+  const toggleLocalVisibility = (layerId: string) => {
+    setLocalVisibility((prev) => {
+      const next = { ...prev };
+      if (layerId in next) delete next[layerId];
+      else next[layerId] = !(layersRef.current.find((l) => l.id === layerId)?.isVisible ?? true);
+      try {
+        if (localVisKey) localStorage.setItem(localVisKey, JSON.stringify(next));
+      } catch {
+        // storage blocked: the override still applies for this session
+      }
+      return next;
+    });
+  };
+  const localVisibilityRef = useRef(localVisibility);
+  localVisibilityRef.current = localVisibility;
+  // The animation folder the timeline plays and its player (set in the animation section below)
+  const animFolderIdRef = useRef<string | null>(null);
+  const animEngineRef = useRef<AnimationEngine | null>(null);
+  // Onion skin is drawn only while this viewer has the timeline open: painters who merely see an
+  // animation folder (or never opened the timeline) get no tinted neighbours on their screen
+  const animTimelineOpenRef = useRef(false);
+  /**
+   * What this viewer's screen shows: the personal eyes, and in every animation folder the cel at
+   * the current frame (the edited folder plus onion skin). `time` renders one frame for export;
+   * `only` keeps just those animation folders (solo / team export).
+   */
+  const displayLayersFor = (ls: LayerModel[], opts: { personal?: boolean; time?: number; only?: Set<string> | null } = {}) => {
+    const vis = localVisibilityRef.current;
+    const local = opts.personal === false ? ls : ls.map((l) => (l.id in vis ? { ...l, isVisible: vis[l.id] } : l));
+    const engine = animEngineRef.current;
+    const exporting = opts.time !== undefined;
+    return animationDisplay(
+      local,
+      {
+        time: exporting ? opts.time! : engine?.getTime() ?? 0,
+        activeFolderId: animFolderIdRef.current,
+        onion: exporting || !engine || engine.getIsPlaying() || !animTimelineOpenRef.current ? null : engine.getOnionSkinConfig(),
+        only: opts.only ?? null,
+      },
+      canvas?.width ?? 0,
+      canvas?.height ?? 0
+    );
+  };
+  const displayLayersRef = useRef(layers);
+  displayLayersRef.current = displayLayersFor(layers);
+
+  // External thumbnail store: updating a layer thumbnail only re-renders its <img> cell, never CanvasWorkspace
+  const thumbnailsRef = useRef<Record<string, string>>({});
+  const thumbListenersRef = useRef(new Set<() => void>());
+  const onThumbnailsChangeRef = useRef(onThumbnailsChange);
+  onThumbnailsChangeRef.current = onThumbnailsChange;
+  const notifyThumbnails = useCallback(() => {
+    for (const cb of thumbListenersRef.current) cb();
+    onThumbnailsChangeRef.current?.(thumbnailsRef.current);
+  }, []);
+  const publishThumbnail = useCallback((layerId: string, url: string) => {
+    if (thumbnailsRef.current[layerId] === url) return;
+    thumbnailsRef.current = { ...thumbnailsRef.current, [layerId]: url };
+    notifyThumbnails();
+  }, [notifyThumbnails]);
+  const resetThumbnails = useCallback(() => {
+    if (!Object.keys(thumbnailsRef.current).length) return;
+    thumbnailsRef.current = {};
+    notifyThumbnails();
+  }, [notifyThumbnails]);
+  const subscribeThumbnails = useCallback((cb: () => void) => {
+    thumbListenersRef.current.add(cb);
+    return () => { thumbListenersRef.current.delete(cb); };
+  }, []);
+  const getThumbnailsSnapshot = useCallback(() => thumbnailsRef.current, []);
+
+  const canvasThumbTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onCanvasThumbnailRef = useRef(onCanvasThumbnail);
+  onCanvasThumbnailRef.current = onCanvasThumbnail;
+  // Whole-canvas preview for the canvas switcher, debounced and deferred while actively drawing
+  const scheduleCanvasThumbnail = () => {
+    const lm = layerManagerRef.current;
+    const canvasId = canvas?.id;
+    if (!lm || !canvasId) return;
+    if (canvasThumbTimerRef.current) clearTimeout(canvasThumbTimerRef.current);
+    canvasThumbTimerRef.current = setTimeout(() => {
+      if (layerManagerRef.current !== lm) return; // canvas switched or engine rebuilt
+      if (lm.isActivelyDrawing() || strokePipelineRef.current?.getIsDrawing()) {
+        scheduleCanvasThumbnail();
+        return;
+      }
+      void lm.getCanvasThumbnailAsync().then((url) => {
+        if (url && layerManagerRef.current === lm) onCanvasThumbnailRef.current?.(canvasId, url);
+      });
+    }, 1200);
+  };
+
+  const remoteThumbAtRef = useRef(new Map<string, number>());
+  const refreshLayerThumbnail = (layerId: string, fromRemote = false) => {
+    if (!layerManagerRef.current) return;
+    if (fromRemote) {
+      const now = performance.now();
+      if (now - (remoteThumbAtRef.current.get(layerId) ?? 0) < 4000) return;
+      remoteThumbAtRef.current.set(layerId, now);
+    }
+    const thumb = layerManagerRef.current.getLayerThumbnail(layerId, 48, 48, fromRemote);
+    if (thumb) publishThumbnail(layerId, thumb);
+    if (!fromRemote) scheduleCanvasThumbnail();
+  };
+
+  type LocalTileCommit = {
+    clientOpId: string;
+    layerId: string;
+    seq: number | null;
+    baseSeq: number;
+    beforeTiles: Map<string, TileData>;
+    afterTiles: Map<string, TileData>;
+    createdAt: number;
+    historyOp?: ScopedUndoOp;
+  };
+  const recentLocalCommitsRef = useRef<LocalTileCommit[]>([]);
+  const appliedClientOpsRef = useRef<Set<string>>(new Set());
+  const appliedVectorOpsRef = useRef<Set<string>>(new Set());
+  const appliedFootprintOpsRef = useRef<Set<string>>(new Set());
+  const speculativeConcurrencyOpsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    recentLocalCommitsRef.current = [];
+    appliedClientOpsRef.current.clear();
+    appliedVectorOpsRef.current.clear();
+    appliedFootprintOpsRef.current.clear();
+    speculativeConcurrencyOpsRef.current.clear();
+  }, [canvas?.id]);
+  useEffect(() => {
+    return subscribeOwnOpSeq((clientOpId, seq) => {
+      const rec = recentLocalCommitsRef.current.find((r) => r.clientOpId === clientOpId);
+      if (rec) {
+        rec.seq = seq;
+        if (rec.historyOp) {
+          rec.historyOp.seq = seq;
+          rec.historyOp = undefined;
+        }
+      }
+    });
+  }, [subscribeOwnOpSeq]);
+
+  const trackLocalCommit = (
+    layerId: string,
+    clientOpId: string,
+    baseSeq: number,
+    beforeTiles: TileData[],
+    afterTiles: TileData[],
+    historyOp?: ScopedUndoOp
+  ) => {
+    if (OfflineSessionStore.isOfflineCanvas(canvas?.id)) return;
+    const beforeMap = new Map<string, TileData>();
+    for (const t of beforeTiles) if (t) beforeMap.set(`${t.col}_${t.row}`, t);
+    const afterMap = new Map<string, TileData>();
+    for (const t of afterTiles) if (t) afterMap.set(`${t.col}_${t.row}`, t);
+    recentLocalCommitsRef.current.push({
+      clientOpId,
+      layerId,
+      seq: null,
+      baseSeq,
+      beforeTiles: beforeMap,
+      afterTiles: afterMap,
+      createdAt: Date.now(),
+      historyOp,
+    });
+    if (recentLocalCommitsRef.current.length > 60) recentLocalCommitsRef.current.shift();
+  };
+
+  // Every committed edit is the layer's new baseline. Tools that skipped this left the ping-pong
+  // buffer (the "before" state of the next stroke) stale, so the next undo or two-finger gesture
+  // wiped what they had just done; the layer thumbnail went stale the same way.
+  const commitOp = (layerId: string, opType: string, payload: unknown, alreadySynced = false) => {
+    // A brush commit finished off the main thread synced when it read its tiles; syncing now would
+    // copy the stroke that may have started since into the next stroke's before-state
+    if (!alreadySynced) layerManagerRef.current?.syncPingPong(layerId);
+    refreshLayerThumbnail(layerId);
+    const pObj = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : null;
+    const clientOpId = typeof pObj?.clientOpId === 'string'
+      ? pObj.clientOpId
+      : `cop_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const baseSeq = typeof pObj?.baseSeq === 'number' ? pObj.baseSeq : getLatestSeq();
+    const tiles = Array.isArray(pObj?.tiles) ? (pObj!.tiles as TileData[]) : null;
+    if (tiles?.length) {
+      const latestUndo = scopedUndoRef.current.peekLatestForLayer(layerId);
+      if (latestUndo?.beforeTiles?.length) {
+        const historyOp = (opType === 'STROKE' || opType === 'ERASE') && latestUndo.opType === opType
+          ? latestUndo
+          : undefined;
+        if (historyOp) historyOp.baseSeq = baseSeq;
+        trackLocalCommit(layerId, clientOpId, baseSeq, latestUndo.beforeTiles, tiles, historyOp);
+      }
+    }
+    emitOp(layerId, opType, pObj ? { ...pObj, baseSeq, clientOpId } : payload);
+  };
+  const commitTilePatch = (
+    layerId: string,
+    tiles: TileData[],
+    isUndo: boolean = false,
+    actionDesc?: string,
+    alreadySynced = false,
+    explicitBeforeTiles?: TileData[],
+    history?: Pick<TilePatchPacket, 'targetOpSeq' | 'historyTiles'>
+  ) => {
+    // (an edit committed off the main thread synced when it queued its reads, like the brush)
+    if (!alreadySynced) layerManagerRef.current?.syncPingPong(layerId);
+    refreshLayerThumbnail(layerId);
+    const clientOpId = `cop_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const baseSeq = getLatestSeq();
+    if (tiles?.length) {
+      const latestUndo = !isUndo && actionDesc !== 'REDO' ? scopedUndoRef.current.peekLatestForLayer(layerId) : undefined;
+      const before = explicitBeforeTiles ?? latestUndo?.beforeTiles;
+      if (before?.length) {
+        const historyOp = before === latestUndo?.beforeTiles && tiles === latestUndo.afterTiles ? latestUndo : undefined;
+        if (historyOp) historyOp.baseSeq = baseSeq;
+        trackLocalCommit(layerId, clientOpId, baseSeq, before, tiles, historyOp);
+      }
+    }
+    emitTilePatch(layerId, tiles, isUndo, actionDesc, { baseSeq, clientOpId, ...history });
+  };
+
+  // Initial snapshot/op replay bookkeeping for the live op queue (see applyRemoteOp)
+  const isReplayingRef = useRef<boolean>(false);
+  const replayedSeqRef = useRef<number>(0);
+
+  // Phase 10: Vector Engine & Color Curves / Gradient Map Modals
+  const [isColorCurvesOpen, setIsColorCurvesOpen] = useState<boolean>(false);
+  const [isGradientMapOpen, setIsGradientMapOpen] = useState<boolean>(false);
+  const [filterMenuOpen, setFilterMenuOpen] = useState(false);
+  const [layerFilterId, setLayerFilterId] = useState<LayerFilterId | null>(null);
+  const filterModalOpenRef = useRef(false);
+  filterModalOpenRef.current = Boolean(layerFilterId || isColorCurvesOpen || isGradientMapOpen);
+  const filterIdRef = useRef(layerFilterId);
+  filterIdRef.current = layerFilterId;
+  const filterWorkerRef = useRef<Worker | null>(null);
+  const filterRequestRef = useRef(0);
+  const filterAbortRef = useRef<(() => void) | null>(null);
+  const [filterBusy, setFilterBusy] = useState(false);
+  const filterPreviewRef = useRef<{ item: NonNullable<ReturnType<LayerManager['getLayerItem']>>; texture: RenderTexture } | null>(null);
+
+  // Tools & Properties State
+  const [currentTool, setCurrentTool] = useState<ToolType>('brush');
+  const currentToolRef = useRef(currentTool);
+  currentToolRef.current = currentTool;
+
+  const [isResizeModalOpen, setIsResizeModalOpen] = useState<boolean>(false);
+  const resizeModalOpenRef = useRef<boolean>(false);
+  resizeModalOpenRef.current = isResizeModalOpen;
+  const lastSameSizeReloadAtRef = useRef<number>(0);
+  const [resizeAnchor, setResizeAnchor] = useState<AnchorKey | null>('c');
+  const [resizeLockAspect, setResizeLockAspect] = useState<boolean>(false);
+  const [resizeModifiers, setResizeModifiers] = useState<{ shift: boolean; alt: boolean }>({ shift: false, alt: false });
+  const [resizeBox, setResizeBox] = useState<ResizeBox>({
+    x: 0,
+    y: 0,
+    width: canvas?.width || 2048,
+    height: canvas?.height || 2048,
+  });
+
+  useEffect(() => {
+    if (!canvas || !isResizeModalOpen) return;
+    setResizeBox({ x: 0, y: 0, width: canvas.width, height: canvas.height });
+    setResizeAnchor('c');
+    setResizeModifiers({ shift: false, alt: false });
+  }, [isResizeModalOpen, canvas?.id, canvas?.width, canvas?.height]);
+
+  useEffect(() => {
+    if (
+      canvas &&
+      canvasResizedEvent &&
+      canvasResizedEvent.canvasId === canvas.id &&
+      canvasResizedEvent.shifted &&
+      canvasResizedEvent.width === canvas.width &&
+      canvasResizedEvent.height === canvas.height &&
+      Date.now() - lastSameSizeReloadAtRef.current > 2000
+    ) {
+      setEngineAttempt((attempt) => attempt + 1);
+    }
+  }, [canvasResizedEvent, canvas?.id, canvas?.width, canvas?.height]);
+  const [selectedBrushId, setSelectedBrushId] = useState<string | null>(null);
+  const [isColorStudioOpen, setIsColorStudioOpen] = useState<boolean>(false);
+
+  // Shape / gradient / vector-pen preview graphic (above the layers)
+  const shapeGraphicRef = useRef<Graphics | null>(null);
+
+  // Hand-drawn animation state
+  const [isAnimationTimelineOpen, setIsAnimationTimelineOpen] = useState<boolean>(false);
+  animTimelineOpenRef.current = isAnimationTimelineOpen;
+  const animationByCanvasRef = useRef(new Map<string, AnimationEngine>());
+  const [timelineState, setTimelineState] = useState<{ canvasId: string; engine: AnimationEngine } | null>(null);
+  const animationEngine = timelineState?.canvasId === canvas?.id ? timelineState?.engine : undefined;
+  animEngineRef.current = animationEngine ?? null;
+  // Every animation folder is a track (top of the layer list first). The edited one holds the
+  // active layer, else it is the last one edited, else the first.
+  const lastAnimFolderRef = useRef<string | null>(null);
+  const animFolders = layers.filter((layer) =>
+    isAnimationFolder(layer) && (folderAccess.canAdd(layer) || layer.ownerId === user?.id || layer.meta?.animation?.shared === true)
+  ).sort((a, b) => b.sortOrder - a.sortOrder);
+  const activeAnimFolderId = activeLayer?.meta?.animation ? activeLayer.id : (activeLayer && celOfLayer(layers, activeLayer.id)?.folderId) ?? null;
+  const animFolder = animFolders.find((f) => f.id === (activeAnimFolderId ?? lastAnimFolderRef.current)) ?? animFolders[0] ?? null;
+  lastAnimFolderRef.current = animFolder?.id ?? null;
+  animFolderIdRef.current = animFolder?.id ?? null;
+  const animTracks: AnimationTrack[] = animFolders.map((f) => ({
+    folderId: f.id, name: f.name, ownerId: f.ownerId, shared: Boolean(f.meta?.animation?.shared), entries: celEntriesOf(layers, f.id),
+  }));
+  const animEntries = animTracks.find((t) => t.folderId === animFolder?.id)?.entries ?? [];
+  const animEntriesRef = useRef(animEntries);
+  animEntriesRef.current = animEntries;
+  const animTimelineLength = Math.max(1, ...animTracks.map((t) => trackLength(t.entries)));
+  const animTrackKey = animTracks.map((t) => `${t.folderId}:${t.shared}:${t.entries.map((e) => `${e.id}/${e.hold}/${e.ref ?? ''}`).join(',')}`).join('|');
+
+
+  // Ruler & Guidelines Modal
+  const [isRulerModalOpen, setIsRulerModalOpen] = useState<boolean>(false);
+
+  // Reference Image HUD Viewport
+  const [isReferenceHUDOpen, setIsReferenceHUDOpen] = useState<boolean>(false);
+
+  // Gesture Radial Pie Menu
+  const [isRadialMenuOpen, setIsRadialMenuOpen] = useState<boolean>(false);
+  const radialMenuOpenRef = useRef(isRadialMenuOpen);
+  radialMenuOpenRef.current = isRadialMenuOpen;
+  const [radialMenuPos, setRadialMenuPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const contextPointerRef = useRef({ type: '', rightButton: false });
+
+  // Undo / Redo availability
+  const [canUndoState, setCanUndoState] = useState<boolean>(false);
+  const [canRedoState, setCanRedoState] = useState<boolean>(false);
+
+  const [viewportState, setViewportState] = useState<ViewportState>({
+    zoom: 1.0,
+    panX: 0,
+    panY: 0,
+    rotation: 0,
+    mirrorX: false,
+  });
+  const shortcutActionsRef = useRef({
+    createLayer: onCreateLayer,
+    deleteLayer: async (_layerId: string) => {},
+    selectTool: (_tool: ToolType) => {},
+    undo: () => {},
+    redo: () => {},
+    transform: (_mode?: DistortMode) => {},
+    stepSize: (_direction: 1 | -1) => {},
+    stepOpacity: (_direction: 1 | -1) => {},
+    vectorKey: (_ev: KeyboardEvent): boolean => false,
+    mergeDown: (_layerId: string) => {},
+    groupLayers: async (_ids: string[]) => {},
+    copyLayers: (_ids: string[]) => {},
+    pasteLayers: async () => {},
+    selection: { has: (): boolean => false, canPaste: (): boolean => false, invert: () => {}, copy: () => {}, cut: () => {}, clear: () => {}, paste: () => {} },
+  });
+  const brushCursorRef = useRef<HTMLDivElement>(null);
+  const brushPointerRef = useRef<{ x: number; y: number; inside: boolean } | null>(null);
+  const [showBrushSize, setShowBrushSize] = useState(false);
+  // The side size slider is being dragged: the canvas centre shows the brush at its real on-screen size
+  const [sizeDragging, setSizeDragging] = useState(false);
+  const brushSizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Each brush tool (筆刷／鉛筆／橡皮擦) remembers its own settings on this device
+  const [brushProps, setBrushProps] = useState<BrushProperties>(() => ({ ...loadBrushTool('brush'), color: '#3B82F6' } as BrushProperties));
+  const [isBrushSettingsOpen, setIsBrushSettingsOpen] = useState(false);
+  brushPropsRef.current = brushProps;
+
+  const [permissionWarning, setPermissionWarning] = useState<string | null>(null);
+  const warn = (message: string, ms = 3000) => {
+    setPermissionWarning(message);
+    setTimeout(() => setPermissionWarning(null), ms);
+  };
+
+  const scopedUndoRef = useRef(new ScopedUndoManager());
+
+  const updateUndoRedoState = () => {
+    const effectiveUserId = userRef.current?.id || user?.id || 'guest';
+    setCanUndoState(scopedUndoRef.current.canUndo(effectiveUserId));
+    setCanRedoState(scopedUndoRef.current.canRedo(effectiveUserId));
+  };
+
+  const canEditPixels = (raw: LayerModel) => {
+    const layer = (raw.layerType === 'mask' && layersRef.current.find((l) => l.id === raw.parentId)) || raw;
+    // A group's mask is painted by whoever may edit the group (the group itself has no pixels)
+    return canEditOwnPixels(layer !== raw && layer.layerType === 'group' ? { ...layer, layerType: 'raster' } : layer);
+  };
+  const canEditOwnPixels = (layer: LayerModel) => !isGuest && !layer.isLocked && layer.layerType !== 'group' && Boolean(
+    layer.ownerId === user?.id || (!layer.isPublic && layer.ownerId && layer.aclMode === 'shared_all')
+  );
+
+  // Canvas tools (components/workspace/tools) share the engines and the commit plumbing through this
+  const toolCtx: ToolContext = {
+    canvas,
+    layers,
+    activeLayer,
+    user,
+    isAdmin,
+    currentTool,
+    brushProps,
+    setBrushProps,
+    pixiAppRef,
+    viewportRef,
+    layerManagerRef,
+    tileEngineRef,
+    brushRendererRef,
+    selectionEngineRef,
+    vectorEngineRef,
+    strokePipelineRef,
+    shapeGraphicRef,
+    activeLayerRef,
+    brushPropsRef,
+    userRef,
+    currentToolRef,
+    scopedUndoRef,
+    updateUndoRedoState,
+    commitOp,
+    commitTilePatch,
+    refreshLayerThumbnail,
+    canEditPixels,
+    warn,
+    selectTool: (tool) => handleSelectTool(tool),
+  };
+  const liquify = useLiquifyTool(toolCtx);
+  const shapes = useShapeTools(toolCtx);
+  const { shapeSubtype, setShapeSubtype, shapeFillMode, setShapeFillMode, shapeLineWidth, setShapeLineWidth, shapeCornerRadius, setShapeCornerRadius, gradientMode, setGradientMode, gradientType, setGradientType } = shapes;
+  const selection = useSelectionTools(toolCtx);
+  const { wandTolerance, setWandTolerance, wandContiguous, setWandContiguous, hasSelectionState, setHasSelectionState, selectionMode, setSelectionMode, handleClearSelection, growSelection } = selection;
+  const fill = useFillTools(toolCtx);
+  const { bucketReference, setBucketReference, bucketRefLayerId, setBucketRefLayerId, bucketTolerance, setBucketTolerance, bucketExpand, setBucketExpand, bucketMode, setBucketMode, referenceLayerId, setReferenceLayerId, gapClosingRadius, setGapClosingRadius, expandRadius, setExpandRadius } = fill;
+  const vector = useVectorTools(toolCtx);
+  const {
+    vectorEraserMode, setVectorEraserMode, vectorWidthMode, setVectorWidthMode, vectorStrokesList, setVectorStrokesList,
+    bezierMode, setBezierMode, penPoints, vectorSel, vectorPreview, penPreview, selectedAnchorExists,
+    applyVectorPayload, finishPenPath, toggleSelectedAnchorCorner, deleteSelectedAnchor, handleVectorKey,
+  } = vector;
+  const brush = useBrushTool(toolCtx);
+  const { outlineBrush, updateOutlineBrush } = brush;
+  // The stroke pipeline is built once per canvas: it reaches the latest commit handler through this
+  const brushCommitRef = useRef(brush.commitStroke);
+  brushCommitRef.current = brush.commitStroke;
+  const transform = useTransformTool(toolCtx);
+  const {
+    isTransformActive, transformPreviewUrl, transformBox, setTransformBox, distortMode, setDistortMode, isMeshWarpActive,
+    transformLayerIdRef, transformSourceCanvasRef, meshWarpInitialBoundsRef, startTransformMode, startFloatingPaste, applyTransform, cancelTransform, applyMeshWarp,
+  } = transform;
+  const {
+    liquifyEngineRef,
+    blurSmudgeEngineRef,
+    liquifyMode,
+    setLiquifyMode,
+    liquifyRadius,
+    setLiquifyRadius,
+    liquifyStrength,
+    setLiquifyStrength,
+    liquifyHardness,
+    setLiquifyHardness,
+    liquifyRefAreaOnly,
+    setLiquifyRefAreaOnly,
+    smudgeMode,
+    setSmudgeMode,
+  } = liquify;
+
+  const [eraserHover, setEraserHoverState] = useState(false);
+  const eraserHoverRef = useRef(false);
+  const setEraserHover = (active: boolean) => {
+    if (eraserHoverRef.current === active) return;
+    eraserHoverRef.current = active;
+    setEraserHoverState(active);
+  };
+  const vectorCursorClass = currentTool === 'vector_eraser' ? 'border-dashed border-rose-500/80 bg-rose-500/10'
+    : currentTool === 'vector_reshape' ? 'border-dashed border-sky-400/80 bg-sky-400/10'
+    : currentTool === 'vector_width' ? 'border-dashed border-pink-500/80 bg-pink-500/10' : '';
+  const brushDiameter = eraserHover && currentTool !== 'eraser' ? loadBrushTool('eraser').size ?? 40
+    : currentTool === 'liquify' ? liquifyRadius * 2
+    : currentTool === 'blur' || currentTool === 'smudge' || vectorCursorClass ? brushProps.size * 2
+    : brushProps.size;
+  const showBrushCursor = eraserHover || Boolean(vectorCursorClass) || ['brush', 'pencil', 'eraser', 'liquify', 'blur', 'smudge', 'select_brush', 'select_eraser'].includes(currentTool);
+
+  // The number the options bar / [ ] keys edit: liquify keeps its own radius, the rest the brush size
+  const sizeValue = currentTool === 'liquify' ? liquifyRadius : brushProps.size;
+  const setSizeValue = (value: number) => {
+    const n = Math.max(1, Math.min(MAX_BRUSH_SIZE, Math.round(value)));
+    if (currentToolRef.current === 'liquify') {
+      setLiquifyRadius(n);
+      return;
+    }
+    setBrushProps((prev) => {
+      brushRendererRef.current?.setProperties({ size: n });
+      return { ...prev, size: n };
+    });
+  };
+  const containerRectRef = useRef<{ left: number; top: number } | null>(null);
+  const brushCursorFrameRef = useRef(0);
+  const updateBrushCursor = (x: number, y: number) => {
+    let rect = containerRectRef.current;
+    if (!rect) {
+      const r = containerRef.current?.getBoundingClientRect();
+      if (!r) return;
+      rect = { left: r.left, top: r.top };
+      if (r.width > 0 || r.height > 0) containerRectRef.current = rect;
+    }
+    const lx = x - rect.left;
+    const ly = y - rect.top;
+    const previous = brushPointerRef.current;
+    if (previous?.inside && previous.x === lx && previous.y === ly) return;
+    brushPointerRef.current = { x: lx, y: ly, inside: true };
+    if (!brushCursorRef.current || brushCursorFrameRef.current) return;
+    brushCursorFrameRef.current = requestAnimationFrame(() => {
+      brushCursorFrameRef.current = 0;
+      const cursor = brushCursorRef.current;
+      const pointer = brushPointerRef.current;
+      if (!cursor || !pointer?.inside) return;
+      cursor.style.transform = `translate3d(${pointer.x}px, ${pointer.y}px, 0) translate(-50%, -50%)`;
+      cursor.style.visibility = 'visible';
+    });
+  };
+  const hideBrushCursor = () => {
+    if (brushPointerRef.current) brushPointerRef.current.inside = false;
+    if (brushCursorRef.current) brushCursorRef.current.style.visibility = 'hidden';
+  };
+
+  // High-frequency raw pointer cursor updates so cursor stays locked at full hardware polling rate (up to 1000Hz)
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el || !showBrushCursor) return;
+    const onRawUpdate = (ev: Event) => {
+      const pe = ev as PointerEvent;
+      if (pe.clientX || pe.clientY) updateBrushCursor(pe.clientX, pe.clientY);
+    };
+    el.addEventListener('pointerrawupdate', onRawUpdate, { passive: true });
+    return () => {
+      el.removeEventListener('pointerrawupdate', onRawUpdate);
+      cancelAnimationFrame(brushCursorFrameRef.current);
+      brushCursorFrameRef.current = 0;
+    };
+  }, [showBrushCursor, canvas?.id]);
+
+  useLayoutEffect(() => {
+    const cursor = brushCursorRef.current;
+    const container = containerRef.current;
+    if (!cursor || !container) return;
+    const last = brushPointerRef.current;
+    const lx = last?.inside ? last.x : container.clientWidth / 2;
+    const ly = last?.inside ? last.y : container.clientHeight / 2;
+    cursor.style.transform = `translate3d(${lx}px, ${ly}px, 0) translate(-50%, -50%)`;
+    cursor.style.visibility = last?.inside || showBrushSize ? 'visible' : 'hidden';
+  }, [showBrushCursor, showBrushSize, brushDiameter, canvas?.id]);
+
+  useEffect(() => {
+    setShowBrushSize(true);
+    brushSizeTimerRef.current = setTimeout(() => setShowBrushSize(false), 900);
+    return () => { if (brushSizeTimerRef.current) clearTimeout(brushSizeTimerRef.current); };
+  }, [brushProps.size, liquifyRadius]);
+
+  // Load Checkpoint Snapshot & Replay Ops
+  const loadCheckpointAndReplay = async (
+    canvasId: string,
+    layerManager: LayerManager,
+    tileEngine: TileEngine
+  ) => {
+    const isCurrent = () => layerManagerRef.current === layerManager;
+    isReplayingRef.current = true;
+    replayedSeqRef.current = 0;
+    try {
+      const snapRes = await ApiService.getSnapshot(canvasId);
+      if (!isCurrent()) return;
+      let sinceSeq = 0;
+
+      if (snapRes?.bundle?.layers) {
+        sinceSeq = snapRes.bundle.seq || 0;
+        for (const layerSnap of snapRes.bundle.layers) {
+          // Parked layers keep the compressed tiles as they came: hidden frames never touch the GPU
+          if (layerSnap.tiles?.length) layerManager.applyTiles(layerSnap.layerId, layerSnap.tiles);
+          // The checkpoint replaces the ops that carried these, so restore them from it
+          for (const vectorStroke of layerSnap.vectorStrokes || []) {
+            vectorEngineRef.current?.addStroke(layerSnap.layerId, vectorStroke);
+          }
+        }
+      }
+      replayedSeqRef.current = sinceSeq;
+
+      // Replay incremental operations after snapshot seq
+      const opsRes = await ApiService.getOpsSince(canvasId, sinceSeq);
+      if (!isCurrent()) return;
+      if (opsRes?.ops && opsRes.ops.length > 0) {
+        for (const op of opsRes.ops) {
+          replayedSeqRef.current = Math.max(replayedSeqRef.current, op.seq || 0);
+          if (!op.layerId) continue;
+          const layerItem = layerManager.getLayerItem(op.layerId);
+          if (!layerItem) continue;
+
+          // Prefer direct authoritative pixel-perfect tile restoration whenever tiles are present
+          if (op.payload?.tiles && Array.isArray(op.payload.tiles) && op.payload.tiles.length > 0) {
+            layerManager.applyTiles(op.layerId, op.payload.tiles);
+          } else if (
+            (op.opType === 'STROKE' || op.opType === 'ERASE') &&
+            op.payload?.samplePoints &&
+            brushRendererRef.current
+          ) {
+            const pts = op.payload.samplePoints;
+            const flat = new Float32Array(pts.length * 7);
+            for (let i = 0; i < pts.length; i++) {
+              const off = i * 7;
+              flat[off] = pts[i].x;
+              flat[off + 1] = pts[i].y;
+              flat[off + 2] = (op.payload.size || 16) * (pts[i].pressure || 0.5);
+              flat[off + 3] = pts[i].pressure || 0.5;
+              flat[off + 4] = (op.payload.flow || 1.0) * (op.payload.opacity || 1.0);
+              flat[off + 5] = 0;
+              flat[off + 6] = 0;
+            }
+            brushRendererRef.current.stampDabs(
+              layerManager.drawTarget(op.layerId) ?? layerItem.renderTexture,
+              flat,
+              pts.length,
+              op.payload.color,
+              op.payload.isEraser
+            );
+          }
+
+          // Replay the vector stroke list changes too (erased strokes must stay erased)
+          applyVectorPayload(op.layerId, op.payload);
+        }
+      }
+
+      // Refresh thumbnails for all layers (ping-pong buffers are made when a layer is drawn on)
+      for (const l of layersRef.current) {
+        layerManager.refreshPingPong(l.id);
+        refreshLayerThumbnail(l.id);
+      }
+
+      if (vectorEngineRef.current && activeLayerRef.current) {
+        setVectorStrokesList(vectorEngineRef.current.getStrokes(activeLayerRef.current.id));
+      }
+    } catch (err) {
+      if (isCurrent()) console.warn('[CanvasWorkspace] Checkpoint / Op Replay failed:', err);
+    } finally {
+      // Live ops that arrived meanwhile were held back; draw the ones the replay did not cover
+      if (isCurrent()) {
+        isReplayingRef.current = false;
+        for (const op of takeBroadcastOps()) applyRemoteOp(op);
+        presentCanvas();
+      }
+    }
+  };
+
+  const fitViewport = (fit = true) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (rect?.width && rect.height) viewportRef.current?.centerInView(rect.width, rect.height, fit);
+  };
+
+  const getViewCenter = () => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    return rect && { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  };
+
+  const zoomAtViewCenter = (factor: number) => {
+    const center = getViewCenter();
+    if (center) viewportRef.current?.zoomAt(center.x, center.y, factor);
+  };
+
+  // 1. Initialize Pixi.js v8 Application and Tile Engine
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    const mount = canvasMountRef.current;
+    if (!container || !mount || !canvas) return;
+    setEngineError(false);
+    setIsCanvasPresented(false);
+
+    const undoLimit = OfflineSessionStore.isOfflineCanvas(canvas.id) ? OFFLINE_UNDO_LIMIT : ONLINE_UNDO_LIMIT;
+    const undoManager = undoByCanvasRef.current.get(canvas.id) ?? new ScopedUndoManager(undoLimit);
+    undoManager.setMaxStackSize(undoLimit);
+    undoByCanvasRef.current.set(canvas.id, undoManager);
+    scopedUndoRef.current = undoManager;
+    updateUndoRedoState();
+
+    const timeline = animationByCanvasRef.current.get(canvas.id) ?? new AnimationEngine();
+    animationByCanvasRef.current.set(canvas.id, timeline);
+    setTimelineState({ canvasId: canvas.id, engine: timeline });
+
+    let destroyed = false;
+    let resizeObserver: ResizeObserver | null = null;
+    let handleKeyDown: ((ev: KeyboardEvent) => void) | null = null;
+    let handleKeyUp: ((ev: KeyboardEvent) => void) | null = null;
+    const invalidateContainerRect = () => { containerRectRef.current = null; };
+    window.addEventListener('resize', invalidateContainerRect, { passive: true });
+    window.addEventListener('scroll', invalidateContainerRect, { capture: true, passive: true });
+    let app = new Application();
+
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      if (!event.deltaY) return;
+      const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
+      viewportRef.current?.zoomAt(event.clientX, event.clientY, factor);
+    };
+    container.addEventListener('wheel', handleWheel, { passive: false });
+
+    const initEngine = async () => {
+      const rect = container.getBoundingClientRect();
+      let viewWidth = Math.max(1, rect.width);
+      let viewHeight = Math.max(1, rect.height);
+
+      try {
+        await app.init({
+          width: viewWidth,
+          height: viewHeight,
+          preference: 'webgl',
+          backgroundColor: '#0d0e12',
+          backgroundAlpha: 0,
+          // 覆蓋／柔光／加亮… are blend filters, and on WebGL they silently fall back to normal without
+          // the back buffer (Pixi turns screen MSAA off with it; layers are render textures anyway)
+          useBackBuffer: true,
+          antialias: false,
+          resolution: Math.min(window.devicePixelRatio || 1, 2),
+          autoDensity: true,
+          eventMode: 'none',
+          eventFeatures: { move: false, globalMove: false, click: false, wheel: false },
+        });
+      } catch (err) {
+        if (destroyed) return;
+        console.warn('Pixi WebGL init with antialias failed, retrying basic WebGL:', err);
+        app = new Application();
+        await app.init({
+          width: viewWidth,
+          height: viewHeight,
+          preference: 'webgl',
+          backgroundColor: '#0d0e12',
+          backgroundAlpha: 0,
+          useBackBuffer: true,
+          resolution: 1,
+          autoDensity: true,
+          eventMode: 'none',
+          eventFeatures: { move: false, globalMove: false, click: false, wheel: false },
+        });
+      }
+
+      if (destroyed) {
+        app.destroy({ removeView: true }, { children: true });
+        return;
+      }
+
+      const currentRect = container.getBoundingClientRect();
+      viewWidth = Math.max(1, currentRect.width);
+      viewHeight = Math.max(1, currentRect.height);
+      app.renderer.resize(viewWidth, viewHeight);
+      mount.replaceChildren(app.canvas);
+      app.canvas.style.touchAction = 'none';
+      app.canvas.style.width = '100%';
+      app.canvas.style.height = '100%';
+      app.canvas.style.display = 'block';
+      app.canvas.style.pointerEvents = 'none';
+
+      pixiAppRef.current = app;
+
+      // 1. Viewport
+      const viewport = new CanvasViewport(canvas.width, canvas.height);
+      viewport.setDomElement(app.canvas);
+      viewportRef.current = viewport;
+      app.stage.eventMode = 'none';
+      app.stage.interactiveChildren = false;
+      app.renderer.events?.setTargetElement?.(null as unknown as HTMLElement);
+      app.stage.addChild(viewport.rootContainer);
+      viewport.centerInView(viewWidth, viewHeight, true);
+
+      // 2. Layer Manager
+      const layerManager = new LayerManager(
+        app.renderer,
+        canvas.width,
+        canvas.height,
+        canvas.bgColor
+      );
+      layerManagerRef.current = layerManager;
+      const syncViewportBounds = () => {
+        if (destroyed) return;
+        const w = app.screen.width || viewWidth;
+        const h = app.screen.height || viewHeight;
+        layerManager.setViewportBounds(computeViewportBounds(viewport, w, h));
+      };
+      viewport.setOnChange((st) => {
+        setViewportState(st);
+        syncViewportBounds();
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('atelier:zoom', { detail: st.zoom }));
+        }
+      });
+      syncViewportBounds();
+      layerManager.setActiveLayer(activeLayerRef.current?.id ?? null);
+      // Thumbnails of parked layers are decoded when the page is idle
+      layerManager.onThumbnail = (layerId, url) => {
+        if (layerManagerRef.current === layerManager) publishThumbnail(layerId, url);
+      };
+      viewport.canvasContainer.addChild(layerManager.rootContainer);
+      (window as any).__debugPixi = { app, viewport, layerManager };
+
+      // 3. Selection Engine Overlay
+      const selectionEngine = new SelectionEngine(canvas.width, canvas.height);
+      selectionEngineRef.current = selectionEngine;
+      viewport.canvasContainer.addChild(selectionEngine.rootContainer);
+
+      // 3.5. Shape & Vector Preview Overlay
+      const shapeGraphic = new Graphics();
+      shapeGraphicRef.current = shapeGraphic;
+      viewport.canvasContainer.addChild(shapeGraphic);
+
+      // 4. Tile Engine
+      const tileEngine = new TileEngine(app.renderer, canvas.width, canvas.height, 256);
+      tileEngineRef.current = tileEngine;
+      // Sparse layers are read tile by tile from their atlas pages, with the same non-blocking read-back
+      layerManager.setReader(
+        (texture, rects) => tileEngine.readRegionsAsync(texture, rects),
+        () => tileEngine.flushReads()
+      );
+      warmUpCommitWorkers();
+      (window as any).__debugPixi = { app, viewport, layerManager, tileEngine };
+
+      // 5. Brush Renderer
+      const brushRenderer = new BrushRenderer(app.renderer);
+      brushRenderer.setCanvasDimensions(canvas.width, canvas.height);
+      brushRendererRef.current = brushRenderer;
+      const currentBrush = brushPropsRef.current || brushProps;
+      brushRenderer.setProperties(currentBrush);
+      if (currentBrush.customBrushUrl) {
+        void brushRenderer.setCustomBrushImage(currentBrush.customBrushUrl).catch((err) => {
+          if (!destroyed) console.warn('[CanvasWorkspace] Failed to load the brush tip:', err);
+        });
+      }
+
+      // 6. WebGL Filter Engine & Liquify Engine
+      const filterEngine = new WebGLFilterEngine(app.renderer, tileEngine, canvas.width, canvas.height);
+      webglFilterEngineRef.current = filterEngine;
+
+      const liquifyEngine = new LiquifyEngine(app.renderer, tileEngine, canvas.width, canvas.height);
+      liquifyEngineRef.current = liquifyEngine;
+
+      const blurSmudgeEngine = new BlurSmudgeEngine(app.renderer, tileEngine, canvas.width, canvas.height);
+      blurSmudgeEngineRef.current = blurSmudgeEngine;
+
+      const vectorEngine = new VectorEngine(tileEngine, canvas.width, canvas.height);
+      vectorEngineRef.current = vectorEngine;
+      // Test hooks: the undo history (ops carry their foreign-pixel masks) lets browser checks explain an undo
+      (window as any).__debugPixi = {
+        app, viewport, layerManager, tileEngine, selectionEngine, vectorEngine, animationEngine: timeline,
+        undo: scopedUndoRef.current, tileToRgba,
+      };
+
+      // 6.1 Initialize Rulers
+      RulerManager.getInstance().initDimensions(canvas.width, canvas.height);
+
+      // 6. Stroke Pipeline with Tile Dirty Detection & Zero-Latency Ping-Pong
+      const pipeline = new StrokePipeline(brushRenderer, layerManager, viewport, {
+        onEmitPreviewDabs: (dabs, isEraser) => {
+          const currentLayer = activeLayerRef.current;
+          const currentProps = brushPropsRef.current || brushProps;
+          if (currentLayer && canvas) {
+            emitPreviewDab(
+              currentLayer.id,
+              dabs,
+              currentProps.color,
+              currentProps.size,
+              currentProps.opacity * currentProps.flow,
+              isEraser
+            );
+          }
+        },
+        onCommitStroke: (strokeData, inkTiles) => brushCommitRef.current(strokeData, inkTiles),
+      });
+      strokePipelineRef.current = pipeline;
+      pipeline.setActiveLayer(activeLayerRef.current?.id || null);
+      // Stamp pending points before Pixi presents this frame.
+      app.ticker.add(pipeline.renderFrame, pipeline, UPDATE_PRIORITY.HIGH);
+
+      // Keep the point at the center in place when a dock changes the workspace size.
+      resizeObserver = new ResizeObserver(([entry]) => {
+        if (destroyed || !entry) return;
+        containerRectRef.current = null;
+        viewport.invalidateRect();
+        const { width, height } = entry.contentRect;
+        if (width <= 0 || height <= 0 || (width === viewWidth && height === viewHeight)) return;
+        app.renderer.resize(width, height);
+        // A view still "fit to window" re-fits (and re-centres) when a dock opens or closes;
+        // one the user zoomed or panned keeps its centre point instead
+        if (viewWidth <= 1 || viewHeight <= 1 || viewport.isFitTo(viewWidth, viewHeight)) {
+          viewport.centerInView(width, height, true);
+        } else {
+          viewport.panBy((width - viewWidth) / 2, (height - viewHeight) / 2);
+        }
+        viewWidth = width;
+        viewHeight = height;
+        syncViewportBounds();
+        // Resizing the WebGL backbuffer clears it immediately; re-render synchronously before paint to eliminate flicker
+        app.render();
+      });
+      resizeObserver.observe(container);
+
+      // Keyboard listeners for shortcuts
+      handleKeyDown = (ev: KeyboardEvent) => {
+        // An open dialog owns the keyboard: B, Ctrl+Z, Space... must not edit the canvas behind it
+        if (document.querySelector('[aria-modal="true"]')) return;
+        // Space pans wherever the focus is, except while typing or inside a dialog / menu: the
+        // button clicked last kept the focus and was pressed again instead of the canvas panning
+        if (ev.code === 'Space' && !filterModalOpenRef.current && !radialMenuOpenRef.current && !isTypingTarget(ev.target)
+          && !(ev.target as HTMLElement | null)?.closest?.('[role="dialog"], [role="menu"]')) {
+          ev.preventDefault();
+          if (!ev.repeat) {
+            (document.activeElement as HTMLElement | null)?.blur?.();
+            pointer.isSpacePressedRef.current = true;
+            if (containerRef.current) containerRef.current.style.cursor = 'grab';
+          }
+          return;
+        }
+        const textEditingTarget = (ev.target as HTMLElement | null)?.closest?.(
+          'textarea, [contenteditable], input:not([type]), input[type="text"], input[type="search"], input[type="number"], input[type="email"], input[type="password"], input[type="url"]'
+        );
+        if (filterModalOpenRef.current || radialMenuOpenRef.current || textEditingTarget) return;
+        if (resizeModalOpenRef.current) {
+          if (ev.key === 'Escape') {
+            ev.preventDefault();
+            setIsResizeModalOpen(false);
+          }
+          return;
+        }
+        if (transformLayerIdRef.current) {
+          if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z' && !ev.shiftKey) {
+            ev.preventDefault();
+            cancelTransform();
+          }
+          return;
+        }
+        // Pen path in progress / selected vector node: Enter, Esc, Backspace, Delete belong to them
+        if (shortcutActionsRef.current.vectorKey(ev)) {
+          ev.preventDefault();
+          return;
+        }
+
+        const shortcutMgr = ShortcutManager.getInstance();
+
+        // Check undo (Ctrl+Z / Cmd+Z)
+        if (
+          shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_undo'), ev) ||
+          ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z' && !ev.shiftKey)
+        ) {
+          ev.preventDefault();
+          shortcutActionsRef.current.undo();
+          return;
+        }
+
+        // Check redo (Ctrl+Shift+Z / Cmd+Shift+Z / Ctrl+Y)
+        if (
+          shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_redo'), ev) ||
+          ((ev.ctrlKey || ev.metaKey) && (ev.key.toLowerCase() === 'y' || (ev.key.toLowerCase() === 'z' && ev.shiftKey)))
+        ) {
+          ev.preventDefault();
+          shortcutActionsRef.current.redo();
+          return;
+        }
+
+        // Check clear selection
+        if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_clear_selection'), ev)) {
+          ev.preventDefault();
+          handleClearSelection();
+          return;
+        }
+
+        // Selection commands; copy / cut / clear only with a selection (else the keys keep their usual meaning)
+        const sel = shortcutActionsRef.current.selection;
+        const hit = (id: string) => shortcutMgr.matchesEvent(shortcutMgr.getComboForAction(id), ev);
+        const selectionCommand =
+          hit('action_selection_invert') ? sel.invert
+          : sel.has() && hit('action_selection_copy') ? sel.copy
+          : sel.has() && hit('action_selection_cut') ? sel.cut
+          : sel.has() && hit('action_selection_delete') ? sel.clear
+          : sel.canPaste() && hit('action_selection_paste') ? sel.paste
+          : null;
+        if (selectionCommand) {
+          ev.preventDefault();
+          selectionCommand();
+          return;
+        }
+
+        // Tool, Layer, Filter & Navigation hotkeys (when not in an input)
+        const targetTag = (ev.target as HTMLElement)?.tagName?.toLowerCase();
+        if (targetTag !== 'input' && targetTag !== 'textarea') {
+          // --- 1. Layer & Group Management Hotkeys ---
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_rename'), ev) || ev.code === 'F2') {
+            ev.preventDefault();
+            window.dispatchEvent(new CustomEvent('atelier:rename-layer', { detail: { layerId: activeLayerRef.current?.id } }));
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_new_raster'), ev)) {
+            ev.preventDefault();
+            const currentLayers = layersRef.current || [];
+            const count = currentLayers.filter((l) => l.layerType !== 'vector' && l.layerType !== 'group').length + 1;
+            shortcutActionsRef.current.createLayer?.(`圖層 ${count}`, 'normal', 'raster', activeLayerRef.current?.id);
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_new_vector'), ev)) {
+            ev.preventDefault();
+            const currentLayers = layersRef.current || [];
+            const count = currentLayers.filter((l) => l.layerType === 'vector').length + 1;
+            shortcutActionsRef.current.createLayer?.(`向量線稿 ${count}`, 'normal', 'vector', activeLayerRef.current?.id);
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_new_group'), ev)) {
+            ev.preventDefault();
+            // The layer panel groups its multi-selection; without the panel on screen, the active layer
+            const handled = !window.dispatchEvent(new CustomEvent('atelier:group-layers', { cancelable: true }));
+            if (!handled && activeLayerRef.current) void shortcutActionsRef.current.groupLayers([activeLayerRef.current.id]);
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_copy'), ev)) {
+            ev.preventDefault();
+            if (activeLayerRef.current) shortcutActionsRef.current.copyLayers([activeLayerRef.current.id]);
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_paste'), ev)) {
+            ev.preventDefault();
+            void shortcutActionsRef.current.pasteLayers();
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_duplicate'), ev)) {
+            ev.preventDefault();
+            if (activeLayerRef.current) {
+              shortcutActionsRef.current.copyLayers([activeLayerRef.current.id]);
+              void shortcutActionsRef.current.pasteLayers();
+            }
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_merge_down'), ev)) {
+            ev.preventDefault();
+            if (activeLayerRef.current) shortcutActionsRef.current.mergeDown(activeLayerRef.current.id);
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_toggle_clip'), ev)) {
+            ev.preventDefault();
+            if (activeLayerRef.current) {
+              onUpdateLayerProps?.(activeLayerRef.current.id, { clipToBelow: !activeLayerRef.current.clipToBelow });
+            }
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_toggle_alpha'), ev)) {
+            ev.preventDefault();
+            if (activeLayerRef.current) {
+              onUpdateLayerProps?.(activeLayerRef.current.id, { alphaLocked: !activeLayerRef.current.alphaLocked });
+            }
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_toggle_vis'), ev)) {
+            ev.preventDefault();
+            if (activeLayerRef.current) {
+              onToggleVisibility?.(activeLayerRef.current);
+            }
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_toggle_lock'), ev)) {
+            ev.preventDefault();
+            if (activeLayerRef.current) {
+              onToggleLock?.(activeLayerRef.current);
+            }
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_delete'), ev)) {
+            ev.preventDefault();
+            const cur = activeLayerRef.current;
+            if (cur && (cur.layerType === 'mask' || layersRef.current.filter((l) => l.layerType !== 'mask').length > 1)) {
+              void shortcutActionsRef.current.deleteLayer(cur.id);
+            }
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_select_above'), ev)) {
+            ev.preventDefault();
+            const currentLayers = layersRef.current || [];
+            const sorted = [...currentLayers].sort((a, b) => b.sortOrder - a.sortOrder);
+            const idx = sorted.findIndex((l) => l.id === activeLayerRef.current?.id);
+            if (idx > 0) {
+              onSelectLayer?.(sorted[idx - 1].id);
+            }
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_select_below'), ev)) {
+            ev.preventDefault();
+            const currentLayers = layersRef.current || [];
+            const sorted = [...currentLayers].sort((a, b) => b.sortOrder - a.sortOrder);
+            const idx = sorted.findIndex((l) => l.id === activeLayerRef.current?.id);
+            if (idx !== -1 && idx < sorted.length - 1) {
+              onSelectLayer?.(sorted[idx + 1].id);
+            }
+            return;
+          }
+
+          // --- 2. Advanced Filters & Tone Hotkeys ---
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_filter_curves'), ev)) {
+            ev.preventDefault();
+            openFilterFromShortcut('curves');
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_filter_gradient_map'), ev)) {
+            ev.preventDefault();
+            openFilterFromShortcut('gradient');
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_filter_liquify'), ev)) {
+            ev.preventDefault();
+            shortcutActionsRef.current.selectTool('liquify');
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_filter_free_transform'), ev)) {
+            ev.preventDefault();
+            shortcutActionsRef.current.transform();
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_filter_mesh_warp'), ev)) {
+            ev.preventDefault();
+            shortcutActionsRef.current.transform('mesh');
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_filter_screentone'), ev)) {
+            ev.preventDefault();
+            if (activeLayerRef.current) {
+              onUpdateLayerProps?.(activeLayerRef.current.id, {
+                screentoneEnabled: !activeLayerRef.current.screentoneEnabled,
+              });
+            }
+            return;
+          }
+
+          // --- 3. Studio & Auxiliary Views ---
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_studio_ruler'), ev)) {
+            ev.preventDefault();
+            setIsRulerModalOpen((prev) => !prev);
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_studio_timeline'), ev)) {
+            ev.preventDefault();
+            setIsAnimationTimelineOpen((prev) => !prev);
+            return;
+          }
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_studio_color_wheel'), ev)) {
+            ev.preventDefault();
+            setIsColorStudioOpen((prev) => !prev);
+            return;
+          }
+
+          // --- 4. Toolbox Tools: the same bindings the tool rail shows ---
+          const toolHit = ALL_TOOLS.find((tool) => tool.shortcutId && shortcutMgr.matchesEvent(shortcutMgr.getComboForAction(tool.shortcutId), ev));
+          if (toolHit) {
+            ev.preventDefault();
+            shortcutActionsRef.current.selectTool(toolHit.id);
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('tool_resize'), ev)) {
+            setIsResizeModalOpen(true);
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_brush_larger'), ev)) {
+            ev.preventDefault();
+            shortcutActionsRef.current.stepSize(1);
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_brush_smaller'), ev)) {
+            ev.preventDefault();
+            shortcutActionsRef.current.stepSize(-1);
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_brush_opacity_up'), ev)) {
+            ev.preventDefault();
+            shortcutActionsRef.current.stepOpacity(1);
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_brush_opacity_down'), ev)) {
+            ev.preventDefault();
+            shortcutActionsRef.current.stepOpacity(-1);
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_view_rotate_left'), ev)) {
+            ev.preventDefault();
+            viewportRef.current?.rotateBy(-Math.PI / 12);
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_view_rotate_right'), ev)) {
+            ev.preventDefault();
+            viewportRef.current?.rotateBy(Math.PI / 12);
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_view_flip'), ev)) {
+            ev.preventDefault();
+            viewportRef.current?.toggleMirrorX();
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_prev_frame'), ev)) {
+            ev.preventDefault();
+            animEngineRef.current?.goToPrevFrame();
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_next_frame'), ev)) {
+            ev.preventDefault();
+            animEngineRef.current?.goToNextFrame();
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_play'), ev)) {
+            ev.preventDefault();
+            animEngineRef.current?.togglePlay();
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_onion'), ev)) {
+            ev.preventDefault();
+            const engine = animEngineRef.current;
+            if (engine) {
+              const on = !engine.getOnionSkinConfig().enabled;
+              engine.setOnionSkinConfig({ enabled: on });
+              warn(on ? '洋蔥皮：開' : '洋蔥皮：關', 1200);
+            }
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_reset_view'), ev)) {
+            fitViewport(false);
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_zoom_in'), ev)) {
+            ev.preventDefault();
+            zoomAtViewCenter(1.2);
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_zoom_out'), ev)) {
+            ev.preventDefault();
+            zoomAtViewCenter(1 / 1.2);
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_toggle_mic'), ev)) {
+            toggleVoiceMute();
+          }
+        }
+      };
+
+      handleKeyUp = (ev: KeyboardEvent) => {
+        if (ev.code === 'Space') {
+          // Some browsers press a focused button on the key's release
+          if (pointer.isSpacePressedRef.current) ev.preventDefault();
+          pointer.isSpacePressedRef.current = false;
+          if (containerRef.current) containerRef.current.style.cursor = 'crosshair';
+        }
+      };
+
+      window.addEventListener('keydown', handleKeyDown);
+      window.addEventListener('keyup', handleKeyUp);
+
+      // Synchronize layers and replay operations if layers are already loaded
+      const currentLayers = layersRef.current;
+      if (currentLayers && currentLayers.length > 0) {
+        const shownDisplay = displayLayersRef.current;
+        layerManager.syncLayers(shownDisplay);
+        const shownIds = new Set(shownDisplay.filter((l) => l.isVisible).map((l) => l.id));
+        for (const l of currentLayers) {
+          if (shownIds.has(l.id) || !l.meta?.cel) refreshLayerThumbnail(l.id);
+        }
+        if (canvas && tileEngine && lastReplayedCanvasIdRef.current !== canvas.id) {
+          lastReplayedCanvasIdRef.current = canvas.id;
+          loadCheckpointAndReplay(canvas.id, layerManager, tileEngine);
+        }
+      }
+
+      setIsEngineReady(true);
+    };
+
+    void initEngine().catch((err) => {
+      if (destroyed) return;
+      console.error('[CanvasWorkspace] Failed to initialize the canvas:', err);
+      setEngineError(true);
+    });
+
+    return () => {
+      destroyed = true;
+      timeline.pause();
+      cancelFilterWork();
+      clearFilterPreview();
+      setIsEngineReady(false);
+      lastReplayedCanvasIdRef.current = null;
+      isReplayingRef.current = false;
+      replayedSeqRef.current = 0;
+      if (resizeObserver) resizeObserver.disconnect();
+      window.removeEventListener('resize', invalidateContainerRect);
+      window.removeEventListener('scroll', invalidateContainerRect, true);
+      container.removeEventListener('wheel', handleWheel);
+      if (handleKeyDown) window.removeEventListener('keydown', handleKeyDown);
+      if (handleKeyUp) window.removeEventListener('keyup', handleKeyUp);
+      pointer.reset();
+      brush.reset();
+      container.style.cursor = '';
+      if (pixiAppRef.current !== app) return;
+      const pipeline = strokePipelineRef.current;
+      const selection = selectionEngineRef.current;
+      const layerManager = layerManagerRef.current;
+      const viewport = viewportRef.current;
+      pixiAppRef.current = null;
+      viewportRef.current = null;
+      strokePipelineRef.current = null;
+      selectionEngineRef.current = null;
+      layerManagerRef.current = null;
+      brushRendererRef.current = null;
+      tileEngineRef.current = null;
+      webglFilterEngineRef.current = null;
+      vectorEngineRef.current = null;
+      liquifyEngineRef.current = null;
+      blurSmudgeEngineRef.current = null;
+      shapeGraphicRef.current = null;
+      if ((window as any).__debugPixi?.app === app) delete (window as any).__debugPixi;
+      pipeline?.destroy();
+      selection?.destroy();
+      layerManager?.destroy();
+      viewport?.destroy();
+      // The retired renderer owns its view, while Pixi assets can be in use by the next one.
+      app.destroy({ removeView: true }, { children: true });
+    };
+    // Every engine (layers, tiles, selection, filters) is sized at init: a resize, ours or a
+    // remote painter's (canvas_resized), rebuilds them and reloads the canvas like opening it
+  }, [canvas?.id, canvas?.width, canvas?.height, engineAttempt]);
+
+  useEffect(() => {
+    transform.reset();
+    setHasSelectionState(false);
+    vector.resetForCanvas();
+    setPermissionWarning(null);
+    setIsRadialMenuOpen(false);
+    resetThumbnails();
+    shapes.cancel();
+    liquify.cancel();
+  }, [canvas?.id, canvas?.width, canvas?.height, engineAttempt]);
+
+  // Sync Layers whenever layers list changes or engine becomes ready & Trigger Op Replay
+  useEffect(() => {
+    if (isEngineReady && layerManagerRef.current) {
+      layerManagerRef.current.syncLayers(displayLayersRef.current);
+      for (const l of layers) {
+        refreshLayerThumbnail(l.id);
+      }
+
+      // Trigger Op Replay only after layers are fully initialized in layerManager
+      if (canvas && layers.length > 0 && tileEngineRef.current && lastReplayedCanvasIdRef.current !== canvas.id) {
+        lastReplayedCanvasIdRef.current = canvas.id;
+        loadCheckpointAndReplay(canvas.id, layerManagerRef.current, tileEngineRef.current);
+      }
+    }
+  }, [isEngineReady, layers, canvas?.id]);
+
+  useEffect(() => {
+    if (isEngineReady && layersLoaded && layers.length === 0 && !isReplayingRef.current) presentCanvas();
+  }, [isEngineReady, layersLoaded, layers.length, presentCanvas]);
+
+  // A personal-eye click (or opening / closing the timeline: onion skin) only changes what this viewer renders
+  useEffect(() => {
+    // Computed now: this render's displayLayersRef was made before animTimelineOpenRef caught up
+    if (isEngineReady) layerManagerRef.current?.syncLayers(displayLayersFor(layersRef.current));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localVisibility, isEngineReady, isAnimationTimelineOpen]);
+
+  /** A layer just created through onCreateLayer gets its textures on the next layer sync */
+  const waitForLayerItem = async (layerId: string) => {
+    for (let i = 0; i < 80; i++) {
+      const item = layerManagerRef.current?.getLayerItem(layerId);
+      if (item) return item;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return null;
+  };
+
+  // The active workspace supplies both the layer snapshot and its pending edits.
+  useEffect(() => {
+    if (onRegisterGetLayerCanvases && canvas) {
+      const getLayerCanvases = async (): Promise<LayerCanvasItem[]> => {
+        const results: LayerCanvasItem[] = [];
+        // Parked layers come straight from their tiles: exporting never makes every layer resident at once
+        const extract = (layerId: string) => {
+          try {
+            return layerManagerRef.current?.layerToCanvas(layerId) ?? undefined;
+          } catch {
+            return undefined;
+          }
+        };
+        // An animation folder exports the frame on screen (personal eyes do not change exports)
+        const shown = new Map(displayLayersFor(layers, { personal: false, time: animEngineRef.current?.getTime() ?? 0 }).map((l) => [l.id, l.isVisible]));
+        for (const layer of layers) {
+          if (layer.layerType === 'mask') continue;
+          const maskLayer = layers.find((m) => m.layerType === 'mask' && m.parentId === layer.id);
+          const maskCanvas = maskLayer ? extract(maskLayer.id) : undefined;
+          const mask = maskLayer && maskCanvas ? { id: maskLayer.id, canvas: maskCanvas, enabled: maskLayer.isVisible, inverted: Boolean(maskLayer.meta?.maskInverted) } : undefined;
+          let extractedCanvas: HTMLCanvasElement | null = extract(layer.id) ?? null;
+          if (!extractedCanvas) {
+            extractedCanvas = document.createElement('canvas');
+            if (layer.layerType !== 'group') {
+              extractedCanvas.width = canvas.width;
+              extractedCanvas.height = canvas.height;
+            }
+          }
+          const vectorStrokes = layer.layerType === 'vector' ? vectorEngineRef.current?.getStrokes(layer.id) : undefined;
+          results.push({ layer: { ...layer, isVisible: shown.get(layer.id) ?? layer.isVisible }, canvas: extractedCanvas, mask, vectorStrokes });
+        }
+        return results;
+      };
+
+      onRegisterGetLayerCanvases({
+        canvasId: canvas.id,
+        ready: isCanvasPresented && isEngineReady,
+        readLayers: getLayerCanvases,
+        flushEdits: async () => {
+          strokePipelineRef.current?.finishPendingRelease();
+          await undoQueueRef.current;
+          await brush.withHistory(() => new Promise<void>(whenToolCommitsDone));
+        },
+      });
+      return () => onRegisterGetLayerCanvases(null);
+    }
+  }, [layers, canvas?.id, canvas?.width, canvas?.height, isCanvasPresented, isEngineReady, onRegisterGetLayerCanvases]);
+
+  useEffect(() => {
+    if (onRegisterBakeScreentone) {
+      onRegisterBakeScreentone(handleBakeScreentone);
+    }
+  }, [onRegisterBakeScreentone]);
+
+  // From 200 % up (or above 100 % when anti-aliasing is disabled) canvas pixels show as sharp squares
+  useEffect(() => {
+    layerManagerRef.current?.setPixelated(
+      viewportState.zoom >= 2 || (viewportState.zoom > 1 && brushProps.antiAlias === 'none')
+    );
+    selectionEngineRef.current?.setViewScale(viewportState.zoom);
+  }, [viewportState.zoom, brushProps.antiAlias, isEngineReady]);
+
+  // Sync Active Layer in pipeline; its before-state buffer must exist before any tool edits it
+  useEffect(() => {
+    strokePipelineRef.current?.setActiveLayer(activeLayer?.id || null);
+    layerManagerRef.current?.setActiveLayer(activeLayer?.id ?? null); // stays resident while selected
+    if (activeLayer) layerManagerRef.current?.ensurePingPong(activeLayer.id);
+  }, [activeLayer?.id, isEngineReady]);
+
+  // Handle Tool Selection
+  const applyBrushProps = (next: BrushProperties) => {
+    setBrushProps(next);
+    const renderer = brushRendererRef.current;
+    if (!renderer) return;
+    renderer.setProperties(next);
+    if (next.customBrushUrl) void renderer.setCustomBrushImage(next.customBrushUrl).catch(() => {});
+    else renderer.clearCustomBrush();
+  };
+
+  const handleSelectTool = (tool: ToolType, preset?: BrushProperties) => {
+    const previousTool = currentToolRef.current;
+    if (isBrushTool(previousTool)) saveBrushTool(previousTool, brushProps);
+    if (transformLayerIdRef.current) cancelTransform();
+    vector.onToolChange(tool);
+    setCurrentTool(tool);
+    currentToolRef.current = tool;
+    if (tool !== previousTool) setSelectedBrushId(null);
+    if (preset) {
+      applyBrushProps(preset);
+      return;
+    }
+    // Only the eraser erases: a stale flag made the vector pen erase on vector layers
+    if (tool !== 'eraser' && brushProps.isEraser && tool !== 'pencil' && tool !== 'brush') {
+      const next = { ...brushProps, isEraser: false };
+      setBrushProps(next);
+      brushRendererRef.current?.setProperties(next);
+    }
+
+    if (tool === 'transform') {
+      // Like Ctrl+T: the handles appear at once instead of waiting for a click on the canvas
+      startTransformMode('transform');
+    } else if (isBrushTool(tool) && tool !== previousTool) {
+      // The tool's own remembered settings (CSP sub-tools); preserve Transparent Color state across brush/pencil unless coming from eraser
+      const keepTransparent = tool !== 'eraser' && previousTool !== 'eraser' && Boolean(brushProps.isEraser);
+      applyBrushProps({ ...brushProps, ...loadBrushTool(tool), color: brushProps.color, ...(keepTransparent ? { isEraser: true } : {}) } as BrushProperties);
+    } else if (tool === 'animation') {
+      setIsAnimationTimelineOpen(true);
+    }
+  };
+
+  // Brush Property changes
+  const handleBrushPropsChange = (props: Partial<BrushProperties>) => {
+    const next = { ...brushProps, ...props };
+    setBrushProps(next);
+    brushRendererRef.current?.setProperties(next);
+  };
+
+  const handleUploadCustomBrush = async (file: File) => {
+    const renderer = brushRendererRef.current;
+    if (!renderer) return;
+    // A data URL (not a blob: URL) so the tip is remembered with the brush after a reload
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+    await renderer.setCustomBrushImage(dataUrl);
+    if (brushRendererRef.current === renderer) setBrushProps((prev) => ({ ...prev, customBrushUrl: dataUrl }));
+  };
+  // Remember the active brush tool's settings as they change
+  useEffect(() => {
+    if (isBrushTool(currentTool)) saveBrushTool(currentTool, brushProps);
+  }, [brushProps, currentTool]);
+  const resetBrushTool = () => {
+    if (!isBrushTool(currentTool)) return;
+    applyBrushProps({ ...brushProps, ...BRUSH_TOOL_DEFAULTS[currentTool], color: brushProps.color } as BrushProperties);
+  };
+
+  const handleClearCustomBrush = () => {
+    if (brushRendererRef.current) {
+      brushRendererRef.current.clearCustomBrush();
+      setBrushProps(brushRendererRef.current.getProperties());
+    }
+  };
+
+  const handleApplyPreset = (preset: AtelierBrushPreset) => {
+    const tool = preset.properties.isEraser ? 'eraser' : preset.properties.brushType === 'pencil' ? 'pencil' : 'brush';
+    handleSelectTool(tool, {
+      ...BRUSH_TOOL_DEFAULTS[tool],
+      ...preset.properties,
+      spacing: preset.properties.spacing ?? MIN_BRUSH_SPACING,
+      color: brushProps.color,
+      secondaryColor: brushProps.secondaryColor,
+      brushType: (preset.properties.brushType as BrushProperties['brushType']) || 'brush',
+      pressureCurve: (preset.properties.pressureCurve as BrushProperties['pressureCurve']) || 'linear',
+      paintAmount: preset.properties.paintAmount ?? 0.8,
+      customBrushUrl: preset.tipDataUrl || null,
+    });
+    setSelectedBrushId(preset.id);
+  };
+
+  // Screentone Permanent Baking
+  const handleBakeScreentone = (
+    layerId: string,
+    params: { density: number; angleRad: number; dotScale: number }
+  ) => {
+    if (!layerManagerRef.current || !webglFilterEngineRef.current || !activeLayer || !tileEngineRef.current) return;
+    const item = layerManagerRef.current.getLayerItem(layerId);
+    if (!item) return;
+
+    const lm = layerManagerRef.current;
+    const occupied = lm.occupiedTiles(layerId) ?? tileEngineRef.current.getAllTileCoords();
+    const beforePromise = tilesAsync(lm, layerId, occupied);
+
+    const result = webglFilterEngineRef.current.applyHalftone(
+      item.renderTexture,
+      params.density,
+      params.angleRad,
+      params.dotScale,
+      selectionEngineRef.current?.getMaskArray()
+    );
+    lm.syncPingPong(layerId);
+
+    commitInOrder(beforePromise, (beforeTiles) => {
+      const opId = `op_screentone_bake_${Date.now()}`;
+      scopedUndoRef.current.push({
+        opId,
+        userId: userRef.current?.id || user?.id || 'guest',
+        layerId,
+        opType: 'FILTER',
+        beforeTiles,
+        afterTiles: result.dirtyTiles,
+        timestamp: Date.now(),
+        desc: '烘焙漫畫網點 (Bake Screentone)',
+      });
+      updateUndoRedoState();
+      commitTilePatch(layerId, result.dirtyTiles, false, '漫畫網點烘焙', true, beforeTiles);
+    });
+  };
+
+  // Comic Panels & Speech Balloons Stamping onto Layer
+  const handleBakeComicToLayer = (comicCanvas: HTMLCanvasElement) => {
+    if (!activeLayer || !canEditPixels(activeLayer) || !layerManagerRef.current || !tileEngineRef.current || !pixiAppRef.current) {
+      setPermissionWarning('請選取可編輯的圖層，再套用分鏡或對話氣泡。');
+      setTimeout(() => setPermissionWarning(null), 3000);
+      return false;
+    }
+    const item = layerManagerRef.current.getLayerItem(activeLayer.id);
+    if (!item) return false;
+
+    const texture = Texture.from(comicCanvas);
+    const sprite = new Sprite(texture);
+
+    const lm = layerManagerRef.current;
+    const targetLayerId = activeLayer.id;
+    const renderer = pixiAppRef.current.renderer;
+    const dirtyCoords = tileEngineRef.current.getDirtyTilesForBounds(0, 0, comicCanvas.width, comicCanvas.height);
+    const diff = diffTilesAsync(lm, targetLayerId, dirtyCoords, () => {
+      renderer.render({
+        container: sprite,
+        target: item.renderTexture,
+        clear: false,
+      });
+      sprite.destroy();
+      texture.destroy(true);
+    });
+    lm.syncPingPong(targetLayerId);
+
+    commitInOrder(diff, ({ beforeTiles, afterTiles }) => {
+      if (afterTiles.length > 0) {
+        const opId = `op_comic_${Date.now()}`;
+        scopedUndoRef.current.push({
+          opId,
+          userId: userRef.current?.id || user?.id || 'guest',
+          layerId: targetLayerId,
+          opType: 'STROKE',
+          beforeTiles,
+          afterTiles,
+          timestamp: Date.now(),
+          desc: '漫畫分格 / 對話氣泡落實',
+        });
+        updateUndoRedoState();
+      }
+      commitTilePatch(targetLayerId, afterTiles, false, '漫畫分格 / 對話氣泡', true, beforeTiles);
+    });
+    handleSelectTool('brush');
+    setPermissionWarning('✅ 漫畫分格與對話氣泡已成功落實至圖層！');
+    setTimeout(() => setPermissionWarning(null), 2500);
+    return true;
+  };
+
+  const clearFilterPreview = () => {
+    const preview = filterPreviewRef.current;
+    if (!preview) return;
+    if (!preview.item.sprite.destroyed) preview.item.sprite.texture = preview.item.renderTexture;
+    preview.texture.destroy(true);
+    filterPreviewRef.current = null;
+  };
+
+  const cancelFilterWork = () => {
+    filterRequestRef.current++;
+    filterWorkerRef.current?.terminate();
+    filterWorkerRef.current = null;
+    filterAbortRef.current?.();
+    filterAbortRef.current = null;
+  };
+
+  const closeFilters = () => {
+    cancelFilterWork();
+    setFilterBusy(false);
+    clearFilterPreview();
+    setFilterMenuOpen(false);
+    setLayerFilterId(null);
+    setIsColorCurvesOpen(false);
+    setIsGradientMapOpen(false);
+  };
+
+  const chooseFilter = (id: LayerFilterId | 'curves' | 'gradient') => {
+    clearFilterPreview();
+    setLayerFilterId(id === 'curves' || id === 'gradient' ? null : id);
+    setFilterMenuOpen(id !== 'curves' && id !== 'gradient');
+    setIsColorCurvesOpen(id === 'curves');
+    setIsGradientMapOpen(id === 'gradient');
+  };
+
+  const getFilterLayer = () => {
+    const layer = activeLayerRef.current;
+    if (!layer || !canEditPixels(layer) || !canvas || !isEngineReady || transformLayerIdRef.current) return null;
+    return layerManagerRef.current?.getLayerItem(layer.id) ?? null;
+  };
+
+  const openFilterRef = useRef<(id?: 'curves' | 'gradient') => void>(() => {});
+  openFilterRef.current = (id) => {
+    if (getFilterLayer()) {
+      if (id) chooseFilter(id);
+      else setFilterMenuOpen(true);
+    } else {
+      setPermissionWarning('請先選取可編輯、未鎖定的圖層。');
+      setTimeout(() => setPermissionWarning(null), 3000);
+    }
+  };
+  function openFilterFromShortcut(id: 'curves' | 'gradient') { openFilterRef.current(id); }
+
+  const runLayerFilter = async (filter: LayerFilter | null, previewOnly: boolean): Promise<boolean> => {
+    cancelFilterWork();
+    if (!filter) { clearFilterPreview(); return true; }
+    const request = filterRequestRef.current;
+    const item = getFilterLayer();
+    const engine = tileEngineRef.current;
+    if (!item || !engine || !canvas) return false;
+    if (!previewOnly) setFilterBusy(true);
+
+    try {
+      const lm = layerManagerRef.current;
+      if (!lm) return false;
+      const { width, height } = canvas;
+      const mask = selectionEngineRef.current?.getMaskArray();
+      // Read without stalling the page (and without making a sparse layer one big texture)
+      const [source] = await lm.readAsync(item.model.id, [{ x: 0, y: 0, w: width, h: height }]);
+      if (request !== filterRequestRef.current) return false;
+      const worker = new Worker(new URL('../workers/layer-filter.worker.ts', import.meta.url), { type: 'module' });
+      filterWorkerRef.current = worker;
+      const pixels = await new Promise<Uint8Array | null>((resolve, reject) => {
+        filterAbortRef.current = () => resolve(null);
+        worker.onmessage = ({ data }: MessageEvent<{ request: number; output?: Uint8Array; error?: string }>) => {
+          if (data.request !== request) return;
+          if (data.output) resolve(data.output);
+          else reject(new Error(data.error ?? 'Filter worker returned no result'));
+        };
+        worker.onerror = (event) => reject(new Error(event.message));
+        const input = new Uint8Array(source);
+        worker.postMessage({ request, pixels: input, width, height, filter, mask }, [input.buffer]);
+      });
+      if (!pixels || request !== filterRequestRef.current || tileEngineRef.current !== engine || activeLayerRef.current?.id !== item.model.id || getFilterLayer() !== item) return false;
+      if (previewOnly) {
+        if (filterPreviewRef.current?.item !== item) clearFilterPreview();
+        const texture = filterPreviewRef.current?.texture ?? RenderTexture.create({ width, height, resolution: 1 });
+        filterPreviewRef.current = { item, texture };
+        engine.writeRegion(texture, 0, 0, width, height, pixels);
+        void item.renderTexture; // resident while previewing: its one sprite shows the preview texture
+        item.sprite.texture = texture;
+        return true;
+      }
+
+      clearFilterPreview();
+      const version = item.version;
+      const [latest] = await lm.readAsync(item.model.id, [{ x: 0, y: 0, w: width, h: height }]);
+      if (latest.some((value, index) => value !== source[index])) {
+        setPermissionWarning('處理濾鏡期間圖層有更新，請再次套用。');
+        setTimeout(() => setPermissionWarning(null), 3500);
+        return false;
+      }
+      if (mask !== selectionEngineRef.current?.getMaskArray()) return false;
+      const bounds = selectionEngineRef.current?.getSelection()?.bounds;
+      const coords = bounds && selectionEngineRef.current?.hasSelection()
+        ? engine.getDirtyTilesForBounds(bounds.minX, bounds.minY, bounds.maxX + 1, bounds.maxY + 1)
+        : engine.getAllTileCoords();
+      if (!coords.length || !source.some((value, index) => value !== pixels[index])) return true;
+      // Tiles cut from the buffers here, LZ4 in the workers (a whole 10000×8000 layer took seconds on this thread)
+      const [beforeTiles, afterTiles] = await Promise.all([
+        compressTiles(engine.extractMultipleTilesFromBuffer(source, coords, 'raw')),
+        compressTiles(engine.extractMultipleTilesFromBuffer(pixels, coords, 'raw')),
+      ]);
+      if (request !== filterRequestRef.current || layerManagerRef.current !== lm || getFilterLayer() !== item ||
+        mask !== selectionEngineRef.current?.getMaskArray()) return false;
+      if (item.version !== version) {
+        setPermissionWarning('處理濾鏡期間圖層有更新，請再次套用。');
+        setTimeout(() => setPermissionWarning(null), 3500);
+        return false;
+      }
+      lm.writeRegion(item.model.id, 0, 0, width, height, pixels);
+      const label = filter.id === 'curves' ? '色彩曲線' : filter.id === 'gradient' ? '漸層對應' : LAYER_FILTERS[filter.id].label;
+      scopedUndoRef.current.push({
+        opId: `op_filter_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        userId: userRef.current?.id || user?.id || 'guest',
+        layerId: item.model.id,
+        opType: 'FILTER',
+        beforeTiles,
+        afterTiles,
+        timestamp: Date.now(),
+        desc: label,
+      });
+      updateUndoRedoState();
+      commitTilePatch(item.model.id, afterTiles, false, label);
+      return true;
+    } catch (error) {
+      if (request !== filterRequestRef.current) return false;
+      clearFilterPreview();
+      console.error('[CanvasWorkspace] Layer filter failed:', error);
+      setPermissionWarning('無法處理這個圖層的濾鏡。');
+      return false;
+    } finally {
+      if (request === filterRequestRef.current) {
+        filterWorkerRef.current?.terminate();
+        filterWorkerRef.current = null;
+        filterAbortRef.current = null;
+        if (!previewOnly) setFilterBusy(false);
+      }
+    }
+  };
+
+  const filterRunnerRef = useRef(runLayerFilter);
+  filterRunnerRef.current = runLayerFilter;
+  const [filterCallbacks] = useState(() => ({
+    curves: (options: ColorCurvesOptions | null) => filterRunnerRef.current(options ? { id: 'curves', options } : null, true),
+    gradient: (stops: GradientStop[] | null, opacity: number) => filterRunnerRef.current(stops ? { id: 'gradient', stops, opacity } : null, true),
+    parameters: (values: number[] | null) => {
+      const id = filterIdRef.current;
+      filterRunnerRef.current(values && id ? { id, values } : null, true);
+    },
+  }));
+
+  useEffect(() => {
+    closeFilters();
+    if (transformLayerIdRef.current && transformLayerIdRef.current !== activeLayer?.id) cancelTransform();
+  }, [activeLayer?.id, canvas?.id]);
+
+  // Pixels other painters touched after my ops: changed bytes, plus their brush footprint (paint in
+  // exactly my colour changes no bytes but is still theirs). Marked on the ops that were in my
+  // history when their edit arrived, never on later ones: one mask per tile for the whole history
+  // also blocked the undo of my newer ops there (an 8K gradient's undo left the gradient inside a
+  // stroke the other painter had drawn minutes before).
+  const foreignReadsRef = useRef(new Set<Promise<void>>());
+  /** ORs one tile's mark (1 = theirs) into each op's foreign mask */
+  const addForeign = (ops: ScopedUndoOp[], key: string, mark: Uint8Array) => {
+    for (const op of ops) {
+      const foreign = op.foreign ?? (op.foreign = new Map());
+      const mask = foreign.get(key);
+      if (!mask || mask.length !== mark.length) {
+        foreign.set(key, mark.slice());
+        continue;
+      }
+      for (let i = 0; i < mark.length; i++) if (mark[i]) mask[i] = 1;
+    }
+  };
+  const markForeignFootprint = (layerId: string, payload: any) => {
+    const te = tileEngineRef.current;
+    const pts = (Array.isArray(payload?.allPoints) && payload.allPoints.length > 0
+      ? payload.allPoints
+      : payload?.samplePoints) as Array<{ x: number; y: number; pressure?: number }> | undefined;
+    if (!te || !pts?.length || !payload?.size) return;
+    const ink = typeof payload.color === 'string' ? hexToRgb(payload.color) : null;
+    const tiles = Array.isArray(payload.tiles) ? payload.tiles as TileData[] : undefined;
+    const coords = tiles ?? te.getDirtyTilesForPoints(pts, payload.size / 2 + 2);
+    const tracked = coords
+      .filter(Boolean)
+      .map((t) => ({ t, ops: scopedUndoRef.current.opsTouchingTile(layerId, t.col, t.row) }))
+      .filter((x) => x.ops.length > 0);
+    if (!tracked.length) return;
+    const rMax = payload.size / 2 + 1;
+    for (const { t, ops } of tracked) {
+      const b = getTileBounds(t.col, t.row, te.tileSize, te.canvasWidth, te.canvasHeight);
+      const tile = 'data' in t ? t as TileData : undefined;
+      const pixels = tile && tileToRgba({ ...tile, data: te.normalizeTileData(tile.data) });
+      const mask = new Uint8Array(b.width * b.height);
+      if (tiles && pixels?.length !== mask.length * 4) continue;
+      for (let k = 0; k < pts.length; k++) {
+        const a = pts[k];
+        const z = pts[k + 1] ?? a;
+        if (
+          Math.max(a.x, z.x) + rMax < b.x ||
+          Math.min(a.x, z.x) - rMax > b.x + b.width ||
+          Math.max(a.y, z.y) + rMax < b.y ||
+          Math.min(a.y, z.y) - rMax > b.y + b.height
+        ) continue;
+        const steps = Math.max(1, Math.ceil(Math.hypot(z.x - a.x, z.y - a.y) / 2));
+        for (let s = 0; s <= steps; s++) {
+          const cx = a.x + ((z.x - a.x) * s) / steps - b.x;
+          const cy = a.y + ((z.y - a.y) * s) / steps - b.y;
+          const r = (payload.size * Math.max(0.3, a.pressure ?? 1)) / 2 + 1;
+          for (let y = Math.max(0, Math.floor(cy - r)); y <= Math.min(b.height - 1, Math.ceil(cy + r)); y++) {
+            for (let x = Math.max(0, Math.floor(cx - r)); x <= Math.min(b.width - 1, Math.ceil(cx + r)); x++) {
+            if ((x - cx) ** 2 + (y - cy) ** 2 > r * r) continue;
+            const index = y * b.width + x;
+            if (mask[index]) continue;
+            if (pixels) {
+              const i = index * 4;
+              const alpha = pixels[i + 3];
+              // Tile diffs track changed pixels. The footprint only needs to protect identical ink.
+              if (payload.isEraser ? alpha !== 0 : !ink || alpha === 0 ||
+                Math.abs(pixels[i] - ink.r * alpha / 255) > 1 ||
+                Math.abs(pixels[i + 1] - ink.g * alpha / 255) > 1 ||
+                Math.abs(pixels[i + 2] - ink.b * alpha / 255) > 1) continue;
+            }
+            mask[index] = 1;
+            }
+          }
+        }
+      }
+      addForeign(ops, `${t.col}_${t.row}`, mask);
+    }
+  };
+  const markForeignPixels = (
+    layerId: string, payload: any, edit: ReturnType<ScopedUndoManager['foreignEdit']>,
+    baseTiles: Map<string, TileData>, predecoded?: WeakMap<TileData, Uint8Array | null>,
+  ) => {
+    const te = tileEngineRef.current;
+    const lm = layerManagerRef.current;
+    if (!te || !lm || !Array.isArray(payload?.tiles)) return;
+    // The ops are taken now (the edit arrived now), the marks land when the baseline read does
+    const history = scopedUndoRef.current;
+    const opsByTile = new Map<string, ScopedUndoOp[]>();
+    const tracked = (payload.tiles as TileData[]).filter((t) => {
+      if (!t) return false;
+      const ops = history.opsTouchingTile(layerId, t.col, t.row).filter(op =>
+        (!edit.seq || op.baseSeq === undefined || op.baseSeq < edit.seq) &&
+        (op.seq === undefined || !edit.seq || op.seq < edit.seq));
+      if (ops.length) opsByTile.set(`${t.col}_${t.row}`, ops);
+      return ops.length > 0;
+    });
+    if (!tracked.length) return;
+    // Where a tile already had local commits unseen by the remote sender, compare against the
+    // common baseline (`baseTiles`) instead of `current`, so our own concurrent strokes are never
+    // flagged as foreign pixels (which used to block our Ctrl+Z).
+    const needRead = tracked.filter((t) => !baseTiles.has(`${t.col}_${t.row}`));
+    const inkTiles = new Map<string, TileData>();
+    if (Array.isArray(payload.inkTiles)) {
+      for (const t of payload.inkTiles as TileData[]) {
+        if (t) inkTiles.set(`${t.col}_${t.row}`, t);
+      }
+    }
+    const pending = (needRead.length ? lm.readTilesAsync(layerId, needRead) : Promise.resolve([] as TileData[])).then(async (prior) => {
+      if (layerManagerRef.current !== lm) return;
+      let readIdx = 0;
+      const normalize = (tile: TileData) => ({ ...tile, data: te.normalizeTileData(tile.data) });
+      await Promise.all(tracked.map(async (t) => {
+        const tileKey = `${t.col}_${t.row}`;
+        const baselineTile = baseTiles.get(tileKey) ?? prior[readIdx++];
+        if (!baselineTile) return;
+        const b = getTileBounds(t.col, t.row, te.tileSize, te.canvasWidth, te.canvasHeight);
+        if (t.width !== b.width || t.height !== b.height) return;
+        const mask = new Uint8Array(b.width * b.height);
+        const current = tileToRgba(baselineTile);
+        const after = normalize(t);
+        const incoming = predecoded?.get(t) ?? tileToRgba(after);
+        if (incoming.length !== mask.length * 4 || current.length !== incoming.length) return;
+        let any = false;
+        for (let i = 0, j = 0; j < mask.length; i += 4, j++) {
+          if (current[i] !== incoming[i] || current[i + 1] !== incoming[i + 1] || current[i + 2] !== incoming[i + 2] || current[i + 3] !== incoming[i + 3]) {
+            mask[j] = 1;
+            any = true;
+          }
+        }
+        const source = inkTiles.get(tileKey);
+        const ink = source && source.width === b.width && source.height === b.height &&
+          (source.compression === 'raw' || source.compression === 'lz4') ? normalize(source) : undefined;
+        const ops = opsByTile.get(tileKey) ?? [];
+        if (ink && tileToRgba(ink).length === incoming.length) {
+          const before = baselineTile.compression === 'raw'
+            ? (await compressTiles([baselineTile]))[0]
+            : baselineTile;
+          history.recordForeignTile(ops, tileKey, { edit, changed: mask, ink: { source: ink, before, after } });
+        } else if (any) {
+          history.recordForeignTile(ops, tileKey, { edit, changed: mask });
+        }
+      }));
+    }).catch((error) => console.warn('[undo] Failed to read remote tile baseline:', error));
+    foreignReadsRef.current.add(pending);
+    void pending.finally(() => foreignReadsRef.current.delete(pending));
+  };
+
+  /**
+   * Undo / redo on a shared layer: only pixels still as this op left them go back; pixels another
+   * painter changed since are kept. Returns the tiles to apply and send.
+   */
+  const mergeForUndo = async (
+    op: ScopedUndoOp,
+    target: TileData[],
+    mine: TileData[],
+    apply: (tiles: TileData[], conflicts: number, before: TileData[], historyTiles: NonNullable<TilePatchPacket['historyTiles']>, decoded?: WeakMap<TileData, Uint8Array | null>) => void,
+  ) => {
+    const { layerId } = op;
+    const lm = layerManagerRef.current;
+    const item = lm?.getLayerItem(layerId);
+    if (!lm || !item) return;
+    if (OfflineSessionStore.isOfflineCanvas(canvas?.id)) {
+      const compressed = target.filter((tile) => tile.compression === 'lz4');
+      let decoded: WeakMap<TileData, Uint8Array | null> | undefined;
+      if (compressed.length >= 16) {
+        const pixels = await decodeTiles(compressed.map((tile) => ({
+          data: tile.data as Uint8Array, compression: 'lz4', w: tile.width, h: tile.height,
+        })));
+        if (layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== item) return;
+        decoded = new WeakMap(compressed.map((tile, i) => [tile, pixels[i]]));
+      }
+      apply(target, 0, [], [], decoded);
+      return;
+    }
+    while (layerManagerRef.current === lm && lm.getLayerItem(layerId) === item) {
+      const mineByTile = new Map(mine.map((t) => [`${t.col}_${t.row}`, t]));
+      const valid = target.filter((t) => {
+        if (!t || t.width <= 0 || t.height <= 0) return false;
+        const own = mineByTile.get(`${t.col}_${t.row}`);
+        return own?.width === t.width && own.height === t.height;
+      });
+      const version = item.version;
+      const current = await lm.readTilesAsync(layerId, valid);
+      await Promise.all(foreignReadsRef.current);
+      if (item.version !== version) continue;
+      let conflicts = 0;
+      const raw: TileData[] = [];
+      const historyTiles: NonNullable<TilePatchPacket['historyTiles']> = [];
+      valid.forEach((t, index) => {
+        const key = `${t.col}_${t.row}`;
+        const own = mineByTile.get(key)!;
+        const history = scopedUndoRef.current;
+        const merged = history.mergeForeignTile(op, key, tileToRgba(t), tileToRgba(own), tileToRgba(current[index]));
+        conflicts += merged.conflicts;
+        if (merged.conflicts > 0 || history.hasForeignTile(op, key)) historyTiles.push({ from: own, to: t });
+        raw.push({ ...t, compression: 'raw', data: merged.pixels, byteLength: merged.pixels.byteLength });
+      });
+      const tiles = await compressTiles(raw);
+      if (layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== item) return;
+      if (item.version !== version) continue;
+      apply(tiles, conflicts, current, historyTiles);
+      return;
+    }
+  };
+  const warnUndoConflicts = (conflicts: number) => {
+    if (conflicts > 0) warn(`其他畫師之後也畫到同一處：保留了他們的 ${conflicts} 個像素，只復原你自己的部分。`, 4000);
+  };
+  /** Undo on an animation frame shows that frame, so the change is not invisible */
+  const showFrameOf = (layerId: string) => {
+    const engine = animEngineRef.current;
+    const cel = engine ? celOfLayer(layersRef.current, layerId) : null;
+    if (!engine || !cel) return;
+    const entries = celEntriesOf(layersRef.current, cel.folderId);
+    if (celLayerOf(entries[entryIndexAt(entries, engine.getTime())]) === cel.celId) return;
+    const i = entries.findIndex((e) => e.id === cel.celId);
+    if (i >= 0) engine.goTo(entryStart(entries, i));
+  };
+
+  const usedTilesOnly = (tiles: TileData[]) => tiles.filter((t) => t.width > 0 && ((t.data as Uint8Array).byteLength > 2048 || tileToRgba(t).some((b) => b !== 0)));
+  const snapshotLayerContent = async (l: LayerModel) => {
+    const ls = layersRef.current;
+    const lm = layerManagerRef.current!;
+    const te = tileEngineRef.current!;
+    const coords = te.getAllTileCoords();
+    const item = lm.getLayerItem(l.id);
+    const mask = ls.find((m) => m.layerType === 'mask' && m.parentId === l.id);
+    const maskItem = mask && lm.getLayerItem(mask.id);
+    const tiles = item ? tilesAsync(lm, l.id, lm.occupiedTiles(l.id) ?? coords) : Promise.resolve([]);
+    const maskTiles = mask && maskItem ? tilesAsync(lm, mask.id, lm.occupiedTiles(mask.id) ?? coords) : null;
+    const strokes = l.layerType === 'vector' ? vectorEngineRef.current?.getStrokes(l.id).map((s) => ({ ...s })) : undefined;
+    return {
+      model: l,
+      tiles: usedTilesOnly(await tiles),
+      mask: mask && maskTiles ? { model: mask, tiles: usedTilesOnly(await maskTiles) } : undefined,
+      strokes,
+    };
+  };
+
+  // Layers that undo took away (a new text layer) can be redone although they no longer exist
+  const undoneLayerIdsRef = useRef(new Set<string>());
+  /**
+   * Puts a layer back as it was (props, pixels, mask, vectors); its undo history follows the new id.
+   * Placed right above `aboveId`, or with `place.under` right below that layer, else where its old
+   * sort order says; `place.parentId` overrides the group it goes into.
+   */
+  const recreateLayer = async (
+    model: LayerModel,
+    tiles: TileData[],
+    mask?: { model: LayerModel; tiles: TileData[] },
+    aboveId?: string,
+    strokes?: VectorStroke[],
+    place?: { under?: string; parentId?: string | null }
+  ) => {
+    const te = tileEngineRef.current;
+    const lm = layerManagerRef.current;
+    const belowId = place?.under ? null : aboveId !== undefined ? aboveId : model.layerType === 'mask' ? model.parentId : findLayerBelow(model);
+    const aboveSibling =
+      aboveId === undefined && !place?.under && model.layerType !== 'mask' && !belowId
+        ? [...layersRef.current].filter((l) => l.sortOrder > model.sortOrder && l.layerType !== 'mask').sort((a, b) => a.sortOrder - b.sortOrder)[0]
+        : undefined;
+    const parentId = place && place.parentId !== undefined ? place.parentId : model.parentId;
+    const created = await onCreateLayer?.(model.name, model.blendMode, model.layerType, belowId, parentId, {
+      meta: model.meta ?? null,
+      select: false,
+      ...(place?.under ? { belowLayerId: place.under } : {}),
+    });
+    if (!created || !te) return null;
+    const item = await waitForLayerItem(created.id);
+    if (aboveSibling && layersRef.current.some((l) => l.id === aboveSibling.id)) {
+      const asc = [...layersRef.current].sort((a, b) => a.sortOrder - b.sortOrder).map((l) => l.id).filter((id) => id !== created.id);
+      const idx = asc.indexOf(aboveSibling.id);
+      if (idx >= 0) {
+        asc.splice(idx, 0, created.id);
+        await onReorderLayer?.(created.id, 0, asc);
+      }
+    }
+    if (item) {
+      if (strokes?.length) {
+        const mapped = strokes.map((s) => ({ ...s, layerId: created.id }));
+        const payload = { tiles, vectorRemovedIds: [], vectorAdded: mapped };
+        if (tiles.length) lm?.applyTiles(created.id, tiles);
+        applyVectorPayload(created.id, payload);
+        commitOp(created.id, 'VECTOR_EDIT', payload);
+      } else if (tiles.length) {
+        lm?.applyTiles(created.id, tiles);
+        commitTilePatch(created.id, tiles, false, '復原：圖層回來了');
+      }
+      if (!tiles.length) refreshLayerThumbnail(created.id);
+      lm?.syncPingPong(created.id);
+    }
+    const props: Partial<LayerModel> = {};
+    for (const k of ['opacity', 'isVisible', 'clipToBelow', 'alphaLocked', 'isLocked', 'isPublic', 'aclMode', 'screentoneEnabled', 'screentoneLpi', 'screentoneAngle', 'screentoneDotScale'] as const) {
+      if (created[k] !== model[k]) (props as any)[k] = model[k];
+    }
+    if (Object.keys(props).length) await onUpdateLayerProps?.(created.id, props);
+    if (mask) {
+      const m = await onCreateLayer?.(mask.model.name, 'normal', 'mask', created.id, created.id, { meta: mask.model.meta ?? null, select: false });
+      const mItem = m && (await waitForLayerItem(m.id));
+      if (m && mItem) {
+        if (mask.tiles.length) {
+          lm?.applyTiles(m.id, mask.tiles);
+          commitTilePatch(m.id, mask.tiles, false, '復原：蒙版回來了');
+        } else {
+          refreshLayerThumbnail(m.id);
+        }
+        lm?.syncPingPong(m.id);
+        if (!mask.model.isVisible) await onUpdateLayerProps?.(m.id, { isVisible: false });
+        scopedUndoRef.current.remapLayer(mask.model.id, m.id);
+      }
+    }
+    scopedUndoRef.current.remapLayer(model.id, created.id);
+    return created;
+  };
+  /**
+   * Undo of a deletion: the layer comes back between the layers that were below / above it; a group
+   * comes back with everything that was inside it, in its order. Repeated animation cels that
+   * pointed at a layer that came back point at it again.
+   */
+  const restoreRemovedLayer = async (removed: RemovedLayer & { below?: string | null; above?: string | null }) => {
+    const idMap = new Map<string, string>();
+    const repeats: Array<{ id: string; meta: any }> = [];
+    const exists = (id?: string | null): id is string => Boolean(id && layersRef.current.some((l) => l.id === id));
+    const restore = async (r: RemovedLayer, onTopOf: string | undefined, under: string | undefined, parentId: string | null | undefined): Promise<LayerModel | null> => {
+      // recreateLayer moves the history (this snapshot too) to the new id: keep the old one
+      const oldId = r.model.id;
+      const meta = r.model.meta;
+      const created = await recreateLayer(r.model, r.tiles, r.mask, onTopOf, r.strokes, { under, parentId });
+      if (!created) return null;
+      idMap.set(oldId, created.id);
+      if (meta?.cel?.ref) repeats.push({ id: created.id, meta });
+      // The bottom child goes right under the group, every next one right above the one before
+      let prev: string | null = null;
+      for (const child of r.children ?? []) {
+        const c = await restore(child, prev ?? undefined, prev ? undefined : created.id, created.id);
+        if (c) prev = c.id;
+      }
+      return created;
+    };
+    const created = exists(removed.below)
+      ? await restore(removed, removed.below, undefined, undefined)
+      : await restore(removed, undefined, exists(removed.above) ? removed.above : undefined, undefined);
+    // Repeats that came back with it (their meta is known here, the layer list may not have caught up)
+    const relinked = new Set<string>();
+    for (const { id, meta } of repeats) {
+      const to = idMap.get(meta.cel.ref);
+      relinked.add(id);
+      if (to && to !== meta.cel.ref) await onUpdateLayerProps?.(id, { meta: { ...meta, cel: { ...meta.cel, ref: to } } });
+    }
+    // Repeats elsewhere (a single cel deleted and brought back)
+    for (const l of layersRef.current) {
+      const ref = l.meta?.cel?.ref;
+      if (ref && idMap.has(ref) && !relinked.has(l.id) && canManageLayer(l)) await onUpdateLayerProps?.(l.id, { meta: { ...l.meta, cel: { ...l.meta?.cel, ref: idMap.get(ref) } } });
+    }
+    return created;
+  };
+  /** A layer as undo needs it; a group with everything inside it (bottom first) */
+  const snapshotLayerTree = async (l: LayerModel, depth = 0): Promise<RemovedLayer> => {
+    const base = await snapshotLayerContent(l);
+    if (l.layerType !== 'group' || depth > 16) return base;
+    const inside = layersRef.current.filter((c) => c.parentId === l.id && c.layerType !== 'mask').sort((a, b) => a.sortOrder - b.sortOrder);
+    return { ...base, children: await Promise.all(inside.map((c) => snapshotLayerTree(c, depth + 1))) };
+  };
+  /** The layer that sat right below this one (it goes back above that one) */
+  const findLayerBelow = (model: LayerModel) =>
+    [...layersRef.current].filter((l) => l.sortOrder < model.sortOrder && l.layerType !== 'mask').sort((a, b) => b.sortOrder - a.sortOrder)[0]?.id ?? null;
+
+  // Personal Scoped Undo. A stroke whose tiles are still compressing is not in the history yet:
+  // undo / redo wait for it (otherwise they would undo the stroke before it)
+  // Brush strokes and the other tools' edits commit off the main thread: undo waits for both
+  const undoQueueRef = useRef(Promise.resolve());
+  const queueHistoryAction = (action: () => Promise<void>) => {
+    const lm = layerManagerRef.current;
+    undoQueueRef.current = undoQueueRef.current.then(() => brush.withHistory(async () => {
+      await new Promise<void>(whenToolCommitsDone);
+      if (layerManagerRef.current === lm) await action();
+    })).catch((error) => console.warn('[undo] Could not apply history action:', error));
+  };
+  const handleScopedUndo = () => queueHistoryAction(undoNow);
+  const handleScopedRedo = () => queueHistoryAction(redoNow);
+  const deleteLayerWithUndo = (layerId: string) =>
+    new Promise<void>((resolve) => {
+      queueHistoryAction(async () => {
+        try {
+          const target = layersRef.current.find((l) => l.id === layerId);
+          if (!target) return;
+          const isOwner = user?.id === target.ownerId;
+          /** Layers inside a deleted group that were not this painter's to delete stay, moved up out of it */
+          const tellLifted = (result: unknown) => {
+            const lifted = (result as DeletedLayers | undefined)?.lifted?.length ?? 0;
+            if (lifted) warn(`圖層組裡有 ${lifted} 個別人的（或鎖定的）圖層沒有刪除，已移到圖層組外面。`, 4000);
+          };
+          if (isGuest || (!isOwner && !isAdmin) || !layerManagerRef.current || !tileEngineRef.current) {
+            tellLifted(await onDeleteLayer?.(layerId));
+            return;
+          }
+          // Where it sat, and (a group) everything inside it: undo puts all of it back
+          const flat = layersRef.current.filter((l) => l.layerType !== 'mask').sort((a, b) => a.sortOrder - b.sortOrder);
+          const removed = await snapshotLayerTree(target);
+          if (!layersRef.current.some((l) => l.id === layerId)) return;
+          const result = await onDeleteLayer?.(layerId);
+          if (result === false) return;
+          tellLifted(result);
+          const gone = new Set(result && typeof result === 'object' ? result.deleted : [layerId]);
+          const onlyGone = (r: RemovedLayer): RemovedLayer => ({ ...r, children: r.children?.filter((c) => gone.has(c.model.id)).map(onlyGone) });
+          const at = flat.flatMap((l, i) => (gone.has(l.id) ? [i] : []));
+          const inside = gone.size - 1;
+          scopedUndoRef.current.push({
+            opId: `op_del_layer_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            userId: userRef.current?.id || user?.id || 'guest',
+            layerId: target.id,
+            opType: 'LAYER_DELETE',
+            beforeTiles: [],
+            afterTiles: [],
+            timestamp: Date.now(),
+            desc: inside > 0 ? `刪除圖層組「${target.name}」（含 ${inside} 個圖層）` : `刪除圖層「${target.name}」`,
+            layerRemoved: {
+              ...onlyGone(removed),
+              below: at.length ? flat[at[0] - 1]?.id ?? null : null,
+              above: at.length ? flat[at[at.length - 1] + 1]?.id ?? null : null,
+            },
+          });
+          updateUndoRedoState();
+        } finally {
+          resolve();
+        }
+      });
+    });
+  const undoNow = async () => {
+    const effectiveUserId = userRef.current?.id || user?.id || 'guest';
+    const op = scopedUndoRef.current.undo(effectiveUserId, (layerId, candidate) => {
+      const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model;
+      return Boolean(target && (target.ownerId === effectiveUserId || canEditPixels(target)));
+    });
+
+    if (op && op.selectionBefore !== undefined) {
+      selectionEngineRef.current?.restoreSnapshot(op.selectionBefore);
+      selection.refreshSelection();
+    }
+
+    // Undo of a new layer (text / pasted / mask too): the layer goes away (redo makes it again).
+    // A new group that layers were put into since: only the group goes, its layers stay
+    if (op?.layerCreated) {
+      const live = layersRef.current.find((layer) => layer.id === op.layerId);
+      const deleted = await onDeleteLayer?.(op.layerId, { keepContents: true });
+      if (deleted === false) scopedUndoRef.current.rollbackStep(op, true);
+      else {
+        if (live) op.layerCreated.model = live;
+        undoneLayerIdsRef.current.add(op.layerId);
+      }
+      updateUndoRedoState();
+      return;
+    }
+
+    // Undo of a deleted layer: bring it back with its pixels, properties, mask and vector strokes
+    // (a group with everything that was inside it)
+    if (op?.opType === 'LAYER_DELETE' && op.layerRemoved) {
+      const created = await restoreRemovedLayer(op.layerRemoved);
+      if (created) onSelectLayer?.(created.id);
+      updateUndoRedoState();
+      return;
+    }
+
+    const hasPixelOrMeta = Boolean(
+      op &&
+      (op.beforeTiles.length > 0 ||
+        op.afterTiles.length > 0 ||
+        op.layerRemoved ||
+        op.vectorStroke ||
+        op.vectorRemovedStrokes ||
+        op.vectorAddedStrokes ||
+        op.metaBefore !== undefined)
+    );
+
+    if (op && hasPixelOrMeta && layerManagerRef.current && tileEngineRef.current) {
+      // Undo of a merge down: the merged layer comes back on top of the one it went into
+      if (op.layerRemoved) {
+        const removed = op.layerRemoved;
+        await recreateLayer(removed.model, removed.tiles, removed.mask, op.layerId, removed.strokes);
+      }
+      const layerItem = layerManagerRef.current.getLayerItem(op.layerId);
+      if (layerItem) {
+        showFrameOf(op.layerId);
+        const lm = layerManagerRef.current;
+        await mergeForUndo(op, op.beforeTiles, op.afterTiles, (undoTiles, conflicts, before, historyTiles, decoded) => {
+          warnUndoConflicts(conflicts);
+          if (op.metaBefore !== undefined) onUpdateLayerProps?.(op.layerId, { meta: op.metaBefore });
+          // Restore reverse diff tiles locally
+          lm.applyTiles(op.layerId, undoTiles, undefined, decoded);
+
+          // Vector ops also carry their stroke-list change, reversed here and sent along, so other
+          // painters and the next reload agree on which strokes exist
+          const vectorOp = op.vectorStroke || op.vectorRemovedStrokes || op.vectorAddedStrokes;
+          if (vectorOp) {
+            const payload = {
+              tiles: undoTiles,
+              isUndo: true,
+              actionDesc: 'UNDO',
+              vectorRemovedIds: [...(op.vectorAddedStrokes || []), ...(op.vectorStroke ? [op.vectorStroke] : [])].map((s: VectorStroke) => s.id),
+              vectorAdded: op.vectorRemovedStrokes || [],
+            };
+            applyVectorPayload(op.layerId, payload);
+            commitOp(op.layerId, 'VECTOR_EDIT', payload);
+          } else {
+            // Broadcast compensation Op to room
+            commitTilePatch(op.layerId, undoTiles, true, 'UNDO', false, before,
+              op.seq ? { targetOpSeq: op.seq, historyTiles } : undefined);
+          }
+        });
+      }
+    }
+    updateUndoRedoState();
+  };
+
+  // Personal Scoped Redo
+  const redoNow = async () => {
+    const effectiveUserId = userRef.current?.id || user?.id || 'guest';
+    const op = scopedUndoRef.current.redo(effectiveUserId, (layerId, candidate) => {
+      if (undoneLayerIdsRef.current.has(layerId)) return true; // a layer undo took away
+      const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model;
+      return Boolean(target && (target.ownerId === effectiveUserId || canEditPixels(target)));
+    });
+
+    if (op && op.selectionAfter !== undefined) {
+      selectionEngineRef.current?.restoreSnapshot(op.selectionAfter);
+      selection.refreshSelection();
+    }
+
+    // Redo of a new text / pasted / mask layer: it is made again with its text and pixels
+    if (op?.layerCreated) {
+      const oldId = op.layerId;
+      const created = await recreateLayer(op.layerCreated.model, op.afterTiles);
+      if (created) {
+        undoneLayerIdsRef.current.delete(oldId);
+        onSelectLayer?.(created.id);
+      } else scopedUndoRef.current.rollbackStep(op, false);
+      updateUndoRedoState();
+      return;
+    }
+    // Redo of a deleted layer: delete the restored layer again
+    if (op?.opType === 'LAYER_DELETE' && op.layerRemoved) {
+      await onDeleteLayer?.(op.layerRemoved.model.id);
+      updateUndoRedoState();
+      return;
+    }
+    // Redo of a merge down: the merged layer goes away again
+    if (op?.layerRemoved) await onDeleteLayer?.(op.layerRemoved.model.id);
+
+    const hasPixelOrMeta = Boolean(
+      op &&
+      (op.beforeTiles.length > 0 ||
+        op.afterTiles.length > 0 ||
+        op.vectorStroke ||
+        op.vectorRemovedStrokes ||
+        op.vectorAddedStrokes ||
+        op.metaAfter !== undefined)
+    );
+
+    if (op && hasPixelOrMeta && layerManagerRef.current && tileEngineRef.current) {
+      const layerItem = layerManagerRef.current.getLayerItem(op.layerId);
+      if (layerItem) {
+        showFrameOf(op.layerId);
+        const lm = layerManagerRef.current;
+        await mergeForUndo(op, op.afterTiles, op.beforeTiles, (redoTiles, conflicts, before, historyTiles, decoded) => {
+          warnUndoConflicts(conflicts);
+          if (op.metaAfter !== undefined) onUpdateLayerProps?.(op.layerId, { meta: op.metaAfter });
+          lm.applyTiles(op.layerId, redoTiles, undefined, decoded);
+
+          const vectorOp = op.vectorStroke || op.vectorRemovedStrokes || op.vectorAddedStrokes;
+          if (vectorOp) {
+            const payload = {
+              tiles: redoTiles,
+              actionDesc: 'REDO',
+              vectorRemovedIds: (op.vectorRemovedStrokes || []).map((s: VectorStroke) => s.id),
+              vectorAdded: [...(op.vectorAddedStrokes || []), ...(op.vectorStroke ? [op.vectorStroke] : [])],
+            };
+            applyVectorPayload(op.layerId, payload);
+            commitOp(op.layerId, 'VECTOR_EDIT', payload);
+          } else {
+            commitTilePatch(op.layerId, redoTiles, false, 'REDO', false, before,
+              op.seq ? { targetOpSeq: op.seq, historyTiles } : undefined);
+          }
+        });
+      }
+    }
+    updateUndoRedoState();
+  };
+
+  // 貼上: the pixels float in the transform box (Enter pastes), on the active layer or a new one
+  const pasteImage = async (source: HTMLCanvasElement, x: number, y: number) => {
+    if (!selection.pasteToNewLayer) {
+      startFloatingPaste(source, x, y);
+      return;
+    }
+    const created = await onCreateLayer?.('貼上的圖層', 'normal', 'raster', activeLayerRef.current?.id ?? null);
+    if (!created || !(await waitForLayerItem(created.id))) return;
+    startFloatingPaste(source, x, y, created);
+  };
+  const pasteClipboard = () => {
+    const clip = selection.clipboardRef.current;
+    if (clip) void pasteImage(clip.source, clip.x, clip.y);
+  };
+  const pasteImageRef = useRef(pasteImage);
+  pasteImageRef.current = pasteImage;
+  // Ctrl+V of an image copied in another app (or in this one: same size = ours, keep its place)
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      if (isTypingTarget(e.target) || document.querySelector('[aria-modal="true"]')) return;
+      const file = Array.from(e.clipboardData?.items || []).find((i) => i.type.startsWith('image/'))?.getAsFile();
+      if (!file || !canvas) return;
+      e.preventDefault();
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        const ours = selection.clipboardRef.current;
+        if (ours && ours.source.width === img.naturalWidth && ours.source.height === img.naturalHeight) {
+          void pasteImageRef.current(ours.source, ours.x, ours.y);
+          return;
+        }
+        const scale = Math.min(1, canvas.width / img.naturalWidth, canvas.height / img.naturalHeight);
+        const source = document.createElement('canvas');
+        source.width = Math.max(1, Math.round(img.naturalWidth * scale));
+        source.height = Math.max(1, Math.round(img.naturalHeight * scale));
+        source.getContext('2d')!.drawImage(img, 0, 0, source.width, source.height);
+        const center = getViewCenter();
+        const c = center && viewportRef.current ? viewportRef.current.screenToCanvas(center.x, center.y) : { x: canvas.width / 2, y: canvas.height / 2 };
+        void pasteImageRef.current(source, Math.round(c.x - source.width / 2), Math.round(c.y - source.height / 2));
+      };
+      img.onerror = () => URL.revokeObjectURL(url);
+      img.src = url;
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [canvas?.id, canvas?.width, canvas?.height]);
+
+  /** 新增圖層／圖層組 (buttons, shortcuts, 群組): Ctrl+Z takes it away again, redo brings it back */
+  const recordLayerCreation = (created: LayerModel, afterTiles: TileData[] = []) => {
+    scopedUndoRef.current.push({
+      opId: `op_new_layer_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      userId: userRef.current?.id || user?.id || 'guest',
+      layerId: created.id,
+      opType: 'LAYER_CREATE',
+      beforeTiles: [],
+      afterTiles,
+      timestamp: Date.now(),
+      desc: `新增${created.layerType === 'group' ? '圖層組' : '圖層'}「${created.name}」`,
+      layerCreated: { model: created },
+    });
+    updateUndoRedoState();
+  };
+
+  const createLayerWithUndo = async (...args: Parameters<NonNullable<typeof onCreateLayer>>): Promise<LayerModel | null> => {
+    const created = await onCreateLayer?.(...args);
+    if (!created) return null;
+    recordLayerCreation(created);
+    return created;
+  };
+
+  shortcutActionsRef.current = {
+    ...shortcutActionsRef.current,
+    createLayer: createLayerWithUndo,
+    deleteLayer: deleteLayerWithUndo,
+    selectTool: handleSelectTool,
+    undo: handleScopedUndo,
+    redo: handleScopedRedo,
+    transform: startTransformMode,
+    stepSize: (direction) => setSizeValue(nextSizeStep(sizeValue, direction)),
+    stepOpacity: (direction) => {
+      const cur = brushPropsRef.current?.opacity ?? 1;
+      handleBrushPropsChange({ opacity: Math.max(0.01, Math.min(1, Math.round((cur + direction * 0.05) * 100) / 100)) });
+    },
+    vectorKey: handleVectorKey,
+    selection: {
+      has: () => Boolean(selectionEngineRef.current?.hasSelection()),
+      canPaste: () => Boolean(selection.clipboardRef.current),
+      invert: selection.invertSelection,
+      copy: () => { selection.copySelection(); },
+      cut: selection.cutSelection,
+      clear: () => selection.deleteSelection(),
+      paste: pasteClipboard,
+    },
+  };
+
+  /** Recent frame time (ms) as seen by the preview flush: drives dab thinning on busy/slow devices */
+  const previewFrameMsRef = useRef(16);
+  const computeViewportBounds = (vp: CanvasViewport, w: number, h: number) => {
+    if (!w || !h) return null;
+    const corners = [vp.localToCanvas(0, 0), vp.localToCanvas(w, 0), vp.localToCanvas(0, h), vp.localToCanvas(w, h)];
+    const pad = 64;
+    return {
+      x0: Math.min(...corners.map((c) => c.x)) - pad,
+      y0: Math.min(...corners.map((c) => c.y)) - pad,
+      x1: Math.max(...corners.map((c) => c.x)) + pad,
+      y1: Math.max(...corners.map((c) => c.y)) + pad,
+    };
+  };
+  /** The part of the canvas on screen (canvas coordinates, padded), without DOM layout reflow */
+  const visibleCanvasBox = () => {
+    const vp = viewportRef.current;
+    const app = pixiAppRef.current;
+    if (!vp || !app?.screen) return null;
+    return computeViewportBounds(vp, app.screen.width, app.screen.height);
+  };
+  /** Drops one painter's preview sprites when their stroke commits, in O(1) without re-stamping others */
+  const dropRemotePreview = (key: string) => {
+    layerManagerRef.current?.dropPreviewPainter(key);
+  };
+  useEffect(() => {
+    if (!isEngineReady || !canvas) return;
+    let raf = 0;
+    const pending: PreviewDabPacket[] = [];
+    // Drawn once per frame however many packets arrive, never through React state
+    let lastFlush = 0;
+    const flush = (now: number) => {
+      raf = 0;
+      const gap = now - lastFlush;
+      lastFlush = now;
+      if (gap > 0 && gap < 250) previewFrameMsRef.current += (gap - previewFrameMsRef.current) * 0.2;
+      else previewFrameMsRef.current = 16;
+      const packets = pending.splice(0);
+      const lm = layerManagerRef.current;
+      const br = brushRendererRef.current;
+      if (!lm || !br || !packets.length) return;
+      const view = visibleCanvasBox();
+      const ft = previewFrameMsRef.current;
+      const spacing = ft <= 20 ? 0 : Math.min(0.25, (ft - 20) / 80);
+      const cap = 4000;
+      const tipTex = br.getPreviewTipTexture(0.8);
+      let total = 0;
+      const byPainter = new Map<string, Array<{ x: number; y: number; size: number; alpha: number; color: string }>>();
+      for (const packet of packets) {
+        if (packet.isEraser || !packet.dabs?.length) continue;
+        const key = packet.socketId || packet.userId;
+        let list = byPainter.get(key);
+        if (!list) byPainter.set(key, (list = []));
+        const alpha = (packet.opacity || 0.8) * 0.7;
+        let lx = NaN;
+        let ly = NaN;
+        for (let i = 0; i < packet.dabs.length; i++) {
+          const d = packet.dabs[i];
+          const size = packet.brushSize * (d.pressure || 0.5);
+          if (view && (d.x + size < view.x0 || d.x - size > view.x1 || d.y + size < view.y0 || d.y - size > view.y1)) continue;
+          const last = i === packet.dabs.length - 1;
+          if (spacing && !last && Math.hypot(d.x - lx, d.y - ly) < size * spacing) continue;
+          if (total >= cap && !last) continue;
+          lx = d.x;
+          ly = d.y;
+          total++;
+          list.push({ x: d.x, y: d.y, size, alpha, color: packet.color });
+        }
+      }
+      for (const [key, dabs] of byPainter) {
+        if (dabs.length) lm.addPreviewDabs(key, dabs, tipTex);
+      }
+    };
+    const unsubscribe = subscribePreviewDabs((packet) => {
+      if (packet.canvasId !== canvas.id) return;
+      pending.push(packet);
+      if (!raf) raf = requestAnimationFrame(flush);
+    });
+    return () => {
+      unsubscribe();
+      cancelAnimationFrame(raf);
+      layerManagerRef.current?.clearPreview();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvas?.id, isEngineReady, subscribePreviewDabs]);
+
+  // Remote Broadcast Ops & Incremental Tile Diff Patching.
+  // Ops come from another socket (our own echo is dropped in SocketContext), which may well be
+  // this same account on a second device.
+  const applyRemoteOp = (latestBroadcastOp: OpBroadcastPacket, predecoded?: WeakMap<TileData, Uint8Array | null>) => {
+    if (latestBroadcastOp.canvasId !== canvas?.id || !layerManagerRef.current || !brushRendererRef.current) return;
+    // Their stroke is final now: the live preview of it goes
+    dropRemotePreview(latestBroadcastOp.socketId || latestBroadcastOp.userId);
+    if (latestBroadcastOp.seq > 0 && latestBroadcastOp.seq <= replayedSeqRef.current) return; // drawn by the initial replay
+
+    if (latestBroadcastOp.layerId) {
+      const layerItem = layerManagerRef.current.getLayerItem(latestBroadcastOp.layerId);
+      if (!layerItem) {
+        // A layer created a moment ago that our layer list does not have yet: keep its ops until it
+        // arrives (dropping them left this viewer without those pixels until a reload)
+        const waiting = opsForUnknownLayersRef.current;
+        const list = waiting.get(latestBroadcastOp.layerId) ?? [];
+        if (list.length < 200) list.push(latestBroadcastOp);
+        waiting.set(latestBroadcastOp.layerId, list);
+        return;
+      }
+      if (transformLayerIdRef.current === latestBroadcastOp.layerId) {
+        // Restore the lifted pixels before applying a patch based on the committed layer.
+        cancelTransform();
+        setPermissionWarning('其他裝置更新了此圖層，已取消變形。');
+        setTimeout(() => setPermissionWarning(null), 3000);
+      }
+
+      const payload = latestBroadcastOp.payload as any;
+      const clientOpId = typeof payload?.clientOpId === 'string' ? payload.clientOpId : null;
+      const rememberOpId = (set: Set<string>, id: string) => {
+        set.add(id);
+        if (set.size > 500) {
+          const first = set.values().next().value;
+          if (first !== undefined) set.delete(first);
+        }
+      };
+      const hasVectorDelta = Boolean(
+        payload && (Array.isArray(payload.vectorAdded) || Array.isArray(payload.vectorRemovedIds) || payload.vectorStroke)
+      );
+      if (hasVectorDelta && (!clientOpId || !appliedVectorOpsRef.current.has(clientOpId))) {
+        if (clientOpId) rememberOpId(appliedVectorOpsRef.current, clientOpId);
+        // Sync vector delta even if pixels arrived first via pixel-only P2P TILE_PATCH with the same clientOpId
+        applyVectorPayload(latestBroadcastOp.layerId, payload);
+      }
+      const hasFootprint = Boolean(
+        payload &&
+        !Array.isArray(payload.inkTiles) &&
+        payload.size &&
+        (!Array.isArray(payload.tiles) || typeof payload.color === 'string' || payload.isEraser) &&
+        ((Array.isArray(payload.allPoints) && payload.allPoints.length > 0) ||
+          (Array.isArray(payload.samplePoints) && payload.samplePoints.length > 0))
+      );
+      if (hasFootprint && (!clientOpId || !appliedFootprintOpsRef.current.has(clientOpId))) {
+        if (clientOpId) rememberOpId(appliedFootprintOpsRef.current, clientOpId);
+        // Sync brush footprint even if P2P TILE_PATCH and Socket STROKE arrive in different order
+        markForeignFootprint(latestBroadcastOp.layerId, payload);
+      }
+      const incomingSeq = latestBroadcastOp.seq || 0;
+      const foreignEdit = scopedUndoRef.current.foreignEdit(clientOpId ?? `seq:${incomingSeq}`, incomingSeq);
+      const isAuthoritativeResync = Boolean(
+        clientOpId &&
+        incomingSeq > 0 &&
+        speculativeConcurrencyOpsRef.current.has(clientOpId)
+      );
+      if (clientOpId) {
+        if (appliedClientOpsRef.current.has(clientOpId) && !isAuthoritativeResync) return;
+        rememberOpId(appliedClientOpsRef.current, clientOpId);
+        if (isAuthoritativeResync) speculativeConcurrencyOpsRef.current.delete(clientOpId);
+      }
+
+      // Build 3-way concurrency context from local commits on this layer not yet reflected in sender's baseSeq
+      const baseSeq = typeof payload?.baseSeq === 'number'
+        ? payload.baseSeq
+        : (incomingSeq > 0 ? incomingSeq - 1 : undefined);
+      const baseTiles = new Map<string, TileData>();
+      const latestLocalSeqByTile = new Map<string, number>();
+      const nowMs = Date.now();
+      recentLocalCommitsRef.current = recentLocalCommitsRef.current.filter(
+        (rec) => !(rec.seq !== null && baseSeq !== undefined && rec.seq <= baseSeq && nowMs - rec.createdAt > 60_000)
+      );
+      for (const rec of recentLocalCommitsRef.current) {
+        if (rec.layerId !== latestBroadcastOp.layerId) continue;
+        if (rec.seq !== null && baseSeq !== undefined && rec.seq <= baseSeq) continue;
+        for (const [k, bt] of rec.beforeTiles) {
+          if (!baseTiles.has(k)) baseTiles.set(k, bt);
+          const seqVal = rec.seq ?? Number.MAX_SAFE_INTEGER;
+          latestLocalSeqByTile.set(k, Math.max(latestLocalSeqByTile.get(k) ?? 0, seqVal));
+        }
+      }
+      const concurrency: TileConcurrencyContext | undefined = baseTiles.size > 0
+        ? {
+            baseTiles,
+            remoteIsNewer: (col, row) => {
+              const localSeq = latestLocalSeqByTile.get(`${col}_${row}`);
+              if (localSeq === undefined) return true;
+              return incomingSeq > 0 && localSeq < Number.MAX_SAFE_INTEGER ? incomingSeq > localSeq : false;
+            },
+          }
+        : undefined;
+      if (clientOpId && incomingSeq === 0 && concurrency && !isAuthoritativeResync) {
+        rememberOpId(speculativeConcurrencyOpsRef.current, clientOpId);
+      }
+
+      if (!isAuthoritativeResync) {
+        if (latestBroadcastOp.opType === 'TILE_PATCH' && incomingSeq > 0 && Number.isInteger(payload?.targetOpSeq) &&
+          payload.targetOpSeq > 0 && payload.targetOpSeq < incomingSeq && Array.isArray(payload.historyTiles)) {
+          scopedUndoRef.current.setForeignEditActive(latestBroadcastOp.layerId, payload.targetOpSeq, !payload.isUndo);
+          for (const change of payload.historyTiles as NonNullable<TilePatchPacket['historyTiles']>) {
+            if (!change?.from || !change.to) continue;
+            const from = change.from;
+            const to = change.to;
+            const te = tileEngineRef.current;
+            if (!te || !Number.isInteger(from.col) || !Number.isInteger(from.row) || from.col < 0 || from.row < 0) continue;
+            const bounds = getTileBounds(from.col, from.row, te.tileSize, te.canvasWidth, te.canvasHeight);
+            if (bounds.width <= 0 || bounds.height <= 0 || from.width !== bounds.width || from.height !== bounds.height) continue;
+            scopedUndoRef.current.rebaseBeforeTiles(latestBroadcastOp.layerId, payload.targetOpSeq, incomingSeq,
+              { ...from, data: te.normalizeTileData(from.data) }, { ...to, data: te.normalizeTileData(to.data) });
+          }
+        } else {
+          markForeignPixels(latestBroadcastOp.layerId, payload, foreignEdit, baseTiles, predecoded);
+        }
+      }
+
+      // Handle Tile Patch (Incremental Tile Sync / Scoped Undo)
+      if (
+        (latestBroadcastOp.opType === 'TILE_PATCH' || payload?.tiles) &&
+        tileEngineRef.current &&
+        payload?.tiles?.length > 0
+      ) {
+        layerManagerRef.current.applyTiles(latestBroadcastOp.layerId, payload.tiles, concurrency, predecoded);
+      } else if (
+        (latestBroadcastOp.opType === 'STROKE' || latestBroadcastOp.opType === 'ERASE') &&
+        payload?.samplePoints &&
+        payload.samplePoints.length > 0
+      ) {
+        // Handle standard Stroke / Erase fallback
+        const pts = payload.samplePoints;
+        const flat = new Float32Array(pts.length * 7);
+        for (let i = 0; i < pts.length; i++) {
+          const off = i * 7;
+          flat[off] = pts[i].x;
+          flat[off + 1] = pts[i].y;
+          flat[off + 2] = (payload.size || 16) * (pts[i].pressure || 0.5);
+          flat[off + 3] = pts[i].pressure || 0.5;
+          flat[off + 4] = (payload.flow || 1.0) * (payload.opacity || 1.0);
+          flat[off + 5] = 0;
+          flat[off + 6] = 0;
+        }
+        brushRendererRef.current.stampDabs(
+          layerManagerRef.current.drawTarget(latestBroadcastOp.layerId) ?? layerItem.renderTexture,
+          flat,
+          pts.length,
+          payload.color,
+          payload.isEraser
+        );
+      }
+
+      // Crucial: keep pingPongTexture and thumbnail strictly in sync after remote op is applied!
+      layerManagerRef.current.refreshPingPong(latestBroadcastOp.layerId);
+      refreshLayerThumbnail(latestBroadcastOp.layerId, true);
+    }
+  };
+
+  // Remote ops are applied the moment they arrive (no React render in between)
+  const opsForUnknownLayersRef = useRef(new Map<string, OpBroadcastPacket[]>());
+  useEffect(() => { opsForUnknownLayersRef.current.clear(); }, [canvas?.id]);
+  // Layers that arrived: their waiting ops go on now, in order; ones for layers that never came are dropped
+  useEffect(() => {
+    const waiting = opsForUnknownLayersRef.current;
+    if (!waiting.size || !isEngineReady) return;
+    for (const [layerId, ops] of [...waiting]) {
+      if (layerManagerRef.current?.getLayerItem(layerId)) {
+        waiting.delete(layerId);
+        ops.forEach((op) => applyRemoteOp(op));
+      } else if (!layers.some((l) => l.id === layerId) && Date.now() - (ops[0].timestamp ?? Date.now()) > 15000) {
+        waiting.delete(layerId);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layers, isEngineReady]);
+  const applyRemoteOpRef = useRef(applyRemoteOp);
+  applyRemoteOpRef.current = applyRemoteOp;
+  /** Runs fn once every local stroke / tool edit so far is in the history and tracked for merging */
+  const whenLocalCommitsTrackedRef = useRef((fn: () => void) => brush.whenCommitted(() => whenToolCommitsDone(fn)));
+  whenLocalCommitsTrackedRef.current = (fn: () => void) => brush.whenCommitted(() => whenToolCommitsDone(fn));
+  useEffect(() => {
+    let cancelled = false;
+    let rafId: number | null = null;
+    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+    const queuedOps: OpBroadcastPacket[] = [];
+    let processing = false;
+
+    const pump = async () => {
+      if (processing) return;
+      processing = true;
+      try {
+        while (queuedOps.length > 0 && !cancelled) {
+          if (!layerManagerRef.current || !brushRendererRef.current) break;
+          if (isReplayingRef.current || lastReplayedCanvasIdRef.current !== canvas?.id) break;
+          const batch = queuedOps.splice(0, queuedOps.length);
+          const tilesToDecode: TileData[] = [];
+          const decodeReqs: Array<{ data: Uint8Array; compression: 'lz4' | 'raw'; w: number; h: number }> = [];
+          for (const op of batch) {
+            if (op.canvasId !== canvas?.id || (op.seq > 0 && op.seq <= replayedSeqRef.current)) continue;
+            const payload = op.payload as { tiles?: TileData[] } | undefined;
+            if ((op.opType === 'TILE_PATCH' || payload?.tiles) && Array.isArray(payload?.tiles)) {
+              for (const t of payload.tiles) {
+                if (t && t.compression === 'lz4' && t.width > 0 && t.height > 0) {
+                  tilesToDecode.push(t);
+                  decodeReqs.push({
+                    data: normalizeTileBytes(t.data),
+                    compression: 'lz4',
+                    w: t.width,
+                    h: t.height,
+                  });
+                }
+              }
+            }
+          }
+          let predecoded: WeakMap<TileData, Uint8Array | null> | undefined;
+          if (decodeReqs.length > 0) {
+            const decoded = await decodeTiles(decodeReqs);
+            if (cancelled || !layerManagerRef.current || !brushRendererRef.current) break;
+            if (isReplayingRef.current || lastReplayedCanvasIdRef.current !== canvas?.id) break;
+            predecoded = new WeakMap();
+            for (let i = 0; i < tilesToDecode.length; i++) {
+              predecoded.set(tilesToDecode[i], decoded[i] ?? null);
+            }
+          }
+          // A local edit whose tiles are read and whose baseline is synced (a sparse layer drops its
+          // backups) but whose commit is still compressing in a worker has neither backups nor a
+          // concurrency record yet: a remote tile applied in that window replaced our stroke's
+          // pixels wholesale. Wait the few ms until those commits are tracked, then merge 3-way.
+          await new Promise<void>((resolve) => whenLocalCommitsTrackedRef.current(resolve));
+          if (cancelled || !layerManagerRef.current || !brushRendererRef.current) break;
+          for (const op of batch) applyRemoteOpRef.current(op, predecoded);
+        }
+      } finally {
+        processing = false;
+      }
+    };
+
+    const drain = () => {
+      if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      if (fallbackTimer !== null) {
+        clearTimeout(fallbackTimer);
+        fallbackTimer = null;
+      }
+      if (!layerManagerRef.current || !brushRendererRef.current) return;
+      // During the initial snapshot/op replay ops stay queued: drawn now, the replay's older
+      // tiles would land on top of them afterwards. loadCheckpointAndReplay drains the queue.
+      if (isReplayingRef.current || lastReplayedCanvasIdRef.current !== canvas?.id) return;
+      const incoming = takeBroadcastOps();
+      if (!incoming.length) return;
+      queuedOps.push(...incoming);
+      void pump();
+    };
+    const scheduleDrain = () => {
+      if (rafId !== null || fallbackTimer !== null) return;
+      if (document.hidden) {
+        fallbackTimer = setTimeout(drain, 0);
+      } else {
+        rafId = requestAnimationFrame(drain);
+        fallbackTimer = setTimeout(drain, 50);
+      }
+    };
+    drain();
+    const unsubscribe = subscribeOps(scheduleDrain);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      if (fallbackTimer !== null) clearTimeout(fallbackTimer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canvas?.id, isEngineReady, subscribeOps]);
+
+  // Animation (CSP style): every animation folder is a track, every child layer a cel, so cels,
+  // their pixels and their timing (meta.cel) sync, save and undo like any layer. This viewer's
+  // frame, playback, playback range and onion skin stay local.
+  useEffect(() => {
+    if (!animationEngine) return;
+    animationEngine.setFps(animFolder?.meta?.animation?.fps ?? 12);
+    animationEngine.setLength(animTimelineLength);
+  }, [animationEngine, animFolder?.meta?.animation?.fps, animTimelineLength]);
+
+  // Timeline clicks pick their own layer, so the frame change must not pick one too
+  const skipSelectShownRef = useRef(false);
+  useEffect(() => {
+    const engine = animationEngine;
+    if (!engine || !isEngineReady) return;
+    let lastSyncSig = '';
+    let lastPrefetchSig = '';
+    const buildDisplaySig = (list: ReturnType<typeof displayLayersFor>) => {
+      let s = '';
+      for (let i = 0; i < list.length; i++) {
+        const l = list[i] as LayerModel & { onionTint?: number; renderTransform?: { isIdentity: boolean; a: number; b: number; tx: number; ty: number } };
+        if (!l.isVisible) continue;
+        s += `${l.id}:${l.opacity.toFixed(2)}:${l.onionTint ?? ''}`;
+        if (l.renderTransform && !l.renderTransform.isIdentity) {
+          s += `@${l.renderTransform.a.toFixed(3)},${l.renderTransform.b.toFixed(3)},${l.renderTransform.tx.toFixed(1)},${l.renderTransform.ty.toFixed(1)}`;
+        }
+        s += '|';
+      }
+      return s;
+    };
+    const show = () => {
+      const lm = layerManagerRef.current;
+      if (!lm) return;
+      const displayed = displayLayersFor(layersRef.current);
+      const playing = engine.getIsPlaying();
+      const sig = buildDisplaySig(displayed);
+      if (!playing || sig !== lastSyncSig) {
+        lastSyncSig = sig;
+        lm.syncLayers(displayed);
+      }
+      if (!playing) {
+        lastPrefetchSig = '';
+        return;
+      }
+      // The next frames' cels: their compressed tiles are decoded in the workers now, so they are
+      // on the GPU when their turn comes (decoding on the spot made a phone drop frames)
+      const t = engine.getTime();
+      const len = Math.max(1, engine.getLength());
+      const ids = new Set<string>();
+      for (let k = 1; k <= ANIM_PREFETCH_FRAMES; k++) {
+        for (const l of displayLayersFor(layersRef.current, { time: (t + k) % len })) if (l.isVisible) ids.add(l.id);
+      }
+      const pfSig = [...ids].sort().join(',');
+      if (pfSig !== lastPrefetchSig) {
+        lastPrefetchSig = pfSig;
+        lm.prefetch([...ids]);
+      }
+    };
+    // The cel on screen in the edited track is the layer you draw on (picked on the timeline, or where playback stopped)
+    const selectShown = () => {
+      if (skipSelectShownRef.current) return;
+      const entries = animEntriesRef.current;
+      const shown = celLayerOf(entries[entryIndexAt(entries, engine.getTime())]);
+      const active = activeLayerRef.current;
+      if (!shown || !active) return;
+      if (active.id === shown || celOfLayer(layersRef.current, active.id)?.celId === shown) return; // already on it (or inside its cel folder)
+      onSelectLayer?.(shown);
+    };
+    const unsubFrame = engine.onFrameChange((_t, byUser) => {
+      show();
+      if (byUser && !engine.getIsPlaying()) selectShown();
+    });
+    const unsubPlay = engine.onPlaybackStateChange((playing) => {
+      layerManagerRef.current?.setThumbnailsPaused(playing);
+      if (!playing) lastSyncSig = '';
+      show();
+      if (!playing) selectShown();
+    });
+    return () => {
+      unsubFrame();
+      unsubPlay();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [animationEngine, isEngineReady]);
+
+  // Picking a cel in the layer panel (or adding one) moves the timeline to it
+  useEffect(() => {
+    const engine = animationEngine;
+    if (!engine || !activeLayer || engine.getIsPlaying()) return;
+    const cel = celOfLayer(layers, activeLayer.id);
+    if (!cel) return;
+    const entries = celEntriesOf(layers, cel.folderId);
+    if (celLayerOf(entries[entryIndexAt(entries, engine.getTime())]) === cel.celId) return;
+    const i = entries.findIndex((e) => e.id === cel.celId);
+    if (i < 0) return;
+    skipSelectShownRef.current = true;
+    engine.goTo(entryStart(entries, i));
+    skipSelectShownRef.current = false;
+  }, [activeLayer?.id, animationEngine, animTrackKey]);
+
+  /** The entry of the edited track at the frame on screen */
+  const currentAnimEntry = () => {
+    const i = entryIndexAt(animEntries, animationEngine?.getTime() ?? 0);
+    return { index: i, entry: animEntries[i] as (typeof animEntries)[number] | undefined };
+  };
+  /** CSP numbers cels 1, 2, 3…: the next number not used yet */
+  const nextCelName = () => {
+    const used = new Set(animEntries.map((e) => e.label));
+    let n = animEntries.filter((e) => e.ref === undefined).length + 1;
+    while (used.has(String(n))) n++;
+    return String(n);
+  };
+  const canAddCel = (folder: LayerModel | null) => Boolean(folder && !isGuest && folderAccess.canAdd(folder));
+  const createAnimationFolder = async () => {
+    if (!onCreateLayer) return;
+    const fps = animationEngine?.getFps() ?? 12; // a new track plays at the same speed as the others
+    const folder = await onCreateLayer(`動畫 ${animFolders.length + 1}`, 'normal', 'group', null, null, { meta: { animation: { fps } }, select: false });
+    if (folder) await onCreateLayer('1', 'normal', 'raster', folder.id, folder.id);
+  };
+  // 順移 (ripple): on, a new / deleted cel moves everything after it; off, its neighbours give or
+  // take the frames so later cels keep their timing. A viewer's own setting.
+  const [animRipple, setAnimRipple] = useState(() => {
+    try {
+      return localStorage.getItem('atelier_anim_ripple') !== '0';
+    } catch {
+      return true;
+    }
+  });
+  // Cels copied on the timeline (Ctrl+C), with where they sat relative to the first one
+  const animClipboardRef = useRef<{
+    folderId: string;
+    cels: Array<{ id: string; ref?: string; isGroup: boolean; offset: number; hold: number }>;
+  } | null>(null);
+  const toggleAnimRipple = () => {
+    setAnimRipple((on) => {
+      try { localStorage.setItem('atelier_anim_ripple', on ? '0' : '1'); } catch { /* not remembered */ }
+      return !on;
+    });
+  };
+  /**
+   * Without ripple a new cel (right after the current one) takes its frames from its neighbours:
+   * the current cel's frames after the playhead, else one frame of the next cel. Returns the new
+   * cel's hold, or null when there is no room (it then ripples after all).
+   */
+  const roomWithoutRipple = (): number | null => {
+    const { index, entry } = currentAnimEntry();
+    if (!entry || !animationEngine) return null;
+    const keep = animationEngine.getTime() - entryStart(animEntries, index) + 1; // the current cel keeps up to the playhead
+    const cur = entryLayer(entry.id);
+    if (keep < entry.hold && cur && canManageLayer(cur)) {
+      setEntryHold(entry.id, keep);
+      return entry.hold - keep;
+    }
+    const next = animEntries[index + 1];
+    const nextLayer = entryLayer(next?.id);
+    if (next && next.hold > 1 && nextLayer && canManageLayer(nextLayer)) {
+      setEntryHold(next.id, next.hold - 1);
+      return 1;
+    }
+    warn('前後沒有可以借的格數（或是別人的格），後面的格往後移。', 3000);
+    return null;
+  };
+  /** The meta of a cel inserted after the current one, holding `hold` frames (default 1) */
+  const insertedCelMeta = (hold: number | null) => (hold && hold > 1 ? { cel: { hold } } : null);
+  const addAnimationFrame = async () => {
+    if (!onCreateLayer || !animFolder) return;
+    if (!canAddCel(animFolder)) return warn('這個動畫資料夾沒有共用，只有建立者能加格。');
+    const time = animationEngine?.getTime() ?? 0;
+    if (animEntries.length > 0 && time >= trackLength(animEntries)) {
+      // Past the end of the track: the new cel goes on that frame and the last drawing holds until it
+      const folderId = animFolder.id;
+      const created = await createLayerWithUndo(nextCelName(), 'normal', 'raster', animEntries[animEntries.length - 1].id, folderId);
+      if (!created) return;
+      await waitForLayerModels([created.id]);
+      const others = celEntriesOf(layersRef.current, folderId).filter((e) => e.id !== created.id);
+      commitAnimationPlacement(folderId, placeEntries(others, new Map([[created.id, time]]), [{ id: created.id, hold: 1 }]));
+      return;
+    }
+    const after = currentAnimEntry().entry?.id ?? animEntries[animEntries.length - 1]?.id ?? animFolder.id;
+    const hold = animRipple ? null : roomWithoutRipple();
+    await createLayerWithUndo(nextCelName(), 'normal', 'raster', after, animFolder.id, { meta: insertedCelMeta(hold) });
+  };
+  const duplicateAnimationFrame = async () => {
+    const src = currentAnimEntry().entry;
+    const srcLayer = src && layersRef.current.find((l) => l.id === src.id);
+    const srcItem = srcLayer && layerManagerRef.current?.getLayerItem(srcLayer.id);
+    const te = tileEngineRef.current;
+    const lm = layerManagerRef.current;
+    if (!onCreateLayer || !animFolder || !canAddCel(animFolder)) return;
+    if (!src || src.ref !== undefined || src.isGroup || !srcLayer || !srcItem || !te || !lm) return warn('只能複製一般的格（重複格用「重複使用」；影格資料夾請複製裡面的圖層）。');
+    const copyCoords = lm.occupiedTiles(srcLayer.id) ?? te.getAllTileCoords();
+    const tiles = copyCoords.length ? await tilesAsync(lm, srcLayer.id, copyCoords) : [];
+    const hold = animRipple ? src.hold : roomWithoutRipple();
+    const created = await onCreateLayer(nextCelName(), srcLayer.blendMode, 'raster', src.id, animFolder.id, { meta: insertedCelMeta(hold) });
+    const item = created && (await waitForLayerItem(created.id));
+    if (!created || !item) return;
+    if (tiles.length) lm.applyTiles(created.id, tiles);
+    recordLayerCreation(created, tiles);
+    commitTilePatch(created.id, tiles, false, '動畫：複製影格');
+  };
+  /** Shows a cel again without copying it (an empty group pointing at it: editing the cel changes every repeat) */
+  const reuseAnimationCel = async (celId: string) => {
+    const target = layersRef.current.find((l) => l.id === celId);
+    if (!onCreateLayer || !animFolder || !target || !canAddCel(animFolder)) return;
+    const after = currentAnimEntry().entry?.id ?? animEntries[animEntries.length - 1]?.id ?? animFolder.id;
+    const hold = animRipple ? null : roomWithoutRipple();
+    await createLayerWithUndo(`↻ ${target.name}`, 'normal', 'group', after, animFolder.id, { meta: { cel: { ref: celId, ...(hold && hold > 1 ? { hold } : {}) } } });
+  };
+  const entryLayer = (id: string | undefined) => (id ? layersRef.current.find((l) => l.id === id) : undefined);
+  const setEntryHold = (entryId: string | undefined, hold: number) => {
+    const layer = entryLayer(entryId);
+    if (!layer) return;
+    if (!canManageLayer(layer)) return warn('這一格是其他畫師的，只有他能改停留格數。');
+    onUpdateLayerProps?.(layer.id, { meta: { ...layer.meta, cel: { ...layer.meta?.cel, hold } } });
+  };
+  const setAnimationHold = (hold: number) => setEntryHold(currentAnimEntry().entry?.id, hold);
+  const holdOfLayer = (l: LayerModel) => Math.max(1, Math.min(MAX_HOLD, Math.round(Number(l.meta?.cel?.hold) || 1)));
+  /** Layers just created through onCreateLayer reach layersRef a render later */
+  const waitForLayerModels = async (ids: string[]) => {
+    for (let i = 0; i < 80 && !ids.every((id) => layersRef.current.some((l) => l.id === id)); i++) await new Promise((r) => setTimeout(r, 50));
+  };
+  /**
+   * Sends a Krita-style placement (placeEntries) of a track: the order of its cels and the holds
+   * that put them on their frames. `joining` cels come from another track and join the folder
+   * first; `alsoHolds` are hold changes elsewhere (the track they left). Returns false, changing
+   * nothing, when another painter's cel would have to change.
+   */
+  const commitAnimationPlacement = (
+    folderId: string,
+    placed: Array<{ id: string; hold: number }>,
+    joining: LayerModel[] = [],
+    alsoHolds: Array<{ id: string; hold: number }> = []
+  ): boolean => {
+    const ls = layersRef.current;
+    const before = celEntriesOf(ls, folderId);
+    const changes = [...placed, ...alsoHolds].filter((p) => {
+      const l = entryLayer(p.id);
+      return !l || holdOfLayer(l) !== p.hold;
+    });
+    if (changes.some((p) => !entryLayer(p.id) || !canManageLayer(entryLayer(p.id)!))) {
+      warn('這樣放會改到其他畫師的格的停留格數，請換個位置。', 3000);
+      return false;
+    }
+    const holdMeta = (l: LayerModel, hold: number) => ({ ...l.meta, cel: { ...l.meta?.cel, hold } });
+    const changed = new Map(changes.map((c) => [c.id, c.hold]));
+    const joiningIds = new Set(joining.map((l) => l.id));
+    // The server keeps a folder's content right below it: cels join the folder before the new order is sent
+    const joined = Promise.all(joining.map((l) => onUpdateLayerProps?.(l.id, {
+      parentId: folderId,
+      ...(changed.has(l.id) ? { meta: holdMeta(l, changed.get(l.id)!) } : {}),
+    })));
+    const order = placed.map((p) => p.id);
+    if (joining.length || order.join() !== before.map((e) => e.id).join()) {
+      const ascending = [...ls].sort((a, b) => a.sortOrder - b.sortOrder).map((l) => l.id);
+      const placing = new Set(order);
+      const rest = ascending.filter((id) => !placing.has(id));
+      // Where the track's cels sit now (an empty folder: right below the folder)
+      const lowest = Math.min(...before.map((e) => ascending.indexOf(e.id)).filter((i) => i >= 0));
+      const pos = Math.max(0, Number.isFinite(lowest) ? ascending.slice(0, lowest).filter((id) => !placing.has(id)).length : rest.indexOf(folderId));
+      rest.splice(pos, 0, ...order);
+      void joined.then(() => onReorderLayer?.(order[0], (pos + 1) * 10, rest));
+    }
+    for (const c of changes) {
+      if (joiningIds.has(c.id)) continue;
+      const l = entryLayer(c.id)!;
+      onUpdateLayerProps?.(l.id, { meta: holdMeta(l, c.hold) });
+    }
+    return true;
+  };
+  /** Drag and drop on the timeline: the cels move `delta` frames (into another track too); every other cel keeps its frames */
+  const placeAnimationEntries = (entryIds: string[], folderId: string, delta: number) => {
+    const ls = layersRef.current;
+    const moving = entryIds.map((id) => entryLayer(id)).filter((l): l is LayerModel => Boolean(l?.parentId));
+    const target = ls.find((l) => l.id === folderId);
+    if (!moving.length || !target) return;
+    if (moving.some((l) => !canManageLayer(l))) return warn('選取的格裡有其他畫師的，不能移動。');
+    const fromId = moving[0].parentId!;
+    if (moving.some((l) => l.parentId !== fromId)) return;
+    const crossing = fromId !== folderId;
+    if (crossing) {
+      if (!canAddCel(target)) return warn('那個動畫資料夾沒有共用，不能把格移過去。');
+      for (const l of moving) {
+        // A reuse only points inside its own folder
+        if (l.meta?.cel?.ref !== undefined && !entryIds.includes(l.meta.cel.ref)) return warn('重複格只能在同一軌裡移動（或和它重複的那張一起移）。');
+        if (celEntriesOf(ls, fromId).some((e) => e.ref === l.id && !entryIds.includes(e.id))) return warn('有一張在原本那一軌被重複使用中，請先刪掉那些重複格（或一起選取）再移到別軌。');
+      }
+    }
+    const from = celEntriesOf(ls, fromId);
+    const startOf = new Map(from.map((e, i) => [e.id, entryStart(from, i)]));
+    const ids = new Set(moving.map((l) => l.id));
+    const starts = new Map(moving.map((l) => [l.id, Math.max(0, (startOf.get(l.id) ?? 0) + delta)]));
+    let ok: boolean;
+    if (!crossing) {
+      ok = commitAnimationPlacement(folderId, placeEntries(from, starts));
+    } else {
+      // The track they leave keeps its other cels on their frames (the drawing before a gap holds on)
+      const left = from.filter((e) => !ids.has(e.id));
+      const leftPlaced = placeEntries(left, new Map(left.map((e) => [e.id, startOf.get(e.id)!])));
+      const added = from.filter((e) => ids.has(e.id)).map((e) => ({ id: e.id, hold: e.hold }));
+      ok = commitAnimationPlacement(folderId, placeEntries(celEntriesOf(ls, folderId), starts, added), moving, leftPlaced);
+    }
+    if (!ok) return;
+    const first = moving[0];
+    onSelectLayer?.(celLayerOf(from.find((e) => e.id === first.id)) ?? first.id);
+  };
+  /** Ctrl+C on the timeline: the cels, and where they sat relative to the first one */
+  const copyAnimationEntries = (folderId: string, entryIds: string[]) => {
+    const entries = celEntriesOf(layersRef.current, folderId);
+    const picked = entries.map((e, i) => ({ e, start: entryStart(entries, i) })).filter(({ e }) => entryIds.includes(e.id));
+    if (!picked.length) return;
+    animClipboardRef.current = {
+      folderId,
+      cels: picked.map(({ e, start }) => ({ id: e.id, ref: e.ref, isGroup: e.isGroup, offset: start - picked[0].start, hold: e.hold })),
+    };
+    warn(`已複製 ${picked.length} 格`, 1500);
+  };
+  /** Ctrl+V on the timeline: new copies of the copied cels, the first on `frame` (a repeat stays a repeat of the same drawing) */
+  const pasteAnimationEntries = async (folderId: string, frame: number) => {
+    const clip = animClipboardRef.current;
+    const folder = layersRef.current.find((l) => l.id === folderId);
+    const lm = layerManagerRef.current;
+    const te = tileEngineRef.current;
+    if (!clip) return warn('先在時間軸選格子按 Ctrl+C', 2000);
+    if (!onCreateLayer || !folder || !lm || !te) return;
+    if (!canAddCel(folder)) return warn('這個動畫資料夾沒有共用，只有建立者能加格。');
+    const existing = celEntriesOf(layersRef.current, folderId);
+    const usedNames = new Set(existing.map((e) => e.label));
+    let n = existing.filter((e) => e.ref === undefined).length + 1;
+    const nextName = () => {
+      while (usedNames.has(String(n))) n++;
+      usedNames.add(String(n));
+      return String(n);
+    };
+    const made: Array<{ id: string; start: number; hold: number }> = [];
+    let skipped = 0;
+    for (const c of clip.cels) {
+      const after = celEntriesOf(layersRef.current, folderId).at(-1)?.id ?? folderId; // the placement below sorts them out
+      if (c.ref !== undefined) {
+        const target = c.ref ? layersRef.current.find((l) => l.id === c.ref) : undefined;
+        if (clip.folderId !== folderId || !target) {
+          skipped++;
+          continue;
+        }
+        const layer = await createLayerWithUndo(`↻ ${target.name}`, 'normal', 'group', after, folderId, { meta: { cel: { ref: c.ref, hold: c.hold } }, select: false });
+        if (layer) made.push({ id: layer.id, start: frame + c.offset, hold: c.hold });
+        continue;
+      }
+      const src = layersRef.current.find((l) => l.id === c.id);
+      if (!src || c.isGroup) {
+        skipped++;
+        continue;
+      }
+      const coords = lm.occupiedTiles(src.id) ?? te.getAllTileCoords();
+      const tiles = coords.length ? await tilesAsync(lm, src.id, coords) : [];
+      const layer = await onCreateLayer(nextName(), src.blendMode, 'raster', after, folderId, { meta: { cel: { hold: c.hold } }, select: false });
+      const item = layer && (await waitForLayerItem(layer.id));
+      if (!layer || !item) continue;
+      if (tiles.length) lm.applyTiles(layer.id, tiles);
+      recordLayerCreation(layer, tiles);
+      commitTilePatch(layer.id, tiles, false, '動畫：貼上影格');
+      made.push({ id: layer.id, start: frame + c.offset, hold: c.hold });
+    }
+    if (skipped) warn(`影格資料夾，以及貼到別軌的重複格不能貼上：略過 ${skipped} 格`, 3000);
+    if (!made.length) return;
+    await waitForLayerModels(made.map((m) => m.id));
+    const madeIds = new Set(made.map((m) => m.id));
+    const others = celEntriesOf(layersRef.current, folderId).filter((e) => !madeIds.has(e.id));
+    commitAnimationPlacement(folderId, placeEntries(others, new Map(made.map((m) => [m.id, m.start])), made));
+    onSelectLayer?.(made[0].id);
+  };
+  const deleteAnimationFrame = () => {
+    const { index, entry } = currentAnimEntry();
+    const layer = entryLayer(entry?.id);
+    if (!entry || !layer || animEntries.length <= 1) return;
+    if (!canManageLayer(layer)) return warn('這一格是其他畫師的，不能刪除。');
+    const repeats = animEntries.filter((e) => e.ref === entry.id).length;
+    const note = repeats ? `\n有 ${repeats} 個重複格用到這張，刪掉後它們會變空白。` : '';
+    if (!confirm(`刪除第 ${index + 1} 張「${entry.label}」？房間裡所有人都會少這一張。${note}`)) return;
+    if (!animRipple) {
+      // Its frames go to the cel before (or after) it, so the cels after it keep their timing
+      const heir = [animEntries[index - 1], animEntries[index + 1]].find((e) => e && canManageLayer(entryLayer(e.id) ?? layer) && entryLayer(e.id));
+      if (heir) setEntryHold(heir.id, Math.min(MAX_HOLD, heir.hold + entry.hold));
+      else warn('前後的格是別人的，沒辦法接手格數：後面的格往前移。', 3000);
+    }
+    void deleteLayerWithUndo(entry.id);
+  };
+  const moveAnimationFrame = (direction: -1 | 1) => {
+    const { index, entry } = currentAnimEntry();
+    const other = animEntries[index + direction];
+    const layer = entryLayer(entry?.id);
+    if (!entry || !other || !layer) return;
+    if (!canManageLayer(layer)) return warn('這一格是其他畫師的，不能移動。');
+    const ascending = [...layersRef.current].sort((a, b) => a.sortOrder - b.sortOrder).map((l) => l.id);
+    const i = ascending.indexOf(entry.id);
+    const j = ascending.indexOf(other.id);
+    [ascending[i], ascending[j]] = [ascending[j], ascending[i]];
+    onReorderLayer?.(entry.id, (j + 1) * 10, ascending);
+  };
+  const toggleAnimationShared = () => {
+    if (!animFolder || !canManageLayer(animFolder)) return;
+    const animation = { fps: 12, ...animFolder.meta?.animation };
+    onUpdateLayerProps?.(animFolder.id, { meta: { ...animFolder.meta, animation: { ...animation, shared: !animation.shared } } });
+  };
+  const setAnimationFps = (fps: number) => {
+    if (animFolder && canManageLayer(animFolder)) onUpdateLayerProps?.(animFolder.id, { meta: { ...animFolder.meta, animation: { ...animFolder.meta?.animation, fps } } });
+  };
+  /** A click on a track: its cel at that frame becomes the active layer (that folder becomes the edited one) */
+  const selectAnimationCell = (folderId: string, time: number) => {
+    const engine = animationEngine;
+    const track = animTracks.find((t) => t.folderId === folderId);
+    if (!engine || !track) return;
+    const entry = track.entries[entryIndexAt(track.entries, time)];
+    skipSelectShownRef.current = true;
+    engine.goTo(time);
+    skipSelectShownRef.current = false;
+    // A reused cel selects the drawing it shows; past the end of the track, the folder itself
+    onSelectLayer?.(celLayerOf(entry) ?? folderId);
+  };
+  /** GIF / video frames: one segment per distinct picture (held cels become one longer frame) */
+  const planAnimationExport = ({ scope, useRange }: { scope: AnimationExportScope; useRange: boolean }): AnimationExportPlan | null => {
+    const lm = layerManagerRef.current;
+    const engine = animationEngine;
+    if (!lm || !engine || !canvas || !animFolder) return null;
+    const range = useRange ? engine.getRange() : null;
+    const start = range?.start ?? 0;
+    const end = range?.end ?? animTimelineLength - 1;
+    const only = scope === 'folder' ? new Set([animFolder.id]) : scope === 'folders' ? new Set(animFolders.map((f) => f.id)) : null;
+    const tracks = animTracks.filter((t) => !only || only.has(t.folderId));
+    const segments: Array<{ time: number; hold: number }> = [];
+    let lastKey = '';
+    for (let t = start; t <= end; t++) {
+      const key = tracks.map((tr) => celLayerOf(tr.entries[entryIndexAt(tr.entries, t)]) ?? '-').join('|');
+      if (key === lastKey) segments[segments.length - 1].hold++;
+      else segments.push({ time: t, hold: 1 });
+      lastKey = key;
+    }
+    return {
+      width: canvas.width,
+      height: canvas.height,
+      segments,
+      render: (time) => {
+        // Personal eyes and onion skin never go into a file
+        lm.syncLayers(displayLayersFor(layersRef.current, { personal: false, time, only }));
+        return lm.renderCompositeCanvas();
+      },
+      done: () => lm.syncLayers(displayLayersFor(layersRef.current)),
+    };
+  };
+
+  // ---------- Layer structure: merge down, group ----------
+  const canManageLayer = (l: LayerModel) => !isGuest && l.ownerId === user?.id;
+  /** 向下合併: the layer (with its opacity, blend mode and mask) is drawn into the one below, then removed */
+  const mergeDown = (layerId: string) => {
+    const ls = layersRef.current;
+    const top = ls.find((l) => l.id === layerId);
+    const lm = layerManagerRef.current;
+    const te = tileEngineRef.current;
+    const renderer = pixiAppRef.current?.renderer;
+    if (!top || !lm || !te || !renderer) return;
+    const siblings = ls.filter((l) => l.layerType !== 'mask' && (l.parentId ?? null) === (top.parentId ?? null)).sort((a, b) => a.sortOrder - b.sortOrder);
+    const below = siblings[siblings.indexOf(top) - 1];
+    if (top.layerType === 'group' || top.layerType === 'mask') return warn('請選一般圖層再向下合併。');
+    if (!below || below.layerType === 'group') return warn('下面沒有可以合併的圖層。');
+    if (below.layerType === 'text' || below.layerType === 'vector') return warn('下面是文字／向量圖層，請先點陣化再合併。');
+    if (!canManageLayer(top) || !canManageLayer(below)) return warn('不能合併別人的圖層。');
+    const topItem = lm.getLayerItem(top.id);
+    const belowItem = lm.getLayerItem(below.id);
+    if (!topItem || !belowItem) return;
+    // The layer below changes only where the merged layer has tiles (all of them if that is unknown)
+    const coords = lm.occupiedTiles(top.id) ?? te.getAllTileCoords();
+    // Everything needed to bring the merged layer back on undo
+    const topMask = ls.find((m) => m.layerType === 'mask' && m.parentId === top.id);
+    const topMaskItem = topMask && lm.getLayerItem(topMask.id);
+    const removed = {
+      model: top,
+      tiles: tilesAsync(lm, top.id, coords),
+      mask: topMask && topMaskItem ? { model: topMask, tiles: tilesAsync(lm, topMask.id, te.getAllTileCoords()) } : undefined,
+    };
+    // Reads of everything involved are queued around the merge (none stalls the page); the undo entry and the
+    // patch go out in order once they are compressed
+    const diff = diffTilesAsync(lm, below.id, coords, () => {
+    if (top.isVisible) {
+      lm.syncPingPong(below.id); // clipping samples this copy, never the texture being drawn into
+      const holder = new Container();
+      const sprite = new Sprite(topItem.renderTexture);
+      sprite.alpha = Math.max(0, Math.min(1, top.opacity));
+      const mode = lm.mapPixiBlendMode(top.blendMode);
+      sprite.blendMode = mode;
+      const filters: Filter[] = [];
+      const helper = (texture: Texture) => {
+        const s = new Sprite(texture);
+        s.renderable = false;
+        holder.addChild(s);
+        return s;
+      };
+      // As drawn on screen: its mask (inverted or not), and clipped to the layer it merges into
+      if (topMask?.isVisible && topMaskItem) filters.push(new MaskFilter({ sprite: helper(topMaskItem.renderTexture), inverse: Boolean(topMask.meta?.maskInverted) }));
+      if (top.clipToBelow) filters.push(new MaskFilter({ sprite: helper(belowItem.pingPongTexture), channel: 'alpha' }));
+      // With filters the blend must act on their output (else multiply + mask merged as black)
+      if (filters.length && mode !== 'normal') {
+        filters.push(lm.createBlendFilter(mode));
+        sprite.blendMode = 'normal';
+      }
+      if (filters.length) sprite.filters = filters;
+      holder.addChild(sprite);
+      renderer.render({ container: holder, target: belowItem.renderTexture, clear: false });
+      filters.forEach((f) => f.destroy());
+      holder.destroy({ children: true });
+    }
+    });
+    lm.syncPingPong(below.id); // queued after the reads: the next edit's baseline
+    commitInOrder(Promise.all([diff, removed.tiles, removed.mask?.tiles ?? Promise.resolve(null)]), ([{ beforeTiles, afterTiles }, removedTiles, removedMask]) => {
+      scopedUndoRef.current.push({
+        opId: `op_merge_${Date.now()}`,
+        userId: userRef.current?.id || 'guest',
+        layerId: below.id,
+        opType: 'STROKE',
+        beforeTiles,
+        afterTiles,
+        timestamp: Date.now(),
+        desc: '向下合併',
+        layerRemoved: { model: removed.model, tiles: removedTiles, mask: removed.mask && removedMask ? { model: removed.mask.model, tiles: removedMask } : undefined },
+      });
+      updateUndoRedoState();
+      commitTilePatch(below.id, afterTiles, false, '向下合併', true);
+    });
+    onDeleteLayer?.(top.id);
+    onSelectLayer?.(below.id);
+  };
+  /** 群組: a new group (inside the layers' common group, so groups nest) holding these layers */
+  const groupLayers = async (ids: string[]) => {
+    const ls = layersRef.current.filter((l) => ids.includes(l.id) && l.layerType !== 'mask');
+    if (!ls.length || !onCreateLayer) return;
+    const blocked = ls.filter((l) => !canManageLayer(l));
+    if (blocked.length) return warn(`不能群組別人的圖層：${blocked.map((b) => b.name).join('、')}`);
+    const parents = new Set(ls.map((l) => l.parentId ?? null));
+    const parent = parents.size === 1 ? [...parents][0] : null;
+    const top = [...ls].sort((a, b) => b.sortOrder - a.sortOrder)[0];
+    // Ctrl+Z ungroups (the group goes, the layers stay)
+    const group = await createLayerWithUndo(nextGroupName(layersRef.current), 'normal', 'group', top.id, parent, { select: false });
+    if (!group) return;
+    for (const l of ls) onUpdateLayerProps?.(l.id, { parentId: group.id });
+    onSelectLayer?.(group.id);
+  };
+
+  // ---------- Layer copy / paste (kept for this browser tab, so it also pastes into another canvas) ----------
+  /** 複製圖層: pixels, properties, mask, text / vector source, and a group's whole content */
+  const copyLayers = (ids: string[]) => {
+    const ls = layersRef.current;
+    const lm = layerManagerRef.current;
+    const te = tileEngineRef.current;
+    if (!lm || !te || !canvas) return;
+    // Every layer's tiles are read without stalling (queued now: they hold the pixels as of this moment)
+    const snap = async (l: LayerModel): Promise<CopiedLayer> => {
+      const ls = layersRef.current;
+      const base = await snapshotLayerContent(l);
+      const children = l.layerType === 'group' ? await Promise.all(ls.filter((c) => c.parentId === l.id && c.layerType !== 'mask').sort((a, b) => a.sortOrder - b.sortOrder).map(snap)) : [];
+      return { ...base, children };
+    };
+    const picked = ls.filter((l) => ids.includes(l.id) && l.layerType !== 'mask');
+    // A picked group brings its children: do not copy them twice
+    const roots = picked.filter((l) => !picked.some((p) => p.id === l.parentId)).sort((a, b) => a.sortOrder - b.sortOrder);
+    if (!roots.length) return;
+    const size = { width: canvas.width, height: canvas.height };
+    // 製作圖層副本 pastes right after copying: paste waits for this
+    pendingCopyRef.current = Promise.all(roots.map(snap)).then((items) => {
+    layerClipboard = { items, ...size };
+    const kept = keepsLayerClipboard() && saveLayerClipboard(layerClipboard);
+    warn(
+      keepsLayerClipboard() && !kept
+        ? `已複製 ${roots.length} 個圖層；內容太大，存不進瀏覽器（約 5MB 上限），重新整理後就沒了`
+        : `已複製 ${roots.length} 個圖層（Ctrl+Alt+V 貼上，可以貼到其他畫布${kept ? '，重新整理後也還在' : ''}）`,
+      kept || !keepsLayerClipboard() ? 2500 : 4500
+    );
+    }).catch((err) => warn(`複製圖層失敗：${String(err)}`)).finally(() => { pendingCopyRef.current = null; });
+  };
+  const pendingCopyRef = useRef<Promise<void> | null>(null);
+  const [keepLayerClipboard, setKeepLayerClipboard] = useState(keepsLayerClipboard);
+  const toggleKeepLayerClipboard = () => {
+    const next = !keepLayerClipboard;
+    try {
+      localStorage.setItem(KEEP_CLIPBOARD_KEY, next ? '1' : '0');
+    } catch {
+      return warn('這個瀏覽器不能保存資料（私密模式？）。');
+    }
+    setKeepLayerClipboard(next);
+    if (!next) saveLayerClipboard(null);
+    else if (layerClipboard && !saveLayerClipboard(layerClipboard)) warn('目前複製的圖層太大，存不進瀏覽器（約 5MB 上限）。', 4000);
+  };
+  /** 貼上圖層: new layers of this painter, right above the active layer, in its group */
+  const pasteLayers = async () => {
+    // The paste ends by selecting what it made, unless the painter picked another layer meanwhile
+    const selectedAtStart = activeLayerRef.current?.id ?? null;
+    if (pendingCopyRef.current) await pendingCopyRef.current;
+    const clip = layerClipboard ?? (layerClipboard = loadLayerClipboard());
+    const te = tileEngineRef.current;
+    if (!clip || !onCreateLayer || !te || !canvas) return warn('還沒有複製任何圖層。');
+    if (isGuest) return warn('訪客不能貼上圖層，請先登入。');
+    let anchor = activeLayerRef.current;
+    let insertionAbove: string | undefined;
+    if (anchor?.layerType === 'mask') anchor = layersRef.current.find((l) => l.id === anchor!.parentId) ?? null;
+    while (anchor) {
+      const cel = celOfLayer(layersRef.current, anchor.id);
+      if (!cel) break;
+      anchor = layersRef.current.find((l) => l.id === cel.folderId) ?? null;
+    }
+    if (anchor && isAnimationFolder(anchor)) {
+      const byId = new Map(layersRef.current.map((l) => [l.id, l]));
+      const folder = anchor;
+      const lastInFolder = layersRef.current.reduce((last, layer) => {
+        if (layer.sortOrder <= last.sortOrder) return last;
+        for (let parentId = layer.parentId; parentId; parentId = byId.get(parentId)?.parentId ?? null) {
+          if (parentId === folder.id) return layer;
+        }
+        return last;
+      }, folder);
+      // The folder and its descendants share one global sort order.
+      insertionAbove = lastInFolder.id;
+    }
+    const resized = clip.width !== canvas.width || clip.height !== canvas.height;
+    const fits = (tiles: TileData[]) => (resized ? tiles.filter((t) => t.col * 256 < canvas.width && t.row * 256 < canvas.height) : tiles);
+    const paste = async (c: CopiedLayer, above: string | null, parentId: string | null): Promise<string | null> => {
+      const m = c.model;
+      const created = await onCreateLayer(m.layerType === 'group' ? m.name : `${m.name} 複製`, m.blendMode, m.layerType, above, parentId, { meta: m.meta ?? null, select: false });
+      if (!created) return null;
+      const props: Partial<LayerModel> = {};
+      for (const k of ['opacity', 'isVisible', 'clipToBelow', 'alphaLocked'] as const) if (created[k] !== m[k]) (props as any)[k] = m[k];
+      if (Object.keys(props).length) onUpdateLayerProps?.(created.id, props);
+      if (m.layerType === 'group') {
+        let prev: string | null = null;
+        for (const child of c.children) prev = (await paste(child, prev ?? created.id, created.id)) ?? prev;
+        // The group sits above its children, as everywhere else
+        if (prev) {
+          const asc = [...layersRef.current].sort((a, b) => a.sortOrder - b.sortOrder).map((l) => l.id).filter((id) => id !== created.id);
+          asc.splice(asc.indexOf(prev) + 1, 0, created.id);
+          onReorderLayer?.(created.id, 0, asc);
+        }
+      } else {
+        const item = await waitForLayerItem(created.id);
+        const tiles = fits(c.tiles);
+        if (item && tiles.length) {
+          te.applyTileBatch(item.renderTexture, tiles);
+          if (c.strokes?.length) {
+            const payload = { tiles, vectorRemovedIds: [], vectorAdded: c.strokes.map((s) => ({ ...s, id: crypto.randomUUID(), layerId: created.id })) };
+            applyVectorPayload(created.id, payload);
+            commitOp(created.id, 'VECTOR_EDIT', payload);
+          } else {
+            commitTilePatch(created.id, tiles, false, '貼上圖層');
+          }
+        }
+        scopedUndoRef.current.push({
+          opId: `op_paste_layer_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          userId: userRef.current?.id || user?.id || 'guest',
+          layerId: created.id,
+          opType: 'STROKE',
+          beforeTiles: [],
+          afterTiles: tiles,
+          timestamp: Date.now(),
+          desc: '貼上圖層',
+          layerCreated: { model: created },
+        });
+        updateUndoRedoState();
+      }
+      if (c.mask) {
+        const mk = await onCreateLayer(c.mask.model.name, 'normal', 'mask', created.id, created.id, { meta: c.mask.model.meta ?? null, select: false });
+        const mItem = mk && (await waitForLayerItem(mk.id));
+        if (mk && mItem) {
+          te.applyTileBatch(mItem.renderTexture, fits(c.mask.tiles));
+          commitTilePatch(mk.id, fits(c.mask.tiles), false, '貼上圖層蒙版');
+          if (!c.mask.model.isVisible) onUpdateLayerProps?.(mk.id, { isVisible: false });
+        }
+      }
+      return created.id;
+    };
+    let above = insertionAbove ?? anchor?.id ?? null;
+    let last: string | null = null;
+    for (const c of clip.items) {
+      last = (await paste(c, above, anchor?.parentId ?? null)) ?? last;
+      above = last ?? above;
+    }
+    if (last && (activeLayerRef.current?.id ?? null) === selectedAtStart) onSelectLayer?.(last);
+    if (resized) warn('畫布尺寸不同：超出這張畫布的部分沒有貼上。', 3000);
+  };
+
+  shortcutActionsRef.current.mergeDown = mergeDown;
+  shortcutActionsRef.current.groupLayers = groupLayers;
+  shortcutActionsRef.current.copyLayers = copyLayers;
+  shortcutActionsRef.current.pasteLayers = pasteLayers;
+
+  // ---------- 匯入圖片 (drop on the canvas or the layer list, 檔案 → 匯入圖片) ----------
+  /** aboveId / parentId for onCreateLayer; an undefined parent lets App pick it from the active layer, as 新增圖層 does */
+  const importPlacement = (target?: ImageDropTarget): { aboveId: string | null; parentId: string | null | undefined; toBottom: boolean } => {
+    const ls = layersRef.current;
+    const byId = new Map(ls.map((l) => [l.id, l]));
+    if (!target) {
+      let anchor = activeLayerRef.current;
+      if (anchor?.layerType === 'mask') anchor = (anchor.parentId && byId.get(anchor.parentId)) || null;
+      return { aboveId: anchor?.id ?? null, parentId: undefined, toBottom: false };
+    }
+    const t = target.layerId ? byId.get(target.layerId) : undefined;
+    if (!t) return { aboveId: null, parentId: null, toBottom: true }; // under every row
+    const isInside = (l: LayerModel, ancestorId: string) => {
+      for (let p = l.parentId; p; p = byId.get(p)?.parentId ?? null) if (p === ancestorId) return true;
+      return false;
+    };
+    const top = (list: LayerModel[]) => [...list].sort((a, b) => b.sortOrder - a.sortOrder)[0];
+    const highestBelow = (sortOrder: number) => top(ls.filter((l) => l.sortOrder < sortOrder)) ?? null;
+    let aboveId: string | null;
+    let parentId: string | null;
+    if (target.pos === 'inside' && t.layerType === 'group') {
+      // Top of the group: right under it (its children sit below it)
+      parentId = t.id;
+      aboveId = highestBelow(t.sortOrder)?.id ?? null;
+    } else if (target.pos === 'below') {
+      parentId = t.parentId ?? null;
+      const lowest = Math.min(t.sortOrder, ...ls.filter((l) => isInside(l, t.id)).map((l) => l.sortOrder));
+      aboveId = highestBelow(lowest)?.id ?? null;
+    } else {
+      parentId = t.parentId ?? null;
+      aboveId = top([t, ...ls.filter((l) => l.parentId === t.id && l.layerType === 'mask')]).id; // above the row and its mask
+    }
+    // The server refuses children in other painters' groups (shared animation folders excepted): step out to one we may use
+    const mayAddInto = folderAccess.canAdd;
+    let leftGroup: LayerModel | undefined;
+    for (let g = parentId ? byId.get(parentId) : undefined; g && !mayAddInto(g); g = g.parentId ? byId.get(g.parentId) : undefined) leftGroup = g;
+    if (leftGroup) {
+      const left = leftGroup;
+      return { aboveId: top([left, ...ls.filter((l) => isInside(l, left.id))]).id, parentId: left.parentId ?? null, toBottom: false };
+    }
+    return { aboveId, parentId, toBottom: aboveId === null };
+  };
+
+  /** Draws the picture into its new layer; the undo step takes the whole layer away (redo brings it back with the picture) */
+  const stampImportedImage = (layer: LayerModel, item: NonNullable<Awaited<ReturnType<typeof waitForLayerItem>>>, source: HTMLCanvasElement, x: number, y: number) => {
+    const te = tileEngineRef.current!;
+    const lm = layerManagerRef.current!;
+    const coords = te.getDirtyTilesForBounds(x, y, x + source.width, y + source.height);
+    const diff = diffTilesAsync(lm, layer.id, coords, () => te.stampCanvas(item.renderTexture, source, x, y));
+    lm.syncPingPong(layer.id);
+    const userId = userRef.current?.id || user?.id || 'guest';
+    commitInOrder(diff, ({ beforeTiles, afterTiles }) => {
+      scopedUndoRef.current.push({
+        opId: `op_import_image_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        userId,
+        layerId: layer.id,
+        opType: 'STROKE',
+        beforeTiles,
+        afterTiles,
+        timestamp: Date.now(),
+        desc: '匯入圖片',
+        layerCreated: { model: layer },
+      });
+      updateUndoRedoState();
+      commitTilePatch(layer.id, afterTiles, false, '匯入圖片', true, beforeTiles);
+    });
+    return diff;
+  };
+
+  const importingRef = useRef(false);
+  /**
+   * Each image becomes a new layer of this painter, centred on `at` (a screen point) or on the view,
+   * scaled down to fit the canvas. A single image then sits in the transform box (Enter / Esc both keep it).
+   */
+  const importImages = async (dropped: DroppedImages, opts: { at?: { x: number; y: number }; target?: ImageDropTarget } = {}) => {
+    const lm = layerManagerRef.current;
+    if (!canvas || !onCreateLayer || !lm || !tileEngineRef.current) return;
+    if (isGuest) return warn('訪客不能匯入圖片，請先登入。');
+    const { entries, skipped, tooMany } = imageEntries(dropped);
+    if (!entries.length) return warn(skipped ? '只能匯入圖片檔（PNG、JPG、WebP、GIF、SVG…）。' : '沒有可匯入的圖片。');
+    if (transformLayerIdRef.current) return warn('請先按 Enter 確定或 Esc 取消目前的變形，再匯入圖片。', 3500);
+    if (textEdit) return warn('請先完成文字輸入，再匯入圖片。');
+    if (importingRef.current) return warn('上一批圖片還在匯入中。');
+    importingRef.current = true;
+    try {
+      const screen = opts.at ?? getViewCenter();
+      const c = screen && viewportRef.current ? viewportRef.current.screenToCanvas(screen.x, screen.y) : { x: canvas.width / 2, y: canvas.height / 2 };
+      let { aboveId, parentId, toBottom } = importPlacement(opts.target);
+      let failed = 0;
+      let fromWeb = false;
+      let last: { layer: LayerModel; stamped: Promise<unknown> } | null = null;
+      for (const entry of entries) {
+        let source: HTMLCanvasElement;
+        try {
+          source = await loadImageEntry(entry, canvas.width, canvas.height);
+        } catch (err) {
+          failed++;
+          if (err instanceof ImageImportError && err.fromWeb) fromWeb = true;
+          continue;
+        }
+        if (layerManagerRef.current !== lm) return; // switched canvas meanwhile
+        const created = (await onCreateLayer(entry.name, 'normal', 'raster', aboveId, parentId)) || null;
+        const item = created && (await waitForLayerItem(created.id));
+        if (!created || !item || layerManagerRef.current !== lm) break;
+        let undoModel = created;
+        if (toBottom) {
+          const others = layersRef.current.filter((l) => l.id !== created.id);
+          const asc = [...others].sort((a, b) => a.sortOrder - b.sortOrder).map((l) => l.id);
+          await onReorderLayer?.(created.id, 0, [created.id, ...asc]);
+          // Redo puts the layer back by its sortOrder: remember it under every layer, not on top where it was made
+          if (others.length) undoModel = { ...created, sortOrder: Math.min(...others.map((l) => l.sortOrder)) - 1 };
+          toBottom = false;
+        }
+        const x = Math.max(0, Math.min(canvas.width - source.width, Math.round(c.x - source.width / 2)));
+        const y = Math.max(0, Math.min(canvas.height - source.height, Math.round(c.y - source.height / 2)));
+        last = { layer: created, stamped: stampImportedImage(undoModel, item, source, x, y) };
+        // The next picture goes right on top of this one, in the same group
+        aboveId = created.id;
+        parentId = created.parentId ?? null;
+      }
+      if (last && entries.length === 1) {
+        await last.stamped.catch(() => {});
+        const fresh = layersRef.current.find((l) => l.id === last!.layer.id);
+        if (fresh && activeLayerRef.current?.id === fresh.id && !transformLayerIdRef.current) void startTransformMode('transform', fresh);
+      }
+      const notes = [
+        failed ? (fromWeb ? '網頁圖片讀不到（對方網站不允許），請先存到電腦再拖進來。' : `${failed} 張圖片無法讀取。`) : '',
+        skipped ? `略過 ${skipped} 個非圖片檔。` : '',
+        tooMany ? `一次最多 ${entries.length} 張，其餘沒有匯入。` : '',
+      ].filter(Boolean);
+      if (notes.length) warn(notes.join(' '), 4500);
+    } finally {
+      importingRef.current = false;
+    }
+  };
+  const importImagesRef = useRef(importImages);
+  importImagesRef.current = importImages;
+  useEffect(() => {
+    if (importImagesRequest?.files.length) void importImagesRef.current({ files: importImagesRequest.files, url: null });
+  }, [importImagesRequest?.id]);
+
+  const applyPluginAction: CanvasPluginAccess['apply'] = async (action) => {
+    const manager = layerManagerRef.current;
+    if (!canvas || !manager || transformLayerIdRef.current || textEdit || importingRef.current) return false;
+    if (action.kind === 'brush') {
+      if (currentTool !== 'brush' && currentTool !== 'pencil' && currentTool !== 'eraser') return false;
+      handleBrushPropsChange({
+        ...(action.color === undefined ? {} : { color: action.color }),
+        ...(action.size === undefined ? {} : { size: action.size }),
+      });
+      return true;
+    }
+    if (isGuest || !onCreateLayer) return false;
+    if (action.kind === 'layer') return Boolean(await onCreateLayer(action.name, 'normal', 'raster'));
+
+    const source = document.createElement('canvas');
+    source.width = action.width;
+    source.height = action.height;
+    const ctx = source.getContext('2d');
+    if (!ctx || source.width > canvas.width || source.height > canvas.height) return false;
+    for (const shape of action.shapes) {
+      ctx.fillStyle = shape.color;
+      if (shape.kind === 'rect') {
+        ctx.fillRect(shape.x, shape.y, shape.width, shape.height);
+      } else {
+        ctx.beginPath();
+        ctx.ellipse(shape.x + shape.width / 2, shape.y + shape.height / 2, shape.width / 2, shape.height / 2, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    const layer = await onCreateLayer(action.name, 'normal', 'raster');
+    const item = layer && await waitForLayerItem(layer.id);
+    if (!layer || !item || layerManagerRef.current !== manager) return false;
+    await stampImportedImage(layer, item, source, Math.floor((canvas.width - source.width) / 2), Math.floor((canvas.height - source.height) / 2));
+    return true;
+  };
+  const pluginActionRef = useRef(applyPluginAction);
+  pluginActionRef.current = applyPluginAction;
+  useLayoutEffect(() => {
+    if (!canvas?.id || !isCanvasPresented || !isEngineReady || !onRegisterPluginAccess) return;
+    onRegisterPluginAccess({ canvasId: canvas.id, apply: (action) => pluginActionRef.current(action) });
+    return () => onRegisterPluginAccess(null);
+  }, [canvas?.id, isCanvasPresented, isEngineReady, onRegisterPluginAccess]);
+
+  // Canvas drop target; a file dropped anywhere else must not make the browser open it (and leave the canvas)
+  const [imageDragOver, setImageDragOver] = useState(false);
+  useEffect(() => {
+    const guard = (e: DragEvent) => {
+      if (e.defaultPrevented || !Array.from(e.dataTransfer?.types ?? []).includes('Files')) return;
+      if ((e.target as Element | null)?.closest?.('input[type="file"]')) return;
+      e.preventDefault();
+      if (e.type === 'dragover' && e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+    };
+    const hide = () => setImageDragOver(false);
+    window.addEventListener('dragover', guard);
+    window.addEventListener('drop', guard);
+    window.addEventListener('drop', hide);
+    window.addEventListener('dragend', hide);
+    return () => {
+      window.removeEventListener('dragover', guard);
+      window.removeEventListener('drop', guard);
+      window.removeEventListener('drop', hide);
+      window.removeEventListener('dragend', hide);
+    };
+  }, []);
+
+  // ---------- Layer masks ----------
+  /** A real layer mask (a 'mask' layer, synced and saved): from the selection if there is one, else showing everything */
+  const addLayerMask = async (layerId: string) => {
+    const target = layersRef.current.find((l) => l.id === layerId);
+    if (!target || !onCreateLayer || !canvas) return;
+    if (target.layerType === 'mask' || target.meta?.cel?.ref !== undefined) {
+      warn('這裡不能加蒙版，請選圖層或圖層組。');
+      return;
+    }
+    if (layersRef.current.some((l) => l.layerType === 'mask' && l.parentId === layerId)) {
+      warn('這個圖層已經有蒙版了。');
+      return;
+    }
+    // A group has no pixels of its own: its owner (or an admin) may mask it
+    if (target.layerType === 'group' ? !canManageLayer(target) : !canEditPixels(target)) {
+      warn('只能替自己可編輯的圖層加蒙版。');
+      return;
+    }
+    const sel = selectionEngineRef.current?.hasSelection() ? selectionEngineRef.current.getMaskArray() : null;
+    const mask = await onCreateLayer(`${target.name} 的蒙版`, 'normal', 'mask', layerId, layerId, { select: false });
+    const item = mask && (await waitForLayerItem(mask.id));
+    const te = tileEngineRef.current;
+    const lm = layerManagerRef.current;
+    if (!mask || !item || !te || !lm) return;
+    // White shows, black (or erased) hides; compress in 128-tile chunks so 8000×8000 masks stay light on RAM
+    const allCoords = te.getAllTileCoords();
+    const tiles: TileData[] = [];
+    for (let start = 0; start < allCoords.length; start += 128) {
+      const raw = allCoords.slice(start, start + 128).map(({ col, row }): TileData => {
+        const { x, y, width, height } = getTileBounds(col, row, te.tileSize, canvas.width, canvas.height);
+        const data = new Uint8Array(width * height * 4);
+        if (!sel) data.fill(255);
+        else for (let dy = 0; dy < height; dy++) {
+          for (let dx = 0; dx < width; dx++) {
+            const i = (dy * width + dx) * 4;
+            data[i] = data[i + 1] = data[i + 2] = sel[(y + dy) * canvas.width + x + dx];
+            data[i + 3] = 255;
+          }
+        }
+        return { col, row, width, height, compression: 'raw', data };
+      });
+      tiles.push(...(await compressTiles(raw)));
+    }
+    if (layerManagerRef.current !== lm || lm.getLayerItem(mask.id) !== item) return;
+    lm.applyTiles(mask.id, tiles);
+    scopedUndoRef.current.push({
+      opId: `op_mask_${Date.now()}`,
+      userId: userRef.current?.id || user?.id || 'guest',
+      layerId: mask.id,
+      opType: 'STROKE',
+      beforeTiles: [],
+      afterTiles: tiles,
+      timestamp: Date.now(),
+      desc: '加圖層蒙版',
+      layerCreated: { model: mask },
+    });
+    updateUndoRedoState();
+    commitTilePatch(mask.id, tiles, false, '加圖層蒙版');
+    if (sel) handleClearSelection();
+    onSelectLayer?.(mask.id);
+    warn('已加圖層蒙版：現在畫在蒙版上（黑色或橡皮擦隱藏、白色顯示）。點圖層縮圖回到圖層。', 4000);
+  };
+
+  // ---------- Text layers ----------
+  const [textEdit, setTextEdit] = useState<{ layerId: string | null; meta: LayerTextMeta } | null>(null);
+  const textHitAt = (local: { x: number; y: number }) =>
+    [...layersRef.current].sort((a, b) => b.sortOrder - a.sortOrder).find((l) => {
+      if (l.layerType !== 'text' || !l.meta?.text || !l.isVisible) return false;
+      const b = textBounds(l.meta.text);
+      return local.x >= b.x && local.y >= b.y && local.x <= b.x + b.width && local.y <= b.y + b.height;
+    });
+  const editTextLayer = (layer: LayerModel) => {
+    if (!canEditPixels(layer)) {
+      warn('這是其他畫友的文字圖層，不能編輯。');
+      return;
+    }
+    onSelectLayer?.(layer.id);
+    const item = layerManagerRef.current?.getLayerItem(layer.id);
+    if (item) item.sprite.visible = false; // the live preview stands in for it while editing
+    setTextEdit({ layerId: layer.id, meta: layer.meta!.text! });
+  };
+  /** Text tool click: edit the text layer under it, or start a new text there */
+  const handleTextTool = (local: { x: number; y: number }) => {
+    if (isGuest) {
+      warn('訪客不能新增文字，請先登入。');
+      return;
+    }
+    const hit = textHitAt(local);
+    if (hit) editTextLayer(hit);
+    else setTextEdit({ layerId: null, meta: { ...DEFAULT_TEXT, color: brushProps.color, x: Math.round(local.x), y: Math.round(local.y) } });
+  };
+  const previewText = (meta: LayerTextMeta) => {
+    const lm = layerManagerRef.current;
+    const te = tileEngineRef.current;
+    if (!lm || !te) return;
+    lm.clearPreview();
+    if (!meta.content.trim()) return;
+    const r = renderText(meta);
+    lm.drawPreviewCanvas(r.canvas, r.x, r.y);
+  };
+  // The canvas shows the text as it will be while it is typed (this screen only)
+  useEffect(() => {
+    if (textEdit) previewText(textEdit.meta);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [textEdit?.meta]);
+  const endTextEdit = () => {
+    setTextEdit(null);
+    layerManagerRef.current?.clearPreview();
+    layerManagerRef.current?.syncLayers(displayLayersRef.current); // shows the edited layer again
+  };
+  /** The text is drawn into its layer and sent as tiles (every screen shows the same pixels); meta keeps it editable */
+  const commitText = async (meta: LayerTextMeta) => {
+    const editing = textEdit;
+    endTextEdit();
+    if (!editing || !canvas) return;
+    let layer = editing.layerId ? layersRef.current.find((l) => l.id === editing.layerId) ?? null : null;
+    const metaBefore: LayerMeta | null = layer ? layer.meta ?? null : null;
+    const metaAfter: LayerMeta = { ...(layer?.meta ?? {}), text: meta };
+    if (layer) {
+      onUpdateLayerProps?.(layer.id, { meta: metaAfter });
+    } else {
+      const name = meta.content.split('\n')[0].trim().slice(0, 16) || '文字';
+      layer = (await onCreateLayer?.(name, 'normal', 'text', activeLayerRef.current?.id ?? null, undefined, { meta: metaAfter })) ?? null;
+    }
+    const item = layer && (await waitForLayerItem(layer.id));
+    const te = tileEngineRef.current;
+    if (!layer || !item || !te) return;
+    const next = renderText(meta);
+    const old = metaBefore?.text ? renderText(metaBefore.text) : null;
+    const rects = [next, ...(old ? [old] : [])].map((r) => ({ x: r.x, y: r.y, w: r.canvas.width, h: r.canvas.height }));
+    const coordKeys = new Map<string, { col: number; row: number }>();
+    for (const r of rects) {
+      for (const c of te.getDirtyTilesForBounds(Math.max(0, r.x), Math.max(0, r.y), Math.min(canvas.width, r.x + r.w), Math.min(canvas.height, r.y + r.h))) {
+        coordKeys.set(`${c.col}_${c.row}`, c);
+      }
+    }
+    const lm = layerManagerRef.current!;
+    const coords = Array.from(coordKeys.values());
+    const diff = diffTilesAsync(lm, layer.id, coords, () => {
+      // A text layer holds only its text: clear the old block, draw the new one
+      for (const r of rects.slice(1)) {
+        const x0 = Math.max(0, r.x);
+        const y0 = Math.max(0, r.y);
+        const x1 = Math.min(canvas.width, r.x + r.w);
+        const y1 = Math.min(canvas.height, r.y + r.h);
+        if (x1 > x0 && y1 > y0) te.clearRegion(item.renderTexture, x0, y0, x1 - x0, y1 - y0);
+      }
+      te.stampCanvas(item.renderTexture, next.canvas, next.x, next.y);
+    });
+    lm.syncPingPong(layer.id);
+    const createdFlag = editing.layerId ? undefined : { model: layer };
+    const textLayerId = layer.id;
+    commitInOrder(diff, ({ beforeTiles, afterTiles }) => {
+      scopedUndoRef.current.push({
+        opId: `op_text_${Date.now()}`,
+        userId: userRef.current?.id || 'guest',
+        layerId: textLayerId,
+        opType: 'STROKE',
+        beforeTiles,
+        afterTiles,
+        timestamp: Date.now(),
+        desc: '文字',
+        metaBefore,
+        metaAfter,
+        // Undoing a brand-new text removes its layer instead of leaving it empty
+        layerCreated: createdFlag,
+      });
+      updateUndoRedoState();
+      commitTilePatch(textLayerId, afterTiles, false, '文字', true, beforeTiles);
+    });
+  };
+
+  // Pointer & touch input: layer checks, tool routing and navigation gestures (workspace/tools/useCanvasPointer)
+  const pointer = useCanvasPointer(toolCtx, { brush, liquify, shapes, selection, fill, vector, transform }, {
+    setEraserHover,
+    containerRef,
+    filterModalOpenRef,
+    radialMenuOpenRef,
+    resizeModalOpenRef,
+    updateBrushCursor,
+    hideBrushCursor,
+    openRadialMenu: (pos) => {
+      setRadialMenuPos(pos);
+      setIsRadialMenuOpen(true);
+    },
+    emitCursor,
+    undo: () => handleScopedUndo(),
+    redo: () => handleScopedRedo(),
+    // Every tool change goes through handleSelectTool: it swaps in the brush tools' own settings
+    setCurrentTool: (tool) => handleSelectTool(tool),
+    onSelectLayer,
+    onRequestCreateMyLayer,
+    onTextTool: (local) => handleTextTool(local),
+  });
+  const { handlePointerDown, handlePointerMove, handlePointerUp } = pointer;
+
+  // Errors propagate to ResizeCanvasModal, which shows them in the dialog
+  const handleResizeCanvas = async (
+    width: number,
+    height: number,
+    offsetX: number = 0,
+    offsetY: number = 0,
+    dpi?: number,
+    unit?: CanvasUnit
+  ) => {
+    if (!canvas) return;
+    const sameSize = width === canvas.width && height === canvas.height;
+    await ApiService.resizeCanvas(canvas.id, width, height, offsetX, offsetY, dpi, unit);
+    // The new size reaches the engine through the canvas prop (see the engine init effect)
+    onCanvasResized?.(width, height, dpi, unit);
+    if (sameSize && (offsetX !== 0 || offsetY !== 0)) {
+      lastSameSizeReloadAtRef.current = Date.now();
+      setEngineAttempt((attempt) => attempt + 1);
+    }
+  };
+
+  const handleSelectResizeAnchor = (anchor: AnchorKey) => {
+    setResizeAnchor(anchor);
+    if (!canvas) return;
+    setResizeBox((prev) => boxFromAnchor(prev.width, prev.height, canvas.width, canvas.height, anchor));
+  };
+
+  const handleResetResizeBox = () => {
+    if (!canvas) return;
+    setResizeBox({ x: 0, y: 0, width: canvas.width, height: canvas.height });
+    setResizeAnchor('c');
+  };
+
+  useEffect(() => {
+    if (resizeRequest > 0) setIsResizeModalOpen(true);
+  }, [resizeRequest]);
+
+  if (!canvas) {
+    return (
+      <div className="flex-1 flex flex-col items-center justify-center bg-neutral-950 p-6 text-center select-none animate-in fade-in zoom-in-95 duration-200">
+        <div className="w-16 h-16 rounded-3xl bg-gradient-to-tr from-indigo-600 via-indigo-500 to-cyan-400 flex items-center justify-center shadow-2xl shadow-indigo-500/30 text-3xl mb-4 animate-bounce">
+          🎨
+        </div>
+        <h2 className="text-lg sm:text-xl font-black text-white tracking-wide">
+          歡迎來到 Lumina Drift 流光
+        </h2>
+        <p className="text-xs text-neutral-400 max-w-sm mt-1.5 leading-relaxed">
+          和朋友一起即時畫畫。
+        </p>
+
+        <div className="flex flex-col sm:flex-row items-center gap-3 mt-6 w-full max-w-xs">
+          {onQuickEnterCanvas && (
+            <button
+              type="button"
+              onClick={onQuickEnterCanvas}
+              className="w-full px-5 py-3 rounded-2xl bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 text-white font-bold text-xs shadow-xl shadow-indigo-600/30 transition flex items-center justify-center gap-2 transform active:scale-95"
+            >
+              <span>🚀 快速進入合繪室</span>
+            </button>
+          )}
+
+          {onQuickCreateCanvas && (
+            <button
+              type="button"
+              onClick={onQuickCreateCanvas}
+              className="w-full px-5 py-3 rounded-2xl bg-neutral-800 hover:bg-neutral-700 text-neutral-200 font-bold text-xs border border-neutral-700 transition flex items-center justify-center gap-2 transform active:scale-95"
+            >
+              <span>＋ 新建一張畫布</span>
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const createLayerFromDock = (type: 'raster' | 'vector' | 'group') => {
+    if (!onCreateLayer) return;
+    if (type === 'group') {
+      void createLayerWithUndo(nextGroupName(layers), 'normal', 'group', activeLayer?.id || null, null);
+    } else if (type === 'vector') {
+      const n = layers.filter((l) => l.layerType === 'vector').length + 1;
+      void createLayerWithUndo(`向量線稿 ${n}`, 'normal', 'vector', activeLayer?.id || null);
+    } else {
+      const n = layers.filter((l) => l.layerType !== 'vector' && l.layerType !== 'group').length + 1;
+      void createLayerWithUndo(`圖層 ${n}`, 'normal', 'raster', activeLayer?.id || null);
+    }
+  };
+
+  const panelDefs: PanelDef[] = [
+    {
+      id: 'color',
+      title: PANEL_TITLES.color,
+      icon: <Palette />,
+      badge: (
+        <span
+          className="ml-1 h-3 w-3 shrink-0 rounded-sm border border-white/40"
+          style={
+            brushProps.isEraser
+              ? {
+                  backgroundImage:
+                    'linear-gradient(45deg, #9ca3af 25%, transparent 25%), linear-gradient(-45deg, #9ca3af 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #9ca3af 75%), linear-gradient(-45deg, transparent 75%, #9ca3af 75%)',
+                  backgroundSize: '6px 6px',
+                  backgroundPosition: '0 0, 0 3px, 3px -3px, -3px 0px',
+                  backgroundColor: '#ffffff',
+                }
+              : { backgroundColor: brushProps.color }
+          }
+        />
+      ),
+      render: () => (
+        <div className="p-2">
+          <ColorWheelStudio isOpen onClose={() => {}} brushProps={brushProps} onUpdateBrushProps={handleBrushPropsChange}
+            onActivateCanvasEyedropper={() => handleSelectTool('eyedropper')} embedded />
+        </div>
+      ),
+    },
+    {
+      id: 'brushToolset',
+      title: t.brushPreset.toolset,
+      icon: <Paintbrush />,
+      render: () => (
+        <Suspense fallback={null}>
+          <BrushToolset currentBrushProps={brushProps} selectedId={selectedBrushId} onApplyPreset={handleApplyPreset} />
+        </Suspense>
+      ),
+    },
+    {
+      id: 'toolProps',
+      title: PANEL_TITLES.toolProps,
+      icon: <Sliders />,
+      render: () => (
+        <div className="p-2">
+          <FloatingStudioPanel
+            currentTool={currentTool}
+            compact={isPhone}
+            brushProps={brushProps}
+            onChangeBrushProps={handleBrushPropsChange}
+            wandTolerance={wandTolerance}
+            onChangeWandTolerance={(t) => setWandTolerance(t)}
+            wandContiguous={wandContiguous}
+            onToggleWandContiguous={() => setWandContiguous(!wandContiguous)}
+            onExpandSelection={() => growSelection(3)}
+            onContractSelection={() => growSelection(-3)}
+            onClearSelection={handleClearSelection}
+            hasSelection={hasSelectionState}
+            onUploadCustomBrush={handleUploadCustomBrush}
+            onClearCustomBrush={handleClearCustomBrush}
+            onOpenPresetModal={openBrushToolset}
+            onOpenColorWheel={() => setIsColorStudioOpen(true)}
+            onActivateCanvasEyedropper={() => handleSelectTool('eyedropper')}
+            gradientMode={gradientMode}
+            onChangeGradientMode={setGradientMode}
+            gradientType={gradientType}
+            onChangeGradientType={setGradientType}
+            bucketReference={bucketReference}
+            onChangeBucketReference={setBucketReference}
+            bucketTolerance={bucketTolerance}
+            onChangeBucketTolerance={setBucketTolerance}
+            bucketExpand={bucketExpand}
+            onChangeBucketExpand={setBucketExpand}
+            bucketRefLayerId={bucketRefLayerId}
+            onChangeBucketRefLayerId={setBucketRefLayerId}
+            layers={layers}
+            referenceLayerId={referenceLayerId}
+            onChangeReferenceLayerId={(id) => setReferenceLayerId(id)}
+            gapClosingRadius={gapClosingRadius}
+            onChangeGapClosingRadius={(r) => setGapClosingRadius(r)}
+            expandRadius={expandRadius}
+            onChangeExpandRadius={(r) => setExpandRadius(r)}
+            liquifyMode={liquifyMode}
+            onChangeLiquifyMode={setLiquifyMode}
+            liquifyRadius={liquifyRadius}
+            onChangeLiquifyRadius={setLiquifyRadius}
+            liquifyStrength={liquifyStrength}
+            onChangeLiquifyStrength={setLiquifyStrength}
+            liquifyHardness={liquifyHardness}
+            onChangeLiquifyHardness={setLiquifyHardness}
+            liquifyRefAreaOnly={liquifyRefAreaOnly}
+            onChangeLiquifyRefAreaOnly={setLiquifyRefAreaOnly}
+            smudgeMode={smudgeMode}
+            onChangeSmudgeMode={setSmudgeMode}
+            shapeSubtype={shapeSubtype}
+            onChangeShapeSubtype={setShapeSubtype}
+            shapeFillMode={shapeFillMode}
+            onChangeShapeFillMode={setShapeFillMode}
+            shapeLineWidth={shapeLineWidth}
+            onChangeShapeLineWidth={setShapeLineWidth}
+            shapeCornerRadius={shapeCornerRadius}
+            onChangeShapeCornerRadius={setShapeCornerRadius}
+            vectorEraserMode={vectorEraserMode}
+            onChangeVectorEraserMode={setVectorEraserMode}
+            vectorWidthMode={vectorWidthMode}
+            onChangeVectorWidthMode={setVectorWidthMode}
+          />
+          {isBrushTool(currentTool) && (
+            <button type="button" onClick={() => setIsBrushSettingsOpen(true)}
+              className="mt-2 w-full rounded-lg border border-indigo-500/50 bg-indigo-600/20 px-2 py-1.5 text-xs font-semibold text-indigo-100 hover:bg-indigo-600/30">
+              筆刷詳細設定
+            </button>
+          )}
+        </div>
+      ),
+    },
+    {
+      id: 'layers',
+      title: PANEL_TITLES.layers,
+      icon: <Layers />,
+      badge: activeLayer ? <span className="ml-1 truncate text-[10px] font-normal text-neutral-400">{activeLayer.name}</span> : undefined,
+      render: () => (
+        <LayerPanel
+          layers={layers}
+          activeLayerId={activeLayer?.id || null}
+          subscribeThumbnails={subscribeThumbnails}
+          getThumbnailsSnapshot={getThumbnailsSnapshot}
+          onRequestThumbnail={refreshLayerThumbnail}
+          onSelectLayer={onSelectLayer || (() => {})}
+          onCreateLayer={onCreateLayer || (() => {})}
+          onCreateRaster={() => createLayerFromDock('raster')}
+          onCreateVector={() => createLayerFromDock('vector')}
+          onCreateGroup={() => createLayerFromDock('group')}
+          onRequestCreateMyLayer={onRequestCreateMyLayer}
+          onToggleLock={onToggleLock || (() => {})}
+          onToggleVisibility={onToggleVisibility || (() => {})}
+          onDeleteLayer={(id) => void deleteLayerWithUndo(id)}
+          onReleaseLayer={onReleaseLayer || (() => {})}
+          roomMembers={roomMembers && roomMembers.length > 0 ? roomMembers : members}
+          onTransferLayer={onTransferLayer}
+          onClaimLayer={onClaimLayer || (() => {})}
+          onReorderLayer={onReorderLayer || (() => {})}
+          onUpdateLayerProps={onUpdateLayerProps || (() => {})}
+          onBakeScreentone={(layerId, params) => handleBakeScreentone(layerId, params)}
+          localVisibility={localVisibility}
+          onToggleLocalVisibility={toggleLocalVisibility}
+          onAddMask={(id) => void addLayerMask(id)}
+          onMergeDown={mergeDown}
+          onGroupLayers={(ids) => void groupLayers(ids)}
+          onCopyLayers={copyLayers}
+          onPasteLayers={() => void pasteLayers()}
+          onImportImages={(dropped, target) => void importImages(dropped, { target })}
+          keepLayerClipboard={keepLayerClipboard}
+          onToggleKeepLayerClipboard={toggleKeepLayerClipboard}
+          canManage={canManageLayer}
+          folderAccess={folderAccess}
+          isRoomAdmin={isAdmin}
+          onLoadLayerSelection={(id) => {
+            const layer = layersRef.current.find((l) => l.id === id);
+            if (layer) selection.loadLayerSelection(layer);
+          }}
+        />
+      ),
+    },
+    {
+      id: 'members',
+      title: PANEL_TITLES.members,
+      icon: <Users />,
+      badge: <span className="ml-1 rounded-full bg-emerald-500/20 px-1.5 text-[10px] font-bold text-emerald-300">{roomMemberCards(members).length}</span>,
+      render: () => <UserListPanel members={members} />,
+    },
+    { id: 'oplog', title: PANEL_TITLES.oplog, icon: <Terminal />, render: () => <OpLogPanel /> },
+    { id: 'quickKeys', title: PANEL_TITLES.quickKeys, icon: <Keyboard />, render: () => <QuickKeysPanel /> },
+  ];
+
+  return (
+    <div ref={workspaceRef} className="atelier-workspace relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden select-none">
+      {permissionWarning && (
+        <div role="status" className="pointer-events-none fixed left-1/2 top-24 z-[80] flex -translate-x-1/2 items-center gap-2 rounded-xl border border-amber-500/70 bg-amber-950/95 px-4 py-2 text-xs text-amber-100 shadow-2xl">
+          <AlertCircle className="h-4 w-4 shrink-0 text-amber-400" />
+          <span className="font-medium">{permissionWarning}</span>
+        </div>
+      )}
+
+      <ToolOptionsBar
+        currentTool={currentTool}
+        compact={isPhone}
+        brushProps={brushProps}
+        onBrushProps={handleBrushPropsChange}
+        canUndo={canUndoState}
+        canRedo={canRedoState}
+        onUndo={handleScopedUndo}
+        onRedo={handleScopedRedo}
+        hasSelection={hasSelectionState}
+        selectionMode={selectionMode}
+        onSelectionMode={setSelectionMode}
+        onSelectionTransform={() => startTransformMode()}
+        onSelectionMask={() => { if (activeLayer) void addLayerMask(activeLayer.layerType === 'mask' && activeLayer.parentId ? activeLayer.parentId : activeLayer.id); }}
+        onSelectionFeather={selection.featherSelection}
+        onColorRange={() => selection.selectColorRange()}
+        lassoErase={selection.lassoErase}
+        onLassoErase={selection.setLassoErase}
+        eraserMode={brushProps.eraserMode === 'soft' ? 'soft' : 'hard'}
+        onEraserMode={(eraserMode) => handleBrushPropsChange({ eraserMode })}
+        pasteToNewLayer={selection.pasteToNewLayer}
+        onPasteToNewLayer={selection.setPasteToNewLayer}
+        onSelectionGrow={growSelection}
+        onClearSelection={handleClearSelection}
+        onSelectionInvert={selection.invertSelection}
+        onSelectionCopy={() => { selection.copySelection(); }}
+        onSelectionCut={selection.cutSelection}
+        onSelectionDelete={() => selection.deleteSelection()}
+        canPaste={selection.hasClipboard}
+        onPaste={pasteClipboard}
+        wandTolerance={wandTolerance}
+        onWandTolerance={setWandTolerance}
+        wandContiguous={wandContiguous}
+        onWandContiguous={setWandContiguous}
+        bucketTolerance={bucketTolerance}
+        onBucketTolerance={setBucketTolerance}
+        bucketReference={bucketReference}
+        onBucketReference={setBucketReference}
+        bucketMode={bucketMode}
+        onBucketMode={setBucketMode}
+        outline={outlineBrush}
+        onOutline={updateOutlineBrush}
+        onPickOutlineColor={() => brush.armOutlinePick(currentTool, handleSelectTool)}
+        gradientType={gradientType}
+        onGradientType={setGradientType}
+        liquifyMode={liquifyMode}
+        onLiquifyMode={setLiquifyMode}
+        liquifyStrength={liquifyStrength}
+        onLiquifyStrength={setLiquifyStrength}
+        liquifyHardness={liquifyHardness}
+        onLiquifyHardness={setLiquifyHardness}
+        liquifyRefAreaOnly={liquifyRefAreaOnly}
+        onLiquifyRefAreaOnly={setLiquifyRefAreaOnly}
+        smudgeMode={smudgeMode}
+        onSmudgeMode={setSmudgeMode}
+        shapeSubtype={shapeSubtype}
+        onShapeSubtype={setShapeSubtype}
+        shapeFillMode={shapeFillMode}
+        onShapeFillMode={setShapeFillMode}
+        shapeLineWidth={shapeLineWidth}
+        onShapeLineWidth={setShapeLineWidth}
+        shapeCornerRadius={shapeCornerRadius}
+        onShapeCornerRadius={setShapeCornerRadius}
+        vectorEraserMode={vectorEraserMode}
+        onVectorEraserMode={setVectorEraserMode}
+        vectorWidthMode={vectorWidthMode}
+        onVectorWidthMode={setVectorWidthMode}
+        bezierMode={bezierMode}
+        onBezierMode={setBezierMode}
+        bezierPointCount={penPoints.length}
+        onBezierFinish={() => finishPenPath(false)}
+        onBezierCancel={vector.cancelPenPath}
+        vectorAnchorSelected={selectedAnchorExists}
+        onVectorToggleCorner={toggleSelectedAnchorCorner}
+        onVectorDeleteAnchor={deleteSelectedAnchor}
+        onStartTransform={() => startTransformMode()}
+        isTransformActive={isTransformActive}
+        onOpenBrushSettings={() => setIsBrushSettingsOpen(true)}
+      />
+
+      <div className="flex min-h-0 min-w-0 flex-1" data-dock-root="">
+        {/* The size / opacity strip and the tool rail sit on the left, or on the right for left-handed painters */}
+        <div data-workspace-entry={railRight ? 'right-tools' : 'left-tools'}
+          className={`flex min-h-0 shrink-0 ${railRight ? 'order-last flex-row-reverse [&>[role=group]]:border-l [&>[role=group]]:border-r-0' : ''}`}>
+          <BrushSideSliders size={sizeValue} onSize={setSizeValue} opacity={brushProps.opacity} onOpacity={(opacity) => handleBrushPropsChange({ opacity })}
+            color={brushProps.color} onSizeDrag={setSizeDragging} width={dockLayout.slidersWidth} side={railRight ? 'right' : 'left'} onResizeWidth={dockActions.setSlidersWidth} />
+          {!isPhone && <ToolRail orientation="vertical" side={railRight ? 'right' : 'left'} width={dockLayout.toolRailWidth} onResizeWidth={dockActions.setToolRailWidth} currentTool={currentTool} onSelectTool={handleSelectTool} />}
+        </div>
+        {!isPhone && <DockColumn side="left" panels={panelDefs} />}
+
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-dock-center="">
+          {/* isolate: overlays inside the canvas (transform preview, rulers, mesh) can never stack above the docks */}
+          <div className="relative isolate flex min-h-0 min-w-0 flex-1 overflow-hidden"
+            onDragOver={(e) => {
+              if (!isImageDrag(e.dataTransfer)) return;
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'copy';
+              if (!imageDragOver) setImageDragOver(true);
+            }}
+            onDragLeave={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setImageDragOver(false);
+            }}
+            onDrop={(e) => {
+              if (!isImageDrag(e.dataTransfer)) return;
+              e.preventDefault();
+              setImageDragOver(false);
+              void importImages(readDroppedImages(e.dataTransfer), { at: { x: e.clientX, y: e.clientY } });
+            }}
+          >
+            {imageDragOver && (
+              <div aria-hidden className="pointer-events-none absolute inset-3 z-50 flex items-center justify-center rounded-xl border-2 border-dashed border-indigo-400/80 bg-indigo-500/10">
+                <span className="atelier-popover flex items-center gap-1.5 px-3 py-1.5 text-xs text-neutral-100"><ImagePlus className="h-4 w-4 text-indigo-400" />放開以新增圖層</span>
+              </div>
+            )}
+            <div
+              ref={containerRef}
+              onPointerDown={(event) => {
+                contextPointerRef.current = { type: event.pointerType, rightButton: event.button === 2 || (event.buttons & 2) !== 0 };
+                if (!isCanvasPresented) return;
+                // Typing a text: a click elsewhere on the canvas applies it (and starts nothing else)
+                if (textEdit) {
+                  if (textEdit.meta.content.trim()) void commitText(textEdit.meta);
+                  else endTextEdit();
+                  return;
+                }
+                handlePointerDown(event);
+              }}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerLeave={(event) => {
+                hideBrushCursor();
+                setEraserHover(false);
+                if (!event.currentTarget.hasPointerCapture(event.pointerId)) handlePointerUp(event);
+              }}
+              onPointerCancel={handlePointerUp}
+              onLostPointerCapture={pointer.handleLostPointerCapture}
+              onDoubleClick={(event) => {
+                const local = viewportRef.current?.screenToCanvas(event.clientX, event.clientY);
+                const hit = local && textHitAt(local);
+                if (hit && !textEdit) editTextLayer(hit);
+              }}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                if (isTransformActive || resizeModalOpenRef.current || filterModalOpenRef.current || radialMenuOpenRef.current) return;
+                if (event.nativeEvent instanceof PointerEvent && event.nativeEvent.pointerType === 'touch') return;
+                // Windows synthesizes a right-click on pen dwell, even during a primary-tip stroke.
+                if (contextPointerRef.current.type === 'pen' && !contextPointerRef.current.rightButton) return;
+                if (currentTool === 'vector_bezier' && penPoints.length > 0) {
+                  finishPenPath(false);
+                  return;
+                }
+                setRadialMenuPos({ x: event.clientX, y: event.clientY });
+                setIsRadialMenuOpen(true);
+              }}
+              style={{ touchAction: 'none' }}
+              className={`atelier-canvas-viewport relative min-h-0 min-w-0 flex-1 overflow-hidden ${currentTool === 'hand' ? 'cursor-grab' : 'cursor-crosshair'}`}
+            >
+              {/* Dedicated Pixi Canvas Host Layer (isolated from React DOM reconciler) */}
+              <div ref={canvasMountRef} data-canvas-presented={isCanvasPresented}
+                className="atelier-canvas-surface pointer-events-none absolute inset-0 z-0 select-none" />
+              {showBrushCursor && (
+                <div ref={brushCursorRef} aria-hidden="true" className={`pointer-events-none absolute left-0 top-0 z-20 rounded-full border ${vectorCursorClass || 'border-white shadow-[0_0_0_1px_#111]'}`}
+                  style={{ width: Math.max(2, brushDiameter * viewportState.zoom), height: Math.max(2, brushDiameter * viewportState.zoom) }}>
+                  {showBrushSize && <span style={{ color: '#fff' }} className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 whitespace-nowrap rounded bg-black/80 px-1.5 py-0.5 text-xs">{brushDiameter} px</span>}
+                </div>
+              )}
+
+              {sizeDragging && (
+                <div aria-hidden="true" className="pointer-events-none absolute left-1/2 top-1/2 z-30 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-[0_0_0_1px_#111]"
+                  style={{ width: Math.max(2, brushDiameter * viewportState.zoom), height: Math.max(2, brushDiameter * viewportState.zoom) }}>
+                  <span style={{ color: '#fff' }} className="absolute left-1/2 top-full mt-1 -translate-x-1/2 whitespace-nowrap rounded bg-black/80 px-1.5 py-0.5 text-xs">{brushDiameter} px</span>
+                </div>
+              )}
+
+              <RemoteCursorsLayer viewport={viewportRef.current} viewportState={viewportState} selfId={user?.id} />
+
+              {textEdit && (
+                <Suspense fallback={null}>
+                  <TextCanvasEditor meta={textEdit.meta} isNew={!textEdit.layerId} viewport={viewportRef.current} viewportState={viewportState}
+                    onChange={(meta) => setTextEdit((t) => (t ? { ...t, meta } : t))}
+                    onCommit={() => (textEdit.meta.content.trim() ? void commitText(textEdit.meta) : endTextEdit())}
+                    onCancel={endTextEdit} />
+                </Suspense>
+              )}
+
+              <CanvasStickersOverlay
+                stickers={stickers}
+                currentUserId={user?.id}
+                zoom={viewportState.zoom}
+                pan={{ x: viewportState.panX, y: viewportState.panY }}
+                onAddSticker={addSticker}
+                onUpdateSticker={updateSticker}
+                onRemoveSticker={removeSticker}
+              />
+
+              {isTransformActive && distortMode === 'transform' && (
+                <Suspense fallback={null}>
+                  <TransformOverlay
+                    isActive
+                    box={transformBox}
+                    onChangeBox={setTransformBox}
+                    // The selection moves with the pixels (a marquee left behind would clip brushes to an empty spot)
+                    onApply={() => { applyTransform(); selection.refreshSelection(); }}
+                    onCancel={cancelTransform}
+                    onChangeMode={setDistortMode}
+                    canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
+                    screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
+                    viewportZoom={viewportState.zoom}
+                    previewUrl={transformPreviewUrl}
+                  />
+                </Suspense>
+              )}
+
+              {isResizeModalOpen && (
+                <Suspense fallback={null}>
+                  <CanvasResizeOverlay
+                    isActive
+                    oldWidth={canvas.width}
+                    oldHeight={canvas.height}
+                    box={resizeBox}
+                    lockAspect={resizeLockAspect}
+                    onChangeBox={(next, hint) => {
+                      setResizeBox(next);
+                      setResizeAnchor(hint);
+                    }}
+                    onModifiersChange={setResizeModifiers}
+                    canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
+                    screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
+                  />
+                </Suspense>
+              )}
+
+              <RulerOverlay
+                canvasWidth={canvas.width}
+                canvasHeight={canvas.height}
+                canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
+                screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
+                viewportZoom={viewportState.zoom}
+              />
+
+              {isMeshWarpActive && (
+                <Suspense fallback={null}>
+                  <MeshWarpOverlay
+                    isActive
+                    mode={distortMode === 'transform' ? 'mesh' : distortMode}
+                    onChangeMode={setDistortMode}
+                    sourceCanvas={transformSourceCanvasRef.current}
+                    canvasWidth={canvas.width}
+                    canvasHeight={canvas.height}
+                    initialBounds={meshWarpInitialBoundsRef.current}
+                    onApply={(warped, bounds) => { applyMeshWarp(warped, bounds); selection.refreshSelection(); }}
+                    onCancel={cancelTransform}
+                    canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
+                    screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
+                  />
+                </Suspense>
+              )}
+            </div>
+
+            <Suspense fallback={null}>
+              <ComicStudioOverlay
+                key={canvas.id}
+                currentTool={currentTool}
+                canvasWidth={canvas.width}
+                canvasHeight={canvas.height}
+                canvasToScreen={(cx, cy) => viewportRef.current?.canvasToScreen(cx, cy) ?? { x: cx, y: cy }}
+                getCanvasViewCenter={() => {
+                  const center = getViewCenter();
+                  return center && viewportRef.current
+                    ? viewportRef.current.screenToCanvas(center.x, center.y)
+                    : { x: canvas.width / 2, y: canvas.height / 2 };
+                }}
+                viewportZoom={viewportState.zoom}
+                onBakeToLayer={handleBakeComicToLayer}
+                onClose={() => handleSelectTool('brush')}
+              />
+            </Suspense>
+            <VectorOverlay
+              viewport={viewportRef.current}
+              viewportState={viewportState}
+              strokes={activeLayer ? (vectorEngineRef.current?.getStrokes(activeLayer.id) || vectorStrokesList) : []}
+              currentTool={currentTool}
+              isVectorLayer={activeLayer?.layerType === 'vector' || currentTool.startsWith('vector')}
+              selectedStrokeId={vectorSel?.strokeId ?? null}
+              selectedAnchorIndex={vectorSel?.index ?? -1}
+              previewStroke={vectorPreview ?? penPreview}
+              penPoints={currentTool === 'vector_bezier' ? penPoints : []}
+            />
+            {engineError && (
+              <div role="alert" className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-neutral-950 text-sm text-neutral-200">
+                <p>無法載入畫布。</p>
+                <button type="button" className="rounded bg-indigo-600 px-3 py-1.5 text-white hover:bg-indigo-500" onClick={() => setEngineAttempt((attempt) => attempt + 1)}>
+                  重新載入畫布
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Timeline sits in the layout (not over the canvas or the canvas switcher) */}
+          {animationEngine && (
+            <Suspense fallback={null}>
+              <AnimationTimelineBar
+                key={canvas.id}
+                engine={animationEngine}
+                isOpen={isAnimationTimelineOpen}
+                onClose={() => setIsAnimationTimelineOpen(false)}
+                tracks={animTracks}
+                activeFolderId={animFolder?.id ?? null}
+                subscribeThumbnails={subscribeThumbnails}
+                getThumbnailsSnapshot={getThumbnailsSnapshot}
+                activeLayer={activeLayer}
+                canvasWidth={canvas.width}
+                canvasHeight={canvas.height}
+                onUpdateLayerKeyframes={activeLayer && canManageLayer(activeLayer) ? (layerId, keyframes) => {
+                  const target = layersRef.current.find((l) => l.id === layerId);
+                  if (!target) return;
+                  onUpdateLayerProps?.(layerId, { meta: { ...(target.meta ?? {}), keyframes } });
+                } : undefined}
+                ownerNames={Object.fromEntries([
+                  ...layers.filter((l) => l.ownerId).map((l) => [l.ownerId as string, l.ownerDisplayName || '畫師']),
+                  ...(user ? [[user.id, `${user.displayName || user.username}（你）`]] : []),
+                ])}
+                can={{
+                  createFolder: !isGuest && Boolean(onCreateLayer),
+                  editFolder: Boolean(animFolder && canManageLayer(animFolder)),
+                  addCel: canAddCel(animFolder),
+                  editableEntryIds: new Set(animTracks.flatMap((t) => t.entries).filter((e) => { const l = layers.find((x) => x.id === e.id); return Boolean(l && canManageLayer(l)); }).map((e) => e.id)),
+                  addableFolderIds: new Set(animFolders.filter((f) => canAddCel(f)).map((f) => f.id)),
+                }}
+                onPlaceEntries={placeAnimationEntries}
+                onCopyEntries={copyAnimationEntries}
+                onPasteEntries={(folderId, frame) => void pasteAnimationEntries(folderId, frame)}
+                ripple={animRipple}
+                onToggleRipple={toggleAnimRipple}
+                onSetEntryHold={setEntryHold}
+                onCreateFolder={() => void createAnimationFolder()}
+                onAddFrame={() => void addAnimationFrame()}
+                onDuplicateFrame={() => void duplicateAnimationFrame()}
+                onReuseCel={(id) => void reuseAnimationCel(id)}
+                onDeleteFrame={deleteAnimationFrame}
+                onMoveFrame={moveAnimationFrame}
+                onSetHold={setAnimationHold}
+                onToggleShared={toggleAnimationShared}
+                onFpsChange={setAnimationFps}
+                onSelectCell={selectAnimationCell}
+                planExport={planAnimationExport}
+              />
+            </Suspense>
+          )}
+          {isBrushSettingsOpen && isBrushTool(currentTool) && (
+            <Suspense fallback={null}>
+              <BrushSettingsModal
+                tool={currentTool}
+                brushProps={brushProps}
+                onChange={handleBrushPropsChange}
+                onReset={resetBrushTool}
+                onUploadTip={(file) => void handleUploadCustomBrush(file)}
+                onClearTip={handleClearCustomBrush}
+                onImportBrushes={() => { setIsBrushSettingsOpen(false); openBrushToolset(); }}
+                renderPreview={() => brushRendererRef.current?.renderPreview() ?? null}
+                onClose={() => setIsBrushSettingsOpen(false)}
+              />
+            </Suspense>
+          )}
+
+          <ViewportToolbar
+            viewportState={viewportState}
+            width={canvas.width}
+            height={canvas.height}
+            onZoomIn={() => zoomAtViewCenter(1.25)}
+            onZoomOut={() => zoomAtViewCenter(1 / 1.25)}
+            onResetZoom={() => zoomAtViewCenter(1 / (viewportRef.current?.getState().zoom ?? 1))}
+            onFitView={() => fitViewport()}
+            onRotate={(rad) => viewportRef.current?.rotateBy(rad)}
+            onResetRotation={() => viewportRef.current?.resetRotation()}
+            onToggleMirror={() => viewportRef.current?.toggleMirrorX()}
+            onOpenRuler={() => setIsRulerModalOpen(true)}
+            onOpenReference={() => setIsReferenceHUDOpen(true)}
+            onOpenFilters={() => openFilterRef.current()}
+            onOpenResize={() => setIsResizeModalOpen(true)}
+            onOpenRadial={() => {
+              if (transformLayerIdRef.current || filterModalOpenRef.current) return;
+              setRadialMenuPos(getViewCenter() ?? { x: window.innerWidth / 2, y: window.innerHeight / 2 });
+              setIsRadialMenuOpen(true);
+            }}
+          />
+          {!isPhone && <DockRow panels={panelDefs} />}
+        </div>
+
+        {!isPhone && <DockColumn side="right" panels={panelDefs} />}
+      </div>
+
+      {isPhone && (
+        <div data-workspace-entry="mobile-tools" className="flex shrink-0 items-stretch">
+          <div className="min-w-0 flex-1">
+            <ToolRail orientation="horizontal" currentTool={currentTool} onSelectTool={handleSelectTool} />
+          </div>
+          <div className="atelier-chrome flex shrink-0 items-center gap-1 border-l border-t px-1.5">
+            <button type="button" onClick={() => setMobileSheet('color')} aria-label="色彩" className="atelier-icon-btn h-10 w-10">
+              <span className="h-6 w-6 rounded-full border-2 border-white/80 shadow" style={{ backgroundColor: brushProps.color }} />
+            </button>
+            <button type="button" onClick={() => setMobileSheet('toolProps')} aria-label="工具屬性" className="atelier-icon-btn h-10 w-10"><Sliders className="h-5 w-5" /></button>
+            <button type="button" onClick={openBrushToolset} aria-label={t.brushPreset.toolset} className="atelier-icon-btn h-10 w-10"><Paintbrush className="h-5 w-5" /></button>
+            <button type="button" onClick={() => setMobileSheet('layers')} aria-label="圖層" className="atelier-icon-btn h-10 w-10"><Layers className="h-5 w-5" /></button>
+            <button type="button" onClick={() => setMobileSheet('quickKeys')} aria-label="快捷鍵面板" className="atelier-icon-btn h-10 w-10"><Keyboard className="h-5 w-5" /></button>
+          </div>
+        </div>
+      )}
+
+      {/* Floating windows: only panels the user floated (members by default) */}
+      <FloatingPanels panels={isPhone ? panelDefs.filter((p) => p.id === 'members' || p.id === 'oplog') : panelDefs} />
+      <MobilePanelSheet def={isPhone ? panelDefs.find((p) => p.id === mobileSheet) ?? null : null} onClose={() => setMobileSheet(null)} />
+
+      {isResizeModalOpen && (
+        <Suspense fallback={null}>
+          <ResizeCanvasModal
+            key={canvas.id}
+            isOpen
+            onClose={() => setIsResizeModalOpen(false)}
+            currentWidth={canvas.width}
+            currentHeight={canvas.height}
+            currentDpi={clampDpi(canvas.dpi ?? 300)}
+            currentUnit={canvas.unit || 'px'}
+            box={resizeBox}
+            anchor={resizeAnchor}
+            lockAspect={resizeLockAspect}
+            modifierState={resizeModifiers}
+            onChangeBox={(next, hint) => {
+              setResizeBox(next);
+              setResizeAnchor(hint);
+            }}
+            onSelectAnchor={handleSelectResizeAnchor}
+            onToggleLockAspect={() => setResizeLockAspect((prev) => !prev)}
+            onReset={handleResetResizeBox}
+            onResize={handleResizeCanvas}
+          />
+        </Suspense>
+      )}
+
+      <ColorWheelStudio
+        isOpen={isColorStudioOpen}
+        onClose={() => setIsColorStudioOpen(false)}
+        brushProps={brushProps}
+        onUpdateBrushProps={handleBrushPropsChange}
+        onActivateCanvasEyedropper={() => handleSelectTool('eyedropper')}
+      />
+
+      {isRulerModalOpen && (
+        <Suspense fallback={null}>
+          <RulerControlsModal
+            isOpen
+            onClose={() => setIsRulerModalOpen(false)}
+            canvasWidth={canvas.width}
+            canvasHeight={canvas.height}
+          />
+        </Suspense>
+      )}
+
+      {isReferenceHUDOpen && (
+        <Suspense fallback={null}>
+          <ReferenceViewportHUD
+            isOpen
+            onClose={() => setIsReferenceHUDOpen(false)}
+            onPickColor={(hex) => {
+              setBrushProps((prev) => ({ ...prev, color: hex, isEraser: false }));
+            }}
+          />
+        </Suspense>
+      )}
+
+      {isRadialMenuOpen && (
+        <TouchRadialMenu
+          isOpen
+          position={radialMenuPos}
+          onClose={() => setIsRadialMenuOpen(false)}
+          canUndo={canUndoState}
+          canRedo={canRedoState}
+          isEraser={brushProps.isEraser}
+          currentColor={brushProps.color}
+          onUndo={handleScopedUndo}
+          onRedo={handleScopedRedo}
+          onSelectEyedropper={() => handleSelectTool('eyedropper')}
+          onToggleEraser={() => handleSelectTool(brushProps.isEraser ? 'brush' : 'eraser')}
+          onFlipCanvas={() => viewportRef.current?.toggleMirrorX()}
+          onToggleRuler={() => setIsRulerModalOpen(true)}
+          onToggleReference={() => setIsReferenceHUDOpen(true)}
+          onClearSelection={handleClearSelection}
+        />
+      )}
+
+      {filterMenuOpen && (
+        <Suspense fallback={null}><LayerFilterDialog key={layerFilterId ?? 'list'} filterId={layerFilterId} busy={filterBusy}
+          layerName={activeLayer?.name ?? ''} onChoose={chooseFilter} onClose={closeFilters}
+          onPreview={filterCallbacks.parameters}
+          onApply={(values) => layerFilterId ? runLayerFilter({ id: layerFilterId, values }, false) : Promise.resolve(false)} /></Suspense>
+      )}
+      {isColorCurvesOpen && <Suspense fallback={null}><ColorCurvesModal
+        isOpen={isColorCurvesOpen}
+        busy={filterBusy}
+        onClose={closeFilters}
+        onPreview={filterCallbacks.curves}
+        onApply={(options) => runLayerFilter({ id: 'curves', options }, false)}
+      /></Suspense>}
+
+      {isGradientMapOpen && <Suspense fallback={null}><GradientMapModal
+        isOpen={isGradientMapOpen}
+        busy={filterBusy}
+        onClose={closeFilters}
+        onPreview={filterCallbacks.gradient}
+        onApply={(stops, opacity) => runLayerFilter({ id: 'gradient', stops, opacity }, false)}
+      /></Suspense>}
+    </div>
+  );
+};

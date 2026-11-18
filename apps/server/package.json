@@ -1,0 +1,39 @@
+{
+  "name": "@atelier/server",
+  "version": "1.1.0",
+  "license": "MIT",
+  "private": true,
+  "description": "AtelierSync Fastify + WebSocket + SQLite backend",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "test": "node scripts/run-tests.mjs"
+  },
+  "dependencies": {
+    "@atelier/shared": "workspace:*",
+    "@fastify/cors": "^10.0.2",
+    "@fastify/jwt": "^9.0.4",
+    "@fastify/static": "^10.1.10",
+    "@node-rs/argon2": "^2.0.2",
+    "ag-psd": "^34.1.0",
+    "better-sqlite3": "^11.8.1",
+    "drizzle-orm": "^0.39.3",
+    "fastify": "^5.2.1",
+    "jszip": "^3.10.2",
+    "nanoid": "^5.0.9",
+    "pngjs": "5.0.0",
+    "socket.io": "^4.8.1",
+    "socket.io-parser": "^4.2.7"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.13.4",
+    "@types/pngjs": "6.0.5",
+    "playwright-core": "^1.65.0",
+    "socket.io-client": "^4.8.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}
