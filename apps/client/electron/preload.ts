@@ -33,6 +33,15 @@ contextBridge.exposeInMainWorld('atelierDesktop', {
   } : undefined,
   setTitleBarTheme: (payload: { color: string; symbolColor: string; backgroundColor?: string }) =>
     ipcRenderer.invoke('atelier:set-titlebar-theme', payload),
+  auth: {
+    isAvailable: () => ipcRenderer.invoke('atelier:auth-available') as Promise<boolean>,
+    getSaved: (origin: string) =>
+      ipcRenderer.invoke('atelier:auth-get-saved', origin) as Promise<{ username: string; password: string } | null>,
+    saveCredentials: (origin: string, username: string, password: string) =>
+      ipcRenderer.invoke('atelier:auth-save-credentials', origin, username, password) as Promise<boolean>,
+    clearCredentials: (origin: string) =>
+      ipcRenderer.invoke('atelier:auth-clear-credentials', origin) as Promise<boolean>,
+  },
   server: {
     getStatus: () => ipcRenderer.invoke('atelier:get-server-status'),
     start: () => ipcRenderer.invoke('atelier:start-server'),

@@ -1165,6 +1165,7 @@ export const jaJP: Translations = {
     username: 'ユーザー名',
     usernamePlaceholder: '半角英数字のユーザーID',
     rememberUsername: 'ユーザー名を記憶',
+    rememberPassword: 'パスワードを記憶',
     displayName: 'ニックネーム',
     displayNameHint: '(他の絵師に表示される名前、空欄でも可)',
     displayNamePlaceholder: '例：イラストレーター',

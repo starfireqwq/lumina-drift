@@ -1165,6 +1165,7 @@ export const enUS: Translations = {
     username: 'Username',
     usernamePlaceholder: 'Alphanumeric username',
     rememberUsername: 'Remember username',
+    rememberPassword: 'Remember password',
     displayName: 'Display Name',
     displayNameHint: '(Name visible to other artists, optional)',
     displayNamePlaceholder: 'e.g. MasterPainter',

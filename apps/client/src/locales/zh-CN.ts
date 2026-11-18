@@ -1165,6 +1165,7 @@ export const zhCN: Translations = {
     username: '账号',
     usernamePlaceholder: '字母或数字账号',
     rememberUsername: '记住账号',
+    rememberPassword: '记住密码',
     displayName: '昵称',
     displayNameHint: '（其他画师可见的名字，可留空）',
     displayNamePlaceholder: '例如：小画家',

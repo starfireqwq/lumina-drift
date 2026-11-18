@@ -31,6 +31,7 @@ import { useWheelStep } from '../../hooks/useWheelStep';
 import { getUiScale } from '../../theme/uiScale';
 import { useI18n } from '../../context/I18nContext';
 import { useAnchoredPopover } from '../../utils/popoverPosition';
+import { useEffectiveWidth } from '../../hooks/useEffectiveWidth';
 
 export type SelectionMode = 'replace' | 'add' | 'subtract';
 export type BezierMode = 'pen' | 'curve';
@@ -329,9 +330,14 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
   const isSelectTool = t === 'lasso' || t === 'magic_wand' || t === 'select_brush' || t === 'select_eraser';
   const selBtn = 'flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-neutral-100 hover:bg-indigo-600/40';
 
+  const barRef = useRef<HTMLDivElement>(null);
+  const { viewportWidth } = useEffectiveWidth(barRef);
+  const isNarrowMobile = viewportWidth < 600;
   return (
-    <div role="toolbar" aria-label={tr.navbar.tools} data-workspace-entry="options"
-      className="atelier-chrome flex h-11 shrink-0 items-center gap-1.5 overflow-x-auto border-b px-2 text-xs no-scrollbar touch-pan-x">
+    <div ref={barRef} role="toolbar" aria-label={tr.navbar.tools} data-workspace-entry="options"
+      className={`atelier-chrome flex shrink-0 items-center gap-1.5 border-b px-2 text-xs ${
+        isNarrowMobile ? 'h-11 overflow-x-auto no-scrollbar touch-pan-x' : 'min-h-11 flex-wrap py-1 content-center'
+      }`}>
       <button type="button" onClick={p.onUndo} disabled={!p.canUndo} title={`${tr.common.undo} (${shortcut('action_undo')})`} aria-label={tr.common.undo} className="atelier-icon-btn h-8 w-8 shrink-0">
         <Undo2 className="h-4 w-4" />
       </button>
@@ -628,7 +634,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
         </span>
       )}
       {/* 指令列: the viewer's own buttons (pencil to choose) */}
-      <div className="ml-auto flex shrink-0 items-center border-l border-neutral-800 pl-1"><CommandBar /></div>
+      <div className={`ml-auto flex items-center border-l border-neutral-800 pl-1 ${isNarrowMobile ? 'shrink-0' : 'max-w-full flex-wrap'}`}><CommandBar wrap={!isNarrowMobile} /></div>
     </div>
   );
 };

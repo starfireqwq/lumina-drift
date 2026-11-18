@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Lock, LogIn, User, UserPlus } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { AtelierModal, modalButton } from './AtelierModal';
@@ -19,6 +19,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
   return <AuthForm key={origin} origin={origin} onClose={onClose} />;
 };
 
+interface DesktopAuthBridge {
+  isAvailable: () => Promise<boolean>;
+  getSaved: (origin: string) => Promise<{ username: string; password: string } | null>;
+  saveCredentials: (origin: string, username: string, password: string) => Promise<boolean>;
+  clearCredentials: (origin: string) => Promise<boolean>;
+}
+
+const getDesktopAuth = (): DesktopAuthBridge | undefined =>
+  typeof window !== 'undefined'
+    ? (window as unknown as { atelierDesktop?: { auth?: DesktopAuthBridge } }).atelierDesktop?.auth
+    : undefined;
+
 const AuthForm: React.FC<{ origin: string; onClose: () => void }> = ({ origin, onClose }) => {
   const { login, register, continueAsGuest } = useAuth();
   const { t } = useI18n();
@@ -26,12 +38,40 @@ const AuthForm: React.FC<{ origin: string; onClose: () => void }> = ({ origin, o
   const storageKey = `atelier_remembered_username:${origin}`;
   const [username, setUsername] = useState(() => localStorage.getItem(storageKey) ?? '');
   const [rememberUsername, setRememberUsername] = useState(true);
+  const [canRememberPassword, setCanRememberPassword] = useState(false);
+  const [rememberPassword, setRememberPassword] = useState(true);
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const dirtyRef = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    const desktopAuth = getDesktopAuth();
+    if (!desktopAuth) {
+      setCanRememberPassword(false);
+      return;
+    }
+    void (async () => {
+      const available = await desktopAuth.isAvailable().catch(() => false);
+      if (cancelled) return;
+      setCanRememberPassword(available);
+      if (!available || isRegisterMode) return;
+      const saved = await desktopAuth.getSaved(origin).catch(() => null);
+      if (cancelled || !saved || dirtyRef.current) return;
+      setUsername(saved.username);
+      setPassword(saved.password);
+      setRememberUsername(true);
+      setRememberPassword(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [origin, isRegisterMode]);
 
   const switchMode = (register: boolean) => {
+    dirtyRef.current = false;
     setIsRegisterMode(register);
     setUsername(register ? '' : localStorage.getItem(storageKey) ?? '');
     setPassword('');
@@ -46,8 +86,13 @@ const AuthForm: React.FC<{ origin: string; onClose: () => void }> = ({ origin, o
       const account = username.trim();
       if (isRegisterMode) await register(account, password, displayName || account);
       else await login(account, password);
-      if (rememberUsername) localStorage.setItem(storageKey, account);
+      if (rememberUsername || rememberPassword) localStorage.setItem(storageKey, account);
       else localStorage.removeItem(storageKey);
+      const desktopAuth = getDesktopAuth();
+      if (desktopAuth && canRememberPassword) {
+        if (rememberPassword) await desktopAuth.saveCredentials(origin, account, password).catch(() => false);
+        else await desktopAuth.clearCredentials(origin).catch(() => false);
+      }
       onClose();
     } catch (err: any) {
       setError(err.message || '驗證失敗，請檢查輸入');
@@ -103,7 +148,7 @@ const AuthForm: React.FC<{ origin: string; onClose: () => void }> = ({ origin, o
           <span className="font-medium text-neutral-300">{t.auth.username}</span>
           <span className="relative">
             <User className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
-            <input type="text" value={username} onChange={(e) => setUsername(e.target.value)} required autoFocus
+            <input type="text" value={username} onChange={(e) => { dirtyRef.current = true; setUsername(e.target.value); }} required autoFocus
               autoComplete="username" autoCapitalize="none" placeholder={t.auth.usernamePlaceholder}
               className="atelier-field h-10 w-full pl-9 pr-3 text-sm" />
           </span>
@@ -121,15 +166,39 @@ const AuthForm: React.FC<{ origin: string; onClose: () => void }> = ({ origin, o
           <span className="font-medium text-neutral-300">{t.auth.password} {isRegisterMode && <span className="font-normal text-neutral-500">{t.auth.passwordMinHint}</span>}</span>
           <span className="relative">
             <Lock className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
-            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required
+            <input type="password" value={password} onChange={(e) => { dirtyRef.current = true; setPassword(e.target.value); }} required
               minLength={isRegisterMode ? 6 : undefined} autoComplete={isRegisterMode ? 'new-password' : 'current-password'}
               className="atelier-field h-10 w-full pl-9 pr-3 text-sm" />
           </span>
         </label>
-        <label className="flex items-center gap-2 text-neutral-300">
-          <input type="checkbox" checked={rememberUsername} onChange={(e) => setRememberUsername(e.target.checked)} />
-          {t.auth.rememberUsername}
-        </label>
+        <div className="flex flex-wrap items-center gap-4">
+          <label className="flex items-center gap-2 text-neutral-300">
+            <input
+              type="checkbox"
+              checked={rememberUsername}
+              onChange={(e) => {
+                const checked = e.target.checked;
+                setRememberUsername(checked);
+                if (!checked) setRememberPassword(false);
+              }}
+            />
+            {t.auth.rememberUsername}
+          </label>
+          {canRememberPassword && (
+            <label className="flex items-center gap-2 text-neutral-300">
+              <input
+                type="checkbox"
+                checked={rememberPassword}
+                onChange={(e) => {
+                  const checked = e.target.checked;
+                  setRememberPassword(checked);
+                  if (checked) setRememberUsername(true);
+                }}
+              />
+              {t.auth.rememberPassword}
+            </label>
+          )}
+        </div>
       </div>
     </AtelierModal>
   );

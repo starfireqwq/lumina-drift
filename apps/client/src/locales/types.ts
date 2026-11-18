@@ -1183,6 +1183,7 @@ export interface Translations {
     username: string;
     usernamePlaceholder: string;
     rememberUsername: string;
+    rememberPassword: string;
     displayName: string;
     displayNameHint: string;
     displayNamePlaceholder: string;

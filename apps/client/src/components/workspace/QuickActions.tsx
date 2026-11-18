@@ -91,7 +91,7 @@ export const QUICK_KEY_DEFAULTS = [
 ];
 
 /** 指令列: a slim row of the chosen actions (top of the workspace) */
-export const CommandBar: React.FC = () => {
+export const CommandBar: React.FC<{ wrap?: boolean }> = ({ wrap = false }) => {
   const [ids, setIds] = useActionList('atelier_command_bar', COMMAND_BAR_DEFAULTS);
   const [editing, setEditing] = useState(false);
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -114,7 +114,7 @@ export const CommandBar: React.FC = () => {
     };
   }, [editing]);
   return (
-    <div className="relative flex shrink-0 items-center gap-0.5" role="toolbar" aria-label="指令列">
+    <div className={`relative flex items-center gap-0.5 ${wrap ? 'flex-wrap' : 'shrink-0'}`} role="toolbar" aria-label="指令列">
       {ids.filter((id) => !FIXED_IN_OPTIONS_BAR.has(id)).map((id) => items.get(id)).filter((s): s is ShortcutItem => Boolean(s)).map((s) => (
         <button key={s.id} type="button" onClick={() => runShortcutAction(s.id)} title={`${s.name}（${ShortcutManager.getInstance().getDisplayLabel(s.currentCombo) || '未設定'}）`}
           className="h-7 shrink-0 rounded px-1.5 text-[11px] text-neutral-300 hover:bg-neutral-800 hover:text-white">

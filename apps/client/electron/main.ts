@@ -1,4 +1,22 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, shell } from 'electron';
+
+const hasDiagnosticFlag = (cliFlag: string, envKey: string) =>
+  process.argv.includes(cliFlag) || process.env[envKey] === '1';
+
+if (process.platform === 'win32') {
+  // Multi-monitor mixed-Hz / DPI Windows setups suffer periodic UI and window-drag stalls from native HWND occlusion walks.
+  app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion');
+  // Opt-in A/B diagnostic overrides for hardware-specific DWM/GPU isolation without affecting default builds.
+  if (hasDiagnosticFlag('--atelier-no-dcomp', 'ATELIER_NO_DCOMP')) {
+    app.commandLine.appendSwitch('disable-direct-composition');
+  }
+  if (hasDiagnosticFlag('--atelier-no-dcomp-overlays', 'ATELIER_NO_DCOMP_OVERLAYS')) {
+    app.commandLine.appendSwitch('disable-direct-composition-video-overlays');
+  }
+  if (hasDiagnosticFlag('--atelier-angle-gl', 'ATELIER_ANGLE_GL')) {
+    app.commandLine.appendSwitch('use-angle', 'gl');
+  }
+}
 import { connectWinTab } from './winTab';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -280,6 +298,7 @@ function createWindow() {
   const packagedIcon = process.resourcesPath ? path.join(process.resourcesPath, 'icon.ico') : '';
   const devIcon = path.join(__dirname, '../resources/icon.ico');
   const iconPath = packagedIcon && fs.existsSync(packagedIcon) ? packagedIcon : devIcon;
+  const useNativeFrame = process.platform === 'win32' && hasDiagnosticFlag('--atelier-native-frame', 'ATELIER_NATIVE_FRAME');
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -289,14 +308,16 @@ function createWindow() {
     autoHideMenuBar: true,
     ...(process.platform === 'darwin'
       ? { titleBarStyle: 'hiddenInset' as const }
-      : {
-          titleBarStyle: 'hidden' as const,
-          titleBarOverlay: {
-            color: '#0d0e12',
-            symbolColor: '#eceef2',
-            height: 28,
-          },
-        }),
+      : useNativeFrame
+        ? {}
+        : {
+            titleBarStyle: 'hidden' as const,
+            titleBarOverlay: {
+              color: '#0d0e12',
+              symbolColor: '#eceef2',
+              height: 28,
+            },
+          }),
     title: 'Lumina Drift 流光 — 專業電繪與即時協同畫室',
     ...(fs.existsSync(iconPath) ? { icon: iconPath } : {}),
     webPreferences: {
@@ -306,7 +327,9 @@ function createWindow() {
     },
   });
 
-  connectWinTab(mainWindow);
+  if (!hasDiagnosticFlag('--atelier-no-wintab', 'ATELIER_NO_WINTAB')) {
+    connectWinTab(mainWindow);
+  }
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('http:') || url.startsWith('https:')) {
       void shell.openExternal(url);
@@ -517,6 +540,105 @@ ipcMain.handle(
     }
   }
 );
+
+const AUTH_STORE_FILE = 'auth-credentials.json';
+
+function isAuthorizedMainSender(event: Electron.IpcMainInvokeEvent): boolean {
+  return Boolean(mainWindow && event.sender === mainWindow.webContents && event.senderFrame === event.sender.mainFrame);
+}
+
+function normalizeCredentialOrigin(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 512) return null;
+  return trimmed;
+}
+
+function getAuthStorePath(): string {
+  return path.join(app.getPath('userData'), AUTH_STORE_FILE);
+}
+
+function readAuthStore(): Record<string, string> {
+  try {
+    const filePath = getAuthStorePath();
+    if (!fs.existsSync(filePath)) return {};
+    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return parsed as Record<string, string>;
+  } catch {
+    return {};
+  }
+}
+
+function writeAuthStore(store: Record<string, string>): boolean {
+  try {
+    const filePath = getAuthStorePath();
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(store), { encoding: 'utf8', mode: 0o600 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function canEncryptCredentials(): boolean {
+  try {
+    return safeStorage.isEncryptionAvailable();
+  } catch {
+    return false;
+  }
+}
+
+ipcMain.handle('atelier:auth-available', (event) => {
+  if (!isAuthorizedMainSender(event)) return false;
+  return canEncryptCredentials();
+});
+
+ipcMain.handle('atelier:auth-get-saved', (event, rawOrigin: unknown) => {
+  if (!isAuthorizedMainSender(event) || !canEncryptCredentials()) return null;
+  const origin = normalizeCredentialOrigin(rawOrigin);
+  if (!origin) return null;
+  const encoded = readAuthStore()[origin];
+  if (typeof encoded !== 'string' || !encoded) return null;
+  try {
+    const decrypted = safeStorage.decryptString(Buffer.from(encoded, 'base64'));
+    const parsed = JSON.parse(decrypted) as { username?: unknown; password?: unknown };
+    if (typeof parsed?.username !== 'string' || typeof parsed?.password !== 'string') return null;
+    if (!parsed.username || !parsed.password) return null;
+    return { username: parsed.username, password: parsed.password };
+  } catch {
+    return null;
+  }
+});
+
+ipcMain.handle(
+  'atelier:auth-save-credentials',
+  (event, rawOrigin: unknown, rawUsername: unknown, rawPassword: unknown) => {
+    if (!isAuthorizedMainSender(event) || !canEncryptCredentials()) return false;
+    const origin = normalizeCredentialOrigin(rawOrigin);
+    if (!origin || typeof rawUsername !== 'string' || typeof rawPassword !== 'string') return false;
+    const username = rawUsername.trim();
+    if (!username || username.length > 256 || !rawPassword || rawPassword.length > 1024) return false;
+    try {
+      const store = readAuthStore();
+      const encrypted = safeStorage.encryptString(JSON.stringify({ username, password: rawPassword }));
+      store[origin] = encrypted.toString('base64');
+      return writeAuthStore(store);
+    } catch {
+      return false;
+    }
+  }
+);
+
+ipcMain.handle('atelier:auth-clear-credentials', (event, rawOrigin: unknown) => {
+  if (!isAuthorizedMainSender(event)) return false;
+  const origin = normalizeCredentialOrigin(rawOrigin);
+  if (!origin) return false;
+  const store = readAuthStore();
+  if (!(origin in store)) return true;
+  delete store[origin];
+  return writeAuthStore(store);
+});
 
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);

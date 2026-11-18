@@ -241,7 +241,9 @@ export class ApiService {
         this.setToken(null, origin);
         if (origin === this.getServerOrigin()) window.dispatchEvent(new Event('atelier:auth-expired'));
       }
-      throw new Error(data.error || data.message || `API 請求失敗 (HTTP ${res.status})`);
+      const err = new Error(data.error || data.message || `API 請求失敗 (HTTP ${res.status})`) as Error & { status?: number };
+      err.status = res.status;
+      throw err;
     }
     return data as T;
   }

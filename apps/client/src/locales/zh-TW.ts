@@ -1165,6 +1165,7 @@ export const zhTW: Translations = {
     username: '帳號',
     usernamePlaceholder: '英數帳號',
     rememberUsername: '記住帳號',
+    rememberPassword: '記住密碼',
     displayName: '暱稱',
     displayNameHint: '（其他畫師看到的名字，可留空）',
     displayNamePlaceholder: '例如：小畫家',

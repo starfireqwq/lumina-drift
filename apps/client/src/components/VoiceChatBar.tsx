@@ -99,6 +99,7 @@ interface VoiceChatBarProps {
   onToggleMute: () => void;
   currentUserName?: string;
   micShortcutKey?: string;
+  compact?: boolean;
 }
 
 export const VoiceMemberStatus: React.FC<{ isMuted: boolean; isSpeaking: boolean }> = ({ isMuted, isSpeaking }) => {
@@ -128,6 +129,7 @@ export const VoiceChatBar: React.FC<VoiceChatBarProps> = ({
   onToggleMute,
   currentUserName,
   micShortcutKey = 'M',
+  compact,
 }) => {
   const { t } = useI18n();
   const { isInVoice, isMuted, isSpeaking, activePeers } = voiceState;
@@ -138,12 +140,13 @@ export const VoiceChatBar: React.FC<VoiceChatBarProps> = ({
         <button
           type="button"
           onClick={onJoinVoice}
-          className="flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-lg bg-neutral-800/90 hover:bg-neutral-700/90 text-neutral-300 hover:text-white border border-neutral-700/60 shadow-sm text-xs font-medium transition shrink-0 whitespace-nowrap active:scale-95"
+          className="flex h-8 items-center gap-1.5 rounded-lg border border-neutral-700/60 bg-neutral-800/90 px-2 text-xs font-medium text-neutral-300 shadow-sm transition hover:bg-neutral-700/90 hover:text-white shrink-0 whitespace-nowrap active:scale-95"
           title={t.collab.joinVoice}
+          aria-label={t.collab.joinVoice}
         >
           <Radio className="w-3.5 h-3.5 text-indigo-400 animate-pulse shrink-0" />
-          <span className="hidden sm:inline">{t.collab.joinVoice}</span>
-          <span className="sm:hidden">{t.collab.voiceChat}</span>
+          {!compact && <span className={compact === undefined ? 'hidden sm:inline' : ''}>{t.collab.joinVoice}</span>}
+          {!compact && <span className={compact === undefined ? 'sm:hidden' : 'hidden'}>{t.collab.voiceChat}</span>}
         </button>
         <VoiceDevices voice={voiceState} />
       </div>
@@ -151,14 +154,14 @@ export const VoiceChatBar: React.FC<VoiceChatBarProps> = ({
   }
 
   return (
-    <div className="flex items-center gap-1.5 sm:gap-2 px-2 sm:px-2.5 py-1 rounded-xl bg-neutral-950/95 border border-indigo-500/50 shadow-lg text-xs backdrop-blur-md text-neutral-200 animate-in fade-in duration-200 shrink-0 whitespace-nowrap">
+    <div className="flex items-center gap-1.5 px-2 py-1 rounded-xl bg-neutral-950/95 border border-indigo-500/50 shadow-lg text-xs backdrop-blur-md text-neutral-200 animate-in fade-in duration-200 shrink-0 whitespace-nowrap">
       {/* 1. Live Voice Indicator & Total In Voice */}
       <div className="flex items-center gap-1 font-medium text-emerald-400 pr-1.5 border-r border-neutral-800 shrink-0">
         <span className="relative flex h-2 w-2">
           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
           <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
         </span>
-        <span className="text-[11px] font-semibold hidden sm:inline">{t.collab.voiceChat}</span>
+        {!compact && <span className={`text-[11px] font-semibold ${compact === undefined ? 'hidden sm:inline' : ''}`}>{t.collab.voiceChat}</span>}
         <span className="text-[10px] text-neutral-400 bg-neutral-800 px-1.5 py-0.2 rounded-full font-mono">
           {activePeers.length + 1}
         </span>
@@ -178,7 +181,7 @@ export const VoiceChatBar: React.FC<VoiceChatBarProps> = ({
         }`}
       >
         {isMuted ? <MicOff className="w-3 h-3 text-rose-400" /> : <Mic className="w-3 h-3 text-emerald-400" />}
-        <span className="text-[10px] hidden md:inline">{isMuted ? t.collab.voiceMuted : isSpeaking ? t.collab.speaking : t.collab.voiceMicOpen}</span>
+        {!compact && <span className={`text-[10px] ${compact === undefined ? 'hidden md:inline' : ''}`}>{isMuted ? t.collab.voiceMuted : isSpeaking ? t.collab.speaking : t.collab.voiceMicOpen}</span>}
       </button>
 
       <VoiceDevices voice={voiceState} />

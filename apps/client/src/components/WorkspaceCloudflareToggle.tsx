@@ -18,10 +18,14 @@ export function WorkspaceCloudflareToggle({
   enabled,
   serverUrl,
   canvasId,
+  compactCloudflare,
+  compactShare,
 }: {
   enabled: boolean;
   serverUrl: string;
   canvasId?: string | null;
+  compactCloudflare?: boolean;
+  compactShare?: boolean;
 }) {
   const { t } = useI18n();
   const { bridge, url, setUrl, ready } = useCloudflareTunnel(enabled);
@@ -227,7 +231,7 @@ export function WorkspaceCloudflareToggle({
           className={`atelier-icon-btn h-8 gap-1.5 px-1.5 text-xs disabled:opacity-50 ${url ? 'bg-indigo-600/20 text-indigo-200' : ''}`}
         >
           <Cloud aria-hidden="true" className="h-4 w-4" />
-          <span className="hidden lg:inline">{busy ? (url ? t.gateway.tunnelClosing : t.gateway.tunnelOpening) : 'Cloudflare'}</span>
+          {!compactCloudflare && <span className={compactCloudflare === undefined ? 'hidden lg:inline' : ''}>{busy ? (url ? t.gateway.tunnelClosing : t.gateway.tunnelOpening) : 'Cloudflare'}</span>}
           <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${url ? 'bg-emerald-400' : 'bg-neutral-500'}`} />
         </button>
       )}
@@ -245,7 +249,7 @@ export function WorkspaceCloudflareToggle({
         }`}
       >
         <Share2 aria-hidden="true" className="h-3.5 w-3.5" />
-        <span className="hidden xl:inline">{t.gateway.shareRoomLink}</span>
+        {!compactShare && <span className={compactShare === undefined ? 'hidden xl:inline' : ''}>{t.gateway.shareRoomLink}</span>}
       </button>
 
       {error && typeof document !== 'undefined' && createPortal(

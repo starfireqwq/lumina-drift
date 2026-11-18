@@ -48,11 +48,13 @@ import type { InstalledPlugin } from '../plugins/pluginStore';
 import { getUserColor } from '../utils/userColors';
 import { dockActions, PANEL_IDS, PANEL_TITLES, PanelId, useDockLayout } from './workspace/dockStore';
 import { useAnchoredPopover } from '../utils/popoverPosition';
+import { useEffectiveWidth } from '../hooks/useEffectiveWidth';
 
-const PainterLevelBadge: React.FC = () => {
+const PainterLevelBadge: React.FC<{ visible: boolean }> = ({ visible }) => {
   const { painterLevel } = useSocketTelemetry();
+  if (!visible) return null;
   return (
-    <span className="hidden rounded px-1 text-[10px] font-semibold xl:inline" style={{ color: painterLevel.badgeColor }}>
+    <span className="rounded px-1 text-[10px] font-semibold" style={{ color: painterLevel.badgeColor }}>
       Lv.{painterLevel.level}
     </span>
   );
@@ -200,6 +202,22 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   const isLocalDesktop = ApiService.isLocalDesktopServer();
   const layout = useDockLayout();
   const importInputRef = useRef<HTMLInputElement>(null);
+  const headerRef = useRef<HTMLElement>(null);
+  const { effectiveWidth, viewportWidth } = useEffectiveWidth(headerRef);
+  const isNarrowMobile = viewportWidth < 600;
+  const showDesktopMenus = effectiveWidth >= 680;
+  const showBrandText = effectiveWidth >= 1020;
+  const showCanvasPill = effectiveWidth >= 1140;
+  const showVoice = !isNarrowMobile || effectiveWidth >= 768;
+  const showVoiceText = effectiveWidth >= 1240;
+  const showCloudflareText = effectiveWidth >= 1180;
+  const showShareText = effectiveWidth >= 1340;
+  const showSettingsText = effectiveWidth >= 840;
+  const showServerStatusText = effectiveWidth >= 1300;
+  const showProfileName = effectiveWidth >= 1040;
+  const showLevelBadge = effectiveWidth >= 1280;
+  const showLoginText = effectiveWidth >= 760;
+  const showHelpIcon = effectiveWidth >= 680;
 
   const fileItems: MenuItem[] = [
     ...(onOpenCreateCanvas ? [{ kind: 'item' as const, label: t.navbar.newCanvas, icon: <FilePlus2 />, onSelect: onOpenCreateCanvas }] : []),
@@ -297,11 +315,14 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
 
   const brand = (compact: boolean) => {
     const subBrand = !compact && t.brand && t.brand !== 'Lumina Drift' ? t.brand : '';
+    const showText = compact || showBrandText;
     const content = <>
       <img src={`${(import.meta as any).env?.BASE_URL || './'}logo.svg`} alt="" className={`${compact ? 'h-3.5 w-3.5' : 'h-7 w-7'} shrink-0`} />
-      <span className={compact ? 'font-semibold text-neutral-100' : 'hidden whitespace-nowrap text-sm font-semibold text-white lg:inline'}>
-        Lumina Drift{subBrand && <span className="font-normal text-neutral-400"> {subBrand}</span>}
-      </span>
+      {showText && (
+        <span className={compact ? 'font-semibold text-neutral-100' : 'whitespace-nowrap text-sm font-semibold text-white'}>
+          Lumina Drift{subBrand && <span className="font-normal text-neutral-400"> {subBrand}</span>}
+        </span>
+      )}
     </>;
     const layout = `flex shrink-0 items-center gap-1.5 ${compact ? 'px-1' : 'pr-1'}`;
     return onOpenGateway ? (
@@ -316,9 +337,8 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
     <>
       {isElectron && (
         <div
-          className={`atelier-drag-region flex h-7 shrink-0 items-center justify-between border-b border-neutral-800/90 bg-neutral-950 px-2.5 text-[11px] text-neutral-300 select-none ${
-            isMac ? 'pl-[76px]' : 'pr-[142px]'
-          }`}
+          className="atelier-drag-region flex h-7 shrink-0 items-center justify-between border-b border-neutral-800/90 bg-neutral-950 px-2.5 text-[11px] text-neutral-300 select-none"
+          style={isMac ? { paddingLeft: '76px', minHeight: '28px' } : { paddingRight: '142px', minHeight: '28px' }}
         >
           {brand(true)}
           <div className="mx-3 min-w-0 flex-1 truncate text-center font-medium tabular-nums text-neutral-200" title={docInfoFull}>
@@ -335,7 +355,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
           </div>
         </div>
       )}
-    <header className="atelier-chrome relative z-40 flex h-11 shrink-0 select-none items-center gap-1 border-b px-2">
+    <header ref={headerRef} className={`atelier-chrome relative z-40 flex shrink-0 select-none items-center gap-1 border-b px-2 ${isNarrowMobile ? 'h-11' : 'min-h-11 flex-wrap py-0.5'}`}>
       {onImportImages && (
         <input ref={importInputRef} type="file" accept="image/*,.svg" multiple hidden
           onChange={(e) => {
@@ -347,39 +367,43 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
       {/* Brand */}
       {brand(false)}
 
-      {/* Menus: full on tablet / desktop, one ☰ on phones */}
-      <div className="hidden shrink-0 items-center sm:flex">
-        <DropdownMenu label={<>{t.navbar.file}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.file} items={fileItems} />
-        <DropdownMenu label={<>{t.navbar.window}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.window} items={windowItems} />
-        <DropdownMenu label={<>{pluginText.menu}<ChevronDown className="h-3 w-3" /></>} title={pluginText.menu} items={pluginItems} width="w-64" />
-        <DropdownMenu label={<>{t.navbar.help}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.help} items={helpItems} />
-      </div>
-      <div className="shrink-0 sm:hidden">
-        <DropdownMenu label={<Menu className="h-4 w-4" />} title={t.navbar.file} buttonClass="atelier-icon-btn h-8 w-8"
-          items={[
-            ...(!isOffline && !isLocalDesktop ? [{
-              kind: 'title' as const,
-              label: isGuest ? t.navbar.loginRegister : (user?.displayName || user?.username || t.navbar.userProfile),
-            }, ...(isGuest
-              ? [{ kind: 'item' as const, label: t.navbar.loginRegister, icon: <LogIn />, onSelect: onOpenAuth }]
-              : [
-                  ...(onOpenProfile ? [{ kind: 'item' as const, label: t.navbar.userProfile, icon: <Users />, onSelect: onOpenProfile }] : []),
-                  { kind: 'item' as const, label: t.navbar.logout, icon: <LogOut />, onSelect: logout },
-                ]), { kind: 'sep' as const }] : []),
-            { kind: 'title', label: t.navbar.file }, ...fileItems, { kind: 'sep' },
-            ...windowItems, { kind: 'sep' },
-            { kind: 'title', label: pluginText.menu }, ...pluginItems, { kind: 'sep' }, ...helpItems,
-          ]} />
-      </div>
+      {/* Menus: full on wide layout, compact ☰ when narrow or heavily scaled */}
+      {showDesktopMenus ? (
+        <div className="flex shrink-0 items-center">
+          <DropdownMenu label={<>{t.navbar.file}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.file} items={fileItems} />
+          <DropdownMenu label={<>{t.navbar.window}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.window} items={windowItems} />
+          <DropdownMenu label={<>{pluginText.menu}<ChevronDown className="h-3 w-3" /></>} title={pluginText.menu} items={pluginItems} width="w-64" />
+          <DropdownMenu label={<>{t.navbar.help}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.help} items={helpItems} />
+        </div>
+      ) : (
+        <div className="shrink-0">
+          <DropdownMenu label={<Menu className="h-4 w-4" />} title={t.navbar.file} buttonClass="atelier-icon-btn h-8 w-8"
+            items={[
+              ...(!isOffline && !isLocalDesktop ? [{
+                kind: 'title' as const,
+                label: isGuest ? t.navbar.loginRegister : (user?.displayName || user?.username || t.navbar.userProfile),
+              }, ...(isGuest
+                ? [{ kind: 'item' as const, label: t.navbar.loginRegister, icon: <LogIn />, onSelect: onOpenAuth }]
+                : [
+                    ...(onOpenProfile ? [{ kind: 'item' as const, label: t.navbar.userProfile, icon: <Users />, onSelect: onOpenProfile }] : []),
+                    { kind: 'item' as const, label: t.navbar.logout, icon: <LogOut />, onSelect: logout },
+                  ]), { kind: 'sep' as const }] : []),
+              { kind: 'title', label: t.navbar.file }, ...fileItems, { kind: 'sep' },
+              ...windowItems, { kind: 'sep' },
+              { kind: 'title', label: pluginText.menu }, ...pluginItems, { kind: 'sep' }, ...helpItems,
+            ]} />
+        </div>
+      )}
 
-      {currentCanvas && (
-        <div className="ml-1 hidden min-w-0 max-w-[220px] items-center gap-1.5 overflow-hidden rounded-md bg-neutral-950/50 px-2 py-1 text-xs lg:flex" title={currentCanvas.title}>
+      {currentCanvas && showCanvasPill && (
+        <div className="ml-1 flex min-w-0 max-w-[220px] items-center gap-1.5 overflow-hidden rounded-md bg-neutral-950/50 px-2 py-1 text-xs" title={currentCanvas.title}>
           {currentCanvas.hasPassword && <span title={t.navbar.passwordProtected} className="inline-flex shrink-0"><Lock className="h-3 w-3 shrink-0 text-amber-400" aria-label={t.navbar.passwordRoom} /></span>}
           <span className="min-w-0 truncate font-medium text-neutral-100">{currentCanvas.title}</span>
         </div>
       )}
 
-      <div className="ml-auto flex min-w-0 items-center gap-1 overflow-x-auto py-0.5 no-scrollbar">
+      <div className="ml-auto flex min-w-0 items-center gap-1 py-0.5">
+      <div className="flex min-w-0 items-center gap-1 overflow-x-auto no-scrollbar">
         {/* Who is here: opens the floating members window */}
         <button type="button" onClick={() => dockActions.toggle('members')} aria-pressed={membersOpen}
           title={t.navbar.onlineUsers} className="atelier-icon-btn h-8 shrink-0 gap-1.5 px-1.5">
@@ -402,13 +426,13 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
           </button>
         )}
 
-        {!isOffline && (
-          <div className="hidden shrink-0 md:block">
-            <VoiceChatBar voiceState={voiceState} onJoinVoice={joinVoice} onLeaveVoice={leaveVoice} onToggleMute={toggleVoiceMute} currentUserName={user?.displayName} />
+        {!isOffline && showVoice && (
+          <div className="shrink-0">
+            <VoiceChatBar voiceState={voiceState} onJoinVoice={joinVoice} onLeaveVoice={leaveVoice} onToggleMute={toggleVoiceMute} currentUserName={user?.displayName} compact={!showVoiceText} />
           </div>
         )}
 
-        <WorkspaceCloudflareToggle enabled={!isOffline} serverUrl={serverUrl} canvasId={currentCanvas?.id} />
+        <WorkspaceCloudflareToggle enabled={!isOffline} serverUrl={serverUrl} canvasId={currentCanvas?.id} compactCloudflare={!showCloudflareText} compactShare={!showShareText} />
 
         <DropdownMenu label={<Palette className="h-4 w-4" />} title={t.settings.themeSelect} align="right" width="w-80" buttonClass="atelier-icon-btn h-8 w-8 shrink-0" protectCanvas>
           <div className="p-1.5">
@@ -417,8 +441,8 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
           </div>
         </DropdownMenu>
 
-        {onOpenHelp && (
-          <button type="button" onClick={onOpenHelp} title={`${t.navbar.help} (F1)`} aria-label={t.navbar.help} className="atelier-icon-btn hidden h-8 w-8 shrink-0 sm:inline-flex">
+        {onOpenHelp && showHelpIcon && (
+          <button type="button" onClick={onOpenHelp} title={`${t.navbar.help} (F1)`} aria-label={t.navbar.help} className="atelier-icon-btn inline-flex h-8 w-8 shrink-0">
             <HelpCircle className="h-4 w-4" />
           </button>
         )}
@@ -428,7 +452,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
           <button type="button" onClick={() => onOpenSettings()} title={t.navbar.settings} aria-label={t.navbar.settings}
             className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-indigo-500/70 bg-indigo-600/20 px-2 text-xs font-semibold text-indigo-200 transition hover:bg-indigo-600/40 hover:text-white">
             <Settings className="h-4 w-4" />
-            <span className="hidden sm:inline">{t.navbar.settings}</span>
+            {showSettingsText && <span>{t.navbar.settings}</span>}
           </button>
         )}
 
@@ -442,11 +466,12 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
           <button
             type="button"
             onClick={onOpenGateway ?? onOpenServer}
-            title={t.server.switchMode}
-            className="mx-1 flex shrink-0 items-center gap-1 rounded-md border border-cyan-500/40 bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold text-cyan-300 transition hover:bg-cyan-500/25"
+            title={`${t.navbar.offlineBadge} — ${t.server.switchMode}`}
+            aria-label={t.navbar.offlineBadge}
+            className="mx-1 flex h-7 shrink-0 items-center gap-1 rounded-md border border-cyan-500/40 bg-cyan-500/15 px-2 py-0.5 text-[10px] font-semibold text-cyan-300 transition hover:bg-cyan-500/25"
           >
-            <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
-            <span>{t.navbar.offlineBadge}</span>
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-400" />
+            {effectiveWidth >= 700 && <span>{t.navbar.offlineBadge}</span>}
           </button>
         ) : (
           <button
@@ -461,30 +486,33 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
             }`}
           >
             <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${isConnected ? 'bg-emerald-400' : 'bg-rose-500'}`} />
-            <span className="hidden xl:inline">{isConnected ? t.navbar.connected : t.navbar.disconnected}</span>
+            {showServerStatusText && <span>{isConnected ? t.navbar.connected : t.navbar.disconnected}</span>}
           </button>
         )}
+      </div>
 
+      <div className="flex shrink-0 items-center gap-1">
         {user && (
-          <button type="button" onClick={onOpenProfile} title={t.navbar.userProfile} className="atelier-icon-btn h-8 shrink-0 gap-1.5 px-1.5">
+          <button type="button" onClick={onOpenProfile} title={t.navbar.userProfile} aria-label={`${user.displayName} — ${t.navbar.userProfile}`} className="atelier-icon-btn h-8 shrink-0 gap-1.5 px-1.5">
             <span className="flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full border text-[10px] font-black"
               style={{ borderColor: getUserColor(user.id).hex, backgroundColor: `${getUserColor(user.id).hex}25`, color: getUserColor(user.id).hex }}>
               {user.avatarUrl ? <img src={user.avatarUrl} alt="" className="h-full w-full object-cover" /> : (user.displayName || user.username || '畫')[0].toUpperCase()}
             </span>
-            <span className="hidden max-w-[90px] truncate text-xs font-medium lg:inline">{user.displayName}</span>
-            <PainterLevelBadge />
+            {showProfileName && <span className="max-w-[90px] truncate text-xs font-medium">{user.displayName}</span>}
+            <PainterLevelBadge visible={showLevelBadge} />
           </button>
         )}
 
         {!isOffline && !isLocalDesktop && (isGuest ? (
-          <button type="button" onClick={onOpenAuth} className="flex h-8 shrink-0 items-center gap-1 rounded-lg bg-indigo-600 px-2.5 text-xs font-semibold text-white hover:bg-indigo-500">
-            <LogIn className="h-3.5 w-3.5" /><span className="hidden sm:inline">{t.navbar.loginRegister}</span>
+          <button type="button" onClick={onOpenAuth} title={t.navbar.loginRegister} aria-label={t.navbar.loginRegister} className="flex h-8 shrink-0 items-center gap-1 rounded-lg bg-indigo-600 px-2.5 text-xs font-semibold text-white hover:bg-indigo-500">
+            <LogIn className="h-3.5 w-3.5" />{showLoginText && <span>{t.navbar.loginRegister}</span>}
           </button>
         ) : (
           <button type="button" onClick={logout} title={t.navbar.logout} aria-label={t.navbar.logout} className="atelier-icon-btn h-8 w-8 shrink-0 hover:!text-rose-400">
             <LogOut className="h-4 w-4" />
           </button>
         ))}
+      </div>
       </div>
     </header>
     </>

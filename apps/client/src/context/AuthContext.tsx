@@ -46,9 +46,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   useEffect(() => {
     let requestId = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let retryDelayMs = 1500;
+    let verifiedOrigin: string | null = null;
+
+    const clearRetry = () => {
+      if (retryTimer !== null) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+    };
+
     async function loadMe() {
+      clearRetry();
       const id = ++requestId;
       if (OfflineSessionStore.isOfflineMode()) {
+        verifiedOrigin = null;
         setToken(null);
         setUser(localArtist());
         setIsGuest(false);
@@ -60,6 +73,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const storedToken = ApiService.getToken(origin);
       setToken(storedToken);
       if (!storedToken) {
+        verifiedOrigin = null;
         setUser(localGuest());
         setIsGuest(true);
         setIsLoading(false);
@@ -72,14 +86,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       try {
         const { user } = await ApiService.getMe();
         if (!stillCurrent()) return;
+        verifiedOrigin = origin;
+        retryDelayMs = 1500;
         setUser(user);
         setIsGuest(user.serverRole === 'guest');
       } catch (err) {
         if (!stillCurrent()) return;
-        console.warn('Unable to verify the stored session:', err);
-        setToken(null);
+        verifiedOrigin = null;
+        const status = (err as { status?: number } | null)?.status;
+        if (status === 401 || status === 403 || status === 404 || !ApiService.getToken(origin)) {
+          console.warn('Stored session rejected by server:', err);
+          ApiService.setToken(null, origin);
+          setToken(null);
+          setUser(localGuest());
+          setIsGuest(true);
+          return;
+        }
+        // Keep the stored token intact on startup/transient network errors and retry when reachable.
+        console.warn('Unable to verify the stored session yet (will retry):', err);
+        setToken(storedToken);
         setUser(localGuest());
         setIsGuest(true);
+        const delay = retryDelayMs;
+        retryDelayMs = Math.min(retryDelayMs * 2, 15000);
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          if (stillCurrent()) void loadMe();
+        }, delay);
       } finally {
         if (id === requestId) setIsLoading(false);
       }
@@ -90,6 +123,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const detail = (ev as CustomEvent<{ token: string; user: UserPayload }>).detail;
       if (detail?.token && detail?.user) {
         requestId++;
+        clearRetry();
+        verifiedOrigin = ApiService.getServerOrigin();
+        retryDelayMs = 1500;
         setToken(detail.token);
         setUser(detail.user);
         setIsGuest(detail.user.serverRole === 'guest');
@@ -98,18 +134,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
     window.addEventListener('atelier:auth-updated', onAuthUpdated);
     const onServerChanged = () => {
+      verifiedOrigin = null;
+      retryDelayMs = 1500;
+      clearRetry();
       setUser(null);
       setIsGuest(true);
       void loadMe();
     };
+    const onSessionRetry = () => {
+      if (OfflineSessionStore.isOfflineMode()) return;
+      const origin = ApiService.getServerOrigin();
+      if (!ApiService.getToken(origin) || verifiedOrigin === origin) return;
+      retryDelayMs = 1500;
+      void loadMe();
+    };
     window.addEventListener('atelier:server-changed', onServerChanged);
     window.addEventListener('atelier:auth-expired', onServerChanged);
+    window.addEventListener('atelier:session-retry', onSessionRetry);
+    window.addEventListener('online', onSessionRetry);
     const unsubMode = OfflineSessionStore.subscribeSessionMode(() => void loadMe());
     return () => {
       requestId++;
+      clearRetry();
       window.removeEventListener('atelier:auth-updated', onAuthUpdated);
       window.removeEventListener('atelier:server-changed', onServerChanged);
       window.removeEventListener('atelier:auth-expired', onServerChanged);
+      window.removeEventListener('atelier:session-retry', onSessionRetry);
+      window.removeEventListener('online', onSessionRetry);
       unsubMode();
     };
   }, []);

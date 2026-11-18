@@ -218,6 +218,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
         const data = (await res.json()) as { canvases: CanvasModel[] };
         if (controller.signal.aborted) return;
         setRooms(data.canvases);
+        window.dispatchEvent(new Event('atelier:session-retry'));
         if (invitedRoom) setTab('join');
         else if (data.canvases.length === 0) setTab('create');
         else if (!userChoseTabRef.current) setTab('join');
@@ -257,7 +258,10 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
     if (request !== pingRequest.current) return;
     const ok = health.ok && health.status === 'ok';
     setPing(ok ? { testing: false, ok: true, ms: Math.round(performance.now() - start) } : { testing: false, ok: false, error: health.error || t.gateway.connectionFailed });
-    if (ok) setRoomsRefresh((n) => n + 1);
+    if (ok) {
+      setRoomsRefresh((n) => n + 1);
+      window.dispatchEvent(new Event('atelier:session-retry'));
+    }
   };
 
   const toggleTunnel = async () => {

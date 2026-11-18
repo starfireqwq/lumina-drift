@@ -4,6 +4,7 @@ import { CanvasModel } from '@atelier/shared';
 import { useAuth } from '../context/AuthContext';
 import { getUserColor } from '../utils/userColors';
 import { useI18n } from '../context/I18nContext';
+import { useEffectiveWidth } from '../hooks/useEffectiveWidth';
 import {
   buildCanvasGroupEntries,
   loadCollapsedCanvasGroups,
@@ -50,6 +51,9 @@ export const CanvasTabsBar: React.FC<CanvasTabsBarProps> = ({
   const [editingTitle, setEditingTitle] = useState('');
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => loadCollapsedCanvasGroups());
   const activeRef = useRef<HTMLDivElement>(null);
+  const navRef = useRef<HTMLElement>(null);
+  const { effectiveWidth } = useEffectiveWidth(navRef);
+  const showTabLabels = effectiveWidth >= 640;
   const entries = buildCanvasGroupEntries(canvases);
 
   const handleToggleGroup = (groupId: string) => {
@@ -214,7 +218,7 @@ export const CanvasTabsBar: React.FC<CanvasTabsBarProps> = ({
   };
 
   return (
-    <nav aria-label={t.canvas.canvasSwitcher} data-canvas-tabs-placement={placement}
+    <nav ref={navRef} aria-label={t.canvas.canvasSwitcher} data-canvas-tabs-placement={placement}
       className={`atelier-chrome shrink-0 select-none ${placement === 'top' ? 'border-b' : 'border-t'}`}>
       {dropGuide !== null && <div aria-hidden="true" className="pointer-events-none fixed inset-x-0 z-[80] h-[3px] bg-indigo-400" style={{ top: dropGuide }} />}
       <div className="flex items-center gap-1 px-1.5" style={expanded ? undefined : { height: 36 }}>
@@ -229,9 +233,10 @@ export const CanvasTabsBar: React.FC<CanvasTabsBarProps> = ({
         </button>
         <button type="button" onClick={onToggleExpanded} aria-expanded={expanded}
           title={expanded ? '收起畫布預覽' : '展開畫布預覽'}
+          aria-label={`${t.canvas.canvasName} (${canvases.length})`}
           className="atelier-icon-btn h-7 shrink-0 gap-1 px-2 text-[11px] font-semibold">
           <ExpandIcon className="h-3.5 w-3.5" />
-          <span className="hidden sm:inline">{t.canvas.canvasName}</span>
+          {showTabLabels && <span>{t.canvas.canvasName}</span>}
           <span className="rounded bg-neutral-800 px-1 text-[10px] text-neutral-400">{canvases.length}</span>
         </button>
 
@@ -274,8 +279,8 @@ export const CanvasTabsBar: React.FC<CanvasTabsBarProps> = ({
         )}
         {expanded && <span className="flex-1 truncate text-[11px] text-neutral-500">{t.canvas.renameCanvas}</span>}
 
-        <button type="button" onClick={onOpenCreateModal} title={t.canvas.newCanvasTitle} className="atelier-icon-btn h-7 shrink-0 gap-1 px-2 text-[11px] font-semibold">
-          <Plus className="h-3.5 w-3.5" /><span className="hidden sm:inline">{t.canvas.newCanvasTitle}</span>
+        <button type="button" onClick={onOpenCreateModal} title={t.canvas.newCanvasTitle} aria-label={t.canvas.newCanvasTitle} className="atelier-icon-btn h-7 shrink-0 gap-1 px-2 text-[11px] font-semibold">
+          <Plus className="h-3.5 w-3.5" />{showTabLabels && <span>{t.canvas.newCanvasTitle}</span>}
         </button>
       </div>
 
