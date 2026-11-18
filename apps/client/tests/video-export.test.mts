@@ -127,8 +127,23 @@ test('unwrapMediaRecorderError extracts DOM ErrorEvent/DOMException details clea
   assert.equal(unwrapMediaRecorderError(undefined).message, 'MediaRecorder encoding failed');
 });
 
-test('getVideoExtensionFromBlob infers extension from Blob MIME type', () => {
+test('getVideoExtensionFromBlob infers extension from Blob MIME type including MOV (QuickTime)', () => {
   assert.equal(getVideoExtensionFromBlob(new Blob([], { type: 'video/mp4;codecs=avc1' }), 'webm'), 'mp4');
+  assert.equal(getVideoExtensionFromBlob(new Blob([], { type: 'video/quicktime;codecs=avc1' }), 'webm'), 'mov');
+  assert.equal(getVideoExtensionFromBlob(new Blob([], { type: 'video/mp4;codecs=avc1' }), 'mov'), 'mov');
   assert.equal(getVideoExtensionFromBlob(new Blob([], { type: 'video/webm;codecs=vp9' }), 'mp4'), 'webm');
+  assert.equal(getVideoExtensionFromBlob(new Blob([], { type: '' }), 'mov'), 'mov');
   assert.equal(getVideoExtensionFromBlob(new Blob([], { type: '' }), 'mp4'), 'mp4');
+
+  const movCandidates = buildVideoRecorderCandidates(
+    4000,
+    4000,
+    'mov',
+    '2k',
+    (m) => m === 'video/mp4;codecs=avc1' || m === 'video/webm;codecs=vp9'
+  );
+  assert.equal(movCandidates[0].extension, 'mov');
+  assert.equal(movCandidates[0].mimeType, 'video/mp4;codecs=avc1');
+  assert.equal(movCandidates[0].width, 1440);
+  assert.equal(movCandidates[0].height, 1440);
 });

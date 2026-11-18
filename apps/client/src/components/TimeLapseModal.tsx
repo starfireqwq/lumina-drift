@@ -25,6 +25,7 @@ import {
   computeVideoExportDimensionsForResolution,
   getVideoExtensionFromBlob,
   unwrapMediaRecorderError,
+  type VideoExportFormat,
   type VideoExportResolution,
 } from '../engine/videoExport';
 import { useI18n } from '../context/I18nContext';
@@ -66,8 +67,8 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [recordProgress, setRecordProgress] = useState<number>(0);
   const [recordedVideoUrl, setRecordedVideoUrl] = useState<string | null>(null);
-  const [recordedExtension, setRecordedExtension] = useState<'webm' | 'mp4'>('webm');
-  const [videoFormat, setVideoFormat] = useState<'webm' | 'mp4'>('webm');
+  const [recordedExtension, setRecordedExtension] = useState<VideoExportFormat>('webm');
+  const [videoFormat, setVideoFormat] = useState<VideoExportFormat>('webm');
   const [videoResolution, setVideoResolution] = useState<VideoExportResolution>('4k');
 
   const seedRef = useRef(seedParticipants);
@@ -433,13 +434,14 @@ export const TimeLapseModal: React.FC<TimeLapseModalProps> = ({
               <select
                 aria-label={t.replay.format}
                 value={videoFormat}
-                onChange={(e) => setVideoFormat(e.target.value as 'webm' | 'mp4')}
+                onChange={(e) => setVideoFormat(e.target.value as VideoExportFormat)}
                 disabled={isRecording}
                 title={t.replay.format}
                 className="bg-neutral-800 border border-neutral-700 text-neutral-300 rounded-lg text-xs px-2 py-1.5 outline-none font-mono"
               >
                 <option value="webm">WebM (VP9)</option>
                 <option value="mp4">MP4 (AVC相容)</option>
+                <option value="mov">MOV (QuickTime)</option>
               </select>
 
               <button

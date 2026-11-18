@@ -7,6 +7,7 @@ import {
   filterTimeLapseOps,
   isMaskTimeLapseOp,
   normalizeReplayTileBytes,
+  reconcileTimeLapseOpsWithSnapshot,
   resolveTileDimensions,
   unpremultiplyRgba,
 } from '../src/engine/timeLapseHelpers.ts';
@@ -206,4 +207,100 @@ test('OfflineSessionStore tags mask tile patches so Ctrl+Z deleted offline masks
   assert.equal(filtered.ops[0].layerId, raster.id);
 
   await OfflineSessionStore.deleteCanvas(canvasId);
+});
+
+test('filterTimeLapseOps excludes cancelled/deleted image import layers and deleted corrupted layers', () => {
+  const activeLayer = { id: 'layer_keep', layerType: 'raster' as const };
+  const deletedImportLayerId = 'layer_cancelled_import';
+  const deletedCorruptLayerId = 'layer_deleted_corrupt';
+
+  const rawOps = [
+    { seq: 1, layerId: activeLayer.id, opType: 'STROKE', payload: { tiles: [{ col: 5, row: 5 }] } },
+    { seq: 2, layerId: deletedImportLayerId, opType: 'TILE_PATCH', payload: { actionDesc: '匯入圖片', tiles: [{ col: 0, row: 1 }] } },
+    { seq: 3, layerId: deletedCorruptLayerId, opType: 'FILTER', payload: { actionDesc: '濾鏡: HALFTONE_DOT', tiles: [{ col: 2, row: 0 }] } },
+    { seq: 4, layerId: activeLayer.id, opType: 'STROKE', payload: { tiles: [{ col: 6, row: 6 }] } },
+  ];
+
+  const filtered = filterTimeLapseOps(rawOps, [activeLayer]);
+  assert.deepEqual(filtered.ops.map((o) => o.seq), [1, 4]);
+});
+
+test('reconcileTimeLapseOpsWithSnapshot shifts pre-resize ops by detected (dCol, dRow) and drops empty-layer ghost ops', () => {
+  const shiftedLayerId = 'layer_shifted';
+  const clearedGhostLayerId = 'layer_cleared_ghost';
+
+  const rawOps = [
+    // Pre-resize ops drawn at col 1..2, row 2..3 (before resize gap at seq 10 -> 12)
+    {
+      seq: 1,
+      layerId: shiftedLayerId,
+      opType: 'STROKE',
+      payload: {
+        samplePoints: [{ x: 300, y: 550, pressure: 0.5 }],
+        tiles: [{ col: 1, row: 2 }, { col: 2, row: 2 }],
+      },
+    },
+    {
+      seq: 2,
+      layerId: shiftedLayerId,
+      opType: 'STROKE',
+      payload: {
+        samplePoints: [{ x: 560, y: 800, pressure: 0.6 }],
+        tiles: [{ col: 2, row: 3 }, { col: 1, row: 3 }],
+      },
+    },
+    // Ghost op on a layer that was completely undone/emptied in the authoritative snapshot
+    {
+      seq: 3,
+      layerId: clearedGhostLayerId,
+      opType: 'STROKE',
+      payload: { tiles: [{ col: 2, row: 2 }] },
+    },
+    // Post-resize op after seq gap (seq 12) already at shifted col 5, row 6
+    {
+      seq: 12,
+      layerId: shiftedLayerId,
+      opType: 'STROKE',
+      payload: {
+        samplePoints: [{ x: 1324, y: 1574, pressure: 0.7 }],
+        tiles: [{ col: 5, row: 6 }],
+      },
+    },
+  ];
+
+  const snapshotBundle = {
+    seq: 20,
+    layers: [
+      {
+        layerId: shiftedLayerId,
+        tiles: [
+          { col: 5, row: 6 },
+          { col: 6, row: 6 },
+          { col: 6, row: 7 },
+          { col: 5, row: 7 },
+        ],
+      },
+      {
+        layerId: clearedGhostLayerId,
+        tiles: [],
+      },
+    ],
+  };
+
+  const reconciled = reconcileTimeLapseOpsWithSnapshot(rawOps, snapshotBundle, rawOps);
+  // Ghost layer op (seq 3) is dropped; pre-resize ops (seq 1, 2) are shifted by (+4, +4)
+  assert.deepEqual(reconciled.map((o) => o.seq), [1, 2, 12]);
+  assert.deepEqual(
+    reconciled[0].payload.tiles.map((t: any) => `${t.col}_${t.row}`),
+    ['5_6', '6_6']
+  );
+  assert.deepEqual(reconciled[0].payload.samplePoints[0], {
+    x: 300 + 4 * DEFAULT_TILE_SIZE,
+    y: 550 + 4 * DEFAULT_TILE_SIZE,
+    pressure: 0.5,
+  });
+  assert.deepEqual(
+    reconciled[2].payload.tiles.map((t: any) => `${t.col}_${t.row}`),
+    ['5_6']
+  );
 });

@@ -14,6 +14,7 @@ import {
   filterTimeLapseOps,
   isMaskTimeLapseOp,
   normalizeReplayTileBytes,
+  reconcileTimeLapseOpsWithSnapshot,
   ReplayParticipantInfo,
   resolveTileDimensions,
   unpremultiplyRgba,
@@ -25,6 +26,7 @@ import {
   getVideoBitrateForResolution,
   stopMediaStream,
   unwrapMediaRecorderError,
+  type VideoExportFormat,
   type VideoExportResolution,
   type VideoRecorderCandidate,
 } from './videoExport';
@@ -245,20 +247,24 @@ export class TimeLapseEngine {
     this.emitProgress();
 
     try {
-      const res = await ApiService.getTimeLapseOps(canvasId, {
-        signal: controller.signal,
-        onProgress: (loaded, total) => {
-          if (controller.signal.aborted) return;
-          this.loadedOps = loaded;
-          this.expectedTotalOps = total;
-          this.emitProgress();
-        },
-      });
+      const [res, snapRes] = await Promise.all([
+        ApiService.getTimeLapseOps(canvasId, {
+          signal: controller.signal,
+          onProgress: (loaded, total) => {
+            if (controller.signal.aborted) return;
+            this.loadedOps = loaded;
+            this.expectedTotalOps = total;
+            this.emitProgress();
+          },
+        }),
+        this.knownLayerIds.size > 0 ? ApiService.getSnapshot(canvasId).catch(() => null) : Promise.resolve(null),
+      ]);
 
       if (controller.signal.aborted) return 0;
 
-      const filtered = filterTimeLapseOps(Array.isArray(res?.ops) ? res.ops : [], layers);
-      this.ops = filtered.ops;
+      const rawOps = Array.isArray(res?.ops) ? res.ops : [];
+      const filtered = filterTimeLapseOps(rawOps, layers);
+      this.ops = reconcileTimeLapseOpsWithSnapshot(filtered.ops, snapRes?.bundle, rawOps);
       this.maskLayerIds = filtered.maskLayerIds;
       this.loadedOps = this.ops.length;
       this.expectedTotalOps = this.ops.length;
@@ -364,6 +370,7 @@ export class TimeLapseEngine {
 
   private ensureLayerCanvas(layerId: string): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null {
     if (this.maskLayerIds.has(layerId)) return null;
+    if (this.knownLayerIds.size > 0 && !this.knownLayerIds.has(layerId)) return null;
     const existing = this.layerCanvases.get(layerId);
     if (existing) return existing;
 
@@ -377,7 +384,6 @@ export class TimeLapseEngine {
     const entry = { canvas: c, ctx };
     this.layerCanvases.set(layerId, entry);
 
-    // Ensure layers deleted/merged later in history still appear during replay
     if (!this.knownLayerIds.has(layerId)) {
       this.knownLayerIds.add(layerId);
       const maxOrder = this.layers.reduce((acc, l) => Math.max(acc, l.sortOrder), 0);
@@ -763,19 +769,7 @@ export class TimeLapseEngine {
 
       if (elapsed >= baseDelay || this.speed >= 16) {
         const opsToProcess = this.speed >= 16 ? Math.min(Math.floor(this.speed / 4), 24) : 1;
-
-        for (let i = 0; i < opsToProcess; i++) {
-          if (this.currentOpIndex < this.ops.length) {
-            const op = this.ops[this.currentOpIndex];
-            this.executeOp(op);
-            this.updateCursorForOp(op, this.currentOpIndex, timestamp);
-            this.currentOpIndex++;
-            executedAny = true;
-          } else {
-            break;
-          }
-        }
-
+        executedAny = this.executeOpBatch(opsToProcess, timestamp);
         this.lastStepTimestamp = timestamp;
       }
 
@@ -830,6 +824,61 @@ export class TimeLapseEngine {
     } catch {
       // Skip corrupt tile
     }
+  }
+
+  /**
+   * Executes a batch of operations for a single frame, deduplicating overwritten tiles
+   * within the same batch so high-speed playback and video export do not decompress
+   * and putImageData the same (layerId, col, row) tile dozens of times in one frame.
+   */
+  private executeOpBatch(count: number, now: number): boolean {
+    if (this.currentOpIndex >= this.ops.length || count <= 0) return false;
+    if (count === 1) {
+      const op = this.ops[this.currentOpIndex];
+      this.executeOp(op);
+      this.updateCursorForOp(op, this.currentOpIndex, now);
+      this.currentOpIndex++;
+      return true;
+    }
+
+    const endIdx = Math.min(this.ops.length, this.currentOpIndex + count);
+    const pendingTiles = new Map<string, { layerId: string; tile: any }>();
+
+    const flushPendingTiles = () => {
+      if (pendingTiles.size === 0) return;
+      for (const { layerId, tile } of pendingTiles.values()) {
+        const targetLayer = this.ensureLayerCanvas(layerId);
+        if (targetLayer) {
+          this.applyTileToContext(targetLayer.ctx, tile);
+        }
+      }
+      pendingTiles.clear();
+    };
+
+    for (let idx = this.currentOpIndex; idx < endIdx; idx++) {
+      const op = this.ops[idx];
+      if (!op || !op.layerId || isMaskTimeLapseOp(op, this.maskLayerIds)) {
+        this.updateCursorForOp(op, idx, now);
+        continue;
+      }
+      const opType = (op.opType || '').toUpperCase();
+      const tiles = op.payload?.tiles;
+      if (opType !== 'LAYER_CLEAR' && Array.isArray(tiles) && tiles.length > 0) {
+        for (const t of tiles) {
+          if (t && Number.isInteger(t.col) && Number.isInteger(t.row)) {
+            pendingTiles.set(`${op.layerId}\0${t.col}_${t.row}`, { layerId: op.layerId, tile: t });
+          }
+        }
+      } else {
+        flushPendingTiles();
+        this.executeOp(op);
+      }
+      this.updateCursorForOp(op, idx, now);
+    }
+
+    flushPendingTiles();
+    this.currentOpIndex = endIdx;
+    return true;
   }
 
   /**
@@ -925,10 +974,10 @@ export class TimeLapseEngine {
   }
 
   /**
-   * Records the entire replay into a WebM or MP4 short video file
+   * Records the entire replay into a WebM, MP4, or MOV short video file
    */
   public async exportTimeLapseVideo(
-    format: 'webm' | 'mp4' = 'webm',
+    format: VideoExportFormat = 'webm',
     onProgress?: (percent: number) => void,
     resolution: VideoExportResolution = '4k'
   ): Promise<Blob> {
@@ -977,7 +1026,16 @@ export class TimeLapseEngine {
     const surface = createScaledRecordingSurface(this.previewCanvas, candidate.width, candidate.height);
     surface.syncFrame();
 
-    const stream = surface.canvas.captureStream(30);
+    const stream = surface.canvas.captureStream(60);
+    const requestStreamFrame = () => {
+      try {
+        const track = stream.getVideoTracks?.()[0] as { requestFrame?: () => void } | undefined;
+        track?.requestFrame?.();
+      } catch {
+        // Ignore if browser does not expose CanvasCaptureMediaStreamTrack.requestFrame
+      }
+    };
+    requestStreamFrame();
     this.recordingStream = stream;
     this.recordedChunks = [];
 
@@ -1071,31 +1129,33 @@ export class TimeLapseEngine {
       }
 
       this.speed = 16;
-      const batch = Math.max(2, Math.min(48, Math.ceil(this.ops.length / 360)));
+      const batch = Math.max(1, Math.min(24, Math.ceil(this.ops.length / 540)));
+      let lastReportedPct = -1;
 
       const checkCompletion = (now: number) => {
         if (settled || this.recordingCancelled || this.status !== 'recording') {
           return;
         }
         if (this.currentOpIndex < this.ops.length) {
-          for (let b = 0; b < batch && this.currentOpIndex < this.ops.length; b++) {
-            const op = this.ops[this.currentOpIndex];
-            this.executeOp(op);
-            this.updateCursorForOp(op, this.currentOpIndex, now);
-            this.currentOpIndex++;
-          }
+          this.executeOpBatch(batch, now);
           this.stepCursorSmoothing(now);
           this.compositePreview(now);
           surface.syncFrame();
-          this.emitProgress();
+          requestStreamFrame();
 
           const pct = Math.round((this.currentOpIndex / this.ops.length) * 100);
-          if (onProgress) onProgress(pct);
+          if (pct !== lastReportedPct) {
+            lastReportedPct = pct;
+            this.emitProgress();
+            if (onProgress) onProgress(pct);
+          }
 
           rafId = requestAnimationFrame(checkCompletion);
         } else {
           this.compositePreview(now);
           surface.syncFrame();
+          requestStreamFrame();
+          this.emitProgress();
           if (onProgress) onProgress(100);
 
           stopTimer = setTimeout(() => {

@@ -1,4 +1,4 @@
-export type VideoExportFormat = 'mp4' | 'webm';
+export type VideoExportFormat = 'mp4' | 'webm' | 'mov';
 export type VideoExportResolution = '1080p' | '2k' | '4k';
 
 export interface VideoSizeLimits {
@@ -160,7 +160,23 @@ export function buildVideoRecorderCandidates(
     candidates.push({ mimeType, extension, width: dims.width, height: dims.height });
   };
 
-  if (format === 'mp4') {
+  if (format === 'mov') {
+    for (const dims of tierChain) {
+      for (const mime of [
+        'video/quicktime;codecs=avc1',
+        'video/quicktime',
+        'video/mp4;codecs=avc1',
+        'video/mp4;codecs=avc1.42E01E',
+      ]) {
+        addIfSupported(mime, 'mov', dims);
+      }
+    }
+    addIfSupported('video/mp4;codecs=vp9', 'mov', primaryDims);
+    addIfSupported('video/mp4', 'mov', primaryDims);
+    for (const mime of ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']) {
+      addIfSupported(mime, 'webm', primaryDims);
+    }
+  } else if (format === 'mp4') {
     for (const dims of tierChain) {
       for (const mime of ['video/mp4;codecs=avc1', 'video/mp4;codecs=avc1.42E01E']) {
         addIfSupported(mime, 'mp4', dims);
@@ -231,6 +247,8 @@ export function getVideoExtensionFromBlob(
   fallback: VideoExportFormat
 ): VideoExportFormat {
   const mime = (blob.type || '').toLowerCase();
+  if (mime.includes('quicktime')) return 'mov';
+  if (fallback === 'mov' && mime.includes('mp4')) return 'mov';
   if (mime.includes('mp4')) return 'mp4';
   if (mime.includes('webm')) return 'webm';
   return fallback;

@@ -237,28 +237,187 @@ export function isMaskTimeLapseOp(op: any, maskLayerIds?: ReadonlySet<string>): 
 
 /**
  * Filters out all operations belonging to mask layers (both active and deleted/Ctrl+Z'd)
+ * and deleted layers (such as cancelled image imports or deleted scratch/corrupted layers)
  * so Time-Lapse Replay only displays actual artwork strokes, colors, and canvas operations.
  */
 export function filterTimeLapseOps(
   ops: any[],
   layers: ReadonlyArray<Pick<LayerModel, 'id' | 'layerType'>> = []
-): { ops: any[]; maskLayerIds: Set<string> } {
+): { ops: any[]; maskLayerIds: Set<string>; activeLayerIds: Set<string> } {
   const maskLayerIds = new Set<string>();
+  const activeLayerIds = new Set<string>();
   for (const layer of layers) {
     if (layer?.layerType === 'mask' && layer.id) {
       maskLayerIds.add(layer.id);
+    } else if (layer?.id) {
+      activeLayerIds.add(layer.id);
     }
   }
   if (!Array.isArray(ops) || ops.length === 0) {
-    return { ops: [], maskLayerIds };
+    return { ops: [], maskLayerIds, activeLayerIds };
   }
   for (const op of ops) {
     if (op && typeof op.layerId === 'string' && isMaskTimeLapseOp(op)) {
       maskLayerIds.add(op.layerId);
     }
   }
-  const filtered = ops.filter((op) => Boolean(op) && !isMaskTimeLapseOp(op, maskLayerIds));
-  return { ops: filtered, maskLayerIds };
+  const enforceActiveLayers = activeLayerIds.size > 0;
+  const filtered = ops.filter(
+    (op) =>
+      Boolean(op) &&
+      !isMaskTimeLapseOp(op, maskLayerIds) &&
+      (!enforceActiveLayers || (typeof op.layerId === 'string' && activeLayerIds.has(op.layerId)))
+  );
+  return { ops: filtered, maskLayerIds, activeLayerIds };
+}
+
+/**
+ * Reconciles historical ops with the authoritative canvas snapshot bundle when a canvas
+ * has been resized/shifted or had pre-snapshot ghost tiles cleared.
+ * - Detects if pre-resize ops were shifted by `(dCol, dRow)` when the canvas was expanded/resized,
+ *   shifting pre-resize tile coordinates and samplePoints into the post-resize coordinate space.
+ * - Drops pre-snapshot orphaned tiles that do not exist in the authoritative snapshot bundle.
+ */
+export function reconcileTimeLapseOpsWithSnapshot(
+  ops: any[],
+  snapshotBundle: {
+    seq?: number;
+    layers?: ReadonlyArray<{ layerId: string; tiles?: ReadonlyArray<{ col: number; row: number; data?: unknown }> }>;
+  } | null | undefined,
+  rawOpsForGapDetection?: ReadonlyArray<{ seq?: number }>
+): any[] {
+  const snapSeq = Number(snapshotBundle?.seq) || 0;
+  if (!Array.isArray(ops) || ops.length === 0 || !snapshotBundle || !Array.isArray(snapshotBundle.layers) || snapSeq <= 0) {
+    return ops;
+  }
+
+  const snapTileKeysByLayer = new Map<string, Set<string>>();
+  for (const layer of snapshotBundle.layers) {
+    if (!layer?.layerId) continue;
+    const keys = new Set<string>();
+    for (const t of layer.tiles || []) {
+      if (t && Number.isInteger(t.col) && Number.isInteger(t.row)) {
+        keys.add(`${t.col}_${t.row}`);
+      }
+    }
+    snapTileKeysByLayer.set(layer.layerId, keys);
+  }
+
+  if (snapTileKeysByLayer.size === 0) return ops;
+
+  // Detect dominant integer tile shift (dCol, dRow) for pre-snapshot ops whose tiles were shifted by resizeCanvas
+  const votes = new Map<string, number>();
+  const maxSeqForVote = new Map<string, number>();
+  for (const op of ops) {
+    const seq = Number(op?.seq) || 0;
+    if (seq > snapSeq || !op?.layerId) continue;
+    const snapSet = snapTileKeysByLayer.get(op.layerId);
+    if (!snapSet || snapSet.size === 0) continue;
+    const tiles = op.payload?.tiles;
+    if (!Array.isArray(tiles)) continue;
+    for (const t of tiles) {
+      if (!t || !Number.isInteger(t.col) || !Number.isInteger(t.row)) continue;
+      if (snapSet.has(`${t.col}_${t.row}`)) continue;
+      for (const sk of snapSet) {
+        const [sc, sr] = sk.split('_').map(Number);
+        const dc = sc - t.col;
+        const dr = sr - t.row;
+        if (dc === 0 && dr === 0) continue;
+        const vk = `${dc}_${dr}`;
+        votes.set(vk, (votes.get(vk) || 0) + 1);
+        maxSeqForVote.set(vk, Math.max(maxSeqForVote.get(vk) || 0, seq));
+      }
+    }
+  }
+
+  let bestKey = '0_0';
+  let bestVotes = 0;
+  for (const [vk, cnt] of votes) {
+    if (cnt > bestVotes) {
+      bestVotes = cnt;
+      bestKey = vk;
+    }
+  }
+
+  const [dCol, dRow] = bestVotes >= 3 ? bestKey.split('_').map(Number) : [0, 0];
+  const hasShift = dCol !== 0 || dRow !== 0;
+  let resizeCutoffSeq = hasShift ? (maxSeqForVote.get(bestKey) || 0) : 0;
+  if (hasShift) {
+    const gapSource = rawOpsForGapDetection && rawOpsForGapDetection.length > 1 ? rawOpsForGapDetection : ops;
+    for (let i = 1; i < gapSource.length; i++) {
+      const prevS = Number(gapSource[i - 1]?.seq) || 0;
+      const currS = Number(gapSource[i]?.seq) || 0;
+      if (prevS >= resizeCutoffSeq && prevS <= snapSeq && currS > prevS + 1) {
+        resizeCutoffSeq = prevS;
+        break;
+      }
+    }
+  }
+
+  const shiftPoints = (pts: any[], dx: number, dy: number) =>
+    pts.map((p) => (p && Number.isFinite(p.x) && Number.isFinite(p.y) ? { ...p, x: p.x + dx, y: p.y + dy } : p));
+
+  const reconciled: any[] = [];
+  for (const op of ops) {
+    const seq = Number(op?.seq) || 0;
+    if (seq > snapSeq || !op?.layerId || !snapTileKeysByLayer.has(op.layerId)) {
+      reconciled.push(op);
+      continue;
+    }
+    const snapSet = snapTileKeysByLayer.get(op.layerId)!;
+    const tiles = op.payload?.tiles;
+    if (!Array.isArray(tiles) || tiles.length === 0) {
+      if (snapSet.size > 0) reconciled.push(op);
+      continue;
+    }
+    if (snapSet.size === 0) {
+      // Layer has 0 tiles in the authoritative snapshot: drop pre-snapshot ghost ops
+      continue;
+    }
+
+    const preferShift = hasShift && seq > 0 && seq <= resizeCutoffSeq;
+    let shiftedAny = false;
+    const nextTiles: any[] = [];
+    for (const t of tiles) {
+      if (!t || !Number.isInteger(t.col) || !Number.isInteger(t.row)) continue;
+      const directKey = `${t.col}_${t.row}`;
+      const shiftedKey = `${t.col + dCol}_${t.row + dRow}`;
+      if (preferShift && snapSet.has(shiftedKey)) {
+        nextTiles.push({ ...t, col: t.col + dCol, row: t.row + dRow });
+        shiftedAny = true;
+      } else if (snapSet.has(directKey)) {
+        nextTiles.push(t);
+      } else if (hasShift && snapSet.has(shiftedKey)) {
+        nextTiles.push({ ...t, col: t.col + dCol, row: t.row + dRow });
+        shiftedAny = true;
+      }
+    }
+
+    if (nextTiles.length === 0) continue;
+
+    if (!shiftedAny && nextTiles.length === tiles.length) {
+      reconciled.push(op);
+      continue;
+    }
+
+    const dx = shiftedAny ? dCol * DEFAULT_TILE_SIZE : 0;
+    const dy = shiftedAny ? dRow * DEFAULT_TILE_SIZE : 0;
+    reconciled.push({
+      ...op,
+      payload: {
+        ...op.payload,
+        tiles: nextTiles,
+        ...(shiftedAny && Array.isArray(op.payload?.samplePoints)
+          ? { samplePoints: shiftPoints(op.payload.samplePoints, dx, dy) }
+          : {}),
+        ...(shiftedAny && Array.isArray(op.payload?.allPoints)
+          ? { allPoints: shiftPoints(op.payload.allPoints, dx, dy) }
+          : {}),
+      },
+    });
+  }
+
+  return reconciled;
 }
 
 /**
