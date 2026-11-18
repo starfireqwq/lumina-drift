@@ -4,6 +4,7 @@ import {
   CanvasModel,
   CanvasSnapshotBundle,
   CreateCanvasDto,
+  encodePacket,
   JoinCanvasDto,
   UpdateCanvasDto,
   UserPayload,
@@ -22,7 +23,9 @@ import {
 import { getLayersByCanvasId } from '../services/layer.service';
 import {
   autoCreateCheckpoint,
+  getCanvasOpParticipants,
   getLatestSnapshot,
+  getOpsPage,
   getOpsSince,
   saveSnapshot,
 } from '../services/snapshot.service';
@@ -289,7 +292,17 @@ export const canvasRoutes: FastifyPluginAsync = async (fastify) => {
   );
 
   // GET /api/canvases/:id/ops - Incremental ops replay since a given sequence number
-  fastify.get<{ Params: { id: string }; Querystring: { sinceSeq?: string; since?: string } }>(
+  fastify.get<{
+    Params: { id: string };
+    Querystring: {
+      sinceSeq?: string;
+      since?: string;
+      limit?: string;
+      view?: string;
+      format?: string;
+      includeParticipants?: string;
+    };
+  }>(
     '/:id/ops',
     async (request, reply) => {
       const { id } = request.params;
@@ -300,8 +313,46 @@ export const canvasRoutes: FastifyPluginAsync = async (fastify) => {
       // `since` is what shipped clients send; ignoring it silently replayed the entire history
       const parsed = parseInt(request.query.sinceSeq ?? request.query.since ?? '0', 10);
       const sinceSeq = Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-      const ops = getOpsSince(id, sinceSeq);
-      return reply.send({ canvasId: id, sinceSeq, latestSeq: canvas.latestSeq, ops });
+
+      const hasPagination =
+        request.query.limit !== undefined ||
+        request.query.view === 'timelapse' ||
+        request.query.format === 'msgpack';
+
+      if (!hasPagination) {
+        const ops = getOpsSince(id, sinceSeq);
+        return reply.send({ canvasId: id, sinceSeq, latestSeq: canvas.latestSeq, ops });
+      }
+
+      const view = request.query.view === 'timelapse' ? 'timelapse' : 'full';
+      const format = request.query.format === 'msgpack' ? 'msgpack' : 'json';
+      const parsedLimit = parseInt(request.query.limit ?? '300', 10);
+      const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 1000) : 300;
+      const page = getOpsPage(id, {
+        sinceSeq,
+        limit,
+        view,
+        tileFormat: format === 'msgpack' ? 'raw' : 'base64',
+      });
+      const includeParticipants =
+        view === 'timelapse' && (sinceSeq === 0 || request.query.includeParticipants === '1');
+      const participants = includeParticipants ? getCanvasOpParticipants(id) : undefined;
+
+      const payload = {
+        canvasId: id,
+        sinceSeq,
+        latestSeq: canvas.latestSeq,
+        ops: page.ops,
+        hasMore: page.hasMore,
+        nextSeq: page.nextSeq,
+        totalRemaining: page.totalRemaining,
+        ...(participants ? { participants } : {}),
+      };
+
+      if (format === 'msgpack') {
+        return reply.type('application/x-msgpack').send(Buffer.from(encodePacket(payload as any)));
+      }
+      return reply.send(payload);
     }
   );
 
