@@ -145,7 +145,12 @@ async function runPhase2Tests() {
     // 7. Bob claims the released layer
     console.log('\n--- Test: Bob claims the released layer ---');
     const claimEventPromise = new Promise<any>((resolve) => {
-      socketAlice.once('layer_updated', (data) => resolve(data));
+      const onClaim = (data: any) => {
+        if (data.layer.id !== layer.id || data.action !== 'claim') return;
+        socketAlice.off('layer_updated', onClaim);
+        resolve(data);
+      };
+      socketAlice.on('layer_updated', onClaim);
     });
 
     socketBob.emit('claim_layer', { canvasId: canvas.id, layerId: layer.id });

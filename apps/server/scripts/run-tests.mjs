@@ -15,9 +15,10 @@ for (const test of tests) {
   const dataDir = mkdtempSync(join(tmpdir(), 'lumina-server-test-'));
   const result = spawnSync(process.execPath, ['--import', 'tsx', 'tests/' + test + '.ts'], {
     stdio: 'inherit',
+    timeout: 60_000,
     env: { ...process.env, DATA_DIR: dataDir, DATABASE_PATH: join(dataDir, 'test.db'), PORT: '0',
       HOST: '127.0.0.1', ADMIN_USERNAME: 'admin', ADMIN_PASSWORD: 'admin123', JWT_SECRET: '' },
   });
-  if (result.error) throw result.error;
+  if (result.error) throw new Error(`${test}: ${result.error.message}`, { cause: result.error });
   if (result.status !== 0) process.exit(result.status ?? 1);
 }

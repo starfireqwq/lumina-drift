@@ -387,24 +387,25 @@ async function runTests() {
     });
 
     // ----------------------------------------------------------------
-    // 9. Admin Superuser Override
+    // 9. Drawing on a private layer still follows the layer ACL
     // ----------------------------------------------------------------
-    console.log('\n--- 9. Testing Admin Superuser Privilege ---');
+    console.log('\n--- 9. Testing Admin Drawing on a Private Layer ---');
     const socketAdmin = ClientSocket(baseUrl, {
       auth: { token: adminAuth.token },
       transports: ['websocket'],
     });
 
     await new Promise<void>((resolve) => socketAdmin.once('auth_ack', () => resolve()));
-    socketAdmin.emit('join_canvas', { canvasId: canvas1.id });
-
-    // Admin draws on Alice's private owner_only layer -> MUST BE ALLOWED!
     await new Promise<void>((resolve) => {
-      socketAlice.once('op_broadcast', (op: OpBroadcastPacket) => {
-        if (op.userId === adminAuth.user.id && op.layerId === privateLayer.id) {
-          console.log(`✓ Admin successfully performed Op on private layer: Seq #${op.seq}, User=${op.displayName}`);
-          resolve();
-        }
+      socketAdmin.once('room_state', () => resolve());
+      socketAdmin.emit('join_canvas', { canvasId: canvas1.id });
+    });
+
+    // Administrators can moderate ownership, but painting still requires layer access.
+    await new Promise<void>((resolve) => {
+      socketAdmin.once('op_rejected', (rejection) => {
+        console.log(`✓ Admin drawing was blocked by the private layer ACL: ${rejection.reason}`);
+        resolve();
       });
 
       socketAdmin.emit('op_commit', {
