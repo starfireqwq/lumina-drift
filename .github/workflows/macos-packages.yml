@@ -59,6 +59,7 @@ jobs:
           pnpm --filter @atelier/client exec electron-builder --mac pkg "--$EXPECTED_ARCH" --publish never \
             --config.npmRebuild=false --config.mac.identity=- --config.mac.hardenedRuntime=false --config.mac.notarize=false
       - name: Verify package and native addons
+        timeout-minutes: 4
         run: |
           set -euo pipefail
           shopt -s nullglob

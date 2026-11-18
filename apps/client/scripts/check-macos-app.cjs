@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { once } = require('node:events');
 const path = require('node:path');
 const { createRequire } = require('node:module');
 
@@ -21,7 +22,18 @@ async function main() {
     await window.getByRole('button', { name: /Solo Offline Drawing/ }).waitFor({ timeout: 20_000 });
     console.log('Packaged Lumina Drift opened the desktop launch screen.');
   } finally {
-    await app.close();
+    const child = app.process();
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, 'exit');
+      const deadline = setTimeout(() => child.kill('SIGKILL'), 5000);
+      try {
+        // On macOS closing the last window leaves the application running.
+        void app.evaluate(({ app }) => { setImmediate(() => app.quit()); }).catch(() => {});
+        await exited;
+      } finally {
+        clearTimeout(deadline);
+      }
+    }
   }
 }
 
