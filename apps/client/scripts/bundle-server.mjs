@@ -105,21 +105,46 @@ if (!argonNativeManifest) throw new Error(`Missing @node-rs/${argonNativeName}. 
 const argonNativeDir = path.dirname(argonNativeManifest);
 
 const nmDir = path.join(outServerDir, 'node_modules');
-copyDirSync(path.join(sqlitePkgDir, 'lib'), path.join(nmDir, 'better-sqlite3/lib'));
-fs.copyFileSync(path.join(sqlitePkgDir, 'package.json'), path.join(nmDir, 'better-sqlite3/package.json'));
-
-// Create minimal bindings shim inside better-sqlite3 so it loads build/Release/better_sqlite3.node directly
-const bindingsDir = path.join(nmDir, 'better-sqlite3/node_modules/bindings');
-fs.mkdirSync(bindingsDir, { recursive: true });
-fs.writeFileSync(
-  path.join(bindingsDir, 'index.js'),
-  `const path = require('path');\nmodule.exports = () => require(path.join(__dirname, '../../build/Release/better_sqlite3.node'));\n`
-);
+const outSqliteDir = path.join(nmDir, 'better-sqlite3');
+for (const stale of ['build', 'node_modules', 'prebuilds']) {
+  fs.rmSync(path.join(outSqliteDir, stale), { recursive: true, force: true });
+}
+copyDirSync(path.join(sqlitePkgDir, 'lib'), path.join(outSqliteDir, 'lib'));
+fs.copyFileSync(path.join(sqlitePkgDir, 'package.json'), path.join(outSqliteDir, 'package.json'));
 
 copyDirSync(argonPkgDir, path.join(nmDir, '@node-rs/argon2'));
 copyDirSync(argonNativeDir, path.join(nmDir, '@node-rs', argonNativeName));
 
-// 3. Download Electron 34 (ABI 132) prebuild for better-sqlite3 v11.10.0
+// 3. Copy ABI-independent N-API prebuild(s) from better-sqlite3 >= 13 (or fallback cleanly if missing)
+const sqlitePrebuildsSrc = path.join(sqlitePkgDir, 'prebuilds');
+const sqlitePrebuildsDest = path.join(outSqliteDir, 'prebuilds');
+fs.mkdirSync(sqlitePrebuildsDest, { recursive: true });
+const copiedPrebuilds = [];
+if (fs.existsSync(sqlitePrebuildsSrc)) {
+  const candidates = process.platform === 'linux'
+    ? [`linux-${process.arch}.node`, `linuxmusl-${process.arch}.node`]
+    : [`${process.platform}-${process.arch}.node`];
+  for (const file of candidates) {
+    const srcFile = path.join(sqlitePrebuildsSrc, file);
+    if (fs.existsSync(srcFile)) {
+      fs.copyFileSync(srcFile, path.join(sqlitePrebuildsDest, file));
+      copiedPrebuilds.push(file);
+    }
+  }
+}
+if (!copiedPrebuilds.length) {
+  throw new Error(`Missing better-sqlite3 N-API prebuild for ${process.platform}-${process.arch} in ${sqlitePrebuildsSrc}`);
+}
+console.log(`[bundle-server] Copied better-sqlite3 N-API prebuild(s): ${copiedPrebuilds.join(', ')}`);
+
+// 4. Copy cloudflared.exe to resources/cloudflared.exe if present in workspace root
+const rootCloudflared = path.join(rootDir, 'cloudflared.exe');
+const destCloudflared = path.resolve(__dirname, '../resources/cloudflared.exe');
+if (fs.existsSync(rootCloudflared) && !fs.existsSync(destCloudflared)) {
+  fs.copyFileSync(rootCloudflared, destCloudflared);
+  console.log(`[bundle-server] Copied cloudflared.exe to resources/cloudflared.exe`);
+}
+
 function downloadBuffer(url) {
   return new Promise((resolve, reject) => {
     https.get(url, (res) => {
@@ -152,30 +177,6 @@ function extractTarFile(tarBuf, targetSuffix) {
     offset = dataStart + Math.ceil(size / 512) * 512;
   }
   return null;
-}
-
-const sqliteVer = JSON.parse(fs.readFileSync(path.join(sqlitePkgDir, 'package.json'), 'utf8')).version;
-const prebuildUrl = `https://github.com/WiseLibs/better-sqlite3/releases/download/v${sqliteVer}/better-sqlite3-v${sqliteVer}-electron-v132-${process.platform}-${process.arch}.tar.gz`;
-const outNodeAddon = path.join(nmDir, 'better-sqlite3/build/Release/better_sqlite3.node');
-fs.mkdirSync(path.dirname(outNodeAddon), { recursive: true });
-
-const cachedPrebuild = process.env.ATELIER_ELECTRON_SQLITE_PREBUILD;
-if (!cachedPrebuild) {
-  console.log(`[bundle-server] Fetching Electron ABI 132 prebuild: ${prebuildUrl}`);
-}
-// The workspace Node build of better-sqlite3 has a different ABI from Electron 34.
-const gzBuf = cachedPrebuild ? fs.readFileSync(cachedPrebuild) : await downloadBuffer(prebuildUrl);
-const nodeBuf = extractTarFile(zlib.gunzipSync(gzBuf), 'better_sqlite3.node');
-if (!nodeBuf) throw new Error('better_sqlite3.node not found in Electron ABI 132 tar archive');
-fs.writeFileSync(outNodeAddon, nodeBuf);
-console.log(`[bundle-server] Wrote Electron ABI 132 better_sqlite3.node (${nodeBuf.length} bytes)`);
-
-// 4. Copy cloudflared.exe to resources/cloudflared.exe if present in workspace root
-const rootCloudflared = path.join(rootDir, 'cloudflared.exe');
-const destCloudflared = path.resolve(__dirname, '../resources/cloudflared.exe');
-if (fs.existsSync(rootCloudflared) && !fs.existsSync(destCloudflared)) {
-  fs.copyFileSync(rootCloudflared, destCloudflared);
-  console.log(`[bundle-server] Copied cloudflared.exe to resources/cloudflared.exe`);
 }
 
 if (process.platform === 'darwin') {
