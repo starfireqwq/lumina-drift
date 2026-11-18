@@ -12,7 +12,9 @@ on:
     paths:
       - '.github/workflows/macos-packages.yml'
       - 'apps/client/scripts/bundle-server.mjs'
+      - 'apps/client/scripts/check-macos-app.cjs'
       - 'apps/client/electron-builder.json5'
+      - 'apps/client/resources/lumina-file.icns'
 
 permissions:
   contents: read
@@ -93,6 +95,7 @@ jobs:
           ' -- --user-data-dir="$LUMINA_PROFILE"
           codesign --verify --deep "$app_path"
           "$resources/cloudflared" --version
+          node apps/client/scripts/check-macos-app.cjs "$executable"
           cd apps/client/release
           shasum -a 256 "$(basename "$installer")" > "SHA256SUMS-macOS-$EXPECTED_ARCH.txt"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
