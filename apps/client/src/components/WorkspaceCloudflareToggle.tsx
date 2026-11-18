@@ -79,8 +79,11 @@ export function WorkspaceCloudflareToggle({
     };
   }, [enabled, shareOpen, activeServer]);
 
+  const savedPublicShareUrl =
+    local && typeof window !== 'undefined' ? localStorage.getItem('atelier_public_share_url') : null;
   const publicOrigin =
-    publicServerOrigin(activeServer) ?? ((local || url === serverUrl || url === activeServer) ? url : null);
+    publicServerOrigin(activeServer) ??
+    ((local || url === serverUrl || url === activeServer) ? (url || savedPublicShareUrl) : null);
 
   const shareOptions: Array<{ id: string; label: string; url: string; isPublic: boolean }> = [];
   if (publicOrigin) {

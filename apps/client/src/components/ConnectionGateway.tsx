@@ -29,6 +29,7 @@ export interface NetworkAddressItem {
 export interface InitialCanvasOptions {
   canvasId?: string;
   title?: string;
+  newGroupTitle?: string;
   password?: string;
   width?: number;
   height?: number;
@@ -62,13 +63,15 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
 
   const workspaceIsLocal = !initialServerUrl || isLoopbackServer(initialServerUrl);
   const [gatewayMode, setGatewayMode] = useState<'offline' | 'online'>(() =>
-    supportsOfflineMode && (OfflineSessionStore.isOfflineMode() || !initialServerUrl) ? 'offline' : 'online'
+    supportsOfflineMode ? 'offline' : 'online'
   );
-  const [tab, setTab] = useState<'join' | 'create'>('join');
+  const [tab, setTab] = useState<'join' | 'create' | 'create-group'>('join');
   const [nickname, setNickname] = useState(user?.displayName || '');
-  const [remember, setRemember] = useState(true);
+  const [remember, setRemember] = useState(!isDesktop);
   const [recentCanvases, setRecentCanvases] = useState<CanvasModel[]>([]);
   const [offlineThumbnails, setOfflineThumbnails] = useState<Record<string, string>>({});
+  const [failedPreviews, setFailedPreviews] = useState<Record<string, boolean>>({});
+  const [isLocalTunnel, setIsLocalTunnel] = useState(false);
 
   useEffect(() => {
     if (gatewayMode !== 'offline') return;
@@ -123,8 +126,9 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
     });
   };
 
-  // New room
+  // New room / canvas group
   const [title, setTitle] = useState('');
+  const [groupTitle, setGroupTitle] = useState('');
   const [preset, setPreset] = useState<number | 'custom'>(0);
   const [customWidth, setCustomWidth] = useState(String(PRESETS[0].w));
   const [customHeight, setCustomHeight] = useState(String(PRESETS[0].h));
@@ -218,6 +222,26 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
         const data = (await res.json()) as { canvases: CanvasModel[] };
         if (controller.signal.aborted) return;
         setRooms(data.canvases);
+        if (isDesktop && serverRunning && where === 'internet' && target && publicServerOrigin(target) && data.canvases.length > 0) {
+          fetch(`${here}/api/canvases`, { signal: controller.signal })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((localData: { canvases?: CanvasModel[] } | null) => {
+              if (controller.signal.aborted) return;
+              const localList = localData?.canvases;
+              const matchesLocal =
+                Array.isArray(localList) &&
+                localList.length === data.canvases.length &&
+                data.canvases.every((c, idx) => c.id === localList[idx]?.id);
+              setIsLocalTunnel(matchesLocal);
+              if (matchesLocal) {
+                const pub = publicServerOrigin(target);
+                if (pub) localStorage.setItem('atelier_public_share_url', pub);
+              }
+            })
+            .catch(() => setIsLocalTunnel(false));
+        } else {
+          setIsLocalTunnel(false);
+        }
         window.dispatchEvent(new Event('atelier:session-retry'));
         if (invitedRoom) setTab('join');
         else if (data.canvases.length === 0) setTab('create');
@@ -300,43 +324,88 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
 
   const filteredRooms = (rooms ?? []).filter((r) => `${r.group?.title ?? ''} ${r.title}`.toLowerCase().includes(query.trim().toLowerCase()));
   const roomEntries = buildCanvasGroupEntries(filteredRooms);
-  const renderRoomButton = (r: CanvasModel, inGroup = false) => (
-    <button key={r.id} type="button" role="radio" aria-checked={pickedRoom === r.id} onClick={() => setPickedRoom(r.id)}
-      aria-label={`${r.title} (${r.width}×${r.height}${r.hasPassword ? ` · ${t.gateway.requiresPassword}` : ''})`}
-      onDoubleClick={() => enter({ canvasId: r.id })}
-      className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left ${pickedRoom === r.id ? 'border-indigo-400 bg-indigo-600/20' : 'border-transparent hover:bg-neutral-800'}`}>
-      <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${pickedRoom === r.id ? 'border-indigo-400 bg-indigo-500' : 'border-neutral-600'}`} aria-hidden="true">
-        {pickedRoom === r.id && <Check className="h-3 w-3 text-white" />}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="block truncate text-sm text-white">{r.title}</span>
-        {!inGroup && r.group && <span className="block truncate text-[10px] text-indigo-300">{r.group.title}</span>}
-        <span className="block text-[11px] text-neutral-500">{r.width} × {r.height}</span>
-      </span>
-      {r.hasPassword && <span className="flex items-center gap-1 text-[11px] text-amber-300"><Lock className="h-3 w-3" />{t.gateway.requiresPassword}</span>}
-    </button>
-  );
+  const getRoomPreviewUrl = (r: CanvasModel): string | undefined => {
+    if (thumbnails?.[r.id]) return thumbnails[r.id];
+    if (r.hasPassword || failedPreviews[r.id] || !target || connectionError) return undefined;
+    const previewHost = isLocalTunnel ? here : target;
+    return `${previewHost}/api/share-preview/${encodeURIComponent(r.id)}?v=${r.latestSeq ?? 0}`;
+  };
+  const renderRoomButton = (r: CanvasModel, inGroup = false) => {
+    const previewUrl = getRoomPreviewUrl(r);
+    return (
+      <button key={r.id} type="button" role="radio" aria-checked={pickedRoom === r.id} onClick={() => setPickedRoom(r.id)}
+        aria-label={`${r.title} (${r.width}×${r.height}${r.hasPassword ? ` · ${t.gateway.requiresPassword}` : ''})`}
+        onDoubleClick={() => enter({ canvasId: r.id })}
+        className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left transition ${pickedRoom === r.id ? 'border-indigo-400 bg-indigo-600/20' : 'border-transparent hover:bg-neutral-800'}`}>
+        <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border ${pickedRoom === r.id ? 'border-indigo-400 bg-indigo-500' : 'border-neutral-600'}`} aria-hidden="true">
+          {pickedRoom === r.id && <Check className="h-3 w-3 text-white" />}
+        </span>
+        <span className="flex h-11 w-16 shrink-0 items-center justify-center overflow-hidden rounded-md border border-neutral-700/80 bg-neutral-900" aria-hidden="true">
+          {previewUrl ? (
+            <img
+              src={previewUrl}
+              alt=""
+              loading="lazy"
+              onError={() => setFailedPreviews((prev) => ({ ...prev, [r.id]: true }))}
+              className="h-full w-full object-cover object-center"
+            />
+          ) : r.hasPassword ? (
+            <Lock className="h-4 w-4 text-amber-400/80" />
+          ) : (
+            <Palette className="h-4 w-4 text-neutral-500" />
+          )}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-sm text-white">{r.title}</span>
+          {!inGroup && r.group && <span className="block truncate text-[10px] text-indigo-300">{r.group.title}</span>}
+          <span className="block text-[11px] text-neutral-500">{r.width} × {r.height}</span>
+        </span>
+        {r.hasPassword && <span className="flex items-center gap-1 text-[11px] text-amber-300"><Lock className="h-3 w-3" />{t.gateway.requiresPassword}</span>}
+      </button>
+    );
+  };
   const picked = rooms?.find((r) => r.id === pickedRoom) ?? null;
   const canCreate = true;
-  const ready = Boolean(target && !connectionError) && (tab === 'join' ? Boolean(picked) : validSize && Boolean(title.trim()) && (!usePassword || Boolean(password.trim())));
+  const ready =
+    Boolean(target && !connectionError) &&
+    (tab === 'join'
+      ? Boolean(picked)
+      : tab === 'create-group'
+        ? Boolean(groupTitle.trim()) && (!usePassword || Boolean(password.trim()))
+        : validSize && Boolean(title.trim()) && (!usePassword || Boolean(password.trim())));
 
   const openAuth = () => {
     if (!target || connectionError) return;
-    onOpenAuth?.(target);
+    onOpenAuth?.(isLocalTunnel ? here : target);
   };
 
   const enter = (options: InitialCanvasOptions) => {
     if (!target || connectionError) return;
-    if (remember) localStorage.setItem('atelier_gateway_resolved', 'true');
-    else localStorage.removeItem('atelier_gateway_resolved');
+    if (remember) {
+      localStorage.setItem('atelier_gateway_resolved', 'true');
+      localStorage.setItem('atelier_gateway_skip_on_launch', 'true');
+    } else {
+      localStorage.removeItem('atelier_gateway_resolved');
+      localStorage.removeItem('atelier_gateway_skip_on_launch');
+    }
+    if (isLocalTunnel && publicUrl) {
+      localStorage.setItem('atelier_public_share_url', publicUrl);
+    } else if (where === 'here') {
+      localStorage.removeItem('atelier_public_share_url');
+    }
     if (isGuest && nickname.trim() && nickname.trim() !== user?.displayName) setGuestDisplayName(nickname.trim());
-    onResolve(target, nickname.trim() || undefined, options);
+    onResolve(isLocalTunnel ? here : target, nickname.trim() || undefined, options);
   };
 
   const startSoloOffline = (canvasId?: string) => {
     if (!canvasId && !validSize) return;
-    if (remember) localStorage.setItem('atelier_gateway_resolved', 'true');
-    else localStorage.removeItem('atelier_gateway_resolved');
+    if (remember) {
+      localStorage.setItem('atelier_gateway_resolved', 'true');
+      localStorage.setItem('atelier_gateway_skip_on_launch', 'true');
+    } else {
+      localStorage.removeItem('atelier_gateway_resolved');
+      localStorage.removeItem('atelier_gateway_skip_on_launch');
+    }
     OfflineSessionStore.setSessionMode('offline');
     if (nickname.trim() && nickname.trim() !== user?.displayName) setGuestDisplayName(nickname.trim());
     onResolve('offline', nickname.trim() || undefined, canvasId ? { canvasId, offline: true } : {
@@ -392,7 +461,16 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
     }
     if (!ready) return;
     if (tab === 'join' && picked) enter({ canvasId: picked.id });
-    else if (tab === 'create' && canCreate) {
+    else if (tab === 'create-group' && canCreate) {
+      const gName = groupTitle.trim();
+      enter({
+        title: title.trim() || `${gName} - 畫布 1`,
+        newGroupTitle: gName,
+        width: 2048,
+        height: 2048,
+        password: usePassword ? password.trim() : undefined,
+      });
+    } else if (tab === 'create' && canCreate) {
       enter({ title: title.trim(), width: size.w, height: size.h, password: usePassword ? password.trim() : undefined });
     }
   };
@@ -405,7 +483,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
     setRoomsRefresh((n) => n + 1);
   };
 
-  const tabBtn = (id: 'join' | 'create', icon: React.ReactNode, label: string, hint: string) => (
+  const tabBtn = (id: 'join' | 'create' | 'create-group', icon: React.ReactNode, label: string, hint: string) => (
     <button type="button" role="tab" aria-selected={tab === id} aria-controls={`gateway-${id}`} id={`gateway-tab-${id}`} onClick={() => { userChoseTabRef.current = true; setTab(id); }} aria-label={`${label}：${hint}`}
       className={`flex flex-1 items-center gap-3 rounded-xl border px-3 py-3 text-left transition ${tab === id ? 'border-indigo-400 bg-indigo-600/20 text-white' : 'border-neutral-800 bg-neutral-900/60 text-neutral-300 hover:border-neutral-600'}`}>
       <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${tab === id ? 'bg-indigo-600 text-white' : 'bg-neutral-800 text-neutral-300'}`}>{icon}</span>
@@ -415,6 +493,8 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
       </span>
     </button>
   );
+
+  const pickedPreviewUrl = picked ? getRoomPreviewUrl(picked) : undefined;
 
   return (
     <div
@@ -426,12 +506,33 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
         paddingRight: 'env(safe-area-inset-right, 0px)',
       }}
     >
+      {/* Non-blocking startup intro animation banner showing creator 星火セイカ */}
+      <div aria-hidden="true" className="atelier-startup-splash pointer-events-none fixed inset-x-0 top-4 z-[60] flex justify-center px-4">
+        <div className="flex items-center gap-2.5 rounded-full border border-cyan-400/50 bg-neutral-900/95 px-4 py-2 text-xs font-bold text-white shadow-xl shadow-cyan-500/20 backdrop-blur-md">
+          <span className="inline-block h-2 w-2 animate-ping rounded-full bg-cyan-400 motion-reduce:animate-none" />
+          <span className="bg-gradient-to-r from-cyan-300 via-indigo-200 to-fuchsia-300 bg-clip-text text-transparent">
+            Lumina Drift
+          </span>
+          <span className="text-neutral-500">·</span>
+          <span className="text-amber-200">✨ 製作者：星火セイカ</span>
+        </div>
+      </div>
+
       <form onSubmit={submit} className="mx-auto flex min-h-full w-full max-w-xl flex-col gap-4 px-4 py-6 sm:py-10">
-        <header className="flex items-center gap-3">
-          <img src={`${(import.meta as any).env?.BASE_URL || './'}logo.svg`} alt="" aria-hidden="true" className="h-11 w-11 shrink-0" />
-          <div>
-            <h1 ref={heading} tabIndex={-1} className="text-lg font-black text-white outline-none">Lumina Drift{t.brand && t.brand !== 'Lumina Drift' && <> <span className="font-semibold text-neutral-300">{t.brand}</span></>}</h1>
-            <p className="text-xs text-neutral-400">{t.gateway.tagline}</p>
+        <header className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <img src={`${(import.meta as any).env?.BASE_URL || './'}logo.svg`} alt="" aria-hidden="true" className="h-11 w-11 shrink-0" />
+            <div>
+              <h1 ref={heading} tabIndex={-1} className="text-lg font-black text-white outline-none">Lumina Drift{t.brand && t.brand !== 'Lumina Drift' && <> <span className="font-semibold text-neutral-300">{t.brand}</span></>}</h1>
+              <p className="text-xs text-neutral-400">{t.gateway.tagline}</p>
+            </div>
+          </div>
+          <div
+            data-creator-badge="星火セイカ"
+            className="atelier-creator-pop flex items-center gap-1.5 rounded-full border border-indigo-400/40 bg-gradient-to-r from-indigo-500/15 via-cyan-500/15 to-fuchsia-500/15 px-3 py-1 text-xs font-semibold text-indigo-100 shadow-sm"
+          >
+            <span className="text-amber-300" aria-hidden="true">✦</span>
+            <span>製作者：星火セイカ</span>
           </div>
         </header>
 
@@ -696,6 +797,11 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                       <QrIcon className="h-3.5 w-3.5" />
                     </button>
                   </div>
+                  {isLocalTunnel && (
+                    <p className="text-[11px] text-emerald-300">
+                      ⚡ 已偵測為本機穿透網址：公開分享網址維持穿透連結，本機自動走 127.0.0.1 極速直連（回放與匯出免繞外網）
+                    </p>
+                  )}
                   {showQr && qr && <img src={qr} alt={t.gateway.qrCodeAlt.replace('{url}', shareUrl)} className="mx-auto mt-1 h-36 w-36 rounded bg-white p-1" />}
                 </div>
               )}
@@ -705,6 +811,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
             <div role="tablist" aria-label={t.gateway.tabActionAria} className="flex flex-col gap-2 sm:flex-row">
               {tabBtn('join', <DoorOpen className="h-5 w-5" />, t.gateway.joinRoom, t.gateway.joinTabDesc)}
               {tabBtn('create', <Plus className="h-5 w-5" />, t.gateway.createRoom, t.gateway.createTabDesc)}
+              {tabBtn('create-group', <Folder className="h-5 w-5" />, '建立畫布組房間', '設密碼開啟畫布組，預設給 2048×2048 畫布')}
             </div>
 
             {tab === 'join' ? (
@@ -723,50 +830,143 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                 ) : filteredRooms.length === 0 ? (
                   <p className="py-6 text-center text-xs text-neutral-400">{rooms.length ? t.gateway.noRoomsMatched : t.gateway.noRoomsCreateFirst}</p>
                 ) : (
-                  <div role="radiogroup" aria-label={t.gateway.chooseRoomAria} className="max-h-72 space-y-1.5 overflow-y-auto">
-                    {roomEntries.map((entry) => {
-                      if (entry.kind === 'canvas') return renderRoomButton(entry.canvas);
-                      const isGroupCollapsed = collapsedGroups.has(entry.group.id) && !query.trim();
-                      return (
-                        <div
-                          key={`group-${entry.group.id}`}
-                          data-canvas-group={entry.group.id}
-                          data-collapsed={isGroupCollapsed ? 'true' : 'false'}
-                          className="overflow-hidden rounded-xl border border-neutral-800 bg-neutral-950/40"
-                        >
-                          <button
-                            type="button"
-                            data-canvas-group-toggle={entry.group.id}
-                            aria-expanded={!isGroupCollapsed}
-                            aria-label={`${t.canvas.canvasGroup}: ${entry.group.title}`}
-                            onClick={() => handleToggleGroup(entry.group.id)}
-                            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-semibold text-indigo-200 transition hover:bg-neutral-800/70"
+                  <div className="space-y-2.5">
+                    <div role="radiogroup" aria-label={t.gateway.chooseRoomAria} className="max-h-72 space-y-1.5 overflow-y-auto">
+                      {roomEntries.map((entry) => {
+                        if (entry.kind === 'canvas') return renderRoomButton(entry.canvas);
+                        const isGroupCollapsed = collapsedGroups.has(entry.group.id) && !query.trim();
+                        return (
+                          <div
+                            key={`group-${entry.group.id}`}
+                            data-canvas-group={entry.group.id}
+                            data-collapsed={isGroupCollapsed ? 'true' : 'false'}
+                            className="overflow-hidden rounded-xl border border-neutral-800 bg-neutral-950/40"
                           >
-                            {isGroupCollapsed ? (
-                              <ChevronRight className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
-                            ) : (
-                              <ChevronDown className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+                            <button
+                              type="button"
+                              data-canvas-group-toggle={entry.group.id}
+                              aria-expanded={!isGroupCollapsed}
+                              aria-label={`${t.canvas.canvasGroup}: ${entry.group.title}`}
+                              onClick={() => handleToggleGroup(entry.group.id)}
+                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-semibold text-indigo-200 transition hover:bg-neutral-800/70"
+                            >
+                              {isGroupCollapsed ? (
+                                <ChevronRight className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+                              ) : (
+                                <ChevronDown className="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+                              )}
+                              {isGroupCollapsed ? (
+                                <Folder className="h-4 w-4 shrink-0 text-indigo-400" />
+                              ) : (
+                                <FolderOpen className="h-4 w-4 shrink-0 text-indigo-400" />
+                              )}
+                              <span className="min-w-0 flex-1 truncate">{entry.group.title}</span>
+                              <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] tabular-nums text-indigo-300">
+                                {entry.canvases.length}
+                              </span>
+                            </button>
+                            {!isGroupCollapsed && (
+                              <div className="space-y-1 border-t border-neutral-800/70 p-1.5 pl-4">
+                                {entry.canvases.map((r) => renderRoomButton(r, true))}
+                              </div>
                             )}
-                            {isGroupCollapsed ? (
-                              <Folder className="h-4 w-4 shrink-0 text-indigo-400" />
-                            ) : (
-                              <FolderOpen className="h-4 w-4 shrink-0 text-indigo-400" />
-                            )}
-                            <span className="min-w-0 flex-1 truncate">{entry.group.title}</span>
-                            <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] tabular-nums text-indigo-300">
-                              {entry.canvases.length}
-                            </span>
-                          </button>
-                          {!isGroupCollapsed && (
-                            <div className="space-y-1 border-t border-neutral-800/70 p-1.5 pl-4">
-                              {entry.canvases.map((r) => renderRoomButton(r, true))}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {picked && (
+                      <div
+                        data-room-preview={picked.id}
+                        className="flex items-center gap-3 rounded-xl border border-indigo-500/30 bg-neutral-950/70 p-2.5"
+                      >
+                        <div className="flex h-24 w-36 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-neutral-800 bg-neutral-900">
+                          {pickedPreviewUrl ? (
+                            <img
+                              src={pickedPreviewUrl}
+                              alt=""
+                              aria-hidden="true"
+                              onError={() => setFailedPreviews((prev) => ({ ...prev, [picked.id]: true }))}
+                              className="h-full w-full object-contain"
+                            />
+                          ) : picked.hasPassword ? (
+                            <div className="flex flex-col items-center gap-1 text-amber-300/80">
+                              <Lock className="h-5 w-5" />
+                              <span className="text-[10px]">{t.gateway.requiresPassword}</span>
+                            </div>
+                          ) : (
+                            <div className="flex flex-col items-center gap-1 text-neutral-500">
+                              <Palette className="h-5 w-5" />
+                              <span className="text-[10px]">畫布預覽</span>
                             </div>
                           )}
                         </div>
-                      );
-                    })}
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="rounded bg-indigo-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-300">
+                              畫布預覽
+                            </span>
+                            {picked.group && (
+                              <span className="truncate rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-indigo-200">
+                                📁 {picked.group.title}
+                              </span>
+                            )}
+                          </div>
+                          <p className="truncate text-sm font-bold text-white">{picked.title}</p>
+                          <p className="text-xs text-neutral-400">
+                            {picked.width} × {picked.height} px
+                            {picked.hasPassword ? ` · ${t.gateway.requiresPassword}` : ''}
+                          </p>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
+              </section>
+            ) : tab === 'create-group' ? (
+              <section id="gateway-create-group" role="tabpanel" aria-labelledby="gateway-tab-create-group" className="space-y-3 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3">
+                <label className="block space-y-1">
+                  <span className="text-xs font-semibold text-neutral-200">{t.canvas.canvasGroupName || '畫布組名稱'}</span>
+                  <input
+                    value={groupTitle}
+                    onChange={(e) => setGroupTitle(e.target.value)}
+                    maxLength={60}
+                    disabled={!canCreate}
+                    placeholder="例如：繪茶合繪組 / 角色企劃夾"
+                    className="atelier-field h-9 w-full px-3 text-sm disabled:opacity-50"
+                  />
+                </label>
+                <label className="block space-y-1">
+                  <span className="text-xs font-semibold text-neutral-200">{t.gateway.roomName}（預設首張畫布）</span>
+                  <input
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    maxLength={60}
+                    disabled={!canCreate}
+                    placeholder={groupTitle.trim() ? `${groupTitle.trim()} - 畫布 1` : '預設：畫布 1 (2048×2048)'}
+                    className="atelier-field h-9 w-full px-3 text-sm disabled:opacity-50"
+                  />
+                </label>
+                <div className="flex items-center justify-between rounded-xl border border-indigo-500/30 bg-indigo-950/25 px-3 py-2 text-xs text-indigo-200">
+                  <span>預設畫布尺寸</span>
+                  <span className="font-mono font-bold text-white">正方 2K (2048 × 2048 px)</span>
+                </div>
+                <div className="space-y-1">
+                  <label className="flex items-center gap-2 text-xs text-neutral-200">
+                    <input type="checkbox" checked={usePassword} disabled={!canCreate} onChange={(e) => setUsePassword(e.target.checked)} aria-label={t.gateway.password} />
+                    為此畫布組設定密碼（組內所有畫布共用同一把密碼鎖）
+                  </label>
+                  {usePassword && (
+                    <div className="relative">
+                      <input type={showPassword ? 'text' : 'password'} value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t.gateway.passwordPlaceholder} autoComplete="new-password"
+                        aria-label={t.gateway.password} className="atelier-field h-9 w-full px-3 pr-10 text-sm" />
+                      <button type="button" onClick={() => setShowPassword((v) => !v)} aria-label={showPassword ? t.gateway.hidePassword : t.gateway.showPassword}
+                        className="absolute right-1 top-1/2 flex h-7 w-8 -translate-y-1/2 items-center justify-center rounded text-neutral-400 hover:text-white">
+                        {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
+                  )}
+                </div>
               </section>
             ) : (
               <section id="gateway-create" role="tabpanel" aria-labelledby="gateway-tab-create" className="space-y-3 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3">
@@ -821,10 +1021,14 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
               {t.gateway.offlineStartButton}
             </button>
           ) : (
-            <button type="submit" disabled={!ready || (tab === 'create' && !canCreate)}
+            <button type="submit" disabled={!ready || (tab !== 'join' && !canCreate)}
               className="flex h-11 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 text-sm font-bold text-white hover:bg-indigo-500 disabled:opacity-40 sm:ml-auto">
-              {tab === 'join' ? <DoorOpen className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-              {tab === 'join' ? (picked ? t.gateway.joinRoomButton.replace('{title}', picked.title) : t.gateway.selectRoomFirst) : t.gateway.createAndEnter}
+              {tab === 'join' ? <DoorOpen className="h-4 w-4" /> : tab === 'create-group' ? <Folder className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+              {tab === 'join'
+                ? (picked ? t.gateway.joinRoomButton.replace('{title}', picked.title) : t.gateway.selectRoomFirst)
+                : tab === 'create-group'
+                  ? '建立畫布組並進入'
+                  : t.gateway.createAndEnter}
             </button>
           )}
         </footer>

@@ -86,7 +86,8 @@ export const App: React.FC = () => {
   // Connection & Host Mode Gateway Portal
   const [showGateway, setShowGateway] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
-    const resolved = localStorage.getItem('atelier_gateway_resolved');
+    const hasDesktopHost = Boolean((window as any).atelierDesktop?.server);
+    const resolved = localStorage.getItem(hasDesktopHost ? 'atelier_gateway_skip_on_launch' : 'atelier_gateway_resolved');
     return !resolved && !sharedRoomFromLocation();
   });
   const returningToGateway = useRef(false);
@@ -306,10 +307,19 @@ export const App: React.FC = () => {
             return;
           }
         } else if (opts?.title) {
-          // 建立新房間 is explicit now (the name starts empty), so it always makes a new room and promotes the creator to room owner/admin
+          // 建立新房間 / 建立畫布組房間 is explicit now (the name starts empty), so it always makes a new room and promotes the creator to room owner/admin
           const list = await ApiService.listCanvases();
           if (origin !== ApiService.getServerOrigin()) return;
-          const res = await ApiService.createCanvas({ title: opts.title, width: opts.width, height: opts.height, roomPassword: opts.password });
+          const res = await ApiService.createCanvas({
+            title: opts.title,
+            width: opts.width || 2048,
+            height: opts.height || 2048,
+            roomPassword: opts.password,
+            newGroupTitle: opts.newGroupTitle,
+          });
+          if (opts.password && res.canvas?.id) {
+            ApiService.setRoomPassword(res.canvas.id, opts.password);
+          }
           if (origin !== ApiService.getServerOrigin()) return;
           setCanvases([...list, res.canvas]);
           joinCanvas(res.canvas.id);
