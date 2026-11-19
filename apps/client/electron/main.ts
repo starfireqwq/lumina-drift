@@ -86,7 +86,8 @@ function getLocalNetworkAddresses() {
   for (const [name, netList] of Object.entries(interfaces)) {
     if (!netList) continue;
     for (const net of netList) {
-      if (net.family === 'IPv4' && !net.internal) {
+      // 169.254.x.x is a self-assigned link-local address nobody else can reach.
+      if (net.family === 'IPv4' && !net.internal && !net.address.startsWith('169.254.')) {
         if (net.address.startsWith('100.')) {
           addresses.push({ name: `${name} (Tailscale)`, address: net.address, type: 'tailscale' });
         } else {

@@ -28,6 +28,22 @@ async function runPhase8GatewayTests() {
     assert.ok(localhostEntry, 'Localhost 127.0.0.1 should be present');
     assert.strictEqual(localhostEntry.type, 'local', 'Localhost type should be local');
     console.log(`✓ Network interfaces detected: ${netJson.addresses.length} addresses (including ${localhostEntry.name})`);
+    assert.ok(!netJson.addresses.some((a: any) => a.address.startsWith('169.254.')), 'Link-local 169.254.x.x is never listed');
+
+    // Shared links reach the server through tunnels (frpc / cloudflared run on the host, so the socket
+    // is 127.0.0.1) or from other devices: none of them may see the host's private LAN / VPN addresses.
+    const visitorCases: Array<[string, Record<string, string>, string?]> = [
+      ['tunnel with a public Host header', { host: 'example.taiwanfrp.me:58632' }],
+      ['tunnel adding X-Forwarded-For', { host: 'localhost:3000', 'x-forwarded-for': '203.0.113.7' }],
+      ['tunnel adding CF-Connecting-IP', { host: 'localhost:3000', 'cf-connecting-ip': '203.0.113.7' }],
+      ['device on the same Wi-Fi', { host: '192.168.0.3:3000' }, '192.168.0.50'],
+    ];
+    for (const [label, headers, remoteAddress] of visitorCases) {
+      const res = await app.inject({ method: 'GET', url: '/api/server/network', headers, ...(remoteAddress ? { remoteAddress } : {}) });
+      assert.strictEqual(res.statusCode, 200, `${label}: HTTP 200`);
+      assert.deepStrictEqual(JSON.parse(res.body).addresses, [], `${label}: host addresses must not be listed`);
+    }
+    console.log(`✓ Visitors get no host addresses (${visitorCases.length} cases: tunnels and LAN devices)`);
 
     // --- 2. Testing Live Health Check Ping ---
     console.log('\n--- 2. Testing Live Health Check Diagnostic (/health) ---');

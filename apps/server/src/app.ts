@@ -24,6 +24,23 @@ declare module 'fastify' {
   }
 }
 
+const LOOPBACK_HOST_HEADER = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])(?::\d+)?$/i;
+const PROXY_HEADERS = ['x-forwarded-for', 'x-forwarded-host', 'x-real-ip', 'forwarded', 'cf-connecting-ip'];
+
+/**
+ * True only for a browser on the host machine that opened the site at localhost / 127.x / [::1].
+ * Tunnel clients (cloudflared, frpc) also connect from 127.0.0.1, so the Host header and the
+ * forwarding headers they add are checked as well; the raw socket address is used because
+ * trustProxy would otherwise let X-Forwarded-For decide request.ip.
+ */
+function isHostMachineRequest(request: FastifyRequest): boolean {
+  const remote = request.raw.socket?.remoteAddress ?? '';
+  const loopbackSocket = remote === '::1' || remote.startsWith('127.') || remote.startsWith('::ffff:127.');
+  if (!loopbackSocket) return false;
+  if (PROXY_HEADERS.some((name) => request.headers[name] !== undefined)) return false;
+  return LOOPBACK_HOST_HEADER.test(String(request.headers.host ?? ''));
+}
+
 export async function buildApp(): Promise<FastifyInstance> {
   const app = Fastify({
     logger: false,
@@ -76,15 +93,21 @@ export async function buildApp(): Promise<FastifyInstance> {
   });
 
   // Server Network Interfaces & Info
-  app.get('/api/server/network', async () => {
-    const interfaces = os.networkInterfaces();
+  // The host's LAN / VPN addresses are only listed for a page opened on the host machine itself.
+  // Everyone else (shared links, phones, tunnels) gets an empty list.
+  app.get('/api/server/network', async (request) => {
     const addresses: Array<{ name: string; address: string; type: 'lan' | 'tailscale' | 'local' }> = [];
+    if (!isHostMachineRequest(request)) {
+      return { status: 'ok', port: config.port, host: config.host, addresses, timestamp: Date.now() };
+    }
+    const interfaces = os.networkInterfaces();
     addresses.push({ name: 'Localhost (本機回環)', address: '127.0.0.1', type: 'local' });
 
     for (const [name, netList] of Object.entries(interfaces)) {
       if (!netList) continue;
       for (const net of netList) {
-        if (net.family === 'IPv4' && !net.internal) {
+        // 169.254.x.x is a self-assigned link-local address nobody else can reach.
+        if (net.family === 'IPv4' && !net.internal && !net.address.startsWith('169.254.')) {
           if (net.address.startsWith('100.')) {
             addresses.push({ name: `${name} (Tailscale 私網)`, address: net.address, type: 'tailscale' });
           } else {
