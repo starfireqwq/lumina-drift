@@ -8,6 +8,8 @@ on:
         required: false
         type: string
   push:
+    # A version tag (v1.2.0, …) also attaches the installers to that tag's GitHub release.
+    tags: ['v*']
     branches: [main]
     paths:
       - '.github/workflows/macos-packages.yml'
@@ -34,6 +36,11 @@ jobs:
             cpu: x86_64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
+    permissions:
+      contents: write # only used by the release step, which runs for version tags
+    concurrency:
+      group: macos-${{ github.ref }}-${{ matrix.arch }}
+      cancel-in-progress: false
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       EXPECTED_ARCH: ${{ matrix.arch }}
@@ -77,7 +84,8 @@ jobs:
           test -s "$resources/app.asar"
           test -s "$resources/server/dist/server.js"
           lipo "$executable" -verify_arch "$MACH_ARCH"
-          lipo "$resources/server/node_modules/better-sqlite3/build/Release/better_sqlite3.node" -verify_arch "$MACH_ARCH"
+          # better-sqlite3 13+ ships an ABI-independent N-API prebuild (see scripts/bundle-server.mjs)
+          lipo "$resources/server/node_modules/better-sqlite3/prebuilds/darwin-$EXPECTED_ARCH.node" -verify_arch "$MACH_ARCH"
           lipo "$resources/cloudflared" -verify_arch "$MACH_ARCH"
           export APPDATA="$work_dir/roaming" LOCALAPPDATA="$work_dir/local" LUMINA_RESOURCES="$resources" LUMINA_PROFILE="$work_dir/profile"
           mkdir -p "$APPDATA" "$LOCALAPPDATA" "$LUMINA_PROFILE"
@@ -108,3 +116,17 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+      - name: Attach to the GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # The other architecture's job may create the draft first.
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "Lumina Drift Paint ${TAG#v}" --notes "" \
+            || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            apps/client/release/*-Mac-*-"$EXPECTED_ARCH".pkg \
+            apps/client/release/SHA256SUMS-macOS-"$EXPECTED_ARCH".txt
