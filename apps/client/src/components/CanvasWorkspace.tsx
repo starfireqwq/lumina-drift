@@ -75,12 +75,11 @@ import { ToolRail } from './workspace/ToolRail';
 import { BrushSideSliders } from './workspace/BrushSideSliders';
 import { BezierMode, SelectionMode, ToolOptionsBar } from './workspace/ToolOptionsBar';
 import { DockColumn, DockRow, FloatingPanels, MobilePanelSheet, PanelDef } from './workspace/DockSystem';
-import { dockActions, PanelId, PANEL_TITLES, useDockLayout } from './workspace/dockStore';
+import { dockActions, PanelId, PANEL_TITLES, useDockLayout, usePhoneLayout } from './workspace/dockStore';
 import { ALL_TOOLS, MAX_BRUSH_SIZE, nextSizeStep } from './workspace/toolCatalog';
 import { RemoteCursorsLayer } from './workspace/RemoteCursorsLayer';
 import { OpLogPanel } from './workspace/OpLogPanel';
 import { QuickKeysPanel } from './workspace/QuickActions';
-import { useMediaQuery } from './workspace/useMediaQuery';
 import { playWorkspaceEntrance } from './workspace/workspaceEntrance';
 import type { ToolContext } from './workspace/tools/toolContext';
 import { LIQUIFY_TOOLS, useLiquifyTool } from './workspace/tools/useLiquifyTool';
@@ -348,7 +347,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     removeSticker,
     toggleVoiceMute,
   } = useSocket();
-  const isPhone = useMediaQuery('(max-width: 767px)');
+  // A phone keeps this layout when turned sideways; 桌面模式 switches it to the desktop layout.
+  const isPhone = usePhoneLayout();
   const { t } = useI18n();
   const dockLayout = useDockLayout();
   const railRight = !isPhone && dockLayout.railSide === 'right';

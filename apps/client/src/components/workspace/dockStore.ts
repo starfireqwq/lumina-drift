@@ -249,16 +249,34 @@ const subscribe = (cb: () => void) => {
 
 export const useDockLayout = () => useSyncExternalStore(subscribe, getDockLayout, getDockLayout);
 
+const TOUCH_UNDER_1280 = '(pointer: coarse) and (max-width: 1279px)';
+/** A phone's shorter screen side is under 600 CSS px, in portrait and landscape alike. */
+const isPhoneScreen = () => typeof window !== 'undefined' && Math.min(window.screen.width, window.screen.height) < 600;
+
+/**
+ * Phone layout (bottom tool bar, panels as sheets). A phone keeps it when turned sideways and
+ * switches to the desktop layout only through 桌面模式, in either orientation. Other screens use
+ * it below 768 px wide.
+ */
+export const usePhoneLayout = () => {
+  const layout = useDockLayout();
+  const narrow = useMediaQuery('(max-width: 767px)');
+  return isPhoneScreen() ? !layout.desktopMode : narrow;
+};
+
 /**
  * Floating windows need room and a precise pointer: on a touch screen narrower than 1280 px
- * (tablets) floating panels dock on the right unless 桌面模式 is on. A Samsung DeX desktop has a
- * mouse, so it floats freely. Phones use their own sheet layout and never get here.
+ * floating panels dock on the right unless 桌面模式 is on. A Samsung DeX desktop has a mouse,
+ * so it floats freely.
  */
 export const useFloatsAllowed = () => {
   const layout = useDockLayout();
-  const touchTablet = useMediaQuery('(pointer: coarse) and (max-width: 1279px)');
-  return layout.desktopMode || !touchTablet;
+  const touchUnder1280 = useMediaQuery(TOUCH_UNDER_1280);
+  return layout.desktopMode || !touchUnder1280;
 };
+
+/** 桌面模式 matters on phones (layout) and touch tablets (floating); a mouse screen never needs it. */
+export const useDesktopModeAvailable = () => useMediaQuery(TOUCH_UNDER_1280) || isPhoneScreen();
 
 export const PANEL_TITLES: Record<PanelId, string> = {
   brushToolset: '筆刷工具集',
