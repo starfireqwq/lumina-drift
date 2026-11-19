@@ -1186,6 +1186,12 @@ export const zhCN: Translations = {
     presetAvatars: '预设头像',
     changeAvatar: '更换',
     updateSuccess: '已成功更新个人资料！',
+    primaryAccount: '主账号',
+    primaryLogin: '登录主账号',
+    primaryLogout: '退出主账号',
+    primaryServerUrl: '主账号所在的服务器',
+    setAsPrimary: '设为主账号',
+    primaryTooltip: '前往其他服务器时自动登录，并同步名称与头像',
   },
 
   admin: {

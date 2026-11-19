@@ -15,6 +15,7 @@ import { adminRoutes } from './routes/admin.routes';
 import { RealtimeRoomManager } from './realtime/room-manager';
 import { findUserById, toUserPayload } from './services/auth.service';
 import { createSharePreviews } from './services/share-preview.service';
+import { IDENTITY_CHALLENGE, signIdentityChallenge } from './services/server-identity.service';
 import { UserPayload } from '@atelier/shared';
 
 declare module 'fastify' {
@@ -124,6 +125,16 @@ export async function buildApp(): Promise<FastifyInstance> {
       addresses,
       timestamp: Date.now(),
     };
+  });
+
+  // Proof of server identity: the same server reached through another address signs with the same key.
+  app.get<{ Querystring: { challenge?: string } }>('/api/server/identity', async (request, reply) => {
+    const challenge = request.query?.challenge;
+    if (typeof challenge !== 'string' || !IDENTITY_CHALLENGE.test(challenge)) {
+      return reply.code(400).send({ error: 'Invalid challenge' });
+    }
+    reply.header('Cache-Control', 'no-store');
+    return signIdentityChallenge(challenge);
   });
 
   // Initialize DB and Seed data

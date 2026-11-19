@@ -1186,6 +1186,12 @@ export const enUS: Translations = {
     presetAvatars: 'Preset Avatars',
     changeAvatar: 'Change',
     updateSuccess: 'Profile successfully updated!',
+    primaryAccount: 'Main account',
+    primaryLogin: 'Sign in to main account',
+    primaryLogout: 'Sign out of main account',
+    primaryServerUrl: 'Server of your main account',
+    setAsPrimary: 'Use as main account',
+    primaryTooltip: 'Signs you in on other servers and keeps your name and avatar in sync',
   },
 
   admin: {

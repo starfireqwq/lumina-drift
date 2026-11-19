@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { AtelierModal, modalButton } from './AtelierModal';
 import { useI18n } from '../context/I18nContext';
 import { ApiService } from '../services/api';
+import { accountBridgeAvailable, getPrimaryAccount, setPrimaryFromSession } from '../services/accountBridge';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -40,6 +41,8 @@ const AuthForm: React.FC<{ origin: string; onClose: () => void }> = ({ origin, o
   const [rememberUsername, setRememberUsername] = useState(true);
   const [canRememberPassword, setCanRememberPassword] = useState(false);
   const [rememberPassword, setRememberPassword] = useState(true);
+  // The first account signed in on this device becomes the primary account unless unticked.
+  const [makePrimary, setMakePrimary] = useState(() => accountBridgeAvailable() && !getPrimaryAccount());
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -92,6 +95,10 @@ const AuthForm: React.FC<{ origin: string; onClose: () => void }> = ({ origin, o
       if (desktopAuth && canRememberPassword) {
         if (rememberPassword) await desktopAuth.saveCredentials(origin, account, password).catch(() => false);
         else await desktopAuth.clearCredentials(origin).catch(() => false);
+      }
+      if (makePrimary) {
+        const me = await ApiService.getMe().catch(() => null);
+        if (me?.user) await setPrimaryFromSession(origin, me.user);
       }
       onClose();
     } catch (err: any) {
@@ -196,6 +203,12 @@ const AuthForm: React.FC<{ origin: string; onClose: () => void }> = ({ origin, o
                 }}
               />
               {t.auth.rememberPassword}
+            </label>
+          )}
+          {accountBridgeAvailable() && (
+            <label className="flex items-center gap-2 text-neutral-300" title={t.auth.primaryTooltip}>
+              <input type="checkbox" checked={makePrimary} onChange={(e) => setMakePrimary(e.target.checked)} />
+              {t.auth.setAsPrimary}
             </label>
           )}
         </div>

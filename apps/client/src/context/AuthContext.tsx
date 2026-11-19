@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import { UserPayload, ServerRole } from '@atelier/shared';
 import { ApiService } from '../services/api';
 import { LOCAL_ARTIST_ID, OfflineSessionStore } from '../services/offlineStore';
+import { getPrimaryAccount, notePrimaryEdit, PRIMARY_ACCOUNT_EVENT, restoreSession, syncAfterSession } from '../services/accountBridge';
 
 interface AuthContextType {
   user: UserPayload | null;
@@ -27,12 +28,25 @@ const localGuest = (): UserPayload => ({
   serverRole: 'guest' as ServerRole,
 });
 
-const localArtist = (): UserPayload => ({
-  id: LOCAL_ARTIST_ID,
-  username: 'local_artist',
-  displayName: localStorage.getItem('atelier_guest_name') || '本機畫師',
-  serverRole: 'admin' as ServerRole,
-});
+// Solo mode paints as the primary account when there is one.
+const localArtist = (): UserPayload => {
+  const primary = getPrimaryAccount();
+  return {
+    id: LOCAL_ARTIST_ID,
+    username: 'local_artist',
+    displayName: primary?.displayName || localStorage.getItem('atelier_guest_name') || '本機畫師',
+    serverRole: 'admin' as ServerRole,
+    ...(primary?.avatarUrl ? { avatarUrl: primary.avatarUrl } : {}),
+  };
+};
+
+// Keeps names and avatars in step across servers; a changed session arrives like any other auth update.
+const syncSession = async (origin: string, user: UserPayload) => {
+  const updated = await syncAfterSession(origin, user).catch(() => null);
+  if (updated && origin === ApiService.getServerOrigin() && !OfflineSessionStore.isOfflineMode()) {
+    window.dispatchEvent(new CustomEvent('atelier:auth-updated', { detail: updated }));
+  }
+};
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<UserPayload | null>(() =>
@@ -70,14 +84,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       const origin = ApiService.getServerOrigin();
-      const storedToken = ApiService.getToken(origin);
+      let storedToken = ApiService.getToken(origin);
       setToken(storedToken);
       if (!storedToken) {
-        verifiedOrigin = null;
-        setUser(localGuest());
-        setIsGuest(true);
-        setIsLoading(false);
-        return;
+        // Same server under another address, or an account this app keeps for the primary account.
+        setIsLoading(true);
+        storedToken = await restoreSession(origin).catch(() => null);
+        if (id !== requestId || origin !== ApiService.getServerOrigin() || OfflineSessionStore.isOfflineMode()) return;
+        if (!storedToken) {
+          verifiedOrigin = null;
+          setUser(localGuest());
+          setIsGuest(true);
+          setIsLoading(false);
+          return;
+        }
+        setToken(storedToken);
       }
 
       setIsLoading(true);
@@ -90,6 +111,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         retryDelayMs = 1500;
         setUser(user);
         setIsGuest(user.serverRole === 'guest');
+        void syncSession(origin, user);
       } catch (err) {
         if (!stillCurrent()) return;
         verifiedOrigin = null;
@@ -153,9 +175,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     window.addEventListener('atelier:session-retry', onSessionRetry);
     window.addEventListener('online', onSessionRetry);
     const unsubMode = OfflineSessionStore.subscribeSessionMode(() => void loadMe());
+    const onPrimaryChanged = () => {
+      if (OfflineSessionStore.isOfflineMode()) setUser(localArtist());
+    };
+    window.addEventListener(PRIMARY_ACCOUNT_EVENT, onPrimaryChanged);
     return () => {
       requestId++;
       clearRetry();
+      window.removeEventListener(PRIMARY_ACCOUNT_EVENT, onPrimaryChanged);
       window.removeEventListener('atelier:auth-updated', onAuthUpdated);
       window.removeEventListener('atelier:server-changed', onServerChanged);
       window.removeEventListener('atelier:auth-expired', onServerChanged);
@@ -173,6 +200,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setToken(res.token);
     setIsGuest(false);
     setIsLoading(false);
+    void syncSession(origin, res.user);
   };
 
   const register = async (username: string, password: string, displayName: string, serverRole?: ServerRole) => {
@@ -183,6 +211,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setToken(res.token);
     setIsGuest(false);
     setIsLoading(false);
+    void syncSession(origin, res.user);
   };
 
   const logout = () => {
@@ -248,11 +277,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         avatarUrl: avatarUrl !== undefined ? avatarUrl : prev?.avatarUrl,
       }));
       setIsGuest(false);
+      void notePrimaryEdit({ displayName: trimmed, avatarUrl }, null);
       return;
     }
     const origin = ApiService.getServerOrigin();
     try {
       const res = await ApiService.updateProfile({ displayName, avatarUrl });
+      void notePrimaryEdit({ displayName: res.user.displayName, avatarUrl: res.user.avatarUrl ?? null }, origin, res.user);
       if (origin !== ApiService.getServerOrigin() || ApiService.getToken(origin) !== res.token || OfflineSessionStore.isOfflineMode()) return;
       setUser(res.user);
       setToken(res.token);

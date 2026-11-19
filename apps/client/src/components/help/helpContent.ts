@@ -407,6 +407,11 @@ export const HELP_TOPICS: HelpTopic[] = [
     keywords: ['手機', '打橫', '橫向', '電腦版', '平板', 'ipad', 'dex', '桌面模式', '浮動'],
   },
   {
+    id: 'primary-account', category: 'collab', title: '主帳號與自動登入',
+    summary: '單機入口按「登入主帳號」，或登入時勾選「設為主帳號」。同一台伺服器換網址（區網 IP、通道網址）會自動登入；到別人的伺服器會自動註冊同名帳號（名稱被用走時加上 _2），並同步名稱與頭像，密碼由 App 產生並存在這台裝置。需在 App 或本機（localhost）開啟的網頁使用。',
+    keywords: ['主帳號', '自動登入', '自動註冊', '同步', '頭像', '名稱', '換網址', '帳號', 'account', 'login'],
+  },
+  {
     id: 'tourbox', category: 'ui', title: '自訂快捷鍵與 TourBox',
     summary: '設定 → 快捷鍵，點按鍵即可重新綁定。最上方有 TourBox 對照表可直接複製。',
     keywords: ['自訂快捷鍵', '綁定', '按鍵', 'tourbox', 'shortcut', 'keybinding', '熱鍵'],
