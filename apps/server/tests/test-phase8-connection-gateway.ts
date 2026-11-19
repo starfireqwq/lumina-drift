@@ -45,6 +45,23 @@ async function runPhase8GatewayTests() {
     }
     console.log(`✓ Visitors get no host addresses (${visitorCases.length} cases: tunnels and LAN devices)`);
 
+    // Server identity: a signed challenge proves the same server behind another address.
+    const { createPublicKey, verify, randomBytes } = await import('node:crypto');
+    const challenge = randomBytes(32).toString('base64url');
+    const idRes = await app.inject({ method: 'GET', url: `/api/server/identity?challenge=${challenge}`, headers: { host: 'example.taiwanfrp.me:58632' } });
+    assert.strictEqual(idRes.statusCode, 200, 'identity endpoint answers any address');
+    const id = JSON.parse(idRes.body);
+    const publicKey = createPublicKey({ key: Buffer.from(id.key, 'base64'), format: 'der', type: 'spki' });
+    assert.ok(verify('sha256', Buffer.from(`lumina-drift-identity:v1:${challenge}`), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(id.signature, 'base64')),
+      'signature verifies with the returned key');
+    assert.ok(!verify('sha256', Buffer.from(`lumina-drift-identity:v1:${challenge}x`), { key: publicKey, dsaEncoding: 'ieee-p1363' }, Buffer.from(id.signature, 'base64')),
+      'signature is bound to the challenge');
+    const again = JSON.parse((await app.inject({ method: 'GET', url: `/api/server/identity?challenge=${randomBytes(32).toString('base64url')}` })).body);
+    assert.strictEqual(again.key, id.key, 'the same server always presents the same key');
+    const bad = await app.inject({ method: 'GET', url: '/api/server/identity?challenge=short' });
+    assert.strictEqual(bad.statusCode, 400, 'malformed challenge is rejected');
+    console.log('✓ Server identity: signed challenge verifies, key is stable, bad challenge rejected');
+
     // --- 2. Testing Live Health Check Ping ---
     console.log('\n--- 2. Testing Live Health Check Diagnostic (/health) ---');
     const healthRes = await app.inject({

@@ -1186,6 +1186,12 @@ export const zhTW: Translations = {
     presetAvatars: '預設頭像',
     changeAvatar: '更換',
     updateSuccess: '已成功更新個人檔案！',
+    primaryAccount: '主帳號',
+    primaryLogin: '登入主帳號',
+    primaryLogout: '登出主帳號',
+    primaryServerUrl: '主帳號所在的伺服器',
+    setAsPrimary: '設為主帳號',
+    primaryTooltip: '到其他伺服器時自動登入，並同步名稱與頭像',
   },
 
   admin: {

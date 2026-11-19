@@ -1186,6 +1186,12 @@ export const jaJP: Translations = {
     presetAvatars: 'プリセットアバター',
     changeAvatar: '変更',
     updateSuccess: 'プロフィールを更新しました！',
+    primaryAccount: 'メインアカウント',
+    primaryLogin: 'メインアカウントでログイン',
+    primaryLogout: 'メインアカウントからログアウト',
+    primaryServerUrl: 'メインアカウントのサーバー',
+    setAsPrimary: 'メインアカウントにする',
+    primaryTooltip: '他のサーバーでも自動でログインし、名前とアイコンを同期します',
   },
 
   admin: {

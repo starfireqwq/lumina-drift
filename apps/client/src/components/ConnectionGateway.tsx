@@ -12,6 +12,8 @@ import { useI18n } from '../context/I18nContext';
 import { useCloudflareTunnel } from '../context/useCloudflareTunnel';
 import { isLoopbackServer, parseServerLink, publicServerOrigin } from '../utils/serverLinks';
 import { RESIZE_MAX, RESIZE_MIN } from '../utils/canvasResize';
+import { accountBridgeAvailable, clearPrimaryAccount, getPrimaryAccount, PRIMARY_ACCOUNT_EVENT } from '../services/accountBridge';
+import { PrimaryAccountDialog } from './PrimaryAccountDialog';
 import {
   buildCanvasGroupEntries,
   loadCollapsedCanvasGroups,
@@ -67,6 +69,14 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
     supportsOfflineMode ? 'offline' : 'online'
   );
   const [tab, setTab] = useState<'join' | 'create' | 'create-group'>('join');
+  // Primary account: solo mode paints as it, other servers get its name and avatar.
+  const [primary, setPrimary] = useState(getPrimaryAccount);
+  const [primaryDialogOpen, setPrimaryDialogOpen] = useState(false);
+  useEffect(() => {
+    const refresh = () => setPrimary(getPrimaryAccount());
+    window.addEventListener(PRIMARY_ACCOUNT_EVENT, refresh);
+    return () => window.removeEventListener(PRIMARY_ACCOUNT_EVENT, refresh);
+  }, []);
   const [nickname, setNickname] = useState(user?.displayName || '');
   const [remember, setRemember] = useState(!isDesktop);
   const [recentCanvases, setRecentCanvases] = useState<CanvasModel[]>([]);
@@ -415,7 +425,8 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
       localStorage.removeItem('atelier_gateway_skip_on_launch');
     }
     OfflineSessionStore.setSessionMode('offline');
-    if (nickname.trim() && nickname.trim() !== user?.displayName) setGuestDisplayName(nickname.trim());
+    // With a primary account the solo artist is that account; the nickname field is hidden then.
+    if (!primary && nickname.trim() && nickname.trim() !== user?.displayName) setGuestDisplayName(nickname.trim());
     onResolve('offline', nickname.trim() || undefined, canvasId ? { canvasId, offline: true } : {
       title: title.trim() || t.gateway.offlineDefaultCanvasName,
       width: size.w,
@@ -610,7 +621,20 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
 
         {/* Who you are */}
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3">
-          {gatewayMode === 'offline' || isGuest ? (
+          {gatewayMode === 'offline' && primary ? (
+            <div className="flex items-center justify-between gap-2">
+              <span className="flex min-w-0 items-center gap-2 text-xs text-neutral-300" title={t.auth.primaryTooltip}>
+                {primary.avatarUrl
+                  ? <img src={primary.avatarUrl} alt="" className="h-7 w-7 shrink-0 rounded-full object-cover" />
+                  : <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-indigo-600 text-[11px] font-bold text-white">{primary.displayName.slice(0, 1)}</span>}
+                <span className="truncate">{t.auth.primaryAccount}：<span className="font-semibold text-white">{primary.displayName}</span></span>
+              </span>
+              <button type="button" onClick={clearPrimaryAccount}
+                className="shrink-0 rounded-lg border border-neutral-700 px-2.5 py-1 text-[11px] text-neutral-300 hover:bg-neutral-800">
+                {t.auth.primaryLogout}
+              </button>
+            </div>
+          ) : gatewayMode === 'offline' || isGuest ? (
             <div className="space-y-2">
               <div className="flex items-center justify-between gap-2">
                 <div>
@@ -628,6 +652,13 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                   >
                     <LogIn className="h-3.5 w-3.5" />
                     <span>{t.navbar.loginRegister}</span>
+                  </button>
+                )}
+                {gatewayMode === 'offline' && accountBridgeAvailable() && (
+                  <button type="button" onClick={() => setPrimaryDialogOpen(true)} title={t.auth.primaryTooltip}
+                    className="flex shrink-0 items-center gap-1.5 rounded-lg border border-indigo-500/50 px-3 py-1.5 text-xs font-semibold text-indigo-200 transition hover:bg-indigo-600/20">
+                    <LogIn className="h-3.5 w-3.5" />
+                    <span>{t.auth.primaryLogin}</span>
                   </button>
                 )}
               </div>
@@ -1077,6 +1108,8 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
           )}
         </footer>
       </form>
+      {/* Outside the gateway form: the dialog is a form of its own */}
+      {primaryDialogOpen && <PrimaryAccountDialog onClose={() => setPrimaryDialogOpen(false)} />}
     </div>
   );
 };

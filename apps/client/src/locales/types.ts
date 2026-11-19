@@ -1204,6 +1204,12 @@ export interface Translations {
     presetAvatars: string;
     changeAvatar: string;
     updateSuccess: string;
+    primaryAccount: string;
+    primaryLogin: string;
+    primaryLogout: string;
+    primaryServerUrl: string;
+    setAsPrimary: string;
+    primaryTooltip: string;
   };
 
   admin: {
