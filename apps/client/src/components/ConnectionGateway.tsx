@@ -146,6 +146,10 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
 
   useEffect(() => {
     const load = async () => {
+      // Only the host machine lists its own addresses. On a phone or a shared link this would show
+      // someone else's private IPs (VPN / LAN) that usually cannot be reached from here.
+      const hostMachine = Boolean(desktop?.server?.getNetworkAddresses) || (!isAndroid && isLoopbackServer(window.location.origin));
+      if (!hostMachine) return;
       try {
         const list: NetworkAddressItem[] = desktop?.server?.getNetworkAddresses
           ? await desktop.server.getNetworkAddresses()
@@ -703,6 +707,8 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                   <span>{t.gateway.serverLocationAria}</span>
                 </span>
                 <div className="flex flex-wrap gap-1">
+                  {/* The Android app has no server of its own, so "this server" would point at the app itself. */}
+                  {!isAndroid && (
                   <button
                     type="button"
                     onClick={() => chooseWhere('here')}
@@ -714,6 +720,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                   >
                     {t.gateway.whereThisServer}
                   </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => chooseWhere('internet')}
