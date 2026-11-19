@@ -46,7 +46,7 @@ import { WorkspaceCloudflareToggle } from './WorkspaceCloudflareToggle';
 import { getPluginLabels } from '../plugins/pluginLabels';
 import type { InstalledPlugin } from '../plugins/pluginStore';
 import { getUserColor } from '../utils/userColors';
-import { dockActions, PANEL_IDS, PANEL_TITLES, PanelId, useDockLayout } from './workspace/dockStore';
+import { dockActions, PANEL_IDS, PANEL_TITLES, PanelId, useDesktopModeAvailable, useDockLayout, usePhoneLayout } from './workspace/dockStore';
 import { useAnchoredPopover } from '../utils/popoverPosition';
 import { useEffectiveWidth } from '../hooks/useEffectiveWidth';
 
@@ -201,11 +201,14 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   const isOffline = OfflineSessionStore.isOfflineMode();
   const isLocalDesktop = ApiService.isLocalDesktopServer();
   const layout = useDockLayout();
+  const desktopModeAvailable = useDesktopModeAvailable();
+  const phoneLayout = usePhoneLayout();
   const importInputRef = useRef<HTMLInputElement>(null);
   const headerRef = useRef<HTMLElement>(null);
   const { effectiveWidth, viewportWidth } = useEffectiveWidth(headerRef);
   const isNarrowMobile = viewportWidth < 600;
-  const showDesktopMenus = effectiveWidth >= 680;
+  // The phone layout keeps the compact ☰ menu when the phone is turned sideways.
+  const showDesktopMenus = !phoneLayout && effectiveWidth >= 680;
   const showBrandText = effectiveWidth >= 1020;
   const showCanvasPill = effectiveWidth >= 1140;
   const showVoice = !isNarrowMobile || effectiveWidth >= 768;
@@ -255,14 +258,15 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
       checked: layout.railSide === 'right',
       onSelect: () => dockActions.setRailSide(layout.railSide === 'right' ? 'left' : 'right'),
     },
-    {
-      kind: 'item',
+    // Phones: desktop vs phone layout. Touch tablets: floating windows. Hidden where a mouse makes it moot.
+    ...(desktopModeAvailable ? [{
+      kind: 'item' as const,
       label: t.navbar.desktopMode,
       icon: <Monitor />,
       checked: layout.desktopMode,
       title: t.navbar.desktopModeTooltip,
       onSelect: () => dockActions.setDesktopMode(!layout.desktopMode),
-    },
+    }] : []),
     { kind: 'item', label: t.common.reset, icon: <RotateCcw />, onSelect: () => dockActions.reset() },
     { kind: 'sep' },
     { kind: 'item', label: `${t.settings.uiScale}…`, icon: <ZoomIn />, onSelect: () => onOpenSettings?.('general') },

@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { EDGE_HANDLES, Edge, resizeRect, startDrag } from './DockSystem';
-import { useMediaQuery } from './useMediaQuery';
+import { usePhoneLayout } from './dockStore';
 import { getUiScale, onUiRescale } from '../../theme/uiScale';
 
 interface Rect { x: number; y: number; w: number; h: number }
@@ -69,7 +69,7 @@ const clampTo = (r: Rect, minW: number, minH: number): Rect => {
 export const ToolWindow: React.FC<ToolWindowProps> = ({
   id, title, icon, onClose, children, footer, actions, initial, minW = 260, minH = 160, closeOnEsc = true, bodyClassName = 'p-3',
 }) => {
-  const phone = useMediaQuery('(max-width: 767px)');
+  const phone = usePhoneLayout();
   const titleId = useId();
   const [rect, setRect] = useState<Rect>(() => clampTo(loadRect(id, initial), minW, minH));
   const rectRef = useRef(rect);

@@ -402,9 +402,9 @@ export const HELP_TOPICS: HelpTopic[] = [
     keywords: ['指令列', '快捷鍵面板', '自訂按鈕', '常用', 'command', 'quick'],
   },
   {
-    id: 'tablet-desktop', category: 'ui', title: '平板的桌面模式',
-    summary: '觸控平板預設不浮動面板；「視窗 → 桌面模式」打開後就能像電腦一樣使用浮動視窗。',
-    keywords: ['平板', 'ipad', 'dex', '桌面模式', '浮動'],
+    id: 'tablet-desktop', category: 'ui', title: '手機與平板的桌面模式',
+    summary: '手機打橫仍是手機版介面；「視窗 → 桌面模式」打開後改用電腦版介面，關掉就回到手機版。觸控平板打開後可使用浮動視窗。',
+    keywords: ['手機', '打橫', '橫向', '電腦版', '平板', 'ipad', 'dex', '桌面模式', '浮動'],
   },
   {
     id: 'tourbox', category: 'ui', title: '自訂快捷鍵與 TourBox',
