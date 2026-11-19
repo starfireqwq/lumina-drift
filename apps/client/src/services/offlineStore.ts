@@ -20,6 +20,7 @@ import {
   tileKey,
 } from '@atelier/shared';
 import { compositeLayers, type LayerCanvasItem } from '../engine/layerComposite';
+import { isLoopbackServer } from '../utils/serverLinks';
 
 export const LOCAL_ARTIST_ID = 'local-artist';
 const SESSION_MODE_KEY = 'atelier_session_mode';
@@ -352,9 +353,15 @@ class OfflineSessionStoreImpl {
     return this.filePaths.get(canvasId) || this.records.get(canvasId)?.filePath || null;
   }
 
+  /**
+   * Solo mode belongs to the person running Lumina Drift on this device: the desktop or Android app,
+   * or the web build opened at a loopback address (localhost / 127.x / [::1]). A visitor who opens a
+   * shared link (LAN IP, Cloudflare or any other host) always stays in collaborative mode.
+   */
   public canUseOfflineMode(): boolean {
     if (typeof window === 'undefined') return false;
-    return Boolean((window as any).atelierDesktop?.isElectron || (window as any).atelierMobile?.isAndroid);
+    if ((window as any).atelierDesktop?.isElectron || (window as any).atelierMobile?.isAndroid) return true;
+    return /^https?:$/.test(window.location.protocol) && isLoopbackServer(window.location.origin);
   }
 
   public getSessionMode(): 'offline' | 'collaborative' {

@@ -477,8 +477,8 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
           <button
             type="button"
             onClick={onOpenGateway ?? onOpenServer}
-            title={t.server.switchMode}
-            aria-label={t.server.switchMode}
+            title={onOpenGateway ? t.server.switchMode : t.server.title}
+            aria-label={onOpenGateway ? t.server.switchMode : t.server.title}
             className={`mx-1 flex shrink-0 items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-semibold transition ${
               isConnected
                 ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
