@@ -92,11 +92,13 @@ export const App: React.FC = () => {
   });
   const returningToGateway = useRef(false);
   const importingLumina = useRef(false);
-  const openGateway = () => {
+  // The mode picker is only reachable where solo mode is allowed (local app or a localhost page).
+  // Without it, the logo, the 切換模式 menu item and the ServerModal button are not rendered.
+  const openGateway = OfflineSessionStore.canUseOfflineMode() ? () => {
     if (importingLumina.current) return;
     returningToGateway.current = true;
     setShowGateway(true);
-  };
+  } : undefined;
 
   const [canvases, setCanvases] = useState<CanvasModel[]>([]);
   const canvasIdRef = useRef(activeCanvasId);

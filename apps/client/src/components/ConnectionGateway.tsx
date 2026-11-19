@@ -59,7 +59,8 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
   const desktop = typeof window !== 'undefined' ? (window as any).atelierDesktop : null;
   const isDesktop = Boolean(desktop?.isElectron);
   const isAndroid = Boolean((window as any).atelierMobile?.isAndroid);
-  const supportsOfflineMode = isDesktop || isAndroid;
+  // Local app or a page opened on this machine; a shared link opened elsewhere stays collaborative.
+  const supportsOfflineMode = OfflineSessionStore.canUseOfflineMode();
 
   const workspaceIsLocal = !initialServerUrl || isLoopbackServer(initialServerUrl);
   const [gatewayMode, setGatewayMode] = useState<'offline' | 'online'>(() =>
@@ -560,7 +561,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
           </div>
         </header>
 
-        {/* Primary Mode Selector: Solo Offline vs Online Collaborative (Desktop / Android only) */}
+        {/* Primary Mode Selector: Solo Offline vs Online Collaborative (local app or localhost page only) */}
         {supportsOfflineMode && (
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
           <button
