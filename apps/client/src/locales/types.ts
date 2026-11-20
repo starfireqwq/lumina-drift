@@ -1178,6 +1178,17 @@ export interface Translations {
     requiresPassword: string;
     joinTabDesc: string;
     createTabDesc: string;
+    createGroupRoom: string;
+    createGroupTabDesc: string;
+    groupNamePlaceholder: string;
+    groupFirstCanvasName: string;
+    groupCanvasDefaultTitle: string;
+    groupCanvasPlaceholder: string;
+    groupDefaultSize: string;
+    groupDefaultSizeValue: string;
+    groupPassword: string;
+    createGroupAndEnter: string;
+    localTunnelDetected: string;
     joinRoomButton: string;
     selectRoomFirst: string;
     createAndEnter: string;

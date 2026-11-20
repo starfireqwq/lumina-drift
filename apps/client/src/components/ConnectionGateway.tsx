@@ -599,7 +599,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
     else if (tab === 'create-group' && canCreate) {
       const gName = groupTitle.trim();
       enter({
-        title: title.trim() || `${gName} - 畫布 1`,
+        title: title.trim() || t.gateway.groupCanvasDefaultTitle.replace('{group}', gName),
         newGroupTitle: gName,
         width: 2048,
         height: 2048,
@@ -629,7 +629,6 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
         userChoseTabRef.current = true;
         setTab(id);
       }}
-      aria-label={`${label}：${hint}`}
       className={`flex min-w-0 items-start gap-2.5 rounded-2xl border p-3 text-left transition ${
         tab === id
           ? 'border-indigo-400 bg-indigo-600/20 text-white shadow-lg shadow-indigo-500/10'
@@ -644,7 +643,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
         {icon}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block whitespace-nowrap text-[13px] font-bold leading-snug">{label}</span>
+        <span className="block text-[13px] font-bold leading-snug [overflow-wrap:anywhere]">{label}</span>
         <span className="mt-0.5 block text-[11px] leading-snug text-neutral-400">{hint}</span>
       </span>
     </button>
@@ -1092,7 +1091,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                   </div>
                   {isLocalTunnel && (
                     <p className="text-[11px] text-emerald-300">
-                      ⚡ 已偵測為本機穿透網址：公開分享網址維持穿透連結，本機自動走 127.0.0.1 極速直連（回放與匯出免繞外網）
+                      {t.gateway.localTunnelDetected}
                     </p>
                   )}
                   {showQr && qr && <img src={qr} alt={t.gateway.qrCodeAlt.replace('{url}', shareUrl)} className="mx-auto mt-1 h-36 w-36 rounded bg-white p-1" />}
@@ -1104,7 +1103,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
             <div role="tablist" aria-label={t.gateway.tabActionAria} className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
               {tabBtn('join', <DoorOpen className="h-5 w-5" />, t.gateway.joinRoom, t.gateway.joinTabDesc)}
               {tabBtn('create', <Plus className="h-5 w-5" />, t.gateway.createRoom, t.gateway.createTabDesc)}
-              {tabBtn('create-group', <Folder className="h-5 w-5" />, '建立畫布組房間', '設密碼開畫布組，預設 2048×2048')}
+              {tabBtn('create-group', <Folder className="h-5 w-5" />, t.gateway.createGroupRoom, t.gateway.createGroupTabDesc)}
             </div>
 
             {tab === 'join' ? (
@@ -1219,35 +1218,35 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
             ) : tab === 'create-group' ? (
               <section id="gateway-create-group" role="tabpanel" aria-labelledby="gateway-tab-create-group" className="space-y-3 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3">
                 <label className="block space-y-1">
-                  <span className="text-xs font-semibold text-neutral-200">{t.canvas.canvasGroupName || '畫布組名稱'}</span>
+                  <span className="text-xs font-semibold text-neutral-200">{t.canvas.canvasGroupName}</span>
                   <input
                     value={groupTitle}
                     onChange={(e) => setGroupTitle(e.target.value)}
                     maxLength={60}
                     disabled={!canCreate}
-                    placeholder="例如：繪茶合繪組 / 角色企劃夾"
+                    placeholder={t.gateway.groupNamePlaceholder}
                     className="atelier-field h-9 w-full px-3 text-sm disabled:opacity-50"
                   />
                 </label>
                 <label className="block space-y-1">
-                  <span className="text-xs font-semibold text-neutral-200">{t.gateway.roomName}（預設首張畫布）</span>
+                  <span className="text-xs font-semibold text-neutral-200">{t.gateway.groupFirstCanvasName}</span>
                   <input
                     value={title}
                     onChange={(e) => setTitle(e.target.value)}
                     maxLength={60}
                     disabled={!canCreate}
-                    placeholder={groupTitle.trim() ? `${groupTitle.trim()} - 畫布 1` : '預設：畫布 1 (2048×2048)'}
+                    placeholder={groupTitle.trim() ? t.gateway.groupCanvasDefaultTitle.replace('{group}', groupTitle.trim()) : t.gateway.groupCanvasPlaceholder}
                     className="atelier-field h-9 w-full px-3 text-sm disabled:opacity-50"
                   />
                 </label>
                 <div className="flex items-center justify-between rounded-xl border border-indigo-500/30 bg-indigo-950/25 px-3 py-2 text-xs text-indigo-200">
-                  <span>預設畫布尺寸</span>
-                  <span className="font-mono font-bold text-white">正方 2K (2048 × 2048 px)</span>
+                  <span>{t.gateway.groupDefaultSize}</span>
+                  <span className="font-mono font-bold text-white">{t.gateway.groupDefaultSizeValue}</span>
                 </div>
                 <div className="space-y-1">
                   <label className="flex items-center gap-2 text-xs text-neutral-200">
                     <input type="checkbox" checked={usePassword} disabled={!canCreate} onChange={(e) => setUsePassword(e.target.checked)} aria-label={t.gateway.password} />
-                    為此畫布組設定密碼（組內所有畫布共用同一把密碼鎖）
+                    {t.gateway.groupPassword}
                   </label>
                   {usePassword && (
                     <div className="relative">
@@ -1320,7 +1319,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
               {tab === 'join'
                 ? (picked ? t.gateway.joinRoomButton.replace('{title}', picked.title) : t.gateway.selectRoomFirst)
                 : tab === 'create-group'
-                  ? '建立畫布組並進入'
+                  ? t.gateway.createGroupAndEnter
                   : t.gateway.createAndEnter}
             </button>
           )}
