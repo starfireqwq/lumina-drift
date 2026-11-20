@@ -7,6 +7,10 @@ import { FLOATS_PER_DAB, StrokeWorkerEngine, type WorkerBrushConfig } from '../s
 import { contrastRatio, resolveTheme, THEME_PRESETS, DEFAULT_CUSTOM_THEME } from '../src/theme/themes';
 import { nextSizeStep } from '../src/components/workspace/toolCatalog';
 import { findContentBounds } from '../src/utils/pixelBounds';
+import {
+  alignBlocker, alignCrops, alignDestination, alignOffset, copyRgbaRect, rectMinus, resolveAlignBasis, selectionFrame,
+  type AlignRect,
+} from '../src/utils/layerAlign';
 import { applyColorOutline } from '../src/engine/colorOutline';
 import { healUnderMask } from '../src/engine/VectorEngine';
 import { ScopedUndoManager } from '../src/engine/ScopedUndoManager';
@@ -890,6 +894,96 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   const blurred = runPixelFilter(PIXEL_FILTER_RUNNERS.box, source, width, height, { radius: 1 });
   assert.equal(blurred.length, source.length);
   assert.notDeepEqual(blurred, source, 'Blur changes the pixels');
+}
+
+// 對齊 L1: basis, whole-pixel offsets, off-canvas parts, and a pixel-level run of the move
+{
+  assert.equal(resolveAlignBasis('auto', false), 'canvas', 'Auto without a selection uses the canvas');
+  assert.equal(resolveAlignBasis('auto', true), 'selection', 'Auto with a selection uses the selection');
+  assert.equal(resolveAlignBasis('selection', false), null, 'The selection basis needs a selection');
+  assert.equal(resolveAlignBasis('canvas', true), 'canvas');
+
+  const canvasFrame: AlignRect = { x: 0, y: 0, w: 100, h: 80 };
+  const content: AlignRect = { x: 10, y: 20, w: 30, h: 40 };
+  assert.deepEqual(alignOffset(content, canvasFrame, 'left', null), { dx: -10, dy: 0 });
+  assert.deepEqual(alignOffset(content, canvasFrame, 'right', null), { dx: 60, dy: 0 });
+  assert.deepEqual(alignOffset(content, canvasFrame, 'center', null), { dx: 25, dy: 0 });
+  assert.deepEqual(alignOffset(content, canvasFrame, null, 'top'), { dx: 0, dy: -20 });
+  assert.deepEqual(alignOffset(content, canvasFrame, null, 'bottom'), { dx: 0, dy: 20 });
+  assert.deepEqual(alignOffset(content, canvasFrame, 'center', 'center'), { dx: 25, dy: 0 });
+  // Odd leftover: 100 - 31 = 69 → 34 on the left, 35 on the right
+  assert.equal(alignOffset({ x: 0, y: 0, w: 31, h: 1 }, canvasFrame, 'center', null).dx, 34);
+
+  assert.deepEqual(selectionFrame({ minX: 5, minY: 6, maxX: 14, maxY: 9 }), { x: 5, y: 6, w: 10, h: 4 }, 'Selection bounds are inclusive');
+  assert.deepEqual(selectionFrame({ minX: 5.4, minY: 6, maxX: 14.2, maxY: 9 }), { x: 5, y: 6, w: 11, h: 4 }, 'A fractional lasso frame covers the pixels it touches');
+
+  assert.equal(alignCrops(content, -10, 0, 100, 80), false);
+  assert.equal(alignCrops(content, -11, 0, 100, 80), true, 'One pixel past the left edge is cut off');
+  assert.equal(alignCrops(content, 0, 21, 100, 80), true, 'One pixel past the bottom edge is cut off');
+  assert.deepEqual(alignDestination({ x: 0, y: 0, w: 10, h: 10 }, -4, 0, 100, 80), { x: 0, y: 0, w: 6, h: 10, sx: 4, sy: 0 });
+  assert.equal(alignDestination({ x: 0, y: 0, w: 10, h: 10 }, -10, 0, 100, 80), null, 'Nothing left on the canvas');
+
+  const area = (rs: AlignRect[]) => rs.reduce((n, r) => n + r.w * r.h, 0);
+  const a: AlignRect = { x: 0, y: 0, w: 10, h: 10 };
+  assert.deepEqual(rectMinus(a, null), [a]);
+  assert.deepEqual(rectMinus(a, { x: 20, y: 0, w: 5, h: 5 }), [a], 'Apart: all of it');
+  assert.deepEqual(rectMinus(a, { x: 3, y: 0, w: 10, h: 10 }), [{ x: 0, y: 0, w: 3, h: 10 }]);
+  assert.equal(area(rectMinus(a, { x: 4, y: 6, w: 10, h: 10 })) + 6 * 4, 100, 'Strips + overlap = the whole rect');
+  assert.deepEqual(rectMinus(a, { x: -5, y: -5, w: 30, h: 30 }), [], 'Fully covered: nothing to clear');
+
+  assert.equal(alignBlocker(null, { canEdit: true, busy: false, hasMask: false, movedByKeyframes: false }), 'noLayer');
+  const raster = { id: 'r', layerType: 'raster' };
+  assert.equal(alignBlocker(raster, { canEdit: true, busy: false, hasMask: false, movedByKeyframes: false }), null);
+  assert.equal(alignBlocker(raster, { canEdit: true, busy: true, hasMask: false, movedByKeyframes: false }), 'busy');
+  assert.equal(alignBlocker({ id: 'g', layerType: 'group' }, { canEdit: true, busy: false, hasMask: false, movedByKeyframes: false }), 'group');
+  assert.equal(alignBlocker({ id: 'm', layerType: 'mask' }, { canEdit: true, busy: false, hasMask: false, movedByKeyframes: false }), 'mask');
+  assert.equal(alignBlocker(raster, { canEdit: false, busy: false, hasMask: true, movedByKeyframes: true }), 'notEditable');
+  assert.equal(alignBlocker(raster, { canEdit: true, busy: false, hasMask: true, movedByKeyframes: false }), 'hasMask');
+  assert.equal(alignBlocker({ id: 't', layerType: 'text' }, { canEdit: true, busy: false, hasMask: false, movedByKeyframes: true }), 'keyframes');
+
+  // The move as useLayerAlign does it, on a CPU buffer: clear what the pixels leave, write them where they land
+  const W = 40;
+  const H = 30;
+  const paint = (rects: AlignRect[]) => {
+    const px = new Uint8Array(W * H * 4);
+    for (const r of rects) for (let y = r.y; y < r.y + r.h; y++) for (let x = r.x; x < r.x + r.w; x++) px.set([200, 100, 50, 255], (y * W + x) * 4);
+    return px;
+  };
+  const boundsOf = (px: Uint8Array): AlignRect => {
+    const b = findContentBounds(px, W, H)!;
+    return { x: b.minX, y: b.minY, w: b.maxX - b.minX + 1, h: b.maxY - b.minY + 1 };
+  };
+  const move = (px: Uint8Array, frame: AlignRect, x: 'left' | 'center' | 'right' | null, y: 'top' | 'center' | 'bottom' | null) => {
+    const r = boundsOf(px);
+    const { dx, dy } = alignOffset(r, frame, x, y);
+    const dest = alignDestination(r, dx, dy, W, H);
+    const moved = dest && copyRgbaRect(px, W, { x: r.x + dest.sx, y: r.y + dest.sy, w: dest.w, h: dest.h });
+    const out = px.slice();
+    const write = (rect: AlignRect, src: Uint8Array | null) => {
+      for (let row = 0; row < rect.h; row++) {
+        const at = ((rect.y + row) * W + rect.x) * 4;
+        if (src) out.set(src.subarray(row * rect.w * 4, (row + 1) * rect.w * 4), at);
+        else out.fill(0, at, at + rect.w * 4);
+      }
+    };
+    for (const s of rectMinus(r, dest)) write(s, null);
+    if (dest && moved) write(dest, moved);
+    return out;
+  };
+  // An L of two strokes (bounds 7×6 at 9,5) with a gap inside the bounds
+  const shape = paint([{ x: 9, y: 5, w: 2, h: 6 }, { x: 9, y: 9, w: 7, h: 2 }]);
+  const full: AlignRect = { x: 0, y: 0, w: W, h: H };
+  assert.deepEqual(boundsOf(move(shape, full, 'left', null)), { x: 0, y: 5, w: 7, h: 6 }, 'Left edge of the canvas');
+  assert.deepEqual(boundsOf(move(shape, full, 'center', null)), { x: 16, y: 5, w: 7, h: 6 }, 'Horizontal centre: (40 - 7) / 2 → 16');
+  assert.deepEqual(boundsOf(move(shape, full, null, 'bottom')), { x: 9, y: 24, w: 7, h: 6 }, 'Bottom edge of the canvas');
+  const cornered = move(shape, full, 'right', 'bottom');
+  assert.deepEqual(boundsOf(cornered), { x: 33, y: 24, w: 7, h: 6 });
+  let opaque = 0;
+  for (let i = 3; i < cornered.length; i += 4) if (cornered[i]) opaque++;
+  assert.equal(opaque, 2 * 6 + 7 * 2 - 2 * 2, 'Every pixel moved, none lost or doubled');
+  // A selection frame smaller than the layer: the whole layer moves to the frame's edge and nothing is cut
+  const selFrame = selectionFrame({ minX: 20, minY: 2, maxX: 23, maxY: 4 });
+  assert.deepEqual(boundsOf(move(shape, selFrame, 'left', 'top')), { x: 20, y: 2, w: 7, h: 6 }, 'The selection is only the frame');
 }
 
 console.log('ui-logic checks passed');

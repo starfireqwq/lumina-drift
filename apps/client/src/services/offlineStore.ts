@@ -155,7 +155,8 @@ function hasAnyPixel(buf: Uint8Array): boolean {
   return false;
 }
 
-function shiftVectorStroke(stroke: VectorStroke, offsetX: number, offsetY: number): VectorStroke {
+/** A vector stroke moved by (offsetX, offsetY): anchors, Bézier handles and bounds (canvas resize, layer alignment) */
+export function shiftVectorStroke(stroke: VectorStroke, offsetX: number, offsetY: number): VectorStroke {
   const shiftAnchor = (a: VectorAnchor): VectorAnchor => ({
     ...a,
     x: a.x + offsetX,
