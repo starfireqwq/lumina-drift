@@ -143,6 +143,22 @@ export class CanvasViewport {
     this.updateTransform();
   }
 
+  /** Rotate about a screen position (two-finger twist): the canvas point under it stays put */
+  public rotateAt(clientX: number, clientY: number, deltaRadians: number) {
+    if (!deltaRadians) return;
+    const rect = this.domElement?.getBoundingClientRect();
+    const x = clientX - (rect?.left ?? 0);
+    const y = clientY - (rect?.top ?? 0);
+    const cos = Math.cos(deltaRadians);
+    const sin = Math.sin(deltaRadians);
+    const dx = this.state.panX - x;
+    const dy = this.state.panY - y;
+    this.state.panX = x + dx * cos - dy * sin;
+    this.state.panY = y + dx * sin + dy * cos;
+    this.state.rotation = (this.state.rotation + deltaRadians) % (Math.PI * 2);
+    this.updateTransform();
+  }
+
   public resetRotation() {
     this.state.rotation = 0;
     this.updateTransform();

@@ -439,7 +439,7 @@ export const HELP_TOPICS: HelpTopic[] = [
   },
   {
     id: 'gesture-pinch', category: 'touch', title: '雙指捏合：縮放與旋轉',
-    summary: '兩指張開／合起縮放，轉動兩指旋轉畫面，拖曳平移。',
+    summary: '兩指張開／合起縮放，轉動兩指旋轉畫面（接近水平或垂直時會吸附），拖曳平移。',
     art: 'pinch',
     keywords: ['捏合', '縮放', '旋轉', '雙指', 'pinch', 'zoom'],
   },

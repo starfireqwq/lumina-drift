@@ -14,6 +14,35 @@ import type { useVectorTools } from './useVectorTools';
 import type { useBrushTool } from './useBrushTool';
 import type { useTransformTool } from './useTransformTool';
 
+/** A two-finger twist turns the view only past this (~8°): a pinch never tilts it by accident */
+const TOUCH_ROTATE_ENGAGE = (8 * Math.PI) / 180;
+/** Within this (~5°) of a right angle the twisted view snaps to it */
+const TOUCH_ROTATE_SNAP = (5 * Math.PI) / 180;
+
+/** The same angle in (−π, π] */
+function wrapAngle(a: number) {
+  const t = (a + Math.PI) % (Math.PI * 2);
+  return (t < 0 ? t + Math.PI * 2 : t) - Math.PI;
+}
+
+function snapRightAngle(a: number) {
+  const q = Math.round(a / (Math.PI / 2)) * (Math.PI / 2);
+  return Math.abs(a - q) < TOUCH_ROTATE_SNAP ? q : a;
+}
+
+interface TouchTwist {
+  /** The two pointers it follows (another pair restarts it) */
+  a: number;
+  b: number;
+  /** Angle of the line between the fingers at the last move */
+  last: number;
+  /** Turned so far before engaging */
+  twist: number;
+  engaged: boolean;
+  /** The view's rotation without snapping */
+  raw: number;
+}
+
 export interface CanvasTools {
   brush: ReturnType<typeof useBrushTool>;
   liquify: ReturnType<typeof useLiquifyTool>;
@@ -88,6 +117,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
   const tailRef = useRef<{ id: number; props: BrushProperties; vector?: boolean } | null>(null);
   const touchInitialDistRef = useRef<number | null>(null);
   const touchLastMidRef = useRef<Point | null>(null);
+  const touchTwistRef = useRef<TouchTwist | null>(null);
 
   const finishTail = (pointerId: number, event?: PointerEvent) => {
     const tail = tailRef.current;
@@ -200,6 +230,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
           x: (pts[0].x + pts[1].x) / 2,
           y: (pts[0].y + pts[1].y) / 2,
         };
+        touchTwistRef.current = null; // restarts on the first move of this pair
       }
       return;
     }
@@ -433,6 +464,33 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
             touchInitialDistRef.current = currentDist;
           }
 
+          // Twisting the fingers turns the view about them (after a small dead zone; snaps near right angles)
+          const [idA, idB] = Array.from(activePointersRef.current.keys());
+          const angle = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
+          const twist = touchTwistRef.current;
+          if (!twist || twist.a !== idA || twist.b !== idB) {
+            touchTwistRef.current = {
+              a: idA, b: idB, last: angle, twist: 0,
+              engaged: twist?.engaged ?? false,
+              raw: viewportRef.current.getState().rotation,
+            };
+          } else {
+            const d = wrapAngle(angle - twist.last);
+            twist.last = angle;
+            if (!twist.engaged) {
+              twist.twist += d;
+              if (Math.abs(twist.twist) > TOUCH_ROTATE_ENGAGE) {
+                twist.engaged = true;
+                if (touchSessionRef.current) touchSessionRef.current.hasMoved = true; // not a two-finger tap
+              }
+            } else {
+              twist.raw += d;
+              const anchor = touchLastMidRef.current ?? currentMid;
+              const current = viewportRef.current.getState().rotation;
+              viewportRef.current.rotateAt(anchor.x, anchor.y, wrapAngle(snapRightAngle(twist.raw) - current));
+            }
+          }
+
           if (touchLastMidRef.current) {
             const panX = currentMid.x - touchLastMidRef.current.x;
             const panY = currentMid.y - touchLastMidRef.current.y;
@@ -550,6 +608,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
           touchSessionRef.current = null;
           touchInitialDistRef.current = null;
           touchLastMidRef.current = null;
+          touchTwistRef.current = null;
         }
         return;
       }
@@ -568,6 +627,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     if (activePointersRef.current.size < 2) {
       touchInitialDistRef.current = null;
       touchLastMidRef.current = null;
+      touchTwistRef.current = null;
     }
 
     if (currentTool === 'vector_bezier' && !isPanningRef.current) {
@@ -636,6 +696,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     isMultiTouchGestureRef.current = false;
     touchInitialDistRef.current = null;
     touchLastMidRef.current = null;
+    touchTwistRef.current = null;
     isSpacePressedRef.current = false;
     isPanningRef.current = false;
   };
