@@ -1353,7 +1353,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                       }} aria-label={t.layers.groupLayer}
                         className="flex h-7 w-9 items-center justify-center gap-0.5 rounded border border-amber-700/50 bg-amber-950/40 text-amber-400">
                         {isCollapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                        {layer.meta?.animation ? <Film className="h-3.5 w-3.5" /> : layer.meta?.cel?.ref !== undefined ? <Repeat className="h-3.5 w-3.5" /> : <Folder className="h-3.5 w-3.5" />}
+                        {layer.meta?.animation ? <Film className="h-3.5 w-3.5" /> : layer.meta?.cel?.ref === '' ? <span aria-hidden className="text-sm leading-none">×</span> : layer.meta?.cel?.ref !== undefined ? <Repeat className="h-3.5 w-3.5" /> : <Folder className="h-3.5 w-3.5" />}
                       </button>
                     ) : (
                       <button type="button"

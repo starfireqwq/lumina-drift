@@ -748,6 +748,12 @@ export interface Translations {
     onionSkinPrev: string;
     onionSkinNext: string;
     onionSkinOpacity: string;
+    onionMode: string;
+    onionModeTint: string;
+    onionModeShade: string;
+    onionModeOriginal: string;
+    blankFrame: string;
+    missingCel: string;
     addCel: string;
     duplicateCel: string;
     deleteCel: string;

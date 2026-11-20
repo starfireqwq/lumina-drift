@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
-  AnimationEngine, AnimationTrack, MAX_HOLD, MAX_ONION, MAX_TIMELINE_FRAMES, OnionSkinConfig, TIMELINE_SLACK, celLayerOf, entryIndexAt, entryStart,
-  formatTimecode, parseTimecode, trackLength, upsertTransformKeyframe, removeTransformKeyframe, type TimecodeMode,
+  AnimationEngine, AnimationTrack, MAX_HOLD, MAX_ONION, MAX_TIMELINE_FRAMES, ONION_MODES, OnionSkinConfig, TIMELINE_SLACK, celLayerOf, entryIndexAt, entryStart,
+  formatTimecode, parseTimecode, trackLength, upsertTransformKeyframe, removeTransformKeyframe, type OnionMode, type TimecodeMode,
 } from '../engine/AnimationEngine';
 import { clearLightTable, lightTableHas, toggleLightCel, type LightTableScope, type LightTableState } from '../engine/lightTable';
 import {
@@ -15,6 +15,7 @@ import {
   Repeat, Repeat2, SkipBack, SkipForward, Trash2, Users, X,
 } from 'lucide-react';
 import { AtelierModal, modalButton } from './AtelierModal';
+import { OverlayPresence } from './OverlayPresence';
 import { getUserColor } from '../utils/userColors';
 import {
   computeVideoExportDimensionsForResolution,
@@ -86,6 +87,8 @@ interface AnimationTimelineBarProps {
   onAddFrame: () => void;
   onDuplicateFrame: () => void;
   onReuseCel: (celId: string) => void;
+  /** A blank frame at the playhead: this track shows nothing there */
+  onAddBlank: () => void;
   onDeleteFrame: () => void;
   onMoveFrame: (direction: -1 | 1) => void;
   onSetHold: (hold: number) => void;
@@ -104,6 +107,16 @@ const TRACK_LABEL_WIDTH = 96;
 const CELL = 36; // px per timeline frame
 const RULER_HEIGHT = 20;
 const ROW = 50;
+const PANEL_LEAVE_MS = 110;
+const TIMELINE_LEAVE_MS = 200;
+/** The chip beside each onion skin look, in the "before" colour: flat, shaded light to dark, or the drawing's own greys */
+const onionSwatch = (mode: OnionMode, color: string) =>
+  mode === 'tint'
+    ? color
+    : mode === 'shade'
+      ? `linear-gradient(135deg, color-mix(in srgb, ${color} 30%, black), ${color} 50%, color-mix(in srgb, ${color} 25%, white))`
+      : 'linear-gradient(135deg, #262626, #a3a3a3 55%, #f5f5f5)';
+const prefersReducedMotion = () => typeof window !== 'undefined' && Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
 
 /**
  * CSP-style timeline: one row per animation folder, one column per frame. A cel spans as many
@@ -129,7 +142,7 @@ const AnimThumbImg: React.FC<{
 
 export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   engine, isOpen, onClose, tracks, activeFolderId, thumbnails = EMPTY_THUMBS, subscribeThumbnails, getThumbnailsSnapshot, ownerNames, can,
-  onCreateFolder, onAddFrame, onDuplicateFrame, onReuseCel, onDeleteFrame, onMoveFrame, onSetHold, onToggleShared, onFpsChange,
+  onCreateFolder, onAddFrame, onDuplicateFrame, onReuseCel, onAddBlank, onDeleteFrame, onMoveFrame, onSetHold, onToggleShared, onFpsChange,
   onSelectCell, planExport, onPlaceEntries, onCopyEntries, onPasteEntries, onSetEntryHold, ripple, onToggleRipple,
   timelineLength, lengthIsSet, onSetLength, lightTable, onUpdateLightTable,
   activeLayer, canvasWidth = 1920, canvasHeight = 1080, onUpdateLayerKeyframes,
@@ -156,7 +169,39 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   const [range, setRange] = useState(engine.getRange());
   const [onionSkin, setOnionSkin] = useState<OnionSkinConfig>(engine.getOnionSkinConfig());
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const [panel, setPanel] = useState<null | 'onion' | 'range' | 'reuse' | 'keyframes' | 'light'>(null);
+  type Panel = null | 'onion' | 'range' | 'reuse' | 'keyframes' | 'light';
+  const [panel, setPanelNow] = useState<Panel>(null);
+  // Settings rows glide out before the next one glides in (the row is swapped, not stacked)
+  const [panelLeaving, setPanelLeaving] = useState(false);
+  const panelTimerRef = useRef(0);
+  const setPanel = (next: Panel) => {
+    if (next === panel) return;
+    window.clearTimeout(panelTimerRef.current);
+    if (prefersReducedMotion()) {
+      setPanelNow(next);
+      return;
+    }
+    setPanelLeaving(true);
+    panelTimerRef.current = window.setTimeout(() => {
+      setPanelLeaving(false);
+      setPanelNow(next);
+    }, PANEL_LEAVE_MS);
+  };
+  useEffect(() => () => window.clearTimeout(panelTimerRef.current), []);
+  // Opening slides the timeline up from the bottom edge; closing slides it back down before it goes
+  const [retained, setRetained] = useState(isOpen);
+  useEffect(() => {
+    if (isOpen) {
+      setRetained(true);
+      return;
+    }
+    if (prefersReducedMotion()) {
+      setRetained(false);
+      return;
+    }
+    const id = window.setTimeout(() => setRetained(false), TIMELINE_LEAVE_MS);
+    return () => window.clearTimeout(id);
+  }, [isOpen]);
   const [loop, setLoop] = useState(engine.getLoop());
   // Seconds + frames (CSP "1+5") or frame numbers: this viewer's own
   const [timecode, setTimecode] = useState<TimecodeMode>(() => {
@@ -199,7 +244,8 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
         prev.nextFramesCount === nextOnion.nextFramesCount &&
         prev.opacity === nextOnion.opacity &&
         prev.prevColor === nextOnion.prevColor &&
-        prev.nextColor === nextOnion.nextColor
+        prev.nextColor === nextOnion.nextColor &&
+        prev.mode === nextOnion.mode
           ? prev
           : nextOnion
       );
@@ -255,6 +301,11 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
       if (!d.started && Math.hypot(e.clientX - d.startX, e.clientY - d.startY) < 5) return;
       const { t, row } = at(e);
       if (d.mode === 'hold') {
+        // Long holds: the grid scrolls on when the edge is dragged near its sides
+        const el = gridRef.current!;
+        const r = el.getBoundingClientRect();
+        if (e.clientX > r.right - 28) el.scrollLeft += CELL;
+        else if (e.clientX < r.left + TRACK_LABEL_WIDTH + 28) el.scrollLeft = Math.max(0, el.scrollLeft - CELL);
         setDrag({ ...d, started: true, hold: Math.max(1, Math.min(MAX_HOLD, Math.round(t - d.origStart))) });
         return;
       }
@@ -401,8 +452,10 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
     mark(1, onionSkin.nextFramesCount, 'next');
   }
 
-  // Frames shown: the timeline plus room after it to put cels on (Krita shows empty frames too)
-  const shownLength = length + TIMELINE_SLACK;
+  // Frames shown: the timeline plus room after it to put cels on (Krita shows empty frames too);
+  // a cel's edge dragged past the end makes room as it goes
+  const dragEnd = drag?.started && drag.mode === 'hold' ? drag.origStart + drag.hold : 0;
+  const shownLength = Math.min(MAX_TIMELINE_FRAMES, Math.max(length, dragEnd)) + TIMELINE_SLACK;
   const timeAt = (e: React.MouseEvent<HTMLElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     return Math.max(0, Math.min(shownLength - 1, Math.floor((e.clientX - rect.left) / CELL)));
@@ -450,7 +503,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
     }
   };
 
-  if (!isOpen) return null;
+  if (!isOpen && !retained) return null;
   const iconBtn = 'flex h-7 min-w-7 shrink-0 items-center justify-center gap-0.5 rounded px-1 text-neutral-300 hover:bg-neutral-800 hover:text-white disabled:opacity-35 disabled:hover:bg-transparent';
   const chip = (on: boolean) => `flex h-7 shrink-0 items-center gap-1 rounded-lg border px-2 text-[11px] font-bold disabled:opacity-40 ${on ? 'border-amber-500/60 bg-amber-500/15 text-amber-300' : 'border-neutral-700/70 text-neutral-300 hover:bg-neutral-800'}`;
   const stepper = (label: string, value: number, set: (n: number) => void, min: number, max: number) => (
@@ -459,6 +512,28 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
       <button type="button" onClick={() => set(value - 1)} disabled={value <= min} aria-label={`${label} -1`} className={iconBtn}><Minus className="h-3 w-3" /></button>
       <span className="w-5 text-center font-mono text-xs font-bold text-white">{value}</span>
       <button type="button" onClick={() => set(value + 1)} disabled={value >= max} aria-label={`${label} +1`} className={iconBtn}><Plus className="h-3 w-3" /></button>
+    </span>
+  );
+  const onionModeLabel = (m: OnionMode) => (m === 'tint' ? t.animation.onionModeTint : m === 'shade' ? t.animation.onionModeShade : t.animation.onionModeOriginal);
+  /** A hold you can also type: the + / − buttons step by one, the box takes any number up to `max` */
+  const holdStepper = (label: string, value: number, set: (n: number) => void, editable: boolean) => (
+    <span className="flex shrink-0 items-center gap-0.5 text-[11px] text-neutral-400">
+      {label}
+      <button type="button" onClick={() => set(value - 1)} disabled={!editable || value <= 1} aria-label={`${label} -1`} className={iconBtn}><Minus className="h-3 w-3" /></button>
+      <input key={value} defaultValue={value} disabled={!editable} inputMode="numeric" aria-label={label}
+        onFocus={(e) => e.currentTarget.select()}
+        onKeyDown={(e) => {
+          e.stopPropagation(); // typing digits must not step frames
+          if (e.key === 'Enter') e.currentTarget.blur();
+          if (e.key === 'Escape') { e.currentTarget.value = String(value); e.currentTarget.blur(); }
+        }}
+        onBlur={(e) => {
+          const n = Math.round(Number(e.currentTarget.value));
+          if (Number.isFinite(n) && n >= 1 && n !== value) set(Math.min(MAX_HOLD, n));
+          else e.currentTarget.value = String(value);
+        }}
+        className="atelier-field h-6 w-11 px-1 text-center font-mono text-xs font-bold text-white disabled:opacity-60" />
+      <button type="button" onClick={() => set(value + 1)} disabled={!editable || value >= MAX_HOLD} aria-label={`${label} +1`} className={iconBtn}><Plus className="h-3 w-3" /></button>
     </span>
   );
   const tc = (frame: number) => formatTimecode(frame, fps, timecode);
@@ -478,8 +553,8 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   const exportFrames = exportRangeOnly && range ? range.end - range.start + 1 : length;
 
   return (
-    <div ref={rootRef} tabIndex={-1} onKeyDown={onTimelineKey} data-anim-timeline style={{ touchAction: 'none' }}
-      className={`relative z-10 flex shrink-0 flex-col overflow-hidden border-t border-neutral-800 bg-neutral-950/95 outline-none transition-all duration-200 ${isCollapsed ? 'h-10' : 'h-52 sm:h-56'}`}>
+    <div ref={rootRef} tabIndex={-1} onKeyDown={onTimelineKey} data-anim-timeline data-phase={isOpen ? 'open' : 'closing'} style={{ touchAction: 'none' }}
+      className={`atelier-timeline relative z-10 flex shrink-0 flex-col overflow-hidden border-t border-neutral-800 bg-neutral-950/95 outline-none transition-all duration-200 ${isCollapsed ? 'h-10' : 'h-52 sm:h-56'} ${isOpen ? '' : 'pointer-events-none'}`}>
       {/* Transport */}
       <div style={{ touchAction: 'pan-x' }} role="toolbar" aria-label={t.animation.timeline}
         className="no-scrollbar flex h-10 shrink-0 items-center gap-1.5 overflow-x-auto border-b border-neutral-800/80 bg-neutral-900/90 px-2 text-xs text-neutral-300">
@@ -563,7 +638,8 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
       {!isCollapsed && tracks.length > 0 && (
         <>
           {/* Edit row, or the settings panel that is open */}
-          <div style={{ touchAction: 'pan-x' }} className="no-scrollbar flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-neutral-800/60 px-2 text-[11px] text-neutral-300">
+          <div key={panel ?? 'edit'} style={{ touchAction: 'pan-x' }}
+            className={`atelier-tl-row no-scrollbar relative flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-neutral-800/60 px-2 text-[11px] text-neutral-300 ${panelLeaving ? 'is-leaving' : ''}`}>
             {panel === 'onion' && (
               <>
                 <button type="button" onClick={() => updateOnion({ enabled: !onionSkin.enabled })} aria-pressed={onionSkin.enabled} className={chip(onionSkin.enabled)}>
@@ -571,6 +647,18 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 </button>
                 {stepper(t.animation.onionPrev, onionSkin.prevFramesCount, (n) => updateOnion({ prevFramesCount: n }), 0, MAX_ONION)}
                 {stepper(t.animation.onionNext, onionSkin.nextFramesCount, (n) => updateOnion({ nextFramesCount: n }), 0, MAX_ONION)}
+                <span role="radiogroup" aria-label={t.animation.onionMode} className="flex shrink-0 overflow-hidden rounded-lg border border-neutral-700/70">
+                  {ONION_MODES.map((m) => {
+                    const on = (onionSkin.mode ?? 'tint') === m;
+                    return (
+                      <button key={m} type="button" role="radio" aria-checked={on} onClick={() => updateOnion({ mode: m })}
+                        className={`flex h-7 items-center gap-1 px-2 text-[11px] font-bold transition-colors ${on ? 'bg-amber-500/15 text-amber-300' : 'text-neutral-300 hover:bg-neutral-800'}`}>
+                        <span aria-hidden className="atelier-onion-swatch h-3 w-3 shrink-0 rounded-[3px]" style={{ background: onionSwatch(m, onionSkin.prevColor) }} />
+                        {onionModeLabel(m)}
+                      </button>
+                    );
+                  })}
+                </span>
                 <label className="flex shrink-0 items-center gap-1 text-neutral-400">{t.animation.onionSkinOpacity}
                   <input type="range" min="0.05" max="0.9" step="0.05" value={onionSkin.opacity} aria-label={t.animation.onionSkinOpacity}
                     onChange={(e) => updateOnion({ opacity: parseFloat(e.target.value) })} className="h-1 w-16 cursor-pointer accent-amber-500" />
@@ -770,9 +858,12 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 <button type="button" onClick={onAddFrame} disabled={!can.addCel} title={t.animation.addCel} className={iconBtn}><Plus className="h-3.5 w-3.5" />{t.animation.addCel}</button>
                 <button type="button" onClick={onDuplicateFrame} disabled={!can.addCel || !current || current.ref !== undefined || current.isGroup} title={t.animation.duplicateCel} className={iconBtn}><Copy className="h-3.5 w-3.5" />{t.animation.duplicateCel}</button>
                 <button type="button" onClick={() => setPanel('reuse')} disabled={!can.addCel || realCels.length === 0} title={t.animation.cel} className={iconBtn}><Repeat className="h-3.5 w-3.5" /></button>
+                <button type="button" onClick={onAddBlank} disabled={!can.addCel} title={t.animation.blankFrame} className={iconBtn}>
+                  <span aria-hidden className="text-sm leading-none text-neutral-400">×</span>{t.animation.blankFrame}
+                </button>
                 <span className="mx-1 h-4 w-px shrink-0 bg-neutral-800" />
                 {current
-                  ? stepper(t.animation.celHoldFrames, current.hold, (n) => onSetHold(Math.max(1, Math.min(MAX_HOLD, n))), canEditEntry ? 1 : current.hold, canEditEntry ? MAX_HOLD : current.hold)
+                  ? holdStepper(t.animation.celHoldFrames, current.hold, (n) => onSetHold(Math.max(1, Math.min(MAX_HOLD, n))), canEditEntry)
                   : <span className="shrink-0 text-neutral-500">—</span>}
                 <button type="button" onClick={() => onMoveFrame(-1)} disabled={!canEditEntry || currentIdx <= 0} title={t.animation.prevCel} aria-label={t.animation.prevCel} className={iconBtn}>◀</button>
                 <button type="button" onClick={() => onMoveFrame(1)} disabled={!canEditEntry || currentIdx < 0 || currentIdx >= entries.length - 1} title={t.animation.nextCel} aria-label={t.animation.nextCel} className={iconBtn}>▶</button>
@@ -909,14 +1000,17 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                         const onion = isActive ? onionMarks.get(e.id) : undefined;
                         const editable = can.editableEntryIds.has(e.id);
                         const isSelected = selection?.folderId === track.folderId && selection.ids.has(e.id);
+                        // A reuse whose drawing was deleted shows nothing too, but by accident: it is flagged
+                        const broken = e.ref === '' && !e.blank;
                         return (
-                          <div key={e.id} data-entry onPointerDown={(ev) => startDrag(ev, track, i)}
+                          <div key={e.id} data-entry data-blank={e.blank ? '' : undefined} onPointerDown={(ev) => startDrag(ev, track, i)}
                             onClick={(ev) => { if (!suppressClickRef.current && pickForSelection(ev, track, e.id)) ev.stopPropagation(); }}
                             aria-selected={isSelected}
-                            aria-label={`${track.name} #${start + 1}: ${e.label} (${e.hold})`}
+                            aria-label={`${track.name} #${start + 1}: ${e.blank ? t.animation.blankFrame : broken ? t.animation.missingCel : e.label} (${e.hold})`}
+                            title={broken ? t.animation.missingCel : undefined}
                             className={`absolute top-1 bottom-1 flex flex-col overflow-hidden rounded-md border ${
-                              isSelected ? 'border-sky-400 ring-2 ring-sky-400/70' : isCurrent ? 'border-rose-400 ring-2 ring-rose-500/70' : onion === 'prev' ? 'border-red-500/70' : onion === 'next' ? 'border-emerald-500/70' : 'border-neutral-700'
-                            } ${e.ref !== undefined ? 'border-dashed bg-neutral-800/60' : 'bg-neutral-900'} ${editable ? 'cursor-grab' : ''} ${isDragged && drag.mode === 'move' ? 'opacity-40' : ''}`}
+                              isSelected ? 'border-sky-400 ring-2 ring-sky-400/70' : isCurrent ? 'border-rose-400 ring-2 ring-rose-500/70' : broken ? 'border-amber-500/80' : onion === 'prev' ? 'border-red-500/70' : onion === 'next' ? 'border-emerald-500/70' : 'border-neutral-700'
+                            } ${e.blank ? 'atelier-blank-cel border-dashed' : e.ref !== undefined ? 'border-dashed bg-neutral-800/60' : 'bg-neutral-900'} ${editable ? 'cursor-grab' : ''} ${isDragged && drag.mode === 'move' ? 'opacity-40' : ''}`}
                             style={{ left: start * CELL + 1, width: hold * CELL - 2 }}>
                             {editable && (
                               <span data-hold-handle title={t.animation.celHoldFrames} aria-hidden style={{ touchAction: 'none' }}
@@ -927,14 +1021,18 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                             )}
                             <span data-drag-handle style={editable ? { touchAction: 'none' } : undefined}
                               className="flex h-3.5 shrink-0 items-center gap-0.5 truncate px-0.5 text-[9px] font-bold text-neutral-300">
-                              {e.ref !== undefined && <Repeat className="h-2.5 w-2.5 shrink-0 text-sky-300" />}
+                              {e.ref !== undefined && !e.blank && <Repeat className={`h-2.5 w-2.5 shrink-0 ${broken ? 'text-amber-400' : 'text-sky-300'}`} />}
                               {e.isGroup && e.ref === undefined && <Folder className="h-2.5 w-2.5 shrink-0" />}
                               {isActive && lightTable.enabled && shownId && lightNow.has(shownId) && <Lamp aria-label={t.animation.lightTable} className="h-2.5 w-2.5 shrink-0 text-amber-300" />}
-                              <span className="truncate">{e.ref !== undefined ? (track.entries.find((x) => x.id === e.ref)?.label ?? '—') : e.label}</span>
+                              <span className="truncate">{e.blank ? '' : e.ref !== undefined ? (track.entries.find((x) => x.id === e.ref)?.label ?? '—') : e.label}</span>
                             </span>
-                            <span className="mx-0.5 flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-sm bg-white/90">
-                              {shownId && <AnimThumbImg layerId={shownId} thumbnails={thumbnails} subscribeThumbnails={subscribeThumbnails} getThumbnailsSnapshot={getThumbnailsSnapshot} className="pointer-events-none h-full w-full object-contain" />}
-                            </span>
+                            {e.blank ? (
+                              <span aria-hidden className="atelier-blank-mark mx-0.5 flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-sm text-lg font-light leading-none">×</span>
+                            ) : (
+                              <span className="mx-0.5 flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-sm bg-white/90">
+                                {shownId && <AnimThumbImg layerId={shownId} thumbnails={thumbnails} subscribeThumbnails={subscribeThumbnails} getThumbnailsSnapshot={getThumbnailsSnapshot} className="pointer-events-none h-full w-full object-contain" />}
+                              </span>
+                            )}
                             <span className="h-1 shrink-0" style={{ backgroundColor: onion === 'prev' ? onionSkin.prevColor : onion === 'next' ? onionSkin.nextColor : getUserColor(e.ownerId).hex, opacity: onion ? 1 : 0.7 }} />
                           </div>
                         );
@@ -952,7 +1050,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
         </>
       )}
 
-      {showExportModal && (
+      <OverlayPresence open={showExportModal}>
         <AtelierModal title={t.animation.exportModalTitle} icon={<Film />} onClose={() => !exportProgress && setShowExportModal(false)}
           footer={
             <>
@@ -1015,7 +1113,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
             <p className="text-[11px] text-neutral-400">{exportFrames} · {fps} FPS · {(exportFrames / fps).toFixed(1)} {t.common.seconds}</p>
           </div>
         </AtelierModal>
-      )}
+      </OverlayPresence>
     </div>
   );
 };

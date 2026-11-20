@@ -310,3 +310,39 @@ html.atelier-theme-vt, html.atelier-theme-vt body { transition: none !important;
 @media (prefers-reduced-motion: reduce) {
   [data-overlay-motion] > *, [data-overlay-motion] > .atelier-modal-backdrop > .atelier-modal { animation: none; }
 }
+
+/* ---- Animation timeline: it rises from the bottom edge, and a streak of light (流光) runs along
+   the top of the timeline and of every settings row as it opens ---- */
+.atelier-timeline::before, .atelier-tl-row::after {
+  content: ''; position: absolute; left: 0; right: 0; height: 1px; pointer-events: none; z-index: 30;
+  /* The streak moves by background position, so it never widens a scrolling row */
+  background: linear-gradient(90deg, transparent, rgb(var(--a-400) / .9) 40%, rgb(251 113 133 / .9) 60%, transparent) no-repeat;
+  background-size: 40% 100%; background-position: -60% 0; opacity: 0;
+}
+.atelier-timeline::before { top: 0; }
+.atelier-tl-row::after { bottom: 0; }
+@keyframes atelierLightSweep {
+  0% { background-position: -60% 0; opacity: 0; }
+  15% { opacity: 1; }
+  100% { background-position: 160% 0; opacity: 0; }
+}
+@keyframes atelierRowIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+@keyframes atelierRowOut { to { opacity: 0; transform: translateY(-5px); } }
+@media (prefers-reduced-motion: no-preference) {
+  .atelier-timeline[data-phase='open']::before { animation: atelierLightSweep .9s cubic-bezier(.3, .1, .2, 1) .08s; }
+  .atelier-timeline[data-phase='closing'] { height: 0 !important; opacity: 0; border-top-width: 0; }
+  @starting-style {
+    .atelier-timeline[data-phase='open'] { height: 0; opacity: 0; }
+  }
+  .atelier-tl-row { animation: atelierRowIn .2s cubic-bezier(.2, .8, .3, 1) both; }
+  .atelier-tl-row:not(.is-leaving)::after { animation: atelierLightSweep .7s cubic-bezier(.3, .1, .2, 1) .05s; }
+  .atelier-tl-row.is-leaving { animation: atelierRowOut .11s ease-in both; }
+}
+
+/* A blank frame: nothing on screen there, drawn as a faint × over a see-through hatch */
+.atelier-blank-cel {
+  background-color: rgb(var(--n-950) / .6);
+  background-image: repeating-linear-gradient(135deg, rgb(var(--n-700) / .35) 0 1px, transparent 1px 7px);
+}
+.atelier-blank-mark { color: rgb(var(--n-400)); text-shadow: 0 0 6px rgb(var(--a-400) / .35); }
+.atelier-onion-swatch { box-shadow: inset 0 0 0 1px rgb(255 255 255 / .18); }

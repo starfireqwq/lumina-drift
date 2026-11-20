@@ -114,7 +114,7 @@ import type { LayerCanvasItem } from '../engine/layerComposite';
 import { LayerPanel } from './LayerPanel';
 import { getUserColor } from '../utils/userColors';
 import {
-  AnimationEngine, AnimationTrack, animationDisplay, celEntriesOf, celInsertAt, celLayerOf, celOfLayer, entryIndexAt, entryStart, isAnimationFolder, MAX_HOLD, MAX_TIMELINE_FRAMES,
+  AnimationEngine, AnimationTrack, animationDisplay, BLANK_CEL_NAME, celEntriesOf, celInsertAt, celLayerOf, celOfLayer, entryIndexAt, entryStart, exportSegments, isAnimationFolder, MAX_HOLD, MAX_TIMELINE_FRAMES,
   placeEntries, trackLength,
 } from '../engine/AnimationEngine';
 import { lightIdsFor, loadLightTable, saveLightTable, type LightTableState } from '../engine/lightTable';
@@ -3490,7 +3490,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   // Cels copied on the timeline (Ctrl+C), with where they sat relative to the first one
   const animClipboardRef = useRef<{
     folderId: string;
-    cels: Array<{ id: string; ref?: string; isGroup: boolean; offset: number; hold: number }>;
+    cels: Array<{ id: string; ref?: string; blank?: boolean; isGroup: boolean; offset: number; hold: number }>;
   } | null>(null);
   const toggleAnimRipple = () => {
     setAnimRipple((on) => {
@@ -3607,6 +3607,28 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const hold = animRipple ? null : roomWithoutRipple();
     await createLayerWithUndo(`↻ ${target.name}`, 'normal', 'group', after, animFolder.id, { meta: { cel: { ref: celId, ...(hold && hold > 1 ? { hold } : {}) } } });
   };
+  /**
+   * A blank frame: an empty group with ref '' (no textures), so this track shows nothing there, in
+   * playback and in exported files alike. Placed like a new cel (at the playhead, or past the end).
+   */
+  const addBlankAnimationFrame = async () => {
+    if (!onCreateLayer || !animFolder) return;
+    if (!canAddCel(animFolder)) return warn('這個動畫資料夾沒有共用，只有建立者能加格。');
+    const folderId = animFolder.id;
+    const time = animationEngine?.getTime() ?? 0;
+    const blankMeta = (hold: number | null): LayerMeta => ({ cel: { ref: '', ...(hold && hold > 1 ? { hold } : {}) } });
+    if (animEntries.length > 0 && time >= trackLength(animEntries)) {
+      const created = await createLayerWithUndo(BLANK_CEL_NAME, 'normal', 'group', animEntries[animEntries.length - 1].id, folderId, { meta: blankMeta(null) });
+      if (!created) return;
+      await waitForLayerModels([created.id]);
+      const others = celEntriesOf(layersRef.current, folderId).filter((e) => e.id !== created.id);
+      commitAnimationPlacement(folderId, placeEntries(others, new Map([[created.id, time]]), [{ id: created.id, hold: 1 }]));
+      return;
+    }
+    const after = currentAnimEntry().entry?.id ?? animEntries[animEntries.length - 1]?.id ?? folderId;
+    const hold = animRipple ? null : roomWithoutRipple();
+    await createLayerWithUndo(BLANK_CEL_NAME, 'normal', 'group', after, folderId, { meta: blankMeta(hold) });
+  };
   const entryLayer = (id: string | undefined) => (id ? layersRef.current.find((l) => l.id === id) : undefined);
   const setEntryHold = (entryId: string | undefined, hold: number) => {
     const layer = entryLayer(entryId);
@@ -3682,7 +3704,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       if (!canAddCel(target)) return warn('那個動畫資料夾沒有共用，不能把格移過去。');
       for (const l of moving) {
         // A reuse only points inside its own folder
-        if (l.meta?.cel?.ref !== undefined && !entryIds.includes(l.meta.cel.ref)) return warn('重複格只能在同一軌裡移動（或和它重複的那張一起移）。');
+        if (l.meta?.cel?.ref && !entryIds.includes(l.meta.cel.ref)) return warn('重複格只能在同一軌裡移動（或和它重複的那張一起移）。');
         if (celEntriesOf(ls, fromId).some((e) => e.ref === l.id && !entryIds.includes(e.id))) return warn('有一張在原本那一軌被重複使用中，請先刪掉那些重複格（或一起選取）再移到別軌。');
       }
     }
@@ -3711,7 +3733,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (!picked.length) return;
     animClipboardRef.current = {
       folderId,
-      cels: picked.map(({ e, start }) => ({ id: e.id, ref: e.ref, isGroup: e.isGroup, offset: start - picked[0].start, hold: e.hold })),
+      cels: picked.map(({ e, start }) => ({ id: e.id, ref: e.ref, blank: e.blank, isGroup: e.isGroup, offset: start - picked[0].start, hold: e.hold })),
     };
     warn(`已複製 ${picked.length} 格`, 1500);
   };
@@ -3736,6 +3758,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     let skipped = 0;
     for (const c of clip.cels) {
       const after = celEntriesOf(layersRef.current, folderId).at(-1)?.id ?? folderId; // the placement below sorts them out
+      if (c.blank) {
+        // A blank frame pastes as a blank frame, into any track
+        const layer = await createLayerWithUndo(BLANK_CEL_NAME, 'normal', 'group', after, folderId, { meta: { cel: { ref: '', hold: c.hold } }, select: false });
+        if (layer) made.push({ id: layer.id, start: frame + c.offset, hold: c.hold });
+        continue;
+      }
       if (c.ref !== undefined) {
         const target = c.ref ? layersRef.current.find((l) => l.id === c.ref) : undefined;
         if (clip.folderId !== folderId || !target) {
@@ -3836,7 +3864,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     // A reused cel selects the drawing it shows; past the end of the track, the folder itself
     onSelectLayer?.(celLayerOf(entry) ?? folderId);
   };
-  /** GIF / video frames: one segment per distinct picture (held cels become one longer frame) */
+  /** GIF / video frames: one segment per distinct picture (held cels become one longer frame, keyframed moves get every step) */
   const planAnimationExport = ({ scope, useRange }: { scope: AnimationExportScope; useRange: boolean }): AnimationExportPlan | null => {
     const lm = layerManagerRef.current;
     const engine = animationEngine;
@@ -3845,15 +3873,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const start = range?.start ?? 0;
     const end = range?.end ?? animTimelineLength - 1;
     const only = scope === 'folder' ? new Set([animFolder.id]) : scope === 'folders' ? new Set(animFolders.map((f) => f.id)) : null;
-    const tracks = animTracks.filter((t) => !only || only.has(t.folderId));
-    const segments: Array<{ time: number; hold: number }> = [];
-    let lastKey = '';
-    for (let t = start; t <= end; t++) {
-      const key = tracks.map((tr) => celLayerOf(tr.entries[entryIndexAt(tr.entries, t)]) ?? '-').join('|');
-      if (key === lastKey) segments[segments.length - 1].hold++;
-      else segments.push({ time: t, hold: 1 });
-      lastKey = key;
-    }
+    const segments = exportSegments(layersRef.current, start, end, only, canvas.width, canvas.height);
     return {
       width: canvas.width,
       height: canvas.height,
@@ -5172,6 +5192,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 onAddFrame={() => void addAnimationFrame()}
                 onDuplicateFrame={() => void duplicateAnimationFrame()}
                 onReuseCel={(id) => void reuseAnimationCel(id)}
+                onAddBlank={() => void addBlankAnimationFrame()}
                 onDeleteFrame={deleteAnimationFrame}
                 onMoveFrame={moveAnimationFrame}
                 onSetHold={setAnimationHold}
