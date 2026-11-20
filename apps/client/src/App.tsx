@@ -175,6 +175,8 @@ export const App: React.FC = () => {
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<string | undefined>(undefined);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
+  // What the help centre opens searched for (the connect guide's "full help" link)
+  const [helpQuery, setHelpQuery] = useState('');
   // F1 opens the help centre from anywhere (and keeps the browser's own help page closed)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1125,7 +1127,7 @@ export const App: React.FC = () => {
         onOpenServer={() => setIsServerModalOpen(true)}
         onOpenGateway={openGateway}
         onOpenSettings={(tab?: string) => { setSettingsTab(tab); setIsSettingsModalOpen(true); }}
-        onOpenHelp={() => setIsHelpOpen(true)}
+        onOpenHelp={(query) => { setHelpQuery(query ?? ''); setIsHelpOpen(true); }}
         onOpenAdmin={() => setIsAdminDashboardOpen(true)}
         onOpenChat={() => setIsChatOpen(true)}
         hasUnreadChat={!isChatOpen && latestIncomingChatId !== null && latestIncomingChatId !== lastReadChatId}
@@ -1308,7 +1310,7 @@ export const App: React.FC = () => {
 
       <OverlayPresence open={isHelpOpen}>
         <Suspense fallback={null}>
-          <HelpCenter onClose={() => setIsHelpOpen(false)}
+          <HelpCenter onClose={() => { setIsHelpOpen(false); setHelpQuery(''); }} initialQuery={helpQuery}
             onOpenShortcutSettings={() => { setIsHelpOpen(false); setSettingsTab('shortcuts'); setIsSettingsModalOpen(true); }} />
         </Suspense>
       </OverlayPresence>

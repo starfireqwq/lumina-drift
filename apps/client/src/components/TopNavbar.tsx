@@ -19,6 +19,7 @@ import {
   LogOut,
   Menu,
   MessageSquare,
+  Network,
   Monitor,
   Palette,
   PanelRight,
@@ -42,6 +43,7 @@ import type { Translations } from '../locales';
 import { VoiceChatBar } from './VoiceChatBar';
 import { ThemePicker } from './ThemePicker';
 import { OverlayPresence } from './OverlayPresence';
+const ConnectGuideModal = React.lazy(() => import('./ConnectGuideModal'));
 import { WorkspaceCloudflareToggle } from './WorkspaceCloudflareToggle';
 import { getPluginLabels } from '../plugins/pluginLabels';
 import type { InstalledPlugin } from '../plugins/pluginStore';
@@ -70,7 +72,8 @@ interface TopNavbarProps {
   onOpenCapsule?: () => void;
   onOpenServer?: () => void;
   onOpenSettings?: (tab?: string) => void;
-  onOpenHelp?: () => void;
+  /** Opens the help centre (with a search already typed in) */
+  onOpenHelp?: (query?: string) => void;
   onOpenAdmin?: () => void;
   onOpenChat?: () => void;
   hasUnreadChat?: boolean;
@@ -293,6 +296,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   const isElectron = typeof window !== 'undefined' && Boolean((window as any).atelierDesktop?.isElectron);
   const isMac = typeof window !== 'undefined' && (window as any).atelierDesktop?.platform === 'darwin';
   const [zoomPct, setZoomPct] = useState(100);
+  const [connectGuideOpen, setConnectGuideOpen] = useState(false);
 
   useEffect(() => {
     setZoomPct(100);
@@ -436,6 +440,13 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
           </div>
         )}
 
+        {/* 聯機: how to paint together (same Wi-Fi, Tailscale / ZeroTier One, a public link), in the accent colours so it is easy to find */}
+        <button type="button" onClick={() => setConnectGuideOpen(true)} title={t.connectGuide.buttonTitle} aria-label={t.connectGuide.buttonTitle}
+          className="atelier-connect-btn flex h-8 shrink-0 items-center gap-1.5 rounded-lg border border-cyan-400/45 bg-gradient-to-r from-cyan-500/20 via-indigo-500/20 to-fuchsia-500/20 px-2 text-xs font-semibold text-cyan-50 transition hover:border-cyan-300/80">
+          <Network className="h-4 w-4 shrink-0 text-cyan-300" />
+          <span className="whitespace-nowrap">{t.connectGuide.button}</span>
+        </button>
+
         <WorkspaceCloudflareToggle enabled={!isOffline} serverUrl={serverUrl} canvasId={currentCanvas?.id} compactCloudflare={!showCloudflareText} compactShare={!showShareText} />
 
         <DropdownMenu label={<Palette className="h-4 w-4" />} title={t.settings.themeSelect} align="right" width="w-80" buttonClass="atelier-icon-btn h-8 w-8 shrink-0" protectCanvas>
@@ -446,7 +457,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
         </DropdownMenu>
 
         {onOpenHelp && showHelpIcon && (
-          <button type="button" onClick={onOpenHelp} title={`${t.navbar.help} (F1)`} aria-label={t.navbar.help} className="atelier-icon-btn inline-flex h-8 w-8 shrink-0">
+          <button type="button" onClick={() => onOpenHelp()} title={`${t.navbar.help} (F1)`} aria-label={t.navbar.help} className="atelier-icon-btn inline-flex h-8 w-8 shrink-0">
             <HelpCircle className="h-4 w-4" />
           </button>
         )}
@@ -519,6 +530,12 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
       </div>
       </div>
     </header>
+    <OverlayPresence open={connectGuideOpen}>
+      <React.Suspense fallback={null}>
+        <ConnectGuideModal onClose={() => setConnectGuideOpen(false)}
+          onOpenHelp={onOpenHelp ? (query) => { setConnectGuideOpen(false); onOpenHelp(query); } : undefined} />
+      </React.Suspense>
+    </OverlayPresence>
     </>
   );
 };

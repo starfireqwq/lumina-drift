@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import {
-  Check, ChevronDown, ChevronRight, Cloud, Copy, DoorOpen, Eye, EyeOff, Folder, FolderOpen, Globe, Lock, LogIn, Palette, Plus, QrCode as QrIcon, RefreshCw, Search,
+  Check, ChevronDown, ChevronRight, Cloud, Copy, DoorOpen, Eye, EyeOff, Folder, FolderOpen, Globe, Lock, LogIn, Network, Palette, Plus, QrCode as QrIcon, RefreshCw, Search,
 } from 'lucide-react';
 import type { CanvasModel } from '@atelier/shared';
 import { ApiService } from '../services/api';
@@ -15,6 +15,8 @@ import { isForeignApiReply } from '../utils/apiErrors';
 import { RESIZE_MAX, RESIZE_MIN } from '../utils/canvasResize';
 import { accountBridgeAvailable, clearPrimaryAccount, getPrimaryAccount, PRIMARY_ACCOUNT_EVENT } from '../services/accountBridge';
 import { PrimaryAccountDialog } from './PrimaryAccountDialog';
+import { OverlayPresence } from './OverlayPresence';
+const ConnectGuideModal = React.lazy(() => import('./ConnectGuideModal'));
 import {
   buildCanvasGroupEntries,
   loadCollapsedCanvasGroups,
@@ -73,6 +75,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
   // Primary account: solo mode paints as it, other servers get its name and avatar.
   const [primary, setPrimary] = useState(getPrimaryAccount);
   const [primaryDialogOpen, setPrimaryDialogOpen] = useState(false);
+  const [connectGuideOpen, setConnectGuideOpen] = useState(false);
   useEffect(() => {
     const refresh = () => setPrimary(getPrimaryAccount());
     window.addEventListener(PRIMARY_ACCOUNT_EVENT, refresh);
@@ -636,6 +639,19 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
         </div>
         )}
 
+        {/* How to paint together: one obvious way in to the connect guide */}
+        <button type="button" onClick={() => setConnectGuideOpen(true)}
+          className="atelier-connect-btn flex w-full items-center gap-3 rounded-2xl border border-cyan-400/40 bg-gradient-to-r from-cyan-500/15 via-indigo-500/15 to-fuchsia-500/15 p-3 text-left text-white transition hover:border-cyan-300/70">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-cyan-500/20 text-cyan-200">
+            <Network className="h-5 w-5" />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-bold">{t.connectGuide.gatewayButton}</span>
+            <span className="mt-0.5 block text-[11px] leading-snug text-neutral-300">{t.connectGuide.gatewayHint}</span>
+          </span>
+          <ChevronRight className="h-4 w-4 shrink-0 text-cyan-300" />
+        </button>
+
         {/* Who you are */}
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3">
           {gatewayMode === 'offline' && primary ? (
@@ -1127,6 +1143,9 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
       </form>
       {/* Outside the gateway form: the dialog is a form of its own */}
       {primaryDialogOpen && <PrimaryAccountDialog onClose={() => setPrimaryDialogOpen(false)} />}
+      <OverlayPresence open={connectGuideOpen}>
+        <React.Suspense fallback={null}><ConnectGuideModal onClose={() => setConnectGuideOpen(false)} /></React.Suspense>
+      </OverlayPresence>
     </div>
   );
 };
