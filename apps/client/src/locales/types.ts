@@ -1234,6 +1234,31 @@ export interface Translations {
     offlineZeroNetworkHint: string;
   };
 
+  /** How to connect with friends: same Wi-Fi, a virtual LAN (Tailscale / ZeroTier One), or a public link */
+  connectGuide: {
+    button: string;
+    buttonTitle: string;
+    gatewayButton: string;
+    gatewayHint: string;
+    title: string;
+    subtitle: string;
+    tabsAria: string;
+    tabs: { lan: string; vpn: string; tunnel: string };
+    badges: { lan: string; vpn: string; tunnel: string };
+    lan: { s1: string; s2: string; s3: string };
+    vpn: { intro: string; s1: string; s2: string; s3: string; phone: string; pcAlt: string };
+    tunnel: { intro: string; s1: string; s2: string; s3: string; note: string };
+    addressesTitle: string;
+    copy: string;
+    copied: string;
+    troubleTitle: string;
+    trouble: { firewall: string; same: string; port: string; blocked: string };
+    moreHelp: string;
+    /** What the help centre is searched for from the guide */
+    helpQuery: string;
+    done: string;
+  };
+
   collab: {
     title: string;
     onlineCount: string;

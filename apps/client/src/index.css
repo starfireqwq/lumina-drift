@@ -360,3 +360,28 @@ html.atelier-theme-vt, html.atelier-theme-vt body { transition: none !important;
 }
 .atelier-blank-mark { color: rgb(var(--n-400)); text-shadow: 0 0 6px rgb(var(--a-400) / .35); }
 .atelier-onion-swatch { box-shadow: inset 0 0 0 1px rgb(255 255 255 / .18); }
+
+/* Connect guide (聯機教學): a streak of light runs under the chosen way and its steps rise in one
+   by one; the 聯機 buttons catch a sheen of light as they appear and again on hover */
+.atelier-guide-tab, .atelier-connect-btn { position: relative; overflow: hidden; }
+.atelier-guide-tab::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 1px; pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgb(var(--a-400) / .9) 40%, rgb(251 113 133 / .9) 60%, transparent) no-repeat;
+  background-size: 40% 100%; background-position: -60% 0; opacity: 0;
+}
+.atelier-connect-btn::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: linear-gradient(100deg, transparent, rgb(255 255 255 / .16) 45%, rgb(var(--a-400) / .3) 55%, transparent) no-repeat;
+  background-size: 45% 100%; background-position: -60% 0; opacity: 0;
+}
+@keyframes atelierConnectSheen {
+  0% { background-position: -60% 0; opacity: 0; }
+  15% { opacity: 1; }
+  100% { background-position: 160% 0; opacity: 0; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .atelier-guide-tab[aria-selected='true']::after { animation: atelierLightSweep .8s cubic-bezier(.3, .1, .2, 1) .04s; }
+  .atelier-guide-step { animation: atelierRowIn .22s cubic-bezier(.2, .8, .3, 1) both; animation-delay: calc(var(--i, 0) * 40ms); }
+  .atelier-connect-btn::after { animation: atelierLightSweep 1.2s cubic-bezier(.3, .1, .2, 1) .9s; }
+  .atelier-connect-btn:is(:hover, :focus-visible)::after { animation: atelierConnectSheen .8s cubic-bezier(.3, .1, .2, 1); }
+}
