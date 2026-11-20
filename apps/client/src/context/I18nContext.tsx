@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useLayoutEffect, useState } from 'react';
 import { applyTheme, CustomThemeSettings, loadThemeSettings, resolveTheme, saveThemeSettings, ThemeId } from '../theme/themes';
-import { translations, type Language, type Translations } from '../locales';
+import { detectLanguage, LANGUAGE_STORAGE_KEY, translations, type Language, type Translations } from '../locales';
 
 export type { Language, Translations };
 export { translations };
@@ -22,16 +22,7 @@ interface I18nContextType {
 const I18nContext = createContext<I18nContextType | undefined>(undefined);
 
 export const I18nProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [language, setLanguageState] = useState<Language>(() => {
-    const saved = localStorage.getItem('atelier_language') as Language;
-    if (saved && translations[saved]) return saved;
-    // Auto-detect browser language
-    const navLang = navigator.language.toLowerCase();
-    if (navLang.startsWith('zh-cn') || navLang.startsWith('zh-sg')) return 'zh-CN';
-    if (navLang.startsWith('zh')) return 'zh-TW';
-    if (navLang.startsWith('ja')) return 'ja-JP';
-    return 'en-US';
-  });
+  const [language, setLanguageState] = useState<Language>(detectLanguage);
 
   const [themeState, setThemeState] = useState(loadThemeSettings);
   const { id: themeId, custom: customTheme } = themeState;
@@ -39,7 +30,7 @@ export const I18nProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const setLanguage = (lang: Language) => {
     setLanguageState(lang);
-    localStorage.setItem('atelier_language', lang);
+    localStorage.setItem(LANGUAGE_STORAGE_KEY, lang);
   };
 
   const setThemeId = (id: ThemeId) => setThemeState((prev) => ({ ...prev, id }));

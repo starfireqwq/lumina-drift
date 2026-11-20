@@ -1020,6 +1020,12 @@ export interface Translations {
     hostLocalhost: string;
     currentServer: string;
     switchMode: string;
+    /** A 404 that did not come from a Lumina server (static host, wrong URL) */
+    apiNotFound: string;
+    /** Any other failed request without a server message; {status} is the HTTP code */
+    apiRequestFailed: string;
+    /** The reply was not the server's JSON */
+    apiBadResponse: string;
   };
 
   settings: {

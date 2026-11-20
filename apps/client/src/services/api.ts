@@ -20,6 +20,8 @@ import {
 } from '@atelier/shared';
 import { OfflineSessionStore } from './offlineStore';
 import { isLoopbackServer, parseServerLink } from '../utils/serverLinks';
+import { apiErrorMessage } from '../utils/apiErrors';
+import { currentTranslations } from '../locales';
 
 const API_BASE = '/api';
 
@@ -246,7 +248,7 @@ export class ApiService {
         this.setToken(null, origin);
         if (origin === this.getServerOrigin()) window.dispatchEvent(new Event('atelier:auth-expired'));
       }
-      const err = new Error(data.error || data.message || `API 請求失敗 (HTTP ${res.status})`) as Error & { status?: number };
+      const err = new Error(apiErrorMessage(currentTranslations().server, res.status, data)) as Error & { status?: number };
       err.status = res.status;
       throw err;
     }
@@ -259,7 +261,7 @@ export class ApiService {
     try {
       return (await res.json()) as T;
     } catch {
-      throw new Error('解析伺服器回應資料失敗');
+      throw new Error(currentTranslations().server.apiBadResponse);
     }
   }
 

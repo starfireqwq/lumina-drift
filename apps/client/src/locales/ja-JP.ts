@@ -1001,6 +1001,9 @@ export const jaJP: Translations = {
     hostLocalhost: 'ローカルホスト (Localhost)',
     currentServer: '接続中サーバーホスト',
     switchMode: '接続方法の切り替え / ロビーに戻る',
+    apiNotFound: 'サーバー API が見つかりません（HTTP 404）。サーバーの URL を確認してください。',
+    apiRequestFailed: 'サーバーへのリクエストに失敗しました（HTTP {status}）。',
+    apiBadResponse: 'サーバーの応答を読み取れません。サーバーの URL を確認してください。',
   },
 
   settings: {

@@ -51,6 +51,8 @@ import {
 import { getDockLayout } from '../src/components/workspace/dockStore';
 import { buildCanvasGroupEntries, toggleCollapsedCanvasGroup } from '../src/utils/canvasGroups';
 import { buildRoomShareUrl } from '../src/utils/serverLinks';
+import { apiErrorMessage } from '../src/utils/apiErrors';
+import { translations, type Language } from '../src/locales';
 import { DEFAULT_COMMUNITY_PRESETS, MIN_BRUSH_SPACING, PIXEL_FILTER_RUNNERS, runPixelFilter, type CanvasModel } from '@atelier/shared';
 import {
   BUILTIN_FILTERS, FILTER_GROUPS, defaultFilterValues, filterGroupsInUse, getFilter, normalizeFilterValues, snapRange,
@@ -715,6 +717,18 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
     buildRoomShareUrl('http://192.168.1.20:3000', 'offline-local'),
     'http://192.168.1.20:3000'
   );
+
+  // Error text: the server's own message wins; otherwise it follows the interface language
+  assert.equal(apiErrorMessage(translations['zh-CN'].server, 404, {}), translations['zh-CN'].server.apiNotFound);
+  assert.equal(apiErrorMessage(translations['en-US'].server, 502, null), 'Server request failed (HTTP 502).');
+  assert.equal(apiErrorMessage(translations['ja-JP'].server, 409, { error: 'Name taken' }), 'Name taken');
+  assert.equal(apiErrorMessage(translations['zh-TW'].server, 400, { error: '', message: 'Bad input' }), 'Bad input');
+  for (const lang of Object.keys(translations) as Language[]) {
+    const text = translations[lang].server;
+    assert.ok(text.apiNotFound.includes('404'), `${lang}: the 404 message names the status`);
+    assert.ok(text.apiRequestFailed.includes('{status}'), `${lang}: the generic message keeps its {status} slot`);
+    assert.ok(apiErrorMessage(text, 503, {}).includes('503'), `${lang}: the generic message shows the status`);
+  }
 
   // Brush presets: no third-party software names in preset titles, and pressure modulates opacity for painting/airbrush
   for (const preset of DEFAULT_COMMUNITY_PRESETS) {

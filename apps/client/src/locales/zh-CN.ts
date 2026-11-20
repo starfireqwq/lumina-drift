@@ -1001,6 +1001,9 @@ export const zhCN: Translations = {
     hostLocalhost: '本机 (Localhost)',
     currentServer: '当前服务器主机',
     switchMode: '切换开房方式 / 返回连接入口',
+    apiNotFound: '找不到服务器 API（HTTP 404），请确认服务器网址。',
+    apiRequestFailed: '服务器请求失败（HTTP {status}）。',
+    apiBadResponse: '无法读取服务器响应，请确认服务器网址。',
   },
 
   settings: {

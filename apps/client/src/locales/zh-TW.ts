@@ -1001,6 +1001,9 @@ export const zhTW: Translations = {
     hostLocalhost: '本機 (Localhost)',
     currentServer: '當前伺服器主機',
     switchMode: '切換開房方式 / 返回連線入口',
+    apiNotFound: '找不到伺服器 API（HTTP 404），請確認伺服器網址。',
+    apiRequestFailed: '伺服器請求失敗（HTTP {status}）。',
+    apiBadResponse: '伺服器回應無法讀取，請確認伺服器網址。',
   },
 
   settings: {

@@ -1001,6 +1001,9 @@ export const enUS: Translations = {
     hostLocalhost: 'Localhost',
     currentServer: 'Active Host Server',
     switchMode: 'Switch Connection Mode / Return to Gateway',
+    apiNotFound: 'Server API not found (HTTP 404). Check the server URL.',
+    apiRequestFailed: 'Server request failed (HTTP {status}).',
+    apiBadResponse: "Couldn't read the server's reply. Check the server URL.",
   },
 
   settings: {
