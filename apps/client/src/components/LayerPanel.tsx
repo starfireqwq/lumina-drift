@@ -173,6 +173,8 @@ interface LayerPanelProps {
   /** Ctrl+click on a thumbnail: the layer's opaque pixels become the selection */
   onLoadLayerSelection?: (layerId: string) => void;
   onMergeDown?: (layerId: string) => void;
+  /** Selects the layer and opens the align window (對齊) */
+  onOpenAlign?: (layerId: string) => void;
   /** Puts these layers into a new group (inside their common group) */
   onGroupLayers?: (layerIds: string[]) => void;
   /** 複製圖層 / 貼上圖層 (the copy works across canvases in this tab) */
@@ -409,6 +411,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   onAddMask,
   onLoadLayerSelection,
   onMergeDown,
+  onOpenAlign,
   onGroupLayers,
   onCopyLayers,
   onPasteLayers,
@@ -1482,6 +1485,9 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             {layer.layerType === 'text' && (
               <MenuItem label={t.layers.rasterizeText} hint={t.layers.rasterizeTextHint} disabledReason={canManage(layer) ? null : t.layers.notYourLayer}
                 onClick={close(() => { if (confirm(t.layers.rasterizeTextConfirm)) onUpdateLayerProps?.(layer.id, { layerType: 'raster' }); })} />
+            )}
+            {onOpenAlign && layer.layerType !== 'mask' && (
+              <MenuItem label={t.align.menuItem} disabledReason={ids.length > 1 ? t.align.oneAtATime : null} onClick={close(() => onOpenAlign(layer.id))} />
             )}
             <MenuItem label={t.layers.renameLayer} hint="F2" disabledReason={canManage(layer) ? null : t.layers.notYourLayer} onClick={close(() => handleStartRename(layer))} />
             <div className="my-1 h-px bg-neutral-700/70" />

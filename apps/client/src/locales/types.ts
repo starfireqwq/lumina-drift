@@ -739,6 +739,43 @@ export interface Translations {
     };
   };
 
+  /** Align the current layer to the canvas or the selection (對齊 L1) */
+  align: {
+    title: string;
+    openTitle: string;
+    menuItem: string;
+    oneAtATime: string;
+    basis: string;
+    basisNames: { auto: string; canvas: string; selection: string };
+    /** Next to the basis menu while it is on auto: {basis} = the frame in use */
+    autoUses: string;
+    horizontal: string;
+    vertical: string;
+    pad: string;
+    x: { left: string; center: string; right: string };
+    y: { top: string; center: string; bottom: string };
+    /** A pad cell's name: {x} and {y} */
+    both: string;
+    middle: string;
+    done: string;
+    alreadyAligned: string;
+    empty: string;
+    failed: string;
+    noSelection: string;
+    cropTitle: string;
+    cropBody: string;
+    cropConfirm: string;
+    blocked: {
+      noLayer: string;
+      busy: string;
+      group: string;
+      mask: string;
+      notEditable: string;
+      hasMask: string;
+      keyframes: string;
+    };
+  };
+
   brushPreset: {
     toolset: string;
     groupsLabel: string;

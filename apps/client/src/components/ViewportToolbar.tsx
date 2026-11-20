@@ -32,8 +32,17 @@ interface ViewportToolbarProps {
   onOpenReference?: () => void;
   onOpenRadial?: () => void;
   onOpenFilters?: () => void;
+  onOpenAlign?: () => void;
   onOpenResize?: () => void;
 }
+
+/** Align: a dashed frame with a block snapped into its corner (same mark as the align window) */
+const AlignMark = () => (
+  <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden>
+    <rect x="1.5" y="1.5" width="13" height="13" rx="2.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeDasharray="2.2 1.6" />
+    <rect x="3.5" y="3.5" width="6" height="5" rx="1.2" fill="currentColor" />
+  </svg>
+);
 
 const btn = 'atelier-icon-btn h-7 shrink-0 gap-1 px-1.5 text-[11px]';
 const Sep = () => <div aria-hidden className="mx-0.5 h-4 w-px shrink-0 bg-neutral-700/70" />;
@@ -54,6 +63,7 @@ export const ViewportToolbar: React.FC<ViewportToolbarProps> = ({
   onOpenReference,
   onOpenRadial,
   onOpenFilters,
+  onOpenAlign,
   onOpenResize,
 }) => {
   const { t } = useI18n();
@@ -65,6 +75,7 @@ export const ViewportToolbar: React.FC<ViewportToolbarProps> = ({
   const showRulerLabel = effectiveWidth >= 660;
   const showRefLabel = effectiveWidth >= 940;
   const showFilterLabel = effectiveWidth >= 720;
+  const showAlignLabel = effectiveWidth >= 780;
   const rotationDeg = Math.round(((viewportState.rotation * 180) / Math.PI) % 360);
   const zoomPercent = Math.round(viewportState.zoom * 100);
 
@@ -101,6 +112,7 @@ export const ViewportToolbar: React.FC<ViewportToolbarProps> = ({
         {onOpenRuler && <button type="button" onClick={onOpenRuler} title={t.canvas.rulers} aria-label={t.canvas.rulers} className={btn}><Compass className="h-3.5 w-3.5" />{showRulerLabel && <span>{t.tools.ruler}</span>}</button>}
         {onOpenReference && <button type="button" onClick={onOpenReference} title={t.canvas.referenceImage} aria-label={t.canvas.referenceImage} className={btn}><ImageIcon className="h-3.5 w-3.5" />{showRefLabel && <span>{t.reference.title}</span>}</button>}
         {onOpenFilters && <button type="button" onClick={onOpenFilters} title={t.canvas.filters} aria-label={t.canvas.filters} className={btn}><SlidersHorizontal className="h-3.5 w-3.5" />{showFilterLabel && <span>{t.canvas.filters}</span>}</button>}
+        {onOpenAlign && <button type="button" onClick={onOpenAlign} title={t.align.openTitle} aria-label={t.align.openTitle} className={btn}><AlignMark />{showAlignLabel && <span>{t.align.title}</span>}</button>}
         {onOpenRadial && <button type="button" onClick={onOpenRadial} title={t.canvas.radialMenu} aria-label={t.canvas.radialMenu} className={btn}><Sparkles className="h-3.5 w-3.5" /></button>}
       </div>
     </div>

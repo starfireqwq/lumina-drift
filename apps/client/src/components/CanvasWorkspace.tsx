@@ -90,6 +90,8 @@ import { useFillTools } from './workspace/tools/useFillTools';
 import { useVectorTools } from './workspace/tools/useVectorTools';
 import { useBrushTool } from './workspace/tools/useBrushTool';
 import { useTransformTool } from './workspace/tools/useTransformTool';
+import { useLayerAlign } from './workspace/tools/useLayerAlign';
+import { alignBlocker, type AlignBasis, type AlignX, type AlignY } from '../utils/layerAlign';
 import { useCanvasPointer } from './workspace/tools/useCanvasPointer';
 import { findContentBounds } from '../utils/pixelBounds';
 import { VectorEditResult } from '../engine/VectorEngine';
@@ -193,6 +195,7 @@ const TextCanvasEditor = lazy(() => import('./TextCanvasEditor').then((m) => ({ 
 const ComicStudioOverlay = lazy(() => import('./ComicStudioOverlay').then((m) => ({ default: m.ComicStudioOverlay })));
 const AnimationTimelineBar = lazy(() => import('./AnimationTimelineBar').then((m) => ({ default: m.AnimationTimelineBar })));
 const LayerFilterDialog = lazy(() => import('./LayerFilterDialog').then((m) => ({ default: m.LayerFilterDialog })));
+const LayerAlignWindow = lazy(() => import('./LayerAlignWindow'));
 const ColorCurvesModal = lazy(() => import('./ColorCurvesModal').then((m) => ({ default: m.ColorCurvesModal })));
 const GradientMapModal = lazy(() => import('./GradientMapModal').then((m) => ({ default: m.GradientMapModal })));
 
@@ -958,6 +961,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     isTransformActive, transformPreviewUrl, transformBox, setTransformBox, distortMode, setDistortMode, isMeshWarpActive,
     transformLayerIdRef, transformSourceCanvasRef, meshWarpInitialBoundsRef, startTransformMode, startFloatingPaste, applyTransform, cancelTransform, applyMeshWarp,
   } = transform;
+  // 對齊 L1: the active layer lines up with the canvas or the selection's frame (whole-pixel move, one undo step)
+  const { alignLayer } = useLayerAlign(toolCtx, {
+    layersRef,
+    applyVectorPayload,
+    updateLayerMeta: (layerId, meta) => { void onUpdateLayerProps?.(layerId, { meta }); },
+  });
+  const [alignOpen, setAlignOpen] = useState(false);
   const {
     liquifyEngineRef,
     blurSmudgeEngineRef,
@@ -4545,6 +4555,29 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     });
   };
 
+  // ---------- Align (對齊 L1) ----------
+  const alignBlockFor = (layer: LayerModel | null, list: LayerModel[], busy: boolean) => alignBlocker(layer, {
+    canEdit: Boolean(layer && canEditPixels(layer)),
+    busy,
+    hasMask: Boolean(layer && list.some((l) => l.layerType === 'mask' && l.parentId === layer.id)),
+    movedByKeyframes: movedByKeyframes(list, layer?.id),
+  });
+  // Mid-transform, while typing text or with a filter previewing, the layer's pixels are not settled
+  const alignBusy = Boolean(isTransformActive || textEdit || filterModalOpenRef.current);
+  const alignBlockReason = alignOpen ? alignBlockFor(activeLayer, layers, alignBusy) : null;
+  const runAlign = (x: AlignX | null, y: AlignY | null, basis: AlignBasis, allowCrop?: boolean) => {
+    const layer = activeLayerRef.current;
+    // The window may be a render behind: check the layer as it is now
+    if (!layer || alignBlockFor(layer, layersRef.current, Boolean(transformLayerIdRef.current || filterModalOpenRef.current))) {
+      return Promise.resolve('failed' as const);
+    }
+    return alignLayer(layer, x, y, basis, allowCrop);
+  };
+  const openAlign = (layerId?: string) => {
+    if (layerId && layerId !== activeLayerRef.current?.id) onSelectLayer?.(layerId);
+    setAlignOpen(true);
+  };
+
   // Pointer & touch input: layer checks, tool routing and navigation gestures (workspace/tools/useCanvasPointer)
   const pointer = useCanvasPointer(toolCtx, { brush, liquify, shapes, selection, fill, vector, transform }, {
     setEraserHover,
@@ -4808,6 +4841,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           onToggleLocalVisibility={toggleLocalVisibility}
           onAddMask={(id) => void addLayerMask(id)}
           onMergeDown={mergeDown}
+          onOpenAlign={openAlign}
           onGroupLayers={(ids) => void groupLayers(ids)}
           onCopyLayers={copyLayers}
           onPasteLayers={() => void pasteLayers()}
@@ -5283,6 +5317,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 onOpenRuler={() => setIsRulerModalOpen(true)}
                 onOpenReference={() => setIsReferenceHUDOpen(true)}
                 onOpenFilters={() => openFilterRef.current()}
+                onOpenAlign={() => openAlign()}
                 onOpenResize={() => setIsResizeModalOpen(true)}
                 onOpenRadial={() => {
                   if (transformLayerIdRef.current || filterModalOpenRef.current) return;
@@ -5403,6 +5438,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         />
       )}
 
+      <OverlayPresence open={alignOpen && Boolean(canvas)} kind="popover">
+        <Suspense fallback={null}><LayerAlignWindow layerName={activeLayer?.name ?? null} blocker={alignBlockReason}
+          hasSelection={hasSelectionState} onAlign={runAlign} onClose={() => setAlignOpen(false)} /></Suspense>
+      </OverlayPresence>
       <OverlayPresence open={filterMenuOpen} kind="popover">
         <Suspense fallback={null}><LayerFilterDialog key={layerFilterId ?? 'list'} filterId={layerFilterId} busy={filterBusy}
           layerName={activeLayer?.name ?? ''} onChoose={chooseFilter} onBack={() => chooseFilter(null)} onClose={closeFilters}
