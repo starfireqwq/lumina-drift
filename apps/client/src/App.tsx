@@ -22,6 +22,7 @@ import { CreateMyLayerModal } from './components/CreateMyLayerModal';
 import { RoomPasswordModal } from './components/RoomPasswordModal';
 import { getNextCanvasTitle } from './utils/canvasName';
 import { sharedRoomFromLocation } from './utils/serverLinks';
+import { recordRecentVisit } from './utils/recentVisits';
 import type { LayerCanvasItem } from './engine/layerComposite';
 import { useFolderAccess } from './components/workspace/useFolderAccess';
 // Loaded when first needed: the workspace (Pixi), exports (ag-psd / jszip), time-lapse, settings…
@@ -375,6 +376,22 @@ export const App: React.FC = () => {
     && !unlockedRooms.has(currentCanvas!.id) && memberOf[currentCanvas!.id] !== true;
   const serverRefused = Boolean(currentCanvas && roomAccessError?.canvasId === currentCanvas.id);
   const roomLocked = Boolean(currentCanvas) && (passwordGate || serverRefused);
+  // Remember the canvas that actually opened, for the gateway's "continue" card and room preselection.
+  // Only once it has stayed open a moment: entering a room can pass through the list's first room.
+  useEffect(() => {
+    if (showGateway || roomLocked || !currentCanvas) return;
+    const offline = OfflineSessionStore.isOfflineMode();
+    const visit = {
+      mode: offline ? 'offline' as const : 'online' as const,
+      server: offline ? undefined : ApiService.getServerOrigin(),
+      canvasId: currentCanvas.id,
+      title: currentCanvas.title,
+      width: currentCanvas.width,
+      height: currentCanvas.height,
+    };
+    const timer = window.setTimeout(() => recordRecentVisit(visit), 1500);
+    return () => window.clearTimeout(timer);
+  }, [showGateway, roomLocked, currentCanvas?.id, currentCanvas?.title, currentCanvas?.width, currentCanvas?.height]);
   const checkingMembership = passwordGate && !isGuest && memberOf[currentCanvas!.id] === undefined;
   // "Choose another canvas" hides the prompt so the canvas bar below can be used
   const [promptHiddenFor, setPromptHiddenFor] = useState<string | null>(null);

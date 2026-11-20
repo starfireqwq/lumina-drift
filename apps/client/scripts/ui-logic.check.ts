@@ -12,6 +12,7 @@ import {
   type AlignRect,
 } from '../src/utils/layerAlign';
 import { applyColorOutline } from '../src/engine/colorOutline';
+import { addRecentVisit, lastVisitOn, normalizeServer, parseRecentVisits, removeRecentVisit, RECENT_VISITS_LIMIT, type RecentVisit } from '../src/utils/recentVisits';
 import { healUnderMask } from '../src/engine/VectorEngine';
 import { ScopedUndoManager } from '../src/engine/ScopedUndoManager';
 import {
@@ -986,4 +987,29 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   assert.deepEqual(boundsOf(move(shape, selFrame, 'left', 'top')), { x: 20, y: 2, w: 7, h: 6 }, 'The selection is only the frame');
 }
 
+// Recent visits: the gateway's continue card and room preselection
+{
+  const v = (over: Partial<RecentVisit>): RecentVisit => ({ mode: 'online', server: 'http://192.168.1.5:3000', canvasId: 'a', title: 'A', width: 100, height: 80, at: 1, ...over });
+  assert.equal(normalizeServer('http://localhost:3000/'), 'http://127.0.0.1:3000', 'localhost and 127.0.0.1 are one server');
+  assert.equal(normalizeServer('not a url'), undefined);
+  let list = addRecentVisit([], v({}));
+  list = addRecentVisit(list, v({ canvasId: 'b', at: 2 }));
+  list = addRecentVisit(list, v({ mode: 'offline', server: 'http://x', canvasId: 's', at: 3 }));
+  assert.deepEqual(list.map((e) => e.canvasId), ['s', 'b', 'a'], 'Newest first');
+  assert.equal(list[0].server, undefined, 'A solo canvas has no server');
+  list = addRecentVisit(list, v({ at: 4, title: 'A2' }));
+  assert.deepEqual(list.map((e) => e.canvasId), ['a', 's', 'b'], 'Visiting again moves it to the front, no copy');
+  assert.equal(list[0].title, 'A2');
+  assert.equal(lastVisitOn(list, 'http://192.168.1.5:3000')?.canvasId, 'a', 'Last room on that server');
+  assert.equal(lastVisitOn(list, 'http://other:3000'), undefined);
+  assert.equal(lastVisitOn(addRecentVisit([], v({ server: 'http://localhost:3000' })), 'http://127.0.0.1:3000')?.canvasId, 'a');
+  assert.deepEqual(removeRecentVisit(list, list[0]).map((e) => e.canvasId), ['s', 'b']);
+  assert.equal(addRecentVisit([], v({ server: 'bad' })).length, 0, 'An online visit needs a valid server');
+  let many: RecentVisit[] = [];
+  for (let i = 0; i < RECENT_VISITS_LIMIT + 5; i++) many = addRecentVisit(many, v({ canvasId: 'c' + i, at: i }));
+  assert.equal(many.length, RECENT_VISITS_LIMIT, 'The list is capped');
+  assert.deepEqual(parseRecentVisits(JSON.stringify([...list, { mode: 'online', server: 'nope', canvasId: 'z', title: '', width: 1, height: 1, at: 1 }, 5, null])), list, 'Bad entries are dropped');
+  assert.deepEqual(parseRecentVisits('{broken'), []);
+  assert.deepEqual(parseRecentVisits(null), []);
+}
 console.log('ui-logic checks passed');
