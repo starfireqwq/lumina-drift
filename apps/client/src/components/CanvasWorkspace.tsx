@@ -125,6 +125,7 @@ import type { AnimationExportPlan, AnimationExportScope } from './AnimationTimel
 import {
   BlendMode,
   ColorCurvesOptions,
+  type FilterValues,
   GradientPresetName,
   GradientStop,
   LayerType,
@@ -135,7 +136,8 @@ import {
 } from '@atelier/shared';
 import { VectorOverlay } from './VectorOverlay';
 import { VectorEngine } from '../engine/VectorEngine';
-import { LAYER_FILTERS, type LayerFilter, type LayerFilterId } from '../utils/layerFilters';
+import { filterLabel, getFilter, type FilterJob } from '../utils/filterRegistry';
+import { FilterWorkerClient } from '../engine/filterWorkerClient';
 import { AlertCircle, ImagePlus, Keyboard, Layers, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
 import { type DroppedImages, type ImageDropTarget, ImageImportError, imageEntries, isImageDrag, loadImageEntry, readDroppedImages } from '../utils/imageImport';
 
@@ -695,14 +697,16 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const [isColorCurvesOpen, setIsColorCurvesOpen] = useState<boolean>(false);
   const [isGradientMapOpen, setIsGradientMapOpen] = useState<boolean>(false);
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
-  const [layerFilterId, setLayerFilterId] = useState<LayerFilterId | null>(null);
+  // The filter window keeps showing its last filter while it fades out, so the id outlives filterMenuOpen
+  const [layerFilterId, setLayerFilterId] = useState<string | null>(null);
+  const shownFilterId = filterMenuOpen ? layerFilterId : null;
   const filterModalOpenRef = useRef(false);
-  filterModalOpenRef.current = Boolean(layerFilterId || isColorCurvesOpen || isGradientMapOpen);
-  const filterIdRef = useRef(layerFilterId);
-  filterIdRef.current = layerFilterId;
-  const filterWorkerRef = useRef<Worker | null>(null);
+  filterModalOpenRef.current = Boolean(shownFilterId || isColorCurvesOpen || isGradientMapOpen);
+  const filterIdRef = useRef(shownFilterId);
+  filterIdRef.current = shownFilterId;
+  /** One resident filter worker for this canvas (created on first use, idles out on its own) */
+  const filterWorkerRef = useRef<FilterWorkerClient | null>(null);
   const filterRequestRef = useRef(0);
-  const filterAbortRef = useRef<(() => void) | null>(null);
   const [filterBusy, setFilterBusy] = useState(false);
   const filterPreviewRef = useRef<{ item: NonNullable<ReturnType<LayerManager['getLayerItem']>>; texture: RenderTexture } | null>(null);
 
@@ -1419,6 +1423,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       (window as any).__debugPixi = {
         app, viewport, layerManager, tileEngine, selectionEngine, vectorEngine, animationEngine: timeline,
         undo: scopedUndoRef.current, tileToRgba,
+        get filterWorker() { return filterWorkerRef.current; },
       };
 
       // 6.1 Initialize Rulers
@@ -2181,10 +2186,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   const cancelFilterWork = () => {
     filterRequestRef.current++;
-    filterWorkerRef.current?.terminate();
-    filterWorkerRef.current = null;
-    filterAbortRef.current?.();
-    filterAbortRef.current = null;
+    filterWorkerRef.current?.cancel();
   };
 
   const closeFilters = () => {
@@ -2192,17 +2194,26 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     setFilterBusy(false);
     clearFilterPreview();
     setFilterMenuOpen(false);
-    setLayerFilterId(null);
     setIsColorCurvesOpen(false);
     setIsGradientMapOpen(false);
   };
 
-  const chooseFilter = (id: LayerFilterId | 'curves' | 'gradient') => {
+  const chooseFilter = (id: string | null) => {
+    const def = getFilter(id);
+    if (def?.tool) {
+      // Liquify and mesh warp are tools of their own: the menu only opens them
+      closeFilters();
+      if (def.tool === 'liquify') shortcutActionsRef.current.selectTool('liquify');
+      else shortcutActionsRef.current.transform('mesh');
+      return;
+    }
+    cancelFilterWork();
+    setFilterBusy(false);
     clearFilterPreview();
-    setLayerFilterId(id === 'curves' || id === 'gradient' ? null : id);
-    setFilterMenuOpen(id !== 'curves' && id !== 'gradient');
-    setIsColorCurvesOpen(id === 'curves');
-    setIsGradientMapOpen(id === 'gradient');
+    setLayerFilterId(def && !def.dialog ? def.id : null);
+    setFilterMenuOpen(!def?.dialog);
+    setIsColorCurvesOpen(def?.dialog === 'curves');
+    setIsGradientMapOpen(def?.dialog === 'gradient');
   };
 
   const getFilterLayer = () => {
@@ -2215,15 +2226,18 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   openFilterRef.current = (id) => {
     if (getFilterLayer()) {
       if (id) chooseFilter(id);
-      else setFilterMenuOpen(true);
+      else if (!filterMenuOpen) {
+        setLayerFilterId(null);
+        setFilterMenuOpen(true);
+      }
     } else {
-      setPermissionWarning('請先選取可編輯、未鎖定的圖層。');
+      setPermissionWarning(t.filters.needEditableLayer);
       setTimeout(() => setPermissionWarning(null), 3000);
     }
   };
   function openFilterFromShortcut(id: 'curves' | 'gradient') { openFilterRef.current(id); }
 
-  const runLayerFilter = async (filter: LayerFilter | null, previewOnly: boolean): Promise<boolean> => {
+  const runLayerFilter = async (filter: FilterJob | null, previewOnly: boolean): Promise<boolean> => {
     cancelFilterWork();
     if (!filter) { clearFilterPreview(); return true; }
     const request = filterRequestRef.current;
@@ -2240,19 +2254,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       // Read without stalling the page (and without making a sparse layer one big texture)
       const [source] = await lm.readAsync(item.model.id, [{ x: 0, y: 0, w: width, h: height }]);
       if (request !== filterRequestRef.current) return false;
-      const worker = new Worker(new URL('../workers/layer-filter.worker.ts', import.meta.url), { type: 'module' });
-      filterWorkerRef.current = worker;
-      const pixels = await new Promise<Uint8Array | null>((resolve, reject) => {
-        filterAbortRef.current = () => resolve(null);
-        worker.onmessage = ({ data }: MessageEvent<{ request: number; output?: Uint8Array; error?: string }>) => {
-          if (data.request !== request) return;
-          if (data.output) resolve(data.output);
-          else reject(new Error(data.error ?? 'Filter worker returned no result'));
-        };
-        worker.onerror = (event) => reject(new Error(event.message));
-        const input = new Uint8Array(source);
-        worker.postMessage({ request, pixels: input, width, height, filter, mask }, [input.buffer]);
-      });
+      const client = filterWorkerRef.current ??= new FilterWorkerClient();
+      const pixels = await client.run(filter.id, new Uint8Array(source), width, height, filter.values, mask);
       if (!pixels || request !== filterRequestRef.current || tileEngineRef.current !== engine || activeLayerRef.current?.id !== item.model.id || getFilterLayer() !== item) return false;
       if (previewOnly) {
         if (filterPreviewRef.current?.item !== item) clearFilterPreview();
@@ -2269,7 +2272,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       const version = item.version;
       const [latest] = await lm.readAsync(item.model.id, [{ x: 0, y: 0, w: width, h: height }]);
       if (latest.some((value, index) => value !== source[index])) {
-        setPermissionWarning('處理濾鏡期間圖層有更新，請再次套用。');
+        setPermissionWarning(t.filters.layerChanged);
         setTimeout(() => setPermissionWarning(null), 3500);
         return false;
       }
@@ -2287,12 +2290,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       if (request !== filterRequestRef.current || layerManagerRef.current !== lm || getFilterLayer() !== item ||
         mask !== selectionEngineRef.current?.getMaskArray()) return false;
       if (item.version !== version) {
-        setPermissionWarning('處理濾鏡期間圖層有更新，請再次套用。');
+        setPermissionWarning(t.filters.layerChanged);
         setTimeout(() => setPermissionWarning(null), 3500);
         return false;
       }
       lm.writeRegion(item.model.id, 0, 0, width, height, pixels);
-      const label = filter.id === 'curves' ? '色彩曲線' : filter.id === 'gradient' ? '漸層對應' : LAYER_FILTERS[filter.id].label;
+      const def = getFilter(filter.id);
+      const label = def ? filterLabel(def, t) : filter.id;
       scopedUndoRef.current.push({
         opId: `op_filter_${Date.now()}_${Math.random().toString(36).slice(2)}`,
         userId: userRef.current?.id || user?.id || 'guest',
@@ -2310,26 +2314,25 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       if (request !== filterRequestRef.current) return false;
       clearFilterPreview();
       console.error('[CanvasWorkspace] Layer filter failed:', error);
-      setPermissionWarning('無法處理這個圖層的濾鏡。');
+      setPermissionWarning(t.filters.failed);
       return false;
     } finally {
-      if (request === filterRequestRef.current) {
-        filterWorkerRef.current?.terminate();
-        filterWorkerRef.current = null;
-        filterAbortRef.current = null;
-        if (!previewOnly) setFilterBusy(false);
-      }
+      if (request === filterRequestRef.current && !previewOnly) setFilterBusy(false);
     }
   };
+
+  useEffect(() => () => filterWorkerRef.current?.dispose(), []);
 
   const filterRunnerRef = useRef(runLayerFilter);
   filterRunnerRef.current = runLayerFilter;
   const [filterCallbacks] = useState(() => ({
-    curves: (options: ColorCurvesOptions | null) => filterRunnerRef.current(options ? { id: 'curves', options } : null, true),
-    gradient: (stops: GradientStop[] | null, opacity: number) => filterRunnerRef.current(stops ? { id: 'gradient', stops, opacity } : null, true),
-    parameters: (values: number[] | null) => {
+    curves: (options: ColorCurvesOptions | null) => filterRunnerRef.current(options ? { id: 'curves', values: { options } } : null, true),
+    gradient: (stops: GradientStop[] | null, opacity: number) =>
+      filterRunnerRef.current(stops ? { id: 'gradient', values: { stops, opacity } } : null, true),
+    parameters: (values: FilterValues | null) => {
+      // A preview timer that fires while the window fades out must not start a new preview
       const id = filterIdRef.current;
-      filterRunnerRef.current(values && id ? { id, values } : null, true);
+      if (id) filterRunnerRef.current(values ? { id, values } : null, true);
     },
   }));
 
@@ -5400,18 +5403,18 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         />
       )}
 
-      {filterMenuOpen && (
+      <OverlayPresence open={filterMenuOpen} kind="popover">
         <Suspense fallback={null}><LayerFilterDialog key={layerFilterId ?? 'list'} filterId={layerFilterId} busy={filterBusy}
-          layerName={activeLayer?.name ?? ''} onChoose={chooseFilter} onClose={closeFilters}
+          layerName={activeLayer?.name ?? ''} onChoose={chooseFilter} onBack={() => chooseFilter(null)} onClose={closeFilters}
           onPreview={filterCallbacks.parameters}
           onApply={(values) => layerFilterId ? runLayerFilter({ id: layerFilterId, values }, false) : Promise.resolve(false)} /></Suspense>
-      )}
+      </OverlayPresence>
       {isColorCurvesOpen && <Suspense fallback={null}><ColorCurvesModal
         isOpen={isColorCurvesOpen}
         busy={filterBusy}
         onClose={closeFilters}
         onPreview={filterCallbacks.curves}
-        onApply={(options) => runLayerFilter({ id: 'curves', options }, false)}
+        onApply={(options) => runLayerFilter({ id: 'curves', values: { options } }, false)}
       /></Suspense>}
 
       {isGradientMapOpen && <Suspense fallback={null}><GradientMapModal
@@ -5419,7 +5422,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         busy={filterBusy}
         onClose={closeFilters}
         onPreview={filterCallbacks.gradient}
-        onApply={(stops, opacity) => runLayerFilter({ id: 'gradient', stops, opacity }, false)}
+        onApply={(stops, opacity) => runLayerFilter({ id: 'gradient', values: { stops, opacity } }, false)}
       /></Suspense>}
     </div>
   );

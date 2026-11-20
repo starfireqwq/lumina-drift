@@ -313,7 +313,7 @@ html.atelier-theme-vt, html.atelier-theme-vt body { transition: none !important;
 
 /* ---- Animation timeline: it rises from the bottom edge, and a streak of light (流光) runs along
    the top of the timeline and of every settings row as it opens ---- */
-.atelier-timeline::before, .atelier-tl-row::after, .atelier-original-chip::after {
+.atelier-timeline::before, .atelier-tl-row::after, .atelier-original-chip::after, .atelier-filter-group::after {
   content: ''; position: absolute; left: 0; right: 0; height: 1px; pointer-events: none; z-index: 30;
   /* The streak moves by background position, so it never widens a scrolling row */
   background: linear-gradient(90deg, transparent, rgb(var(--a-400) / .9) 40%, rgb(251 113 133 / .9) 60%, transparent) no-repeat;
@@ -339,7 +339,12 @@ html.atelier-theme-vt, html.atelier-theme-vt body { transition: none !important;
   /* 原位作畫 chip: the streak of light runs under it each time it appears */
   .atelier-original-chip::after { animation: atelierLightSweep 1.1s cubic-bezier(.3, .1, .2, 1) .15s; }
   .atelier-tl-row.is-leaving { animation: atelierRowOut .11s ease-in both; }
+  /* Filter menu: the streak runs under the group just picked, and its filters rise in one by one */
+  .atelier-filter-group:is([aria-pressed='true'], [aria-expanded='true'])::after { animation: atelierLightSweep .8s cubic-bezier(.3, .1, .2, 1) .04s; }
+  .atelier-filter-item { animation: atelierRowIn .2s cubic-bezier(.2, .8, .3, 1) both; animation-delay: calc(var(--i, 0) * 28ms); }
 }
+.atelier-filter-group { position: relative; }
+.atelier-filter-group::after { bottom: 0; }
 
 /* A blank frame: nothing on screen there, drawn as a faint × over a see-through hatch */
 .atelier-blank-cel {
