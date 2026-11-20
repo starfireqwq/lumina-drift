@@ -1160,6 +1160,7 @@ export const jaJP: Translations = {
     tunnelErrorScript: 'Web版はホストPCで scripts/tunnel-cloudflare.ps1 を実行し、表示されたURLを上に貼り付けてください。',
     tunnelStartFailed: 'トンネルの起動に失敗しました。cloudflaredがインストールされているか確認してください',
     fillInternetUrlFirst: '先にインターネットサーバーのURLを入力してください。',
+    noServerHere: 'このサイトにはサーバーがありません。先にサーバーのURLを入力してください。',
     tabActionAria: 'ルームへの参加または作成を選択',
     modeSoloOffline: '🎨 ソロ・オフライン作画',
     modeSoloOfflineDesc: 'サーバー起動や通信なしで、ローカルキャンバスや .lumina ファイルをすぐ開いて作画',

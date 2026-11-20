@@ -1160,6 +1160,7 @@ export const enUS: Translations = {
     tunnelErrorScript: 'In web mode, run scripts/tunnel-cloudflare.ps1 on host and paste the generated URL above.',
     tunnelStartFailed: 'Failed to start tunnel; please make sure cloudflared is installed',
     fillInternetUrlFirst: 'Please enter the Internet server URL first.',
+    noServerHere: 'This site has no server. Enter a server URL first.',
     tabActionAria: 'Choose to join or create room',
     modeSoloOffline: '🎨 Solo Offline Drawing',
     modeSoloOfflineDesc: 'Draw offline immediately or open a local .lumina project without starting a server',

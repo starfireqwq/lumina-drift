@@ -11,6 +11,7 @@ import { PRESETS } from './ResizeCanvasModal';
 import { useI18n } from '../context/I18nContext';
 import { useCloudflareTunnel } from '../context/useCloudflareTunnel';
 import { isLoopbackServer, parseServerLink, publicServerOrigin } from '../utils/serverLinks';
+import { isForeignApiReply } from '../utils/apiErrors';
 import { RESIZE_MAX, RESIZE_MIN } from '../utils/canvasResize';
 import { accountBridgeAvailable, clearPrimaryAccount, getPrimaryAccount, PRIMARY_ACCOUNT_EVENT } from '../services/accountBridge';
 import { PrimaryAccountDialog } from './PrimaryAccountDialog';
@@ -114,6 +115,9 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
   const [tunnelError, setTunnelError] = useState<string | null>(null);
   const [serverRunning, setServerRunning] = useState(true);
   const [roomsRefresh, setRoomsRefresh] = useState(0);
+  // Web only: this site turned out to be static hosting (no /api), so "this server" was swapped for the Internet box
+  const [noServerHere, setNoServerHere] = useState(false);
+  const leftHereRef = useRef(false);
   const userChoseTabRef = useRef(false);
   const [ping, setPing] = useState<{ testing: boolean; ok: boolean | null; ms?: number; error?: string }>({ testing: false, ok: null });
   const pingRequest = useRef(0);
@@ -182,7 +186,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
   const remoteLink = parseServerLink(internetUrl);
   const target = where === 'here' ? here : where === 'internet' ? remoteLink?.origin :
     lanIp.trim() ? parseServerLink(`http://${lanIp.trim()}:${lanPort.trim() || '3000'}`)?.origin : undefined;
-  const connectionError = !target ? t.gateway.fillInternetUrlFirst : !isDesktop && !isAndroid && (
+  const connectionError = !target ? (noServerHere && where === 'internet' ? t.gateway.noServerHere : t.gateway.fillInternetUrlFirst) : !isDesktop && !isAndroid && (
     (window.location.protocol === 'https:' && target.startsWith('http:')) ||
     (isLoopbackServer(target) && !isLoopbackServer(here))
   ) ? t.gateway.cannotConnectCheckSettings : null;
@@ -233,6 +237,17 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
           await new Promise((r) => setTimeout(r, 350));
           res = await fetch(`${target}/api/canvases`, { signal: controller.signal });
         }
+        // Web page on static hosting: its own site has no API (404, or the app's HTML as a fallback page).
+        // Move to the Internet box once, so the user is asked for a server URL instead of hitting 404s.
+        if (!isDesktop && !isAndroid && where === 'here' && !leftHereRef.current &&
+            isForeignApiReply(res.status, res.headers.get('content-type'))) {
+          if (controller.signal.aborted) return;
+          leftHereRef.current = true;
+          resetPing();
+          setNoServerHere(true);
+          setWhere('internet');
+          return;
+        }
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = (await res.json()) as { canvases: CanvasModel[] };
         if (controller.signal.aborted) return;
@@ -273,7 +288,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
       controller.abort();
       clearTimeout(timer);
     };
-  }, [target, connectionError, invitedRoom, gatewayMode, isDesktop, where, desktop, t.gateway.cannotConnectCheckSettings, roomsRefresh]);
+  }, [target, connectionError, invitedRoom, gatewayMode, isDesktop, isAndroid, where, desktop, t.gateway.cannotConnectCheckSettings, roomsRefresh]);
 
   useEffect(() => {
     setQr('');
@@ -392,8 +407,10 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
         ? Boolean(groupTitle.trim()) && (!usePassword || Boolean(password.trim()))
         : validSize && Boolean(title.trim()) && (!usePassword || Boolean(password.trim())));
 
+  // No login while this server's API is unreachable: the dialog could only fail (e.g. a static host's 404)
+  const authBlocked = Boolean(connectionError || roomsError);
   const openAuth = () => {
-    if (!target || connectionError) return;
+    if (!target || authBlocked) return;
     onOpenAuth?.(isLocalTunnel ? here : target);
   };
 
@@ -647,8 +664,8 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                   <button
                     type="button"
                     onClick={openAuth}
-                    disabled={Boolean(connectionError)}
-                    className="flex shrink-0 items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-500"
+                    disabled={authBlocked}
+                    className="flex shrink-0 items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-indigo-500 disabled:pointer-events-none disabled:opacity-40"
                   >
                     <LogIn className="h-3.5 w-3.5" />
                     <span>{t.navbar.loginRegister}</span>
@@ -672,8 +689,8 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                 <button
                   type="button"
                   onClick={openAuth}
-                  disabled={Boolean(connectionError)}
-                  className="rounded-lg border border-neutral-700 px-2.5 py-1 text-[11px] text-neutral-300 hover:bg-neutral-800"
+                  disabled={authBlocked}
+                  className="rounded-lg border border-neutral-700 px-2.5 py-1 text-[11px] text-neutral-300 hover:bg-neutral-800 disabled:pointer-events-none disabled:opacity-40"
                 >
                   {t.navbar.loginRegister}
                 </button>

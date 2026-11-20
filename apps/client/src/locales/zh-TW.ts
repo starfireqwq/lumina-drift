@@ -1160,6 +1160,7 @@ export const zhTW: Translations = {
     tunnelErrorScript: '網頁版請在主機執行 scripts/tunnel-cloudflare.ps1，再把它給的網址貼在上面。',
     tunnelStartFailed: '啟動通道失敗，請確認已安裝 cloudflared',
     fillInternetUrlFirst: '請先填網際網路的伺服器網址。',
+    noServerHere: '這個網站沒有伺服器，請先填伺服器網址。',
     tabActionAria: '要加入還是建立房間',
     modeSoloOffline: '🎨 單人離線作畫',
     modeSoloOfflineDesc: '免開伺服器、免連網，直接進入本機畫布或開啟 .lumina 專案檔創作',

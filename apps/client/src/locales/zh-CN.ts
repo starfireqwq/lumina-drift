@@ -1160,6 +1160,7 @@ export const zhCN: Translations = {
     tunnelErrorScript: '网页版请在主机运行 scripts/tunnel-cloudflare.ps1，并将生成的网址粘贴于上方。',
     tunnelStartFailed: '启动隧道失败，请确认已安装 cloudflared',
     fillInternetUrlFirst: '请先填写互联网服务器网址。',
+    noServerHere: '这个网站没有服务器，请先填写服务器网址。',
     tabActionAria: '加入或创建房间',
     modeSoloOffline: '🎨 单人离线作画',
     modeSoloOfflineDesc: '无需启动服务器或联网，直接进入本机画布或打开 .lumina 工程档创作',

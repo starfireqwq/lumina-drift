@@ -51,7 +51,7 @@ import {
 import { getDockLayout } from '../src/components/workspace/dockStore';
 import { buildCanvasGroupEntries, toggleCollapsedCanvasGroup } from '../src/utils/canvasGroups';
 import { buildRoomShareUrl } from '../src/utils/serverLinks';
-import { apiErrorMessage } from '../src/utils/apiErrors';
+import { apiErrorMessage, isForeignApiReply } from '../src/utils/apiErrors';
 import { translations, type Language } from '../src/locales';
 import { DEFAULT_COMMUNITY_PRESETS, MIN_BRUSH_SPACING, PIXEL_FILTER_RUNNERS, runPixelFilter, type CanvasModel } from '@atelier/shared';
 import {
@@ -718,6 +718,13 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
     'http://192.168.1.20:3000'
   );
 
+  // API replies: a static host (404 page or HTML fallback) is not a Lumina server; real errors stay as they are
+  assert.equal(isForeignApiReply(404, 'text/html'), true);
+  assert.equal(isForeignApiReply(404, 'application/json; charset=utf-8'), true);
+  assert.equal(isForeignApiReply(200, 'text/html; charset=utf-8'), true);
+  assert.equal(isForeignApiReply(200, 'application/json; charset=utf-8'), false);
+  assert.equal(isForeignApiReply(500, 'text/html'), false);
+  assert.equal(isForeignApiReply(401, null), false);
   // Error text: the server's own message wins; otherwise it follows the interface language
   assert.equal(apiErrorMessage(translations['zh-CN'].server, 404, {}), translations['zh-CN'].server.apiNotFound);
   assert.equal(apiErrorMessage(translations['en-US'].server, 502, null), 'Server request failed (HTTP 502).');

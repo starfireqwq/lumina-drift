@@ -1183,6 +1183,8 @@ export interface Translations {
     tunnelErrorScript: string;
     tunnelStartFailed: string;
     fillInternetUrlFirst: string;
+    /** The web page's own site has no server (static hosting), so the gateway moved to the Internet box */
+    noServerHere: string;
     tabActionAria: string;
     modeSoloOffline: string;
     modeSoloOfflineDesc: string;
