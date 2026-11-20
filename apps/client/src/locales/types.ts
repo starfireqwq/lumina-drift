@@ -689,6 +689,56 @@ export interface Translations {
     colorStop: string;
   };
 
+  /** Filter menu (utils/filterRegistry.ts): groups, filter names and parameter names */
+  filters: {
+    title: string;
+    groupsAria: string;
+    preview: string;
+    opensTool: string;
+    resetParams: string;
+    invertHint: string;
+    needEditableLayer: string;
+    layerChanged: string;
+    failed: string;
+    groups: {
+      color: string;
+      library: string;
+      lineart: string;
+      render: string;
+      effect: string;
+      blur: string;
+      distort: string;
+      sharpen: string;
+    };
+    items: {
+      box: string;
+      gaussian: string;
+      spin: string;
+      posterize: string;
+      noise: string;
+      invert: string;
+      chromatic: string;
+      halftone: string;
+      twirl: string;
+      curves: string;
+      gradient: string;
+      liquify: string;
+      meshWarp: string;
+    };
+    /** Parameter names; a select's option names share this table */
+    params: {
+      radius: string;
+      angle: string;
+      levels: string;
+      amount: string;
+      grain: string;
+      offsetX: string;
+      offsetY: string;
+      density: string;
+      dotSize: string;
+    };
+  };
+
   brushPreset: {
     toolset: string;
     groupsLabel: string;
