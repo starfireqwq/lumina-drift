@@ -21,8 +21,10 @@ export interface CelEntry {
   label: string;
   /** Timeline frames it stays on screen (1 = one frame) */
   hold: number;
-  /** A reused cel: the layer it shows ('' = its cel was deleted, it shows nothing) */
+  /** A reused cel: the layer it shows ('' = nothing: a blank frame, or its cel was deleted) */
   ref?: string;
+  /** A blank frame put on the timeline on purpose (meta.cel.ref = ''), not a reuse of a deleted cel */
+  blank?: boolean;
   ownerId: string | null;
   isGroup: boolean;
 }
@@ -35,6 +37,13 @@ export interface AnimationTrack {
   entries: CelEntry[];
 }
 
+/**
+ * How onion skin draws the neighbouring drawings: one flat colour (`tint`), the colour shaded by the
+ * drawing's own lights and darks (`shade`), or the drawing as it is, only fainter (`original`)
+ */
+export type OnionMode = 'tint' | 'shade' | 'original';
+export const ONION_MODES: readonly OnionMode[] = ['tint', 'shade', 'original'];
+
 export interface OnionSkinConfig {
   enabled: boolean;
   prevColor: string;
@@ -42,14 +51,19 @@ export interface OnionSkinConfig {
   opacity: number; // 0.05 to 0.9
   prevFramesCount: number; // 0 to MAX_ONION
   nextFramesCount: number;
+  /** Missing = 'tint' (settings saved before there was a choice) */
+  mode?: OnionMode;
 }
 
-export const MAX_HOLD = 99;
 /** Longest timeline that can be set (250 s at 24 FPS) */
 export const MAX_TIMELINE_FRAMES = 6000;
-export const MAX_ONION = 5;
+/** A cel can stay on screen for the whole timeline */
+export const MAX_HOLD = MAX_TIMELINE_FRAMES;
+export const MAX_ONION = 10;
 /** Frames past the end of the longest track that the playhead can be put on (to place cels there) */
 export const TIMELINE_SLACK = 24;
+/** Layer name of a blank frame (the timeline draws it as ×) */
+export const BLANK_CEL_NAME = '×';
 
 type AnimLayer = {
   id: string;
@@ -98,7 +112,8 @@ export function celEntriesOf(layers: AnimLayer[], folderId: string): CelEntry[] 
       // No chains: a reference to a reference (or to itself) shows nothing
       ref = target && target.id !== l.id && target.meta?.cel?.ref === undefined ? target.id : '';
     }
-    return { id: l.id, label: l.name ?? '', hold, ref, ownerId: l.ownerId ?? null, isGroup: l.layerType === 'group' };
+    const blank = cel?.ref === '' ? { blank: true } : null;
+    return { id: l.id, label: l.name ?? '', hold, ref, ...blank, ownerId: l.ownerId ?? null, isGroup: l.layerType === 'group' };
   });
 }
 
@@ -219,6 +234,27 @@ export function parseTimecode(text: string, fps: number): number | null {
   return /^\d{1,6}$/.test(s) && Number(s) >= 1 ? Number(s) - 1 : null;
 }
 
+/**
+ * Where playback is `elapsedMs` after it left `startFrame`, counted from the clock rather than from
+ * timer ticks: a late tick skips to where the animation should be instead of drifting behind.
+ * Plays `first`–`last` (both included); `ended` = a play that does not loop reached `last`.
+ */
+export function playbackFrame(
+  startFrame: number,
+  elapsedMs: number,
+  fps: number,
+  first: number,
+  last: number,
+  loop: boolean
+): { frame: number; ended: boolean } {
+  const steps = Math.max(0, Math.floor((elapsedMs * Math.max(1, fps)) / 1000 + 1e-6));
+  const target = startFrame + steps;
+  if (target <= last) return { frame: target, ended: false };
+  if (!loop) return { frame: last, ended: true };
+  const span = Math.max(1, last - first + 1);
+  return { frame: first + ((((target - first) % span) + span) % span), ended: false };
+}
+
 export interface AnimationView {
   /** Timeline frame on screen */
   time: number;
@@ -240,7 +276,7 @@ export function animationDisplay<T extends AnimLayer>(
   view: AnimationView | null,
   canvasWidth = 0,
   canvasHeight = 0
-): Array<T & { onionTint?: number; renderTransform?: Affine2D }> {
+): Array<T & { onionTint?: number; onionMode?: 'shade'; renderTransform?: Affine2D }> {
   const folders = layers.filter(isAnimationFolder);
   let hasKeyframes = false;
   for (let i = 0; i < layers.length; i++) {
@@ -318,8 +354,9 @@ export function animationDisplay<T extends AnimLayer>(
         if (!id || seen.has(id)) continue;
         seen.add(id);
         distance++;
-        // The nearest drawing at the set opacity, each one further away fainter (1, 0.8, 0.6… of 5)
-        if (!celState.has(id)) celState.set(id, { tint: tint(color), fade: 1 - (distance - 1) / count });
+        // The nearest drawing at the set opacity, each one further away fainter (1, 0.8, 0.6… of 5).
+        // 'original' only fades it: no colour, so no filter to run
+        if (!celState.has(id)) celState.set(id, { tint: onion.mode === 'original' ? undefined : tint(color), fade: 1 - (distance - 1) / count });
       }
     };
     walk(-1, onion.prevFramesCount, onion.prevColor);
@@ -348,6 +385,7 @@ export function animationDisplay<T extends AnimLayer>(
   }
 
   const opacity = view?.onion?.opacity ?? 0.35;
+  const shade = view?.onion?.mode === 'shade' ? ({ onionMode: 'shade' } as const) : null;
   return layers.map((l) => {
     const m = worldTransforms?.get(l.id);
     const withTransform = m && !m.isIdentity ? { renderTransform: m } : null;
@@ -362,23 +400,90 @@ export function animationDisplay<T extends AnimLayer>(
       if (!l.isVisible) return withTransform ? { ...l, ...withTransform } : l;
       return { ...l, opacity: l.opacity * state.light, ...withTransform };
     }
-    if (state?.tint !== undefined) {
+    if (state?.fade !== undefined) {
       if (!l.isVisible) return withTransform ? { ...l, ...withTransform } : l;
-      const faded = opacity * (state.fade ?? 1);
-      return l.layerType === 'group'
+      const faded = opacity * state.fade;
+      return l.layerType === 'group' || state.tint === undefined
         ? { ...l, opacity: faded, ...withTransform }
-        : { ...l, opacity: faded, onionTint: state.tint, ...withTransform };
+        : { ...l, opacity: faded, onionTint: state.tint, ...shade, ...withTransform };
     }
     const inherited = tintOf.get(l.id);
     if (inherited !== undefined && l.layerType !== 'group' && l.layerType !== 'mask') {
-      return { ...l, onionTint: inherited, ...withTransform };
+      return { ...l, onionTint: inherited, ...shade, ...withTransform };
     }
     return withTransform ? { ...l, ...withTransform } : l;
   });
 }
 
+/**
+ * One frame's picture as a string, for telling frames apart: every layer really on screen (it and
+ * every group around it shown) with its opacity and keyframe transform. Same string = same picture.
+ */
+export function frameSignature(list: ReadonlyArray<AnimLayer & { renderTransform?: Affine2D }>): string {
+  const byId = new Map<string, AnimLayer>();
+  for (const l of list) byId.set(l.id, l);
+  const shown = new Map<string, boolean>();
+  const isShown = (l: AnimLayer, depth: number): boolean => {
+    const known = shown.get(l.id);
+    if (known !== undefined) return known;
+    const parent = l.parentId ? byId.get(l.parentId) : undefined;
+    const on = l.isVisible && (!parent || depth > 32 || isShown(parent, depth + 1));
+    shown.set(l.id, on);
+    return on;
+  };
+  let s = '';
+  for (const l of list) {
+    if (!isShown(l, 0)) continue;
+    s += `${l.id}:${l.opacity.toFixed(3)}`;
+    const m = l.renderTransform;
+    if (m && !m.isIdentity) s += `@${m.a.toFixed(4)},${m.b.toFixed(4)},${m.c.toFixed(4)},${m.d.toFixed(4)},${m.tx.toFixed(2)},${m.ty.toFixed(2)}`;
+    s += '|';
+  }
+  return s;
+}
+
+/**
+ * GIF / video frames from `start` to `end`: one segment per distinct picture, so a held drawing is
+ * one longer frame, while a drawing that only moves by keyframes gets a frame for every step.
+ * `only`: the animation folders being exported (null = everything).
+ */
+export function exportSegments<T extends AnimLayer>(
+  layers: T[],
+  start: number,
+  end: number,
+  only: Set<string> | null,
+  canvasWidth: number,
+  canvasHeight: number
+): Array<{ time: number; hold: number }> {
+  const segments: Array<{ time: number; hold: number }> = [];
+  let keyAt: (t: number) => string;
+  if (layers.some((l) => l.meta?.keyframes?.length)) {
+    keyAt = (t) => frameSignature(animationDisplay(layers, { time: t, activeFolderId: null, onion: null, only }, canvasWidth, canvasHeight));
+  } else {
+    // Nothing moves by keyframes: the picture changes only where a track's drawing does, so the
+    // drawings on screen are the key (a long timeline plans in a few ms, also on a phone)
+    const tracks = layers.filter((l) => isAnimationFolder(l) && (!only || only.has(l.id))).map((f) => celEntriesOf(layers, f.id));
+    keyAt = (t) => tracks.map((entries) => celLayerOf(entries[entryIndexAt(entries, t)]) ?? '-').join('|');
+  }
+  let last: string | null = null;
+  for (let t = start; t <= end; t++) {
+    const key = keyAt(t);
+    if (key === last) segments[segments.length - 1].hold++;
+    else segments.push({ time: t, hold: 1 });
+    last = key;
+  }
+  return segments;
+}
+
 const ONION_KEY = 'atelier_onion_skin';
 const LOOP_KEY = 'atelier_anim_loop';
+/** A gap between ticks longer than this (a hidden tab gets none) restarts the count instead of jumping ahead */
+const RESYNC_AFTER_MS = 500;
+const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+// Display-synced ticks in the app; a timer where there is no screen (scripts)
+const requestFrame = (cb: (now: number) => void): number =>
+  typeof requestAnimationFrame === 'function' ? requestAnimationFrame(cb) : (setTimeout(() => cb(nowMs()), 16) as unknown as number);
+const cancelFrame = (id: number) => (typeof cancelAnimationFrame === 'function' ? cancelAnimationFrame(id) : clearTimeout(id));
 
 /**
  * This viewer's player: the frame on screen, playback, playback range and onion skin are their
@@ -391,7 +496,10 @@ export class AnimationEngine {
   private time = 0;
   private length = 1;
   private range: { start: number; end: number } | null = null;
-  private playTimer: ReturnType<typeof setInterval> | null = null;
+  /** Pending animation-frame callback while playing (0 = none) */
+  private rafId = 0;
+  /** Playback counts frames from here: when it (re)started and the frame it was on */
+  private clock = { at: 0, frame: 0, lastTick: 0, shown: 0 };
 
   private onionSkinConfig: OnionSkinConfig = {
     enabled: true,
@@ -400,6 +508,7 @@ export class AnimationEngine {
     opacity: 0.35,
     prevFramesCount: 1,
     nextFramesCount: 1,
+    mode: 'tint',
   };
 
   // byUser: the viewer moved (timeline, playback); false when the timeline changed under them
@@ -425,6 +534,7 @@ export class AnimationEngine {
       opacity: Math.max(0.05, Math.min(0.9, Number(c.opacity) || 0.35)),
       prevFramesCount: count(c.prevFramesCount),
       nextFramesCount: count(c.nextFramesCount),
+      mode: ONION_MODES.includes(c.mode as OnionMode) ? c.mode : 'tint',
     };
   }
 
@@ -436,10 +546,8 @@ export class AnimationEngine {
     const next = Math.max(1, Math.min(60, Math.round(fps) || 12));
     if (next === this.fps) return;
     this.fps = next;
-    if (this.playing) {
-      this.pause();
-      this.play();
-    }
+    // Keeps playing: the new speed counts from the frame on screen
+    if (this.playing) this.startClock(nowMs());
   }
 
   /** Timeline length in frames (the longest track); keeps the frame on screen where possible */
@@ -508,25 +616,47 @@ export class AnimationEngine {
     else if (this.time >= (this.range?.end ?? this.length - 1)) this.goTo(this.range?.start ?? 0); // from the top again
     this.playing = true;
     this.notifyPlaybackState();
-    this.playTimer = setInterval(() => this.tick(), 1000 / this.fps);
+    this.startClock(nowMs());
+    this.scheduleTick();
   }
 
   public pause() {
     if (!this.playing) return;
     this.playing = false;
-    if (this.playTimer) {
-      clearInterval(this.playTimer);
-      this.playTimer = null;
+    if (this.rafId) {
+      cancelFrame(this.rafId);
+      this.rafId = 0;
     }
     this.notifyPlaybackState();
   }
 
-  private tick() {
+  /** Playback counts frames from the frame on screen, now */
+  private startClock(now: number) {
+    this.clock = { at: now, frame: this.time, lastTick: now, shown: this.time };
+  }
+
+  private scheduleTick() {
+    if (!this.rafId) this.rafId = requestFrame((now) => {
+      this.rafId = 0;
+      if (!this.playing) return;
+      this.tick(now);
+      if (this.playing) this.scheduleTick();
+    });
+  }
+
+  /**
+   * Shows the frame the clock is on. A slow screen skips frames to keep the timing; after a pause
+   * in the ticks (a background tab) or a move by hand, playback goes on from the frame on screen.
+   */
+  private tick(now: number) {
+    if (now - this.clock.lastTick > RESYNC_AFTER_MS || this.time !== this.clock.shown) this.startClock(now);
+    this.clock.lastTick = now;
     const start = this.range?.start ?? 0;
     const end = this.range?.end ?? this.length - 1;
-    if (this.time + 1 <= end) this.goTo(this.time + 1);
-    else if (this.loop) this.goTo(start);
-    else this.pause(); // played once: stays on the last frame
+    const { frame, ended } = playbackFrame(this.clock.frame, now - this.clock.at, this.fps, start, end, this.loop);
+    if (frame !== this.time) this.goTo(frame);
+    this.clock.shown = this.time;
+    if (ended) this.pause(); // played once: stays on the last frame
   }
 
   /** Loop playback (CSP 重複播放); off, playback stops on the last frame. This viewer's own */

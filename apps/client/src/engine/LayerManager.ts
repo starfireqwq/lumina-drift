@@ -453,9 +453,9 @@ export class LayerManager {
         parentId = parentModel.parentId;
       }
 
-      // Onion skin (display only): the neighbouring frame drawn in one flat colour
-      const onionTint = (model as LayerModel & { onionTint?: number }).onionTint;
-      item.onionFilter = onionTint === undefined ? null : this.getOnionFilter(onionTint);
+      // Onion skin (display only): the neighbouring frame in one flat colour, or shaded by its own lights and darks
+      const { onionTint, onionMode } = model as LayerModel & { onionTint?: number; onionMode?: 'shade' };
+      item.onionFilter = onionTint === undefined ? null : this.getOnionFilter(onionTint, onionMode === 'shade');
 
       item.shown = effectiveVisible && model.layerType !== 'mask';
       if (item.shown) item.lastShown = now;
@@ -2288,15 +2288,21 @@ export class LayerManager {
     };
   }
 
+  /** One filter per colour and way of drawing (key: colour, plus 0x1000000 when shaded) */
   private onionFilters = new Map<number, Filter>();
 
-  private getOnionFilter(tint: number): Filter {
-    let filter = this.onionFilters.get(tint);
-    if (!filter) this.onionFilters.set(tint, (filter = this.createOnionFilter(tint)));
+  private getOnionFilter(tint: number, shade: boolean): Filter {
+    const key = tint + (shade ? 0x1000000 : 0);
+    let filter = this.onionFilters.get(key);
+    if (!filter) this.onionFilters.set(key, (filter = this.createOnionFilter(tint, shade)));
     return filter;
   }
 
-  private createOnionFilter(tint: number): Filter {
+  /**
+   * uMode 0: the drawing in one flat colour. uMode 1: the colour keeps the drawing's lights and
+   * darks (dark lines a deep shade of it, light fills a pale one), so shading still reads.
+   */
+  private createOnionFilter(tint: number, shade: boolean): Filter {
     return Filter.from({
       gl: {
         vertex: defaultFilterVert,
@@ -2306,15 +2312,23 @@ export class LayerManager {
           out vec4 finalColor;
           uniform sampler2D uTexture;
           uniform vec3 uTint;
+          uniform float uMode;
           void main() {
-            float a = texture(uTexture, vTextureCoord).a;
-            finalColor = vec4(uTint * a, a);
+            vec4 src = texture(uTexture, vTextureCoord);
+            float a = src.a;
+            vec3 col = uTint;
+            if (uMode > 0.5 && a > 0.0) {
+              float lum = dot(src.rgb / a, vec3(0.299, 0.587, 0.114));
+              col = lum < 0.5 ? mix(uTint * 0.3, uTint, lum * 2.0) : mix(uTint, vec3(1.0), (lum - 0.5) * 1.5);
+            }
+            finalColor = vec4(col * a, a);
           }
         `,
       },
       resources: {
         onionUniforms: {
           uTint: { value: [((tint >> 16) & 255) / 255, ((tint >> 8) & 255) / 255, (tint & 255) / 255], type: 'vec3<f32>' },
+          uMode: { value: shade ? 1 : 0, type: 'f32' },
         },
       },
     });

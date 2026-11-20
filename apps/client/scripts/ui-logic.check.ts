@@ -30,7 +30,8 @@ import {
 } from '@atelier/shared';
 import { getBoxPivotCanvasPoint, type TransformBox } from '../src/utils/transformProjection';
 import {
-  AnimationEngine, animationDisplay, celEntriesOf, celInsertAt, celOfLayer, entryIndexAt, formatTimecode, parseTimecode, placeEntries, removeTransformKeyframe,
+  AnimationEngine, animationDisplay, celEntriesOf, celInsertAt, celOfLayer, entryIndexAt, exportSegments, formatTimecode, frameSignature, MAX_HOLD, MAX_TIMELINE_FRAMES,
+  parseTimecode, placeEntries, playbackFrame, removeTransformKeyframe,
   timeOfCel, trackLength, upsertTransformKeyframe,
 } from '../src/engine/AnimationEngine';
 import { cleanLightTable, clearLightTable, emptyLightTable, lightIdsFor, toggleLightCel } from '../src/engine/lightTable';
@@ -322,13 +323,21 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   player.setRange({ start: 7, end: 4 });
   assert.deepEqual(player.getRange(), { start: 4, end: 7 });
   player.goTo(7);
-  (player as any).tick();
+  (player as any).playing = true;
+  (player as any).startClock(0);
+  (player as any).tick(1000 / player.getFps()); // one frame later
+  (player as any).playing = false;
   assert.equal(player.getTime(), 4, 'loops back to the range start');
   player.setLength(5);
   assert.deepEqual(player.getRange(), { start: 4, end: 4 });
-  player.setOnionSkinConfig({ prevFramesCount: 9, opacity: 5 });
-  assert.equal(player.getOnionSkinConfig().prevFramesCount, 5);
+  player.setOnionSkinConfig({ prevFramesCount: 19, opacity: 5 });
+  assert.equal(player.getOnionSkinConfig().prevFramesCount, 10, 'up to 10 drawings each way');
   assert.equal(player.getOnionSkinConfig().opacity, 0.9);
+  assert.equal(player.getOnionSkinConfig().mode, 'tint', 'settings saved before the choice keep the flat colour');
+  player.setOnionSkinConfig({ mode: 'shade' });
+  assert.equal(player.getOnionSkinConfig().mode, 'shade');
+  player.setOnionSkinConfig({ mode: 'sepia' as never });
+  assert.equal(player.getOnionSkinConfig().mode, 'tint', 'an unknown look falls back to the flat colour');
 
   // CSP in-between: a cel added at the playhead splits the cel there, later cels keep their frames
   {
@@ -353,7 +362,8 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
     once.setLoop(false);
     once.goTo(4);
     (once as any).playing = true;
-    (once as any).tick();
+    (once as any).startClock(0);
+    (once as any).tick(1000 / once.getFps());
     assert.equal(once.getTime(), 4);
     assert.equal(once.getIsPlaying(), false, 'stopped at the end');
     once.play();
@@ -366,6 +376,138 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
     assert.equal(once.getTime(), 1, 'first frame of the playback range');
     once.goToEnd();
     assert.equal(once.getTime(), 3);
+  }
+  // Playback clock: frames come from elapsed time, not from counting ticks
+  {
+    assert.equal(playbackFrame(0, 60_000, 24, 0, 5999, true).frame, 1440, '60 s at 24 FPS is frame 1440');
+    assert.equal(playbackFrame(0, 1000 / 24, 24, 0, 99, true).frame, 1, 'one frame time is one frame (no rounding loss)');
+    assert.equal(playbackFrame(0, 500, 24, 0, 99, true).frame, 12, 'a late tick skips ahead to keep the pace');
+    assert.deepEqual(playbackFrame(8, (1000 / 12) * 3, 12, 4, 9, true), { frame: 5, ended: false }, 'loops inside the range');
+    assert.deepEqual(playbackFrame(8, 1000, 12, 0, 9, false), { frame: 9, ended: true }, 'played once: stops on the last frame');
+    const bg = new AnimationEngine();
+    bg.setLength(100);
+    bg.setFps(24);
+    bg.goTo(0);
+    (bg as any).playing = true;
+    (bg as any).startClock(0);
+    // Display ticks about every 16 ms
+    const run = (from: number, to: number) => {
+      for (let now = from; now < to; now += 16) (bg as any).tick(now);
+      (bg as any).tick(to);
+    };
+    run(16, 1000);
+    assert.equal(bg.getTime(), 24);
+    (bg as any).tick(1300); // a 300 ms stall (a heavy frame): skips to where it should be
+    assert.equal(bg.getTime(), 31, 'a slow frame skips ahead, keeping the pace');
+    run(1316, 2000);
+    assert.equal(bg.getTime(), 48);
+    (bg as any).tick(6000); // no ticks for 4 s (a hidden tab): count again from here, no jump
+    assert.equal(bg.getTime(), 48, 'back from a background tab: no jump');
+    (bg as any).tick(6000 + 1000 / 24);
+    assert.equal(bg.getTime(), 49, 'then on frame by frame');
+    bg.goTo(60); // moved by hand while playing
+    (bg as any).tick(6100);
+    assert.equal(bg.getTime(), 60);
+    (bg as any).tick(6100 + (2 * 1000) / 24);
+    assert.equal(bg.getTime(), 62, 'playback goes on from where it was put');
+    (bg as any).playing = false;
+  }
+  // Blank frames (ref ''), long holds, export frames and onion skin looks
+  {
+    const track = [
+      L('bg2', null, 1),
+      L('T', null, 2, { layerType: 'group', meta: { animation: { fps: 24 } } }),
+      L('tA', 'T', 3, { meta: { cel: { hold: 6 } } }),
+      L('tX', 'T', 4, { layerType: 'group', meta: { cel: { ref: '', hold: 3 } } }),
+      L('tB', 'T', 5, { meta: { cel: { hold: 4 } } }),
+      L('tGone', 'T', 6, { layerType: 'group', meta: { cel: { ref: 'deleted-cel' } } }),
+    ];
+    const entries = celEntriesOf(track, 'T');
+    assert.equal(entries[1].blank, true, 'ref "" is a blank frame');
+    assert.equal(entries[3].ref, '', 'a reuse of a deleted cel shows nothing too…');
+    assert.equal(entries[3].blank, undefined, '…but is not a blank frame (the timeline flags it)');
+    const shownAt = (t: number) => animationDisplay(track, { time: t, activeFolderId: null, onion: null }).filter((l) => l.isVisible && l.parentId === 'T').map((l) => l.id);
+    assert.deepEqual([0, 5, 6, 8, 9, 12].map(shownAt), [['tA'], ['tA'], [], [], ['tB'], ['tB']], 'frames 1–6 A, 7–9 blank, 10– B');
+    assert.deepEqual(exportSegments(track, 0, 12, null, 100, 100), [{ time: 0, hold: 6 }, { time: 6, hold: 3 }, { time: 9, hold: 4 }], 'the export has the blank too');
+    // Holds as long as the timeline (240 frames = 10 s at 24 FPS)
+    assert.equal(MAX_HOLD, MAX_TIMELINE_FRAMES);
+    assert.equal(celEntriesOf([L('F', null, 1, { layerType: 'group', meta: { animation: { fps: 24 } } }), L('f', 'F', 2, { meta: { cel: { hold: 240 } } })], 'F')[0].hold, 240);
+    assert.equal(placeEntries([{ id: 'a', hold: 1 }, { id: 'b', hold: 1 }], new Map([['b', 3000]])).find((e) => e.id === 'a')!.hold, 3000, 'a long gap is one long hold');
+  }
+  {
+    // A still drawing moved only by keyframes: every step is a frame; a pure hold stays one long frame
+    const kf = (frame: number, x: number) => ({ frame, x, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 50, pivotY: 50, easing: 'linear' as const });
+    const scene = (keyframes: unknown, extra: unknown[] = []) => [
+      L('M', null, 1, { layerType: 'group', meta: { animation: { fps: 12 } } }),
+      L('m1', 'M', 2, { meta: { cel: { hold: 10 }, ...(keyframes ? { keyframes } : {}) } }),
+      ...(extra as ReturnType<typeof L>[]),
+    ];
+    assert.deepEqual(exportSegments(scene(null), 0, 9, null, 100, 100), [{ time: 0, hold: 10 }], 'held drawing: one frame, as before');
+    assert.equal(exportSegments(scene([kf(0, 0), kf(9, 90)]), 0, 9, null, 100, 100).length, 10, 'moving by keyframes: a frame per step');
+    assert.deepEqual(exportSegments(scene([kf(0, 0), kf(5, 50)]), 0, 9, null, 100, 100).map((s) => s.hold), [1, 1, 1, 1, 1, 5], 'still again after the last keyframe: merged');
+    // A moving cel that is off screen does not split the frames of the one that is on
+    const two = [
+      L('N', null, 1, { layerType: 'group', meta: { animation: { fps: 12 } } }),
+      L('n1', 'N', 2, { meta: { cel: { hold: 3 }, keyframes: [kf(0, 0), kf(9, 90)] } }),
+      L('n2', 'N', 3, { meta: { cel: { hold: 7 } } }),
+    ];
+    assert.deepEqual(exportSegments(two, 0, 9, null, 100, 100), [{ time: 0, hold: 1 }, { time: 1, hold: 1 }, { time: 2, hold: 1 }, { time: 3, hold: 7 }]);
+    // Reuses merge like before: A, A again, then B
+    const reuse = [
+      L('R', null, 1, { layerType: 'group', meta: { animation: { fps: 12 } } }),
+      L('r1', 'R', 2, { meta: { cel: { hold: 2 } } }),
+      L('r2', 'R', 3, { layerType: 'group', meta: { cel: { ref: 'r1', hold: 2 } } }),
+      L('r3', 'R', 4, { meta: { cel: { hold: 3 } } }),
+    ];
+    assert.deepEqual(exportSegments(reuse, 0, 6, null, 100, 100), [{ time: 0, hold: 4 }, { time: 4, hold: 3 }]);
+    // Only the exported folders count: a keyframed layer outside them does not split frames
+    const outside = scene(null, [L('logo', null, 9, { meta: { keyframes: [kf(0, 0), kf(9, 90)] } })]);
+    assert.equal(exportSegments(outside, 0, 9, new Set(['M']), 100, 100).length, 1);
+    assert.equal(exportSegments(outside, 0, 9, null, 100, 100).length, 10, 'the whole picture: the logo moves');
+    // A hidden group hides what is in it
+    assert.equal(frameSignature([L('g', null, 1, { layerType: 'group', isVisible: false }), L('c', 'g', 2)]), '');
+    // Without keyframes the drawings on screen are the key: the same frames as the full comparison
+    // (a keyframe that changes nothing forces the full one)
+    const still = { frame: 0, x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 0, pivotY: 0, easing: 'linear' as const };
+    const blankTrack = [
+      L('W', null, 1, { layerType: 'group', meta: { animation: { fps: 24 } } }),
+      L('w1', 'W', 2, { meta: { cel: { hold: 6 } } }),
+      L('w2', 'W', 3, { layerType: 'group', meta: { cel: { ref: '', hold: 3 } } }),
+      L('w3', 'W', 4, { meta: { cel: { hold: 4 } } }),
+      L('V', null, 5, { layerType: 'group', meta: { animation: { fps: 24 } } }),
+      L('v1', 'V', 6, { meta: { cel: { hold: 4 } } }),
+      L('v2', 'V', 7, { meta: { cel: { hold: 5 } } }),
+    ];
+    for (const [name, sc] of [['blank frame, two tracks', blankTrack], ['reuses', reuse]] as const) {
+      const forced = [...sc, L('still', null, 99, { meta: { keyframes: [still] } })];
+      assert.deepEqual(exportSegments(sc, 0, 12, null, 100, 100), exportSegments(forced, 0, 12, null, 100, 100), `fast key = full key (${name})`);
+    }
+    // How long a long export takes to plan (6000 frames, about 200 layers)
+    const big = [L('BG', null, 0, { meta: { keyframes: [kf(0, 0), kf(5999, 500)] } })];
+    for (let f = 0; f < 8; f++) {
+      big.push(L(`F${f}`, null, 1 + f * 30, { layerType: 'group', meta: { animation: { fps: 24 } } }));
+      for (let c = 0; c < 24; c++) big.push(L(`F${f}c${c}`, `F${f}`, 2 + f * 30 + c, { meta: { cel: { hold: 250 } } }));
+    }
+    for (const [name, layersIn] of [['with keyframes', big], ['no keyframes', big.slice(1)]] as const) {
+      const t0 = performance.now();
+      const segs = exportSegments(layersIn, 0, 5999, null, 1920, 1080);
+      console.log(`  exportSegments (${name}): ${layersIn.length} layers × 6000 frames → ${segs.length} frames in ${(performance.now() - t0).toFixed(0)} ms`);
+    }
+  }
+  {
+    // Onion skin looks: flat colour (default), shaded (same colour, the drawing's lights and darks), or the drawing itself faded
+    const look = (mode?: 'tint' | 'shade' | 'original') => animationDisplay(layers, { time: 2, activeFolderId: 'anim', onion: { ...onion, mode } }).find((l) => l.id === 'f2')!;
+    assert.equal(look().onionTint, 0xff0000);
+    assert.equal(look().onionMode, undefined);
+    assert.equal(look('shade').onionTint, 0xff0000);
+    assert.equal(look('shade').onionMode, 'shade');
+    assert.equal(look('original').onionTint, undefined, 'original: no colour, no filter');
+    assert.equal(look('original').opacity, 0.3, 'original: still faded like onion skin');
+    // 10 each way: the furthest is the faintest
+    const many = [L('o', null, 1, { layerType: 'group', meta: { animation: { fps: 12 } } }), ...Array.from({ length: 21 }, (_, i) => L(`o${i}`, 'o', 2 + i))];
+    const ten = animationDisplay(many, { time: 10, activeFolderId: 'o', onion: { ...onion, opacity: 0.5, prevFramesCount: 10, nextFramesCount: 10 } });
+    assert.equal(ten.filter((l) => l.parentId === 'o' && l.isVisible).length, 21);
+    assert.ok(Math.abs(ten.find((l) => l.id === 'o0')!.opacity - 0.05) < 1e-9, '10th back at a tenth of the opacity');
   }
   // Light table: picked cels show at its opacity, untinted, and come before onion skin
   {
