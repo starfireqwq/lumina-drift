@@ -51,7 +51,10 @@ import {
 import { getDockLayout } from '../src/components/workspace/dockStore';
 import { buildCanvasGroupEntries, toggleCollapsedCanvasGroup } from '../src/utils/canvasGroups';
 import { buildRoomShareUrl } from '../src/utils/serverLinks';
-import { DEFAULT_COMMUNITY_PRESETS, MIN_BRUSH_SPACING, type CanvasModel } from '@atelier/shared';
+import { DEFAULT_COMMUNITY_PRESETS, MIN_BRUSH_SPACING, PIXEL_FILTER_RUNNERS, runPixelFilter, type CanvasModel } from '@atelier/shared';
+import {
+  BUILTIN_FILTERS, FILTER_GROUPS, defaultFilterValues, filterGroupsInUse, getFilter, normalizeFilterValues, snapRange,
+} from '../src/utils/filterRegistry';
 
 const hex = (channels: string) => `#${channels.split(' ').map((n) => Number(n).toString(16).padStart(2, '0')).join('')}`;
 
@@ -812,6 +815,60 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
     const closed = computeSmartEncloseFillMask(lasso, pixels, width, height, { gapClosingRadius: 2, expandRadius: 2 });
     assert.equal(closed.data[24 * width + 24], 255, 'Gap closing still seals a small break');
   }
+}
+
+// Filter registry: every entry is computable, values are stored by key and survive bad storage
+{
+  assert.equal(new Set(BUILTIN_FILTERS.map((def) => def.id)).size, BUILTIN_FILTERS.length, 'Filter ids are unique');
+  for (const def of BUILTIN_FILTERS) {
+    assert.ok(FILTER_GROUPS.includes(def.group), `${def.id} sits in a known group`);
+    if (def.tool) assert.equal(PIXEL_FILTER_RUNNERS[def.id], undefined, `${def.id} only opens a tool`);
+    else assert.ok(PIXEL_FILTER_RUNNERS[def.id], `${def.id} has a pixel runner`);
+    assert.equal(new Set(def.params.map((param) => param.key)).size, def.params.length, `${def.id} parameter keys are unique`);
+    for (const param of def.params) {
+      if (param.kind === 'range') assert.ok(param.min <= param.initial && param.initial <= param.max, `${def.id}.${param.key} default is in range`);
+    }
+  }
+  assert.deepEqual(filterGroupsInUse(), ['color', 'effect', 'blur', 'distort'], 'Groups with no filters yet stay out of the menu');
+
+  const halftone = getFilter('halftone')!;
+  assert.deepEqual(normalizeFilterValues(halftone, null), defaultFilterValues(halftone), 'Nothing stored: defaults');
+  assert.deepEqual(
+    normalizeFilterValues(halftone, { density: 999, angle: 'x', dotSize: 0.37, stray: 5 }),
+    { density: 128, angle: 45, dotSize: 0.4 },
+    'Out of range is clamped, the wrong type falls back, steps snap, unknown keys drop',
+  );
+  const dot = halftone.params.find((param) => param.key === 'dotSize')!;
+  assert.ok(dot.kind === 'range');
+  assert.equal(snapRange(dot, 2.04), 2, 'Snapping never passes max');
+  assert.equal(snapRange(dot, 0.05), 0.1, 'Snapping never passes min');
+}
+
+// Filter runners: colour-only filters keep alpha and empty pixels, the mask limits the change, input is never written
+{
+  const width = 4, height = 2;
+  const source = new Uint8Array([
+    0, 0, 0, 0, 100, 50, 0, 128, 200, 100, 50, 255, 10, 20, 30, 255,
+    255, 255, 255, 255, 0, 0, 0, 255, 64, 64, 64, 64, 1, 2, 3, 255,
+  ]);
+  const before = source.slice();
+  const inverted = runPixelFilter(PIXEL_FILTER_RUNNERS.invert, source, width, height, {});
+  assert.deepEqual(source, before, 'The caller\'s pixels stay as they were');
+  for (let i = 0; i < source.length; i += 4) assert.equal(inverted[i + 3], source[i + 3], 'Invert keeps alpha');
+  assert.deepEqual([...inverted.slice(0, 4)], [0, 0, 0, 0], 'An empty pixel stays empty');
+  assert.deepEqual([...inverted.slice(8, 12)], [55, 155, 205, 255], 'Opaque colour is inverted');
+  assert.deepEqual([...inverted.slice(4, 8)], [28, 78, 128, 128], 'Half-transparent colour is inverted on straight colour, then premultiplied');
+
+  const mask = new Uint8Array(width * height);
+  mask[2] = 255;
+  const masked = runPixelFilter(PIXEL_FILTER_RUNNERS.posterize, source, width, height, { levels: 2 }, mask);
+  for (let p = 0; p < width * height; p++) {
+    if (p === 2) assert.deepEqual([...masked.slice(8, 12)], [255, 0, 0, 255], 'Inside the selection the filter applies');
+    else assert.deepEqual([...masked.slice(p * 4, p * 4 + 4)], [...source.slice(p * 4, p * 4 + 4)], 'Outside the selection nothing changes');
+  }
+  const blurred = runPixelFilter(PIXEL_FILTER_RUNNERS.box, source, width, height, { radius: 1 });
+  assert.equal(blurred.length, source.length);
+  assert.notDeepEqual(blurred, source, 'Blur changes the pixels');
 }
 
 console.log('ui-logic checks passed');

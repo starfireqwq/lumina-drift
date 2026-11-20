@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { translations, SUPPORTED_LANGUAGES, type Language, type Translations } from '../src/locales';
 import { getLocalizedToolGroups, ALL_TOOLS } from '../src/components/workspace/toolCatalog';
 import { getLocalizedBlendModeGroups } from '../src/components/LayerPanel';
+import { BUILTIN_FILTERS, FILTER_GROUPS, filterGroupLabel, filterLabel, filterParamLabel } from '../src/utils/filterRegistry';
 
 console.log('--- Running i18n Verification & Quality Checks ---');
 
@@ -157,5 +158,20 @@ for (const lang of REQUIRED_LOCALES) {
   assert.ok(t.textEditor.editorAria.length > 0);
 }
 console.log('✓ Specialized modules localized strings verified across all 4 locales');
+
+// 5d. Filter registry: every group, filter and parameter name resolves in every locale
+for (const lang of REQUIRED_LOCALES) {
+  const t = translations[lang];
+  for (const group of FILTER_GROUPS) assert.ok(filterGroupLabel(group, t)?.trim(), `Filter group '${group}' needs a name in ${lang}`);
+  for (const def of BUILTIN_FILTERS) {
+    assert.ok(filterLabel(def, t)?.trim(), `Filter '${def.id}' needs a name in ${lang}`);
+    for (const param of def.params) {
+      assert.ok(filterParamLabel(param, t)?.trim(), `Parameter '${def.id}.${param.key}' needs a name in ${lang}`);
+      if (param.kind === 'select') for (const option of param.options) assert.ok(filterParamLabel(option, t)?.trim(), `Option '${def.id}.${option.value}' needs a name in ${lang}`);
+    }
+    if (def.hint) assert.ok(t.filters[def.hint].trim(), `Filter '${def.id}' hint needs text in ${lang}`);
+  }
+}
+console.log('✓ Filter groups, names and parameters localized across all 4 locales');
 
 console.log('--- ALL i18n VERIFICATION CHECKS PASSED SUCCESSFULLY! ---');
