@@ -368,6 +368,20 @@ export const HELP_TOPICS: HelpTopic[] = [
     keywords: ['房間', '邀請', '分享', '密碼', '加入', '建立', 'room', 'invite', '網址', '連線'],
   },
   {
+    id: 'connect', category: 'collab', title: '聯機：和朋友一起畫',
+    summary: '頂列的「聯機」按鈕（入口頁的「如何和朋友聯機？」）會打開聯機教學。三種方式：同一個 Wi-Fi、虛擬區網（Tailscale、ZeroTier One）、公開連結（Cloudflare Tunnel）。',
+    steps: [
+      '同一個 Wi-Fi：一台電腦開著桌面版（或伺服器），按右上角「分享連結」複製 192.168. 開頭的網址或 QR Code，朋友用瀏覽器打開就能進房間。',
+      '不同地方：大家安裝同一款虛擬區網軟體。Tailscale 登入同一個帳號，或由主持人把電腦分享給朋友；ZeroTier One 在管理頁建立網路，大家輸入同一個 Network ID，再由建立者勾選允許每台裝置。',
+      '虛擬區網的網址：Tailscale 是 100.x.x.x，ZeroTier 是管理頁列出的 IP；朋友打開 http://那個網址:3000。聯機教學裡會列出這台電腦目前的網址，可以直接複製。',
+      '手機：Tailscale 和 ZeroTier One 都有 iPhone、iPad 與 Android 的 App。安裝後登入或加入同一個網路並開啟 VPN，再用手機瀏覽器打開主持人的網址；手機只當畫畫的一方，不用開伺服器。',
+      '只用 Windows 電腦時，Radmin VPN 也能做到一樣的事：加入同一個網路後，用它顯示的 IP 加上 :3000。',
+      '公開連結：桌面版按右上角的 Cloudflare 雲朵按鈕，產生 https 公開網址，朋友不用安裝任何東西。關掉後網址失效，下次會換新網址；網址等於房間入口，只分享給要一起畫的人，必要時替房間設密碼。',
+      '連不上時：Windows 防火牆要允許「私人網路」；網址要有 :3000（伺服器改用別的埠就換成那個數字）；雙方要在同一個 Wi-Fi 或同一個虛擬區網；學校或公司網路可能擋連線，可以改用公開連結。',
+    ],
+    keywords: ['聯機', '連線', '一起畫', '多人', '朋友', '區網', '虛擬區網', 'Wi-Fi', 'wifi', 'tailscale', 'zerotier', 'zerotier one', 'radmin', 'vpn', 'cloudflare', 'tunnel', '公開連結', '手機', 'iphone', 'android', '防火牆', 'connect', 'lan', '联机', '接続'],
+  },
+  {
     id: 'ownership', category: 'collab', title: '每人自己的圖層',
     summary: '每位畫師只能改自己的圖層；別人的圖層會用對方的顏色標示。房主與管理員可直接編輯所有圖層。',
     keywords: ['權限', '擁有者', '別人的圖層', '鎖定', '接管', '管理員', '房主', 'owner', 'permission'],
