@@ -347,6 +347,7 @@ export const enUS: Translations = {
     rotateLeft: 'Rotate Counterclockwise 15°',
     rotateRight: 'Rotate Clockwise 15°',
     resetRotation: 'Reset Rotation',
+    straighten: 'Straighten',
     flipView: 'Flip Horizontal View (Display Only)',
     flipViewButton: 'Flip View',
     rulers: 'Rulers & Guides',

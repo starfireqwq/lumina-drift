@@ -358,6 +358,7 @@ export interface Translations {
     rotateLeft: string;
     rotateRight: string;
     resetRotation: string;
+    straighten: string;
     flipView: string;
     flipViewButton: string;
     rulers: string;

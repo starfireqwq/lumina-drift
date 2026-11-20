@@ -347,6 +347,7 @@ export const jaJP: Translations = {
     rotateLeft: '反時計回りに15°回転',
     rotateRight: '時計回りに15°回転',
     resetRotation: '回転をリセット',
+    straighten: '回転を戻す',
     flipView: '左右反転表示 (キャンバス自体は変更しません)',
     flipViewButton: '左右反転',
     rulers: '定規・ガイド線',

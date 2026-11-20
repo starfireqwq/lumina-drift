@@ -347,6 +347,7 @@ export const zhCN: Translations = {
     rotateLeft: '逆时针旋转 15°',
     rotateRight: '顺时针旋转 15°',
     resetRotation: '重置旋转',
+    straighten: '回正',
     flipView: '左右翻转视图 (不改变画布内容)',
     flipViewButton: '翻转视图',
     rulers: '标尺与参考线',

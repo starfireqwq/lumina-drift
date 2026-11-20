@@ -347,6 +347,7 @@ export const zhTW: Translations = {
     rotateLeft: '逆時針旋轉 15°',
     rotateRight: '順時針旋轉 15°',
     resetRotation: '重設旋轉',
+    straighten: '回正',
     flipView: '左右翻轉檢視 (不改變畫布內容)',
     flipViewButton: '翻轉檢視',
     rulers: '尺規與輔助線',

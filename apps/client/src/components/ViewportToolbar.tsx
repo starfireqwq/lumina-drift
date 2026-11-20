@@ -10,6 +10,7 @@ import {
   RotateCw,
   SlidersHorizontal,
   Sparkles,
+  Undo2,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
@@ -88,6 +89,11 @@ export const ViewportToolbar: React.FC<ViewportToolbarProps> = ({
         <button type="button" onClick={() => onRotate(-Math.PI / 12)} title={t.canvas.rotateLeft} aria-label={t.canvas.rotateLeft} className={btn}><RotateCcw className="h-3.5 w-3.5" /></button>
         <button type="button" onClick={onResetRotation} title={t.canvas.resetRotation} className={`${btn} min-w-[38px] justify-center font-mono`}>{rotationDeg}°</button>
         <button type="button" onClick={() => onRotate(Math.PI / 12)} title={t.canvas.rotateRight} aria-label={t.canvas.rotateRight} className={btn}><RotateCw className="h-3.5 w-3.5" /></button>
+        {rotationDeg % 360 !== 0 && (
+          <button type="button" onClick={onResetRotation} title={t.canvas.resetRotation} className={`${btn} text-amber-300`}>
+            <Undo2 className="h-3.5 w-3.5" /><span>{t.canvas.straighten}</span>
+          </button>
+        )}
         <button type="button" onClick={onToggleMirror} aria-pressed={viewportState.mirrorX} title={t.canvas.flipView} aria-label={t.canvas.flipView} className={btn}>
           <FlipHorizontal className="h-3.5 w-3.5" />{showFlipLabel && <span>{t.canvas.flipViewButton}</span>}
         </button>
