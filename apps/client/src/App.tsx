@@ -223,6 +223,10 @@ export const App: React.FC = () => {
     | null
   >(null);
 
+  // The canvas picked on the gateway. The list fetched as the gateway closes opens it directly,
+  // instead of joining the list's first (or the last opened) canvas on the way there.
+  const gatewayCanvasRef = useRef<string | null>(null);
+
   // Load all available canvases on boot or user change
   const fetchCanvases = async () => {
     const origin = ApiService.getServerOrigin();
@@ -231,12 +235,15 @@ export const App: React.FC = () => {
     try {
       const list = await ApiService.listCanvases();
       if (!sameTarget()) return;
+      const picked = gatewayCanvasRef.current;
+      gatewayCanvasRef.current = null;
       setCanvases(list);
 
       // The socket starts in the linked room. Fall back to the last canvas if the room is gone.
       if (list.length > 0) {
         const savedCanvasId = typeof window !== 'undefined' ? localStorage.getItem('atelier_active_canvas_id') : null;
-        const targetId = list.find((c) => c.id === activeCanvasId)?.id
+        const targetId = list.find((c) => c.id === picked)?.id
+          ?? list.find((c) => c.id === activeCanvasId)?.id
           ?? list.find((c) => c.id === savedCanvasId)?.id
           ?? list[0].id;
         joinCanvas(targetId);
@@ -264,6 +271,7 @@ export const App: React.FC = () => {
     _nickname?: string,
     canvasOptions?: InitialCanvasOptions
   ) => {
+    gatewayCanvasRef.current = canvasOptions?.canvasId ?? null;
     if ((targetServerUrl === 'offline' || canvasOptions?.offline) && OfflineSessionStore.canUseOfflineMode()) {
       OfflineSessionStore.setSessionMode('offline');
       reconnectServer('offline');
