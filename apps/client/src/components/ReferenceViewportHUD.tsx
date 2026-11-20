@@ -174,6 +174,9 @@ export const ReferenceViewportHUD: React.FC<ReferenceViewportHUDProps> = ({
   // Window drag handlers
   const handleWindowHeaderPointerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
+    // A press on a header button is that button's click: capturing the pointer here would send the
+    // click to the header instead (close, minimise and the eyedropper never fired)
+    if ((e.target as HTMLElement).closest('button')) return;
     e.preventDefault();
     e.stopPropagation();
 
