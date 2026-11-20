@@ -1,16 +1,31 @@
 import { BufferImageSource, Container, Matrix, Rectangle, type Renderer, RenderTexture, Sprite, Texture } from 'pixi.js';
 import { DEFAULT_TILE_SIZE } from '@atelier/shared';
+import type { MipmapView } from './MipmapView';
 
 const TS = DEFAULT_TILE_SIZE;
-/** A slot is the 256 px tile plus a 1 px gutter all round: bilinear sampling at a tile's edge reads its own pixels, never a neighbouring slot */
-const PITCH = TS + 2;
+/**
+ * A slot is the 256 px tile plus a 4 px gutter all round, copies of the tile's edge (or what a
+ * stroke leaves just outside it): sampling at a tile's edge reads its own pixels, never a
+ * neighbouring slot — bilinear at 1:1, and the page's mip levels when zoomed out (see below).
+ */
+export const GUTTER = 4;
+const PITCH = TS + 2 * GUTTER;
 const SLOTS_PER_ROW = 8;
-/** 8 × 8 = 64 tiles per page (2064 px square: fits every GPU's texture limit) */
+/** 8 × 8 = 64 tiles per page (2112 px square: fits every GPU's texture limit) */
 export const ATLAS_PAGE_SIZE = PITCH * SLOTS_PER_ROW;
 const SLOTS_PER_PAGE = SLOTS_PER_ROW * SLOTS_PER_ROW;
 export const ATLAS_PAGE_BYTES = ATLAS_PAGE_SIZE * ATLAS_PAGE_SIZE * 4;
+/**
+ * Mip levels of a page shown zoomed out: while the pitch divides by 2^level, a texel of that
+ * level averages one slot only (264 = 8 × 33: levels 1–3, so 2112 → 264 px, 1/8 zoom)
+ */
+export const ATLAS_MIP_LEVELS = (() => {
+  let levels = 1;
+  while (levels < 4 && PITCH % (1 << levels) === 0) levels++;
+  return levels;
+})();
 
-/** Where a tile lives: (x, y) is its top-left texel in the page (its gutter starts at x − 1, y − 1) */
+/** Where a tile lives: (x, y) is its top-left texel in the page (its gutter starts at x − GUTTER, y − GUTTER) */
 export interface Slot {
   page: number;
   index: number;
@@ -56,7 +71,12 @@ export class TileAtlas {
   private uploadHolder: Container | null = null;
   private magFilter: MagFilter = 'linear';
 
-  constructor(private renderer: Renderer) {}
+  constructor(private renderer: Renderer, private mips?: MipmapView) {}
+
+  /** The pages in use (zoomed out, their mip levels are brought up to date before a frame) */
+  *pageTextures(): Iterable<RenderTexture> {
+    for (const p of this.pages) if (p) yield p.rt;
+  }
 
   /** Zoomed in far, pages are sampled 'nearest' (sharp pixels); copies are 1:1 and unaffected */
   setMagFilter(mode: MagFilter) {
@@ -85,7 +105,7 @@ export class TileAtlas {
     const page = this.pages[pageIndex]!;
     const index = page.free.pop()!;
     page.used++;
-    return { page: pageIndex, index, x: (index % SLOTS_PER_ROW) * PITCH + 1, y: Math.floor(index / SLOTS_PER_ROW) * PITCH + 1 };
+    return { page: pageIndex, index, x: (index % SLOTS_PER_ROW) * PITCH + GUTTER, y: Math.floor(index / SLOTS_PER_ROW) * PITCH + GUTTER };
   }
 
   /** The slot goes back to its page; an empty page is freed (the GPU memory goes with it) */
@@ -110,7 +130,7 @@ export class TileAtlas {
   }
 
   /** Render target confined to the slot and its gutter (drawing is clipped to it, coordinates start at the gutter) */
-  private target(slot: Slot, x = -1, y = -1, w = PITCH, h = PITCH): Texture {
+  private target(slot: Slot, x = -GUTTER, y = -GUTTER, w = PITCH, h = PITCH): Texture {
     return new Texture({ source: this.texture(slot).source, frame: new Rectangle(slot.x + x, slot.y + y, w, h) });
   }
 
@@ -120,36 +140,73 @@ export class TileAtlas {
    */
   draw(slot: Slot, container: Container, tx: number, ty: number) {
     const target = this.target(slot);
-    this.renderer.render({ container, target, clear: false, transform: new Matrix().translate(1 - tx, 1 - ty) });
+    this.renderer.render({ container, target, clear: false, transform: new Matrix().translate(GUTTER - tx, GUTTER - ty) });
     target.destroy(false);
   }
 
   /**
    * Replaces a w × h rectangle at (ox, oy) inside the slot's tile (tileW × tileH) with `source`
    * (premultiplied, drawn without blending). Sides of the rectangle that touch the tile's edge
-   * are also copied one texel into the gutter.
+   * are also copied into the gutter: exactly one texel out, the edge row or column stretched beyond.
    */
   write(slot: Slot, source: Texture, ox: number, oy: number, w: number, h: number, tileW = TS, tileH = TS) {
     const holder = new Container();
-    for (const [dx, dy] of AROUND) {
-      if ((dx < 0 && ox > 0) || (dx > 0 && ox + w < tileW) || (dy < 0 && oy > 0) || (dy > 0 && oy + h < tileH)) continue;
-      const s = new Sprite(source);
-      s.position.set(1 + ox + dx, 1 + oy + dy);
-      s.width = w;
-      s.height = h;
+    const views: Texture[] = [];
+    const add = (tex: Texture, x: number, y: number, sw: number, sh: number) => {
+      const s = new Sprite(tex);
+      s.position.set(x, y);
+      s.width = sw;
+      s.height = sh;
       s.blendMode = 'none'; // only honoured below a root container
       holder.addChild(s);
+    };
+    const left = ox <= 0;
+    const top = oy <= 0;
+    const right = ox + w >= tileW;
+    const bottom = oy + h >= tileH;
+    // A canvas-edge tile written whole: the rest of its slot is cleared, so no pixels of the slot's
+    // previous tile sit next to its edge (mip levels average them in when zoomed out)
+    if (left && top && right && bottom && (tileW < TS || tileH < TS)) add(this.zeroTexture(), 0, 0, PITCH, PITCH);
+    if (GUTTER > 1) {
+      const f = source.frame;
+      const sx = f.width / w;
+      const sy = f.height / h;
+      const edge = (fx: number, fy: number, fw: number, fh: number, x: number, y: number, sw: number, sh: number) => {
+        const view = new Texture({ source: source.source, frame: new Rectangle(fx, fy, fw, fh) });
+        views.push(view);
+        add(view, x, y, sw, sh);
+      };
+      const x0 = GUTTER + ox;
+      const y0 = GUTTER + oy;
+      const outer = GUTTER - 1;
+      const fr = f.x + f.width - sx;
+      const fb = f.y + f.height - sy;
+      // Corners first (the whole corner square: the one-texel ring below overwrites its inner part)
+      if (left && top) edge(f.x, f.y, sx, sy, x0 - GUTTER, y0 - GUTTER, GUTTER, GUTTER);
+      if (right && top) edge(fr, f.y, sx, sy, x0 + w, y0 - GUTTER, GUTTER, GUTTER);
+      if (left && bottom) edge(f.x, fb, sx, sy, x0 - GUTTER, y0 + h, GUTTER, GUTTER);
+      if (right && bottom) edge(fr, fb, sx, sy, x0 + w, y0 + h, GUTTER, GUTTER);
+      if (left) edge(f.x, f.y, sx, f.height, x0 - GUTTER, y0, outer, h);
+      if (right) edge(fr, f.y, sx, f.height, x0 + w + 1, y0, outer, h);
+      if (top) edge(f.x, f.y, f.width, sy, x0, y0 - GUTTER, w, outer);
+      if (bottom) edge(f.x, fb, f.width, sy, x0, y0 + h + 1, w, outer);
+    }
+    for (const [dx, dy] of AROUND) {
+      if ((dx < 0 && !left) || (dx > 0 && !right) || (dy < 0 && !top) || (dy > 0 && !bottom)) continue;
+      add(source, GUTTER + ox + dx, GUTTER + oy + dy, w, h);
     }
     const target = this.target(slot);
     this.renderer.render({ container: holder, target, clear: false });
     target.destroy(false);
     holder.destroy({ children: true });
+    for (const v of views) v.destroy(false);
   }
 
   /** write() for premultiplied RGBA bytes; null clears to transparent */
   writePixels(slot: Slot, px: Uint8Array | null, ox: number, oy: number, w: number, h: number, tileW = TS, tileH = TS) {
-    // Fast zero-alloc path for full-tile uploads (including clamped edge/corner tiles <= TS):
-    // packs 1px clamped gutter on CPU and streams directly via gl.texSubImage2D (no FBO switch or shader draw).
+    // Fast zero-alloc path for full-tile uploads (including clamped edge/corner tiles <= TS): packs
+    // the whole slot on CPU (tile, clamped gutter, the rest of a canvas-edge tile's slot cleared)
+    // and streams it directly via gl.texSubImage2D (no FBO switch or shader draw).
     if (ox === 0 && oy === 0 && w === tileW && h === tileH && w > 0 && h > 0 && w <= TS && h <= TS) {
       const page = this.pages[slot.page];
       if (page) {
@@ -161,16 +218,13 @@ export class TileAtlas {
           _premultiplyAlpha?: boolean;
         } | undefined;
         if (gl && texSys?.bindSource) {
-          const dstW = w + 2;
-          const dstH = h + 2;
           let bytes: Uint8Array;
           if (!px) {
-            const fullZero = (this.zeroGutterBytes ??= new Uint8Array(PITCH * PITCH * 4));
-            bytes = w === TS && h === TS ? fullZero : fullZero.subarray(0, dstW * dstH * 4);
+            bytes = this.zeroGutterBytes ??= new Uint8Array(PITCH * PITCH * 4);
           } else {
             this.ensurePaddedBuffers();
             this.packRectWithGutter(px, w, h);
-            bytes = w === TS && h === TS ? this.padded! : this.padded!.subarray(0, dstW * dstH * 4);
+            bytes = this.padded!;
           }
           texSys.bindSource(page.rt.source, 0);
           // bindSource does nothing when Pixi believes the page already sits on unit 0, yet the
@@ -187,7 +241,8 @@ export class TileAtlas {
             gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
             texSys._premultiplyAlpha = false;
           }
-          gl.texSubImage2D(gl.TEXTURE_2D, 0, slot.x - 1, slot.y - 1, dstW, dstH, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, slot.x - GUTTER, slot.y - GUTTER, PITCH, PITCH, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+          this.mips?.markDirty(page.rt.source);
           return;
         }
         if (w === TS && h === TS) {
@@ -199,7 +254,7 @@ export class TileAtlas {
             this.paddedSource!.update();
             this.uploadSprite!.texture = this.paddedTex!;
           }
-          this.uploadSprite!.position.set(slot.x - 1, slot.y - 1);
+          this.uploadSprite!.position.set(slot.x - GUTTER, slot.y - GUTTER);
           this.renderer.render({ container: this.uploadHolder!, target: page.rt, clear: false });
           return;
         }
@@ -232,32 +287,27 @@ export class TileAtlas {
     this.uploadHolder.addChild(this.uploadSprite);
   }
 
+  /** The whole slot (PITCH × PITCH) into `padded`: the tile, its edges repeated over the gutter, zeros beyond a smaller tile */
   private packRectWithGutter(px: Uint8Array, w: number, h: number) {
-    const dstW = w + 2;
     const dst32 = this.padded32!;
-    if ((px.byteOffset & 3) === 0) {
-      const src32 = new Uint32Array(px.buffer, px.byteOffset, w * h);
-      for (let y = 0; y < h; y++) {
-        const s = y * w;
-        const d = (y + 1) * dstW;
-        dst32[d] = src32[s];
-        dst32.set(src32.subarray(s, s + w), d + 1);
-        dst32[d + w + 1] = src32[s + w - 1];
-      }
-    } else {
-      const dst = this.padded!;
-      const rowBytes = w * 4;
-      const pitchBytes = dstW * 4;
-      for (let y = 0; y < h; y++) {
-        const s = y * rowBytes;
-        const d = (y + 1) * pitchBytes;
-        dst.set(px.subarray(s, s + 4), d);
-        dst.set(px.subarray(s, s + rowBytes), d + 4);
-        dst.set(px.subarray(s + rowBytes - 4, s + rowBytes), d + 4 + rowBytes);
-      }
+    if (w < TS || h < TS) dst32.fill(0);
+    // 32-bit copies need an aligned view (a subarray at an odd offset is copied once)
+    const aligned = (px.byteOffset & 3) === 0 ? px : px.slice(0, w * h * 4);
+    const src32 = new Uint32Array(aligned.buffer, aligned.byteOffset, w * h);
+    for (let y = 0; y < h; y++) {
+      const s = y * w;
+      const d = (y + GUTTER) * PITCH;
+      dst32.fill(src32[s], d, d + GUTTER);
+      dst32.set(src32.subarray(s, s + w), d + GUTTER);
+      dst32.fill(src32[s + w - 1], d + GUTTER + w, d + 2 * GUTTER + w);
     }
-    dst32.set(dst32.subarray(dstW, dstW * 2), 0);
-    dst32.set(dst32.subarray(h * dstW, (h + 1) * dstW), (h + 1) * dstW);
+    const rowLen = w + 2 * GUTTER;
+    const first = GUTTER * PITCH;
+    const last = (GUTTER + h - 1) * PITCH;
+    for (let k = 0; k < GUTTER; k++) {
+      dst32.copyWithin(k * PITCH, first, first + rowLen);
+      dst32.copyWithin((GUTTER + h + k) * PITCH, last, last + rowLen);
+    }
   }
 
   private zeroGutterTexture(): Texture {

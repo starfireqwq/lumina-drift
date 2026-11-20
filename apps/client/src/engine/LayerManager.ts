@@ -32,7 +32,8 @@ import {
 } from 'pixi.js';
 import { compressTileBuffer, decompressTileBuffer, DEFAULT_TILE_SIZE, type Affine2D, type BlendMode, type LayerModel, type TileCoord, type TileData } from '@atelier/shared';
 import { normalizeTileBytes } from './TileEngine';
-import { applyMagFilter, TileAtlas, type MagFilter, type Slot } from './TileAtlas';
+import { applyMagFilter, ATLAS_MIP_LEVELS, GUTTER, TileAtlas, type MagFilter, type Slot } from './TileAtlas';
+import { fullMipLevels, MipmapView } from './MipmapView';
 import { decodeTiles } from './commitWorkers';
 
 /** mapPixiBlendMode's filter-based modes: on a filtered layer this filter is appended to do the blend */
@@ -91,6 +92,8 @@ const PINGPONG_IDLE_MS = 8000;
 const BIG_CANVAS_PX = 4096 * 4096;
 /** The composite texture (canvas-sized, for fills and exports) is freed after this long unused */
 const SCRATCH_IDLE_MS = 10000;
+/** Zoomed back to 100 % or more for this long: the zoomed-out mip levels' memory is freed */
+const MIP_IDLE_MS = 5000;
 /** Main-thread time one background step (parking / freezing a layer) may take */
 const STEP_BUDGET_MS = 6;
 /** Per-frame main-thread time budget for incremental viewport cold-tile reheat */
@@ -299,6 +302,7 @@ export class LayerManager {
   private layersMap = new Map<string, LayerItem>();
   private emptyContainer = new Container();
   private atlas: TileAtlas;
+  private mips: MipmapView;
   private reader: RegionReader | null = null;
   private onFlushReads?: () => void;
   private pendingReadCount = 0;
@@ -347,7 +351,8 @@ export class LayerManager {
     this.cols = Math.ceil(width / TS);
     this.rows = Math.ceil(height / TS);
     this.lastBgColor = bgColor || '#FFFFFF';
-    this.atlas = new TileAtlas(renderer);
+    this.mips = new MipmapView(renderer);
+    this.atlas = new TileAtlas(renderer, this.mips);
 
     this.rootContainer = new Container();
 
@@ -687,6 +692,30 @@ export class LayerManager {
     this.atlas.setMagFilter(mode);
     for (const item of this.layersMap.values()) if (item.rt) applyMagFilter(item.rt, mode);
     this.onStageChange?.();
+  }
+
+  /**
+   * Before a frame. Shown smaller than 1:1 (`scale`: screen pixels per canvas pixel), layer
+   * textures are sampled from mip levels that average every canvas pixel under a screen pixel
+   * (bilinear alone skips some, so thin lines turn jagged zoomed out). Only textures on screen get
+   * levels; they are rebuilt after writes and freed a while after zooming back in.
+   */
+  public prepareView(scale: number) {
+    if (!this.mips.supported) return;
+    if (scale >= 1 || this.magFilter === 'nearest') {
+      this.mips.releaseIdle(MIP_IDLE_MS);
+      return;
+    }
+    for (const rt of this.atlas.pageTextures()) this.mips.ensure(rt.source, ATLAS_MIP_LEVELS);
+    for (const item of this.layersMap.values()) if (item.shown) this.ensureResidentMips(item);
+    this.ensureResidentMips(this.preview);
+  }
+
+  private ensureResidentMips(item: LayerItem) {
+    if (!item.rt || item.sprite.parent !== item.display || !item.display.visible) return;
+    // The sprite's texture: the layer's, or what a tool shows in its place (a filter preview)
+    const source = item.sprite.texture.source;
+    this.mips.ensure(source, fullMipLevels(source.pixelWidth, source.pixelHeight));
   }
 
   public setActiveLayer(layerId: string | null) {
@@ -1094,11 +1123,11 @@ export class LayerManager {
     if (x1 <= x0 || y1 <= y0) return;
     const gpu = item.gpu ?? (item.gpu = new Map());
     this.touch(item);
-    // One pixel more on each side: a tile's gutter mirrors its neighbour's edge
-    const c0 = Math.max(0, Math.floor((x0 - 1) / TS));
-    const c1 = Math.min(this.cols - 1, Math.floor(x1 / TS));
-    const r0 = Math.max(0, Math.floor((y0 - 1) / TS));
-    const r1 = Math.min(this.rows - 1, Math.floor(y1 / TS));
+    // A gutter's width more on each side: a tile's gutter mirrors its neighbour's edge
+    const c0 = Math.max(0, Math.floor((x0 - GUTTER) / TS));
+    const c1 = Math.min(this.cols - 1, Math.floor((x1 + GUTTER - 1) / TS));
+    const r0 = Math.max(0, Math.floor((y0 - GUTTER) / TS));
+    const r1 = Math.min(this.rows - 1, Math.floor((y1 + GUTTER - 1) / TS));
     for (let row = r0; row <= r1; row++) {
       for (let col = c0; col <= c1; col++) {
         const tx = col * TS;
@@ -2265,7 +2294,8 @@ export class LayerManager {
     }
     const scratch = this.compositeRT ? 1 : 0;
     const atlas = this.atlas.stats();
-    const gpuBytes = (resident + pingPong + scratch) * full + atlas.bytes;
+    const mipBytes = this.mips.bytes();
+    const gpuBytes = (resident + pingPong + scratch) * full + atlas.bytes + mipBytes;
     const mb = (b: number) => Math.round(b / 1048576);
     return {
       layers: this.layersMap.size,
@@ -2281,6 +2311,8 @@ export class LayerManager {
       /** atlas pages (64 tiles each, 17 MB) holding warm tiles, backups and previews */
       atlasPages: atlas.pages,
       atlasMegabytes: mb(atlas.bytes),
+      /** mip levels of layer textures shown zoomed out (freed a few seconds after zooming back in) */
+      mipMegabytes: mb(mipBytes),
       /** tiles copied before their first write in the stroke being drawn */
       backups,
       previewTiles: this.preview.gpu?.size ?? 0,
@@ -3166,6 +3198,7 @@ export class LayerManager {
     this.heldAfterSlots.clear();
     this.pendingAfterSlots.clear();
     this.pendingReadCount = 0;
+    this.mips.destroy();
     this.atlas.destroy();
     this.rootContainer.destroy({ children: true });
   }

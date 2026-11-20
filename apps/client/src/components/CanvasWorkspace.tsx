@@ -1274,6 +1274,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
       let pipelineForRender: StrokePipeline | null = null;
       let syncViewportPending: (() => void) | null = null;
+      let prepareLayerView: (() => void) | null = null;
       const scheduleRender = () => {
         if (destroyed || renderRaf) return;
         renderRaf = requestAnimationFrame(() => {
@@ -1281,6 +1282,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           if (destroyed) return;
           syncViewportPending?.();
           pipelineForRender?.renderFrame();
+          prepareLayerView?.();
           app.render();
           if (pipelineForRender?.hasPendingWork()) scheduleRender();
         });
@@ -1331,6 +1333,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         canvas.bgColor
       );
       layerManagerRef.current = layerManager;
+      // Zoomed out, the layers are sampled from mip levels (smooth like CSP instead of jagged)
+      prepareLayerView = () => layerManager.prepareView(viewport.getState().zoom * app.renderer.resolution);
       const syncViewportBounds = () => {
         if (destroyed) return;
         const w = app.screen.width || viewWidth;
@@ -1482,6 +1486,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         viewHeight = height;
         syncViewportBounds();
         // Resizing the WebGL backbuffer clears it immediately; re-render synchronously before paint to eliminate flicker
+        prepareLayerView?.();
         app.render();
       });
       resizeObserver.observe(container);
