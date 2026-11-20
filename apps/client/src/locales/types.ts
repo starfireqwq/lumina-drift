@@ -1230,6 +1230,15 @@ export interface Translations {
     offlineStartButton: string;
     offlineDefaultCanvasName: string;
     offlineRecentCanvases: string;
+    resumeHeading: string;
+    resumeAria: string;
+    resumeSolo: string;
+    resumeChecking: string;
+    resumeGone: string;
+    resumeUnreachable: string;
+    resumeRetry: string;
+    resumeForget: string;
+    canvasPreview: string;
     offlineOpenLuminaButton: string;
     offlineZeroNetworkHint: string;
   };

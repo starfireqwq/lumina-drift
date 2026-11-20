@@ -385,3 +385,18 @@ html.atelier-theme-vt, html.atelier-theme-vt body { transition: none !important;
   .atelier-connect-btn::after { animation: atelierLightSweep 1.2s cubic-bezier(.3, .1, .2, 1) .9s; }
   .atelier-connect-btn:is(:hover, :focus-visible)::after { animation: atelierConnectSheen .8s cubic-bezier(.3, .1, .2, 1); }
 }
+
+/* Gateway 繼續上次 card: it rises in, a streak of light runs under it once the canvas is confirmed,
+   and it fades out when removed; the recent-canvas gallery below rises in one by one */
+.atelier-resume-card { position: relative; overflow: hidden; }
+.atelier-resume-card::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 1px; pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgb(var(--a-400) / .9) 40%, rgb(251 113 133 / .9) 60%, transparent) no-repeat;
+  background-size: 40% 100%; background-position: -60% 0; opacity: 0;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .atelier-resume-card { animation: atelierRowIn .24s cubic-bezier(.2, .8, .3, 1) both; }
+  .atelier-resume-card[data-state='ready']::after { animation: atelierLightSweep 1s cubic-bezier(.3, .1, .2, 1) .1s; }
+  .atelier-resume-card.is-leaving { animation: atelierRowOut .16s ease-in both; }
+  .atelier-gallery-item { animation: atelierRowIn .2s cubic-bezier(.2, .8, .3, 1) both; animation-delay: calc(var(--i, 0) * 30ms); }
+}

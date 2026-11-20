@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import {
-  Check, ChevronDown, ChevronRight, Cloud, Copy, DoorOpen, Eye, EyeOff, Folder, FolderOpen, Globe, Lock, LogIn, Network, Palette, Plus, QrCode as QrIcon, RefreshCw, Search,
+  Check, ChevronDown, ChevronRight, Cloud, Copy, DoorOpen, Eye, EyeOff, Folder, FolderOpen, Globe, Lock, LogIn, Network, Palette, Plus, QrCode as QrIcon, RefreshCw, Search, X,
 } from 'lucide-react';
 import type { CanvasModel } from '@atelier/shared';
 import { ApiService } from '../services/api';
@@ -13,6 +13,7 @@ import { useCloudflareTunnel } from '../context/useCloudflareTunnel';
 import { isLoopbackServer, parseServerLink, publicServerOrigin } from '../utils/serverLinks';
 import { isForeignApiReply } from '../utils/apiErrors';
 import { RESIZE_MAX, RESIZE_MIN } from '../utils/canvasResize';
+import { forgetRecentVisit, lastVisitOn, loadRecentVisits, normalizeServer, type RecentVisit } from '../utils/recentVisits';
 import { accountBridgeAvailable, clearPrimaryAccount, getPrimaryAccount, PRIMARY_ACCOUNT_EVENT } from '../services/accountBridge';
 import { PrimaryAccountDialog } from './PrimaryAccountDialog';
 import { OverlayPresence } from './OverlayPresence';
@@ -68,8 +69,17 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
   const supportsOfflineMode = OfflineSessionStore.canUseOfflineMode();
 
   const workspaceIsLocal = !initialServerUrl || isLoopbackServer(initialServerUrl);
+  // Recent visits: the newest one this page can open becomes the "continue" card
+  const [visits, setVisits] = useState(loadRecentVisits);
+  const visitOpenable = (v: RecentVisit) => v.mode === 'offline' ? supportsOfflineMode
+    : isDesktop || isAndroid || !(
+      (window.location.protocol === 'https:' && v.server!.startsWith('http:')) ||
+      (isLoopbackServer(v.server!) && !isLoopbackServer(window.location.origin))
+    );
+  const lastVisit = visits.find(visitOpenable) ?? null;
+  // Open in the mode last used, so a regular of an online room lands on its room list
   const [gatewayMode, setGatewayMode] = useState<'offline' | 'online'>(() =>
-    supportsOfflineMode ? 'offline' : 'online'
+    supportsOfflineMode && lastVisit?.mode !== 'online' ? 'offline' : 'online'
   );
   const [tab, setTab] = useState<'join' | 'create' | 'create-group'>('join');
   // Primary account: solo mode paints as it, other servers get its name and avatar.
@@ -281,7 +291,10 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
         else if (!userChoseTabRef.current) setTab('join');
         setPickedRoom((current) => {
           if (invitedRoom) return data.canvases.some((c) => c.id === invitedRoom) ? invitedRoom : null;
-          return data.canvases.some((c) => c.id === current) ? current : data.canvases[0]?.id ?? null;
+          if (data.canvases.some((c) => c.id === current)) return current;
+          // The room last opened on this server comes first, else the top of the list
+          const last = lastVisitOn(loadRecentVisits(), target)?.canvasId;
+          return last && data.canvases.some((c) => c.id === last) ? last : data.canvases[0]?.id ?? null;
         });
       } catch {
         if (!controller.signal.aborted) setRoomsError(t.gateway.cannotConnectCheckSettings);
@@ -292,6 +305,61 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
       clearTimeout(timer);
     };
   }, [target, connectionError, invitedRoom, gatewayMode, isDesktop, isAndroid, where, desktop, t.gateway.cannotConnectCheckSettings, roomsRefresh]);
+
+  // "Continue" card: check the last canvas is still there. When the room list above is already
+  // loading that server, its answer is reused instead of asking the server twice.
+  type ResumeStatus = 'checking' | 'ready' | 'gone' | 'unreachable';
+  interface ResumeCheck { status: ResumeStatus; room?: CanvasModel; thumb?: string }
+  const [resumeCheck, setResumeCheck] = useState<ResumeCheck & { key: string }>({ key: '', status: 'checking' });
+  const [resumeRetry, setResumeRetry] = useState(0);
+  const [resumeLeaving, setResumeLeaving] = useState(false);
+  const lastVisitKey = lastVisit ? `${lastVisit.mode}|${lastVisit.server ?? ''}|${lastVisit.canvasId}` : '';
+  const resumeFromList = lastVisit?.mode === 'online' && gatewayMode === 'online' && !connectionError
+    && normalizeServer(target) === lastVisit.server;
+  useEffect(() => {
+    if (!lastVisit || resumeFromList) return;
+    const key = lastVisitKey;
+    let active = true;
+    setResumeCheck({ key, status: 'checking' });
+    if (lastVisit.mode === 'offline') {
+      void OfflineSessionStore.listRecentCanvases().then(async (list) => {
+        const room = list.find((c) => c.id === lastVisit.canvasId);
+        if (!active) return;
+        if (!room) {
+          setResumeCheck({ key, status: 'gone' });
+          return;
+        }
+        setResumeCheck({ key, status: 'ready', room });
+        const thumb = thumbnails?.[room.id] ?? await OfflineSessionStore.getThumbnail(room.id);
+        if (active && thumb) setResumeCheck((prev) => (prev.key === key ? { ...prev, thumb } : prev));
+      }).catch(() => { if (active) setResumeCheck({ key, status: 'gone' }); });
+      return () => { active = false; };
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6000);
+    fetch(`${lastVisit.server}/api/canvases`, { signal: controller.signal })
+      .then((res) => (res.ok && !isForeignApiReply(res.status, res.headers.get('content-type'))
+        ? res.json() as Promise<{ canvases?: CanvasModel[] }>
+        : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((data) => {
+        if (!active) return;
+        if (!Array.isArray(data?.canvases)) throw new Error('No room list');
+        const room = data.canvases.find((c) => c.id === lastVisit.canvasId);
+        setResumeCheck(room ? { key, status: 'ready', room } : { key, status: 'gone' });
+      })
+      .catch(() => { if (active) setResumeCheck({ key, status: 'unreachable' }); })
+      .finally(() => clearTimeout(timer));
+    return () => {
+      active = false;
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [lastVisitKey, resumeFromList, resumeRetry]);
+  const listRoom = resumeFromList && rooms ? rooms.find((r) => r.id === lastVisit!.canvasId) : undefined;
+  const resume: ResumeCheck = resumeFromList
+    ? rooms ? (listRoom ? { status: 'ready', room: listRoom } : { status: 'gone' })
+      : roomsError ? { status: 'unreachable' } : { status: 'checking' }
+    : resumeCheck.key === lastVisitKey ? resumeCheck : { status: 'checking' };
 
   useEffect(() => {
     setQr('');
@@ -417,8 +485,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
     onOpenAuth?.(isLocalTunnel ? here : target);
   };
 
-  const enter = (options: InitialCanvasOptions) => {
-    if (!target || connectionError) return;
+  const persistRemember = () => {
     if (remember) {
       localStorage.setItem('atelier_gateway_resolved', 'true');
       localStorage.setItem('atelier_gateway_skip_on_launch', 'true');
@@ -426,6 +493,11 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
       localStorage.removeItem('atelier_gateway_resolved');
       localStorage.removeItem('atelier_gateway_skip_on_launch');
     }
+  };
+
+  const enter = (options: InitialCanvasOptions) => {
+    if (!target || connectionError) return;
+    persistRemember();
     if (isLocalTunnel && publicUrl) {
       localStorage.setItem('atelier_public_share_url', publicUrl);
     } else if (where === 'here') {
@@ -437,13 +509,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
 
   const startSoloOffline = (canvasId?: string) => {
     if (!canvasId && !validSize) return;
-    if (remember) {
-      localStorage.setItem('atelier_gateway_resolved', 'true');
-      localStorage.setItem('atelier_gateway_skip_on_launch', 'true');
-    } else {
-      localStorage.removeItem('atelier_gateway_resolved');
-      localStorage.removeItem('atelier_gateway_skip_on_launch');
-    }
+    persistRemember();
     OfflineSessionStore.setSessionMode('offline');
     // With a primary account the solo artist is that account; the nickname field is hidden then.
     if (!primary && nickname.trim() && nickname.trim() !== user?.displayName) setGuestDisplayName(nickname.trim());
@@ -453,6 +519,36 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
       height: size.h,
       offline: true,
     });
+  };
+
+  const resumeLast = () => {
+    if (!lastVisit || resume.status !== 'ready') return;
+    if (lastVisit.mode === 'offline') {
+      startSoloOffline(lastVisit.canvasId);
+      return;
+    }
+    // Same server as the form: the usual way in, which also keeps the share link in step
+    if (resumeFromList) {
+      enter({ canvasId: lastVisit.canvasId });
+      return;
+    }
+    persistRemember();
+    if (isGuest && nickname.trim() && nickname.trim() !== user?.displayName) setGuestDisplayName(nickname.trim());
+    onResolve(lastVisit.server!, nickname.trim() || undefined, { canvasId: lastVisit.canvasId });
+  };
+  const retryResume = () => {
+    if (resumeFromList) setRoomsRefresh((n) => n + 1);
+    else setResumeRetry((n) => n + 1);
+  };
+  const forgetLast = () => {
+    if (!lastVisit || resumeLeaving) return;
+    const visit = lastVisit;
+    setResumeLeaving(true);
+    // Let the card fade out first; the next most recent canvas (if any) rises in its place
+    window.setTimeout(() => {
+      setVisits(forgetRecentVisit(visit));
+      setResumeLeaving(false);
+    }, 160);
   };
 
   const canvasSizes = (hint: string, selectedStyle: string) => (
@@ -555,6 +651,19 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
   );
 
   const pickedPreviewUrl = picked ? getRoomPreviewUrl(picked) : undefined;
+  const resumeRoom = resume.room;
+  const resumePreview = !lastVisit ? undefined
+    : thumbnails?.[lastVisit.canvasId] ?? resume.thumb ?? (
+      lastVisit.mode === 'online' && resumeRoom && !resumeRoom.hasPassword && !failedPreviews[resumeRoom.id]
+        ? `${lastVisit.server}/api/share-preview/${encodeURIComponent(resumeRoom.id)}?v=${resumeRoom.latestSeq ?? 0}`
+        : undefined);
+  const resumePlace = !lastVisit ? '' : lastVisit.mode === 'offline' ? t.gateway.resumeSolo
+    : lastVisit.server === normalizeServer(here) ? t.gateway.whereThisServer
+      : parseServerLink(lastVisit.server!)?.host ?? lastVisit.server!;
+  const resumeNote = resume.status === 'checking' ? t.gateway.resumeChecking
+    : resume.status === 'gone' ? t.gateway.resumeGone
+      : resume.status === 'unreachable' ? t.gateway.resumeUnreachable : '';
+  const resumeDimmed = resume.status === 'gone' || resume.status === 'unreachable';
 
   return (
     <div
@@ -595,6 +704,80 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
             <span>製作者：星火セイカ</span>
           </div>
         </header>
+
+        {/* Continue: one tap back to the canvas last opened, once it is confirmed to still be there */}
+        {lastVisit && (
+          <section
+            key={lastVisitKey}
+            data-resume-card={lastVisit.canvasId}
+            data-state={resume.status}
+            aria-label={t.gateway.resumeHeading}
+            className={`atelier-resume-card flex items-center gap-1 rounded-2xl border p-1.5 transition-colors${resumeLeaving ? ' is-leaving' : ''} ${
+              resume.status === 'ready'
+                ? 'border-cyan-400/50 bg-gradient-to-r from-cyan-500/10 via-indigo-500/10 to-fuchsia-500/10'
+                : 'border-neutral-800 bg-neutral-900/60'
+            }`}
+          >
+            <button
+              type="button"
+              onClick={resumeLast}
+              disabled={resume.status !== 'ready'}
+              aria-label={t.gateway.resumeAria.replace('{title}', resumeRoom?.title ?? lastVisit.title)}
+              aria-describedby={resumeNote ? 'gateway-resume-note' : undefined}
+              className="group flex min-w-0 flex-1 items-center gap-3 rounded-xl p-1 text-left transition enabled:hover:bg-neutral-800/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 disabled:cursor-default"
+            >
+              <span className={`flex h-16 w-24 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-neutral-800 bg-neutral-900 transition sm:h-20 sm:w-32${resumeDimmed ? ' opacity-50 grayscale' : ''}`}>
+                {resumePreview ? (
+                  <img
+                    src={resumePreview}
+                    alt=""
+                    aria-hidden="true"
+                    onError={() => resumeRoom && setFailedPreviews((prev) => ({ ...prev, [resumeRoom.id]: true }))}
+                    className="h-full w-full object-contain"
+                  />
+                ) : resumeRoom?.hasPassword ? (
+                  <Lock className="h-5 w-5 text-amber-300/80" aria-hidden="true" />
+                ) : (
+                  <Palette className="h-5 w-5 text-neutral-500" aria-hidden="true" />
+                )}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-[11px] font-semibold text-cyan-300">{t.gateway.resumeHeading}</span>
+                <span className="block truncate text-sm font-bold text-white">{resumeRoom?.title ?? lastVisit.title}</span>
+                <span className="block truncate text-[11px] text-neutral-400">
+                  {resumePlace} · {resumeRoom?.width ?? lastVisit.width} × {resumeRoom?.height ?? lastVisit.height}
+                </span>
+                {resumeNote && (
+                  <span id="gateway-resume-note" className={`mt-0.5 block truncate text-[11px] ${resumeDimmed ? 'text-amber-300' : 'text-neutral-400'}`}>
+                    {resumeNote}
+                  </span>
+                )}
+              </span>
+              {resume.status === 'ready' && (
+                <span aria-hidden="true" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-cyan-500 text-neutral-950 shadow-lg shadow-cyan-500/20 transition group-hover:scale-105">
+                  <ChevronRight className="h-5 w-5" />
+                </span>
+              )}
+              {resume.status === 'checking' && (
+                <RefreshCw aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin text-neutral-500 motion-reduce:animate-none" />
+              )}
+            </button>
+            {resumeDimmed && (
+              <div className="flex shrink-0 flex-col gap-1 pr-0.5">
+                {resume.status === 'unreachable' && (
+                  <button type="button" onClick={retryResume} title={t.gateway.resumeRetry} aria-label={t.gateway.resumeRetry}
+                    className="flex h-8 w-8 items-center justify-center rounded-lg border border-neutral-700 text-neutral-300 transition hover:border-cyan-400 hover:text-white">
+                    <RefreshCw className="h-4 w-4" />
+                  </button>
+                )}
+                <button type="button" onClick={forgetLast} title={t.gateway.resumeForget} aria-label={t.gateway.resumeForget}
+                  className="flex h-8 w-8 items-center justify-center rounded-lg border border-neutral-700 text-neutral-300 transition hover:border-rose-400 hover:text-white">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            )}
+          </section>
+        )}
 
         {/* Primary Mode Selector: Solo Offline vs Online Collaborative (local app or localhost page only) */}
         {supportsOfflineMode && (
@@ -717,6 +900,28 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
 
         {gatewayMode === 'offline' ? (
           <section className="space-y-3 rounded-2xl border border-cyan-500/30 bg-neutral-900/70 p-4">
+            {/* The gallery first: earlier canvases are one tap away, a new one is set up below */}
+            {recentCanvases.length > 0 && (
+              <div className="space-y-2 border-b border-neutral-700 pb-3">
+                <h2 className="text-xs font-semibold text-neutral-200">{t.gateway.offlineRecentCanvases}</h2>
+                <div className="grid max-h-72 grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-3">
+                  {recentCanvases.map((canvas, index) => {
+                    const thumbnail = thumbnails?.[canvas.id] ?? offlineThumbnails[canvas.id];
+                    return (
+                      <button type="button" key={canvas.id} onClick={() => startSoloOffline(canvas.id)}
+                        style={{ '--i': Math.min(index, 8) } as React.CSSProperties}
+                        className="atelier-gallery-item min-w-0 rounded-lg border border-neutral-700 bg-neutral-800/60 p-2 text-left hover:border-cyan-400 focus-visible:ring-2 focus-visible:ring-cyan-400">
+                        <span className="flex h-16 items-center justify-center overflow-hidden rounded bg-neutral-900">
+                          {thumbnail ? <img className="h-full w-full object-cover object-center" src={thumbnail} alt="" /> : <Palette className="h-5 w-5 text-neutral-500" aria-hidden="true" />}
+                        </span>
+                        <span className="mt-1 block truncate text-xs font-semibold text-neutral-100" title={canvas.title}>{canvas.title}</span>
+                        <span className="block text-[11px] text-neutral-400">{canvas.width} × {canvas.height}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
             <label className="block space-y-1">
               <span className="text-xs font-semibold text-neutral-200">{t.gateway.roomName}</span>
               <input
@@ -738,26 +943,6 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                   <FolderOpen className="h-4 w-4 text-cyan-400" />
                   <span>{t.gateway.offlineOpenLuminaButton}</span>
                 </button>
-              </div>
-            )}
-            {recentCanvases.length > 0 && (
-              <div className="space-y-2 border-t border-neutral-700 pt-3">
-                <h2 className="text-xs font-semibold text-neutral-200">{t.gateway.offlineRecentCanvases}</h2>
-                <div className="grid max-h-72 grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-3">
-                  {recentCanvases.map((canvas) => {
-                    const thumbnail = thumbnails?.[canvas.id] ?? offlineThumbnails[canvas.id];
-                    return (
-                      <button type="button" key={canvas.id} onClick={() => startSoloOffline(canvas.id)}
-                        className="min-w-0 rounded-lg border border-neutral-700 bg-neutral-800/60 p-2 text-left hover:border-cyan-400 focus-visible:ring-2 focus-visible:ring-cyan-400">
-                        <span className="flex h-16 items-center justify-center overflow-hidden rounded bg-neutral-900">
-                          {thumbnail ? <img className="h-full w-full object-cover object-center" src={thumbnail} alt="" /> : <Palette className="h-5 w-5 text-neutral-500" aria-hidden="true" />}
-                        </span>
-                        <span className="mt-1 block truncate text-xs font-semibold text-neutral-100" title={canvas.title}>{canvas.title}</span>
-                        <span className="block text-[11px] text-neutral-400">{canvas.width} × {canvas.height}</span>
-                      </button>
-                    );
-                  })}
-                </div>
               </div>
             )}
           </section>
@@ -1005,14 +1190,14 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                           ) : (
                             <div className="flex flex-col items-center gap-1 text-neutral-500">
                               <Palette className="h-5 w-5" />
-                              <span className="text-[10px]">畫布預覽</span>
+                              <span className="text-[10px]">{t.gateway.canvasPreview}</span>
                             </div>
                           )}
                         </div>
                         <div className="min-w-0 flex-1 space-y-1">
                           <div className="flex items-center gap-1.5">
                             <span className="rounded bg-indigo-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-indigo-300">
-                              畫布預覽
+                              {t.gateway.canvasPreview}
                             </span>
                             {picked.group && (
                               <span className="truncate rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-indigo-200">

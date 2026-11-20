@@ -88,6 +88,17 @@ export const HELP_TOPICS: HelpTopic[] = [
     keys: [{ fixed: 'Alt', label: '按住吸色' }, { action: 'tool_eyedropper', label: '滴管' }],
     keywords: ['吸色', '滴管', '取色', '吸管', 'eyedropper', 'picker', 'alt'],
   },
+  {
+    id: 'resume', category: 'start', title: '回到上次的畫布',
+    summary: '入口最上方的「繼續上次」卡會顯示你上次打開的畫布或房間，確認還在之後點一下就進入。',
+    steps: [
+      '入口會用上次的模式打開；多人連線時，房間列表會先選好你上次去的房間。',
+      '房間被刪除或伺服器連不上時，卡片會變灰並說明原因，可以重新確認或從最近移除。',
+      '單機模式的「最近的單機畫布」列在最上面，點縮圖就能打開。',
+      '紀錄只存在這台裝置。',
+    ],
+    keywords: ['繼續', '上次', '最近', '快速進入', '畫廊', '房間', 'resume', 'continue', 'recent', 'gallery'],
+  },
 
   // ---- 繪畫
   {
