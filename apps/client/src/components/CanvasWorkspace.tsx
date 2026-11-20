@@ -114,8 +114,10 @@ import type { LayerCanvasItem } from '../engine/layerComposite';
 import { LayerPanel } from './LayerPanel';
 import { getUserColor } from '../utils/userColors';
 import {
-  AnimationEngine, AnimationTrack, animationDisplay, celEntriesOf, celLayerOf, celOfLayer, entryIndexAt, entryStart, isAnimationFolder, MAX_HOLD, placeEntries, trackLength,
+  AnimationEngine, AnimationTrack, animationDisplay, celEntriesOf, celInsertAt, celLayerOf, celOfLayer, entryIndexAt, entryStart, isAnimationFolder, MAX_HOLD, MAX_TIMELINE_FRAMES,
+  placeEntries, trackLength,
 } from '../engine/AnimationEngine';
+import { lightIdsFor, loadLightTable, saveLightTable, type LightTableState } from '../engine/lightTable';
 import { DEFAULT_TEXT, renderText, textBounds } from '../engine/textLayer';
 import { nextGroupName } from '../utils/canvasName';
 import type { AnimationExportPlan, AnimationExportScope } from './AnimationTimelineBar';
@@ -444,6 +446,26 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   // Onion skin is drawn only while this viewer has the timeline open: painters who merely see an
   // animation folder (or never opened the timeline) get no tinted neighbours on their screen
   const animTimelineOpenRef = useRef(false);
+  // Light table (透光桌): reference cels this viewer picked, per canvas (like onion skin, never in the file)
+  const [lightTable, setLightTable] = useState<LightTableState>(() => loadLightTable(canvas?.id));
+  const lightTableRef = useRef(lightTable);
+  lightTableRef.current = lightTable;
+  useEffect(() => setLightTable(loadLightTable(canvas?.id)), [canvas?.id]);
+  const updateLightTable = (fn: (s: LightTableState) => LightTableState) => {
+    const next = fn(lightTableRef.current);
+    lightTableRef.current = next;
+    saveLightTable(canvas?.id, next);
+    setLightTable(next);
+  };
+  /** The light table under the cel on screen in the edited track */
+  const lightViewFor = (ls: LayerModel[], time: number) => {
+    const state = lightTableRef.current;
+    const folderId = animFolderIdRef.current;
+    if (!state.enabled || !folderId) return null;
+    const entries = celEntriesOf(ls, folderId);
+    const ids = lightIdsFor(state, folderId, celLayerOf(entries[entryIndexAt(entries, time)]));
+    return ids.size ? { opacity: state.opacity, ids } : null;
+  };
   /**
    * What this viewer's screen shows: the personal eyes, and in every animation folder the cel at
    * the current frame (the edited folder plus onion skin). `time` renders one frame for export;
@@ -454,13 +476,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const local = opts.personal === false ? ls : ls.map((l) => (l.id in vis ? { ...l, isVisible: vis[l.id] } : l));
     const engine = animEngineRef.current;
     const exporting = opts.time !== undefined;
+    const aids = !exporting && engine && !engine.getIsPlaying() && animTimelineOpenRef.current; // onion skin, light table
     return animationDisplay(
       local,
       {
         time: exporting ? opts.time! : engine?.getTime() ?? 0,
         activeFolderId: animFolderIdRef.current,
-        onion: exporting || !engine || engine.getIsPlaying() || !animTimelineOpenRef.current ? null : engine.getOnionSkinConfig(),
+        onion: aids ? engine.getOnionSkinConfig() : null,
         only: opts.only ?? null,
+        light: aids ? lightViewFor(local, engine.getTime()) : null,
       },
       canvas?.width ?? 0,
       canvas?.height ?? 0
@@ -736,7 +760,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const animEntries = animTracks.find((t) => t.folderId === animFolder?.id)?.entries ?? [];
   const animEntriesRef = useRef(animEntries);
   animEntriesRef.current = animEntries;
-  const animTimelineLength = Math.max(1, ...animTracks.map((t) => trackLength(t.entries)));
+  // Timeline length: set on the edited folder (or another track), else up to the end of the longest track
+  const animAutoLength = Math.max(1, ...animTracks.map((t) => trackLength(t.entries)));
+  const animSetLength = Number(animFolder?.meta?.animation?.length ?? animFolders.find((f) => f.meta?.animation?.length)?.meta?.animation?.length) || 0;
+  const animTimelineLength = animSetLength > 0 ? Math.max(1, Math.min(MAX_TIMELINE_FRAMES, Math.round(animSetLength))) : animAutoLength;
   const animTrackKey = animTracks.map((t) => `${t.folderId}:${t.shared}:${t.entries.map((e) => `${e.id}/${e.hold}/${e.ref ?? ''}`).join(',')}`).join('|');
 
 
@@ -3451,13 +3478,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const folder = await onCreateLayer(`動畫 ${animFolders.length + 1}`, 'normal', 'group', null, null, { meta: { animation: { fps } }, select: false });
     if (folder) await onCreateLayer('1', 'normal', 'raster', folder.id, folder.id);
   };
-  // 順移 (ripple): on, a new / deleted cel moves everything after it; off, its neighbours give or
-  // take the frames so later cels keep their timing. A viewer's own setting.
+  // 順移 (ripple): on, a new / deleted cel moves everything after it; off (the default, as in CSP),
+  // its neighbours give or take the frames so later cels keep their timing. A viewer's own setting.
   const [animRipple, setAnimRipple] = useState(() => {
     try {
-      return localStorage.getItem('atelier_anim_ripple') !== '0';
+      return localStorage.getItem('atelier_anim_ripple') === '1';
     } catch {
-      return true;
+      return false;
     }
   });
   // Cels copied on the timeline (Ctrl+C), with where they sat relative to the first one
@@ -3472,18 +3499,19 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     });
   };
   /**
-   * Without ripple a new cel (right after the current one) takes its frames from its neighbours:
-   * the current cel's frames after the playhead, else one frame of the next cel. Returns the new
-   * cel's hold, or null when there is no room (it then ripples after all).
+   * Without ripple a new cel (right after the current one) takes its frames from its neighbours,
+   * as in CSP: it starts on the playhead and runs up to the next cel (on a cel's first frame, one
+   * frame later), else it takes one frame of the next cel. Returns the new cel's hold, or null when
+   * there is no room (it then ripples after all).
    */
   const roomWithoutRipple = (): number | null => {
     const { index, entry } = currentAnimEntry();
     if (!entry || !animationEngine) return null;
-    const keep = animationEngine.getTime() - entryStart(animEntries, index) + 1; // the current cel keeps up to the playhead
+    const split = celInsertAt(animEntries, animationEngine.getTime());
     const cur = entryLayer(entry.id);
-    if (keep < entry.hold && cur && canManageLayer(cur)) {
-      setEntryHold(entry.id, keep);
-      return entry.hold - keep;
+    if (split && cur && canManageLayer(cur)) {
+      setEntryHold(entry.id, split.keep);
+      return split.hold;
     }
     const next = animEntries[index + 1];
     const nextLayer = entryLayer(next?.id);
@@ -3496,23 +3524,62 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
   /** The meta of a cel inserted after the current one, holding `hold` frames (default 1) */
   const insertedCelMeta = (hold: number | null) => (hold && hold > 1 ? { cel: { hold } } : null);
+  /**
+   * CSP 動畫膠片: a cel folder with the same folders and layers as `template` (empty), so a cel made
+   * of line art / colour / shadow layers stays one cel on one track. Drawing goes on in the copy of
+   * the layer that was active.
+   */
+  const createCelLike = async (template: LayerModel, name: string, after: string, folderId: string, meta: LayerMeta | null) => {
+    const all = layersRef.current;
+    const root = await createLayerWithUndo(name, template.blendMode, 'group', after, folderId, { meta, select: false });
+    if (!root) return null;
+    const copies = new Map<string, string>([[template.id, root.id]]);
+    let last = root.id;
+    let drawable: string | null = null;
+    const copyInto = async (fromId: string, toId: string, depth: number): Promise<void> => {
+      if (depth > 8) return;
+      const kids = all.filter((l) => l.parentId === fromId).sort((a, b) => a.sortOrder - b.sortOrder);
+      for (const k of kids) {
+        const group = k.layerType === 'group' || k.layerType === 'folder';
+        const type: LayerType | null = group ? 'group' : k.layerType === 'raster' || k.layerType === 'vector' ? k.layerType : null;
+        if (!type) continue; // masks, text and adjustment layers are not part of the drawing structure
+        const made = await createLayerWithUndo(k.name, k.blendMode, type, last, toId, { select: false });
+        if (!made) return;
+        copies.set(k.id, made.id);
+        last = made.id;
+        if (!group) drawable = made.id;
+        if (k.opacity !== made.opacity || k.isVisible !== made.isVisible) await onUpdateLayerProps?.(made.id, { opacity: k.opacity, isVisible: k.isVisible });
+        if (group) await copyInto(k.id, made.id, depth + 1);
+      }
+    };
+    await copyInto(template.id, root.id, 0);
+    onSelectLayer?.(copies.get(activeLayerRef.current?.id ?? '') ?? drawable ?? root.id);
+    return root;
+  };
   const addAnimationFrame = async () => {
     if (!onCreateLayer || !animFolder) return;
     if (!canAddCel(animFolder)) return warn('這個動畫資料夾沒有共用，只有建立者能加格。');
     const time = animationEngine?.getTime() ?? 0;
+    const folderId = animFolder.id;
+    // A folder cel (the one on screen, else the last one) is copied as a whole structure
+    const here = currentAnimEntry().entry;
+    const templateId = celLayerOf(here ?? animEntries[animEntries.length - 1]);
+    const template = templateId ? layersRef.current.find((l) => l.id === templateId && l.layerType === 'group' && l.meta?.cel?.ref === undefined) : undefined;
+    const make = (after: string, meta: LayerMeta | null) => (template
+      ? createCelLike(template, nextCelName(), after, folderId, meta)
+      : createLayerWithUndo(nextCelName(), 'normal', 'raster', after, folderId, { meta }));
     if (animEntries.length > 0 && time >= trackLength(animEntries)) {
       // Past the end of the track: the new cel goes on that frame and the last drawing holds until it
-      const folderId = animFolder.id;
-      const created = await createLayerWithUndo(nextCelName(), 'normal', 'raster', animEntries[animEntries.length - 1].id, folderId);
+      const created = await make(animEntries[animEntries.length - 1].id, null);
       if (!created) return;
       await waitForLayerModels([created.id]);
       const others = celEntriesOf(layersRef.current, folderId).filter((e) => e.id !== created.id);
       commitAnimationPlacement(folderId, placeEntries(others, new Map([[created.id, time]]), [{ id: created.id, hold: 1 }]));
       return;
     }
-    const after = currentAnimEntry().entry?.id ?? animEntries[animEntries.length - 1]?.id ?? animFolder.id;
+    const after = here?.id ?? animEntries[animEntries.length - 1]?.id ?? folderId;
     const hold = animRipple ? null : roomWithoutRipple();
-    await createLayerWithUndo(nextCelName(), 'normal', 'raster', after, animFolder.id, { meta: insertedCelMeta(hold) });
+    await make(after, insertedCelMeta(hold));
   };
   const duplicateAnimationFrame = async () => {
     const src = currentAnimEntry().entry;
@@ -3738,6 +3805,25 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const setAnimationFps = (fps: number) => {
     if (animFolder && canManageLayer(animFolder)) onUpdateLayerProps?.(animFolder.id, { meta: { ...animFolder.meta, animation: { ...animFolder.meta?.animation, fps } } });
   };
+  /** Timeline length in frames, kept on the edited folder; null = up to the end of the longest track */
+  const setAnimationLength = (frames: number | null) => {
+    if (!animFolder || !canManageLayer(animFolder)) return;
+    const withLength = (f: LayerModel, length: number | null) => {
+      const animation: NonNullable<LayerMeta['animation']> = { fps: 12, ...f.meta?.animation };
+      if (length) animation.length = Math.max(1, Math.min(MAX_TIMELINE_FRAMES, Math.round(length)));
+      else delete animation.length;
+      onUpdateLayerProps?.(f.id, { meta: { ...f.meta, animation } });
+    };
+    if (frames) return withLength(animFolder, frames);
+    // Back to automatic: every length this painter may change goes
+    for (const f of animFolders) if (f.meta?.animation?.length && canManageLayer(f)) withLength(f, null);
+  };
+  // The light table changed: show (or hide) its cels now
+  useEffect(() => {
+    const lm = layerManagerRef.current;
+    if (lm && animationEngine) lm.syncLayers(displayLayersFor(layersRef.current));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lightTable, animationEngine]);
   /** A click on a track: its cel at that frame becomes the active layer (that folder becomes the edited one) */
   const selectAnimationCell = (folderId: string, time: number) => {
     const engine = animationEngine;
@@ -4504,7 +4590,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const createLayerFromDock = (type: 'raster' | 'vector' | 'group') => {
     if (!onCreateLayer) return;
     if (type === 'group') {
-      void createLayerWithUndo(nextGroupName(layers), 'normal', 'group', activeLayer?.id || null, null);
+      // In an animation folder a new folder stays there (CSP): a folder cel, or a folder inside a cel
+      const inAnimation = Boolean(activeLayer && (isAnimationFolder(activeLayer) || celOfLayer(layers, activeLayer.id)));
+      void createLayerWithUndo(nextGroupName(layers), 'normal', 'group', activeLayer?.id || null, inAnimation ? undefined : null);
     } else if (type === 'vector') {
       const n = layers.filter((l) => l.layerType === 'vector').length + 1;
       void createLayerWithUndo(`向量線稿 ${n}`, 'normal', 'vector', activeLayer?.id || null);
@@ -5074,6 +5162,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 onPasteEntries={(folderId, frame) => void pasteAnimationEntries(folderId, frame)}
                 ripple={animRipple}
                 onToggleRipple={toggleAnimRipple}
+                timelineLength={animTimelineLength}
+                lengthIsSet={animSetLength > 0}
+                onSetLength={setAnimationLength}
+                lightTable={lightTable}
+                onUpdateLightTable={updateLightTable}
                 onSetEntryHold={setEntryHold}
                 onCreateFolder={() => void createAnimationFolder()}
                 onAddFrame={() => void addAnimationFrame()}

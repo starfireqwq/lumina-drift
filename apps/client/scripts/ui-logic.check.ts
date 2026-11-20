@@ -29,7 +29,11 @@ import {
   unitToPixels,
 } from '@atelier/shared';
 import { getBoxPivotCanvasPoint, type TransformBox } from '../src/utils/transformProjection';
-import { AnimationEngine, animationDisplay, celEntriesOf, celOfLayer, entryIndexAt, placeEntries, removeTransformKeyframe, timeOfCel, trackLength, upsertTransformKeyframe } from '../src/engine/AnimationEngine';
+import {
+  AnimationEngine, animationDisplay, celEntriesOf, celInsertAt, celOfLayer, entryIndexAt, formatTimecode, parseTimecode, placeEntries, removeTransformKeyframe,
+  timeOfCel, trackLength, upsertTransformKeyframe,
+} from '../src/engine/AnimationEngine';
+import { cleanLightTable, clearLightTable, emptyLightTable, lightIdsFor, toggleLightCel } from '../src/engine/lightTable';
 import { nextGroupName } from '../src/utils/canvasName';
 import { verticalRuns } from '../src/engine/textLayer';
 import { deleteAnchor, isCornerAnchor, moveHandle, penPointsToAnchors, toggleCorner } from '../src/engine/vectorEditing';
@@ -325,6 +329,75 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   player.setOnionSkinConfig({ prevFramesCount: 9, opacity: 5 });
   assert.equal(player.getOnionSkinConfig().prevFramesCount, 5);
   assert.equal(player.getOnionSkinConfig().opacity, 0.9);
+
+  // CSP in-between: a cel added at the playhead splits the cel there, later cels keep their frames
+  {
+    const ab = [{ hold: 8 }, { hold: 4 }]; // A on frames 1–8, B from frame 9
+    assert.deepEqual(celInsertAt(ab, 4), { index: 0, keep: 4, hold: 4, start: 4 }, 'frame 5: A keeps 1–4, the new cel runs 5–8, B stays on 9');
+    assert.deepEqual(celInsertAt(ab, 0), { index: 0, keep: 1, hold: 7, start: 1 }, "on A's first frame the new cel goes on the next frame");
+    assert.deepEqual(celInsertAt(ab, 9), { index: 1, keep: 1, hold: 3, start: 9 });
+    assert.equal(celInsertAt([{ hold: 1 }, { hold: 2 }], 0), null, 'a one-frame cel has no frame to give');
+    assert.equal(celInsertAt(ab, 12), null, 'past the end of the track');
+    assert.equal(celInsertAt(ab, -1), null);
+  }
+  // Seconds + frames, as CSP shows time
+  assert.deepEqual([0, 23, 24, 49].map((f) => formatTimecode(f, 24, 'sf')), ['0+1', '0+24', '1+1', '2+2']);
+  assert.equal(formatTimecode(24, 24, 'frames'), '25');
+  assert.deepEqual(['1+1', '0+24', ' 2 + 2 ', '25', '1'].map((s) => parseTimecode(s, 24)), [24, 23, 49, 24, 0]);
+  assert.deepEqual(['0+0', '0', 'x', '', '1+'].map((s) => parseTimecode(s, 24)), [null, null, null, null, null]);
+  assert.equal(parseTimecode('1+3', 12), 14, 'seconds follow the FPS');
+  // Loop off: playback stops on the last frame; play again starts from the top
+  {
+    const once = new AnimationEngine();
+    once.setLength(5);
+    once.setLoop(false);
+    once.goTo(4);
+    (once as any).playing = true;
+    (once as any).tick();
+    assert.equal(once.getTime(), 4);
+    assert.equal(once.getIsPlaying(), false, 'stopped at the end');
+    once.play();
+    assert.equal(once.getTime(), 0, 'play on the last frame starts again from the first');
+    once.pause();
+    once.goToEnd();
+    assert.equal(once.getTime(), 4);
+    once.setRange({ start: 1, end: 3 });
+    once.goToStart();
+    assert.equal(once.getTime(), 1, 'first frame of the playback range');
+    once.goToEnd();
+    assert.equal(once.getTime(), 3);
+  }
+  // Light table: picked cels show at its opacity, untinted, and come before onion skin
+  {
+    const light = { opacity: 0.5, ids: new Set(['a2']) };
+    assert.deepEqual(at(0, { light }), ['bg', 'A', 'a1', 'a2', 'B', 'b1']);
+    const lit = animationDisplay(timed, { time: 0, activeFolderId: 'A', onion: null, light });
+    assert.equal(lit.find((l) => l.id === 'a2')!.opacity, 0.5);
+    assert.equal(lit.find((l) => l.id === 'a2')!.onionTint, undefined, 'not tinted');
+    const both = animationDisplay(timed, { time: 2, activeFolderId: 'A', onion: { ...onion, prevFramesCount: 1 }, light: { opacity: 0.4, ids: new Set(['a1']) } });
+    assert.equal(both.find((l) => l.id === 'a1')!.onionTint, undefined, 'the light table wins over onion skin');
+    assert.equal(both.find((l) => l.id === 'a1')!.opacity, 0.4);
+    // A folder cel on the light table shows what is inside it
+    assert.deepEqual(at(0, { light: { opacity: 0.5, ids: new Set(['b2']) } }).filter((id) => /^b\d/.test(id)), ['b1', 'b2', 'b2line']);
+    // The cel on screen is never dimmed by its own light table
+    assert.equal(animationDisplay(timed, { time: 0, activeFolderId: 'A', onion: null, light: { opacity: 0.3, ids: new Set(['a1']) } }).find((l) => l.id === 'a1')!.opacity, 1);
+  }
+  {
+    let s = emptyLightTable();
+    s = toggleLightCel(s, { kind: 'cel', id: 'c5' }, 'c1');
+    s = toggleLightCel(s, { kind: 'cel', id: 'c5' }, 'c9');
+    s = toggleLightCel(s, { kind: 'track', id: 'A' }, 'bg1');
+    assert.deepEqual([...lightIdsFor(s, 'A', 'c5')].sort(), ['bg1', 'c1', 'c9']);
+    assert.deepEqual([...lightIdsFor(s, 'A', 'c1')], ['bg1'], 'another cel has only the track-wide picks (and never itself)');
+    assert.equal(lightIdsFor({ ...s, enabled: false }, 'A', 'c5').size, 0, 'switched off');
+    s = toggleLightCel(s, { kind: 'cel', id: 'c5' }, 'c1');
+    assert.deepEqual(s.cels.c5, ['c9'], 'a second click takes it off');
+    s = clearLightTable(s, { kind: 'cel', id: 'c5' });
+    assert.equal(s.cels.c5, undefined);
+    const cleaned = cleanLightTable({ enabled: 0, opacity: 9, cels: { x: ['a', 'a', 7, 'b'] }, tracks: [] });
+    assert.deepEqual(cleaned, { enabled: false, opacity: 1, cels: { x: ['a', 'b'] }, tracks: {} });
+    assert.deepEqual(cleanLightTable('junk'), emptyLightTable());
+  }
 }
 
 // Group names count plain groups only (animation folders and their cels are not groups for this)

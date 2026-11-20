@@ -806,6 +806,18 @@ export interface Translations {
     sharedFolderTooltip: string;
     fpsTooltip: string;
     fpsAria: string;
+    timecodeToggle: string;
+    length: string;
+    lengthTooltip: string;
+    lengthAuto: string;
+    lightTable: string;
+    lightTableTooltip: string;
+    lightTableOn: string;
+    lightTableOff: string;
+    lightThisCel: string;
+    lightWholeTrack: string;
+    lightOpacity: string;
+    lightClear: string;
   };
 
   comic: {

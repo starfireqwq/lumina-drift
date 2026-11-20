@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
-  AnimationEngine, AnimationTrack, MAX_HOLD, MAX_ONION, OnionSkinConfig, TIMELINE_SLACK, celLayerOf, entryIndexAt, entryStart, trackLength,
-  upsertTransformKeyframe, removeTransformKeyframe,
+  AnimationEngine, AnimationTrack, MAX_HOLD, MAX_ONION, MAX_TIMELINE_FRAMES, OnionSkinConfig, TIMELINE_SLACK, celLayerOf, entryIndexAt, entryStart,
+  formatTimecode, parseTimecode, trackLength, upsertTransformKeyframe, removeTransformKeyframe, type TimecodeMode,
 } from '../engine/AnimationEngine';
+import { clearLightTable, lightTableHas, toggleLightCel, type LightTableScope, type LightTableState } from '../engine/lightTable';
 import {
   evaluateTransformKeyframes,
   type KeyframeEasing,
@@ -10,8 +11,8 @@ import {
   type TransformKeyframe,
 } from '@atelier/shared';
 import {
-  ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Eye, Film, Folder, Loader2, Minus, Pause, Play, Plus,
-  Repeat, SkipBack, Trash2, Users, X,
+  ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Eye, Film, Folder, Lamp, Loader2, Minus, Pause, Play, Plus,
+  Repeat, Repeat2, SkipBack, SkipForward, Trash2, Users, X,
 } from 'lucide-react';
 import { AtelierModal, modalButton } from './AtelierModal';
 import { getUserColor } from '../utils/userColors';
@@ -70,6 +71,15 @@ interface AnimationTimelineBarProps {
   /** 順移: adding / deleting a cel moves the ones after it (off: neighbours give / take frames, later timing stays) */
   ripple: boolean;
   onToggleRipple: () => void;
+  /** Timeline length in frames (the player gets it after this render, so it is passed in) */
+  timelineLength: number;
+  /** The timeline length was set by hand (else it runs to the end of the longest track) */
+  lengthIsSet: boolean;
+  /** Frames, or null for automatic */
+  onSetLength: (frames: number | null) => void;
+  /** Light table (透光桌): reference cels this viewer picked */
+  lightTable: LightTableState;
+  onUpdateLightTable: (fn: (state: LightTableState) => LightTableState) => void;
   /** Drag of an entry's right edge */
   onSetEntryHold: (entryId: string, hold: number) => void;
   onCreateFolder: () => void;
@@ -121,6 +131,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   engine, isOpen, onClose, tracks, activeFolderId, thumbnails = EMPTY_THUMBS, subscribeThumbnails, getThumbnailsSnapshot, ownerNames, can,
   onCreateFolder, onAddFrame, onDuplicateFrame, onReuseCel, onDeleteFrame, onMoveFrame, onSetHold, onToggleShared, onFpsChange,
   onSelectCell, planExport, onPlaceEntries, onCopyEntries, onPasteEntries, onSetEntryHold, ripple, onToggleRipple,
+  timelineLength, lengthIsSet, onSetLength, lightTable, onUpdateLightTable,
   activeLayer, canvasWidth = 1920, canvasHeight = 1080, onUpdateLayerKeyframes,
 }) => {
   const { t } = useI18n();
@@ -145,7 +156,23 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   const [range, setRange] = useState(engine.getRange());
   const [onionSkin, setOnionSkin] = useState<OnionSkinConfig>(engine.getOnionSkinConfig());
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const [panel, setPanel] = useState<null | 'onion' | 'range' | 'reuse' | 'keyframes'>(null);
+  const [panel, setPanel] = useState<null | 'onion' | 'range' | 'reuse' | 'keyframes' | 'light'>(null);
+  const [loop, setLoop] = useState(engine.getLoop());
+  // Seconds + frames (CSP "1+5") or frame numbers: this viewer's own
+  const [timecode, setTimecode] = useState<TimecodeMode>(() => {
+    try {
+      return localStorage.getItem('atelier_anim_timecode') === 'frames' ? 'frames' : 'sf';
+    } catch {
+      return 'sf';
+    }
+  });
+  const toggleTimecode = () => {
+    const next: TimecodeMode = timecode === 'sf' ? 'frames' : 'sf';
+    setTimecode(next);
+    try { localStorage.setItem('atelier_anim_timecode', next); } catch { /* kept for this session */ }
+  };
+  const [lengthDraft, setLengthDraft] = useState<string | null>(null);
+  const [lightKind, setLightKind] = useState<LightTableScope['kind']>('cel');
   const [bezierDragIdx, setBezierDragIdx] = useState<null | 1 | 2>(null);
   const [gridViewport, setGridViewport] = useState({ left: 0, width: 960 });
   const [showExportModal, setShowExportModal] = useState(false);
@@ -177,7 +204,10 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
           : nextOnion
       );
     });
-    const unsubPlay = engine.onPlaybackStateChange(setIsPlaying);
+    const unsubPlay = engine.onPlaybackStateChange((playing) => {
+      setIsPlaying(playing);
+      setLoop(engine.getLoop());
+    });
     return () => {
       unsubFrame();
       unsubPlay();
@@ -350,7 +380,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   const entries = active?.entries ?? [];
   const currentIdx = entryIndexAt(entries, time);
   const current = entries[currentIdx];
-  const length = engine.getLength();
+  const length = Math.max(1, timelineLength);
   const canEditEntry = Boolean(current && can.editableEntryIds.has(current.id));
   const realCels = entries.filter((e) => e.ref === undefined);
 
@@ -431,7 +461,20 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
       <button type="button" onClick={() => set(value + 1)} disabled={value >= max} aria-label={`${label} +1`} className={iconBtn}><Plus className="h-3 w-3" /></button>
     </span>
   );
-  const rangeText = range ? `${range.start + 1}–${range.end + 1}` : t.animation.rangeAll;
+  const tc = (frame: number) => formatTimecode(frame, fps, timecode);
+  const rangeText = range ? `${tc(range.start)}–${tc(range.end)}` : t.animation.rangeAll;
+  // Light table of the cel on screen, or of the whole edited track
+  const currentCel = celLayerOf(current);
+  const lightScope: LightTableScope | null = lightKind === 'track' ? (activeFolderId ? { kind: 'track', id: activeFolderId } : null) : currentCel ? { kind: 'cel', id: currentCel } : null;
+  const lightNow = new Set([...(activeFolderId ? lightTable.tracks[activeFolderId] ?? [] : []), ...(currentCel ? lightTable.cels[currentCel] ?? [] : [])]);
+  if (currentCel) lightNow.delete(currentCel);
+  const lightCount = lightNow.size;
+  const commitLength = () => {
+    if (lengthDraft === null) return;
+    const frame = parseTimecode(lengthDraft, fps);
+    setLengthDraft(null);
+    if (frame !== null) onSetLength(Math.min(MAX_TIMELINE_FRAMES, frame + 1));
+  };
   const exportFrames = exportRangeOnly && range ? range.end - range.start + 1 : length;
 
   return (
@@ -447,7 +490,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
         </div>
         {tracks.length > 0 && (
           <>
-            <button type="button" onClick={() => engine.goTo(range?.start ?? 0)} title={t.animation.firstCel} aria-label={t.animation.firstCel} className={iconBtn}><SkipBack className="h-3.5 w-3.5" /></button>
+            <button type="button" onClick={() => engine.goToStart()} title={t.animation.firstCel} aria-label={t.animation.firstCel} className={iconBtn}><SkipBack className="h-3.5 w-3.5" /></button>
             <button type="button" onClick={() => engine.goToPrevFrame()} title={t.animation.prevCel} aria-label={t.animation.prevCel} className={iconBtn}><ChevronLeft className="h-4 w-4" /></button>
             <button type="button" onClick={() => engine.togglePlay()} disabled={(range ? range.end - range.start + 1 : length) < 2}
               title={isPlaying ? t.animation.pause : t.animation.play}
@@ -456,7 +499,13 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
               <span>{isPlaying ? t.animation.pause : t.animation.play}</span>
             </button>
             <button type="button" onClick={() => engine.goToNextFrame()} title={t.animation.nextCel} aria-label={t.animation.nextCel} className={iconBtn}><ChevronRight className="h-4 w-4" /></button>
-            <span className="shrink-0 font-mono text-[11px] text-neutral-400" aria-label={t.animation.currentFrame}>{time + 1}/{length}</span>
+            <button type="button" onClick={() => engine.goToEnd()} title={t.animation.lastCel} aria-label={t.animation.lastCel} className={iconBtn}><SkipForward className="h-3.5 w-3.5" /></button>
+            <button type="button" onClick={() => engine.setLoop(!loop)} aria-pressed={loop} title={t.animation.loop} aria-label={t.animation.loop}
+              className={`${iconBtn} ${loop ? 'bg-amber-500/15 !text-amber-300' : ''}`}><Repeat2 className="h-3.5 w-3.5" /></button>
+            <button type="button" onClick={toggleTimecode} title={t.animation.timecodeToggle} aria-label={t.animation.currentFrame}
+              className="shrink-0 rounded px-1 font-mono text-[11px] text-neutral-400 hover:bg-neutral-800 hover:text-white">
+              {formatTimecode(time, fps, timecode)}/{formatTimecode(length - 1, fps, timecode)}
+            </button>
             <label className="ml-1 flex shrink-0 items-center gap-1 border-l border-neutral-800 pl-2" title={t.animation.fpsTooltip}>
               <span className="text-[10px] font-bold text-neutral-500">FPS</span>
               <select value={fps} disabled={!can.editFolder} onChange={(e) => onFpsChange(Number(e.target.value))} aria-label={t.animation.fpsAria}
@@ -468,6 +517,11 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
               title={t.animation.onionSkinTooltip} className={chip(onionSkin.enabled)}>
               <Eye className="h-3.5 w-3.5" />{t.animation.onionSkin}
               {onionSkin.enabled && <span className="font-mono text-[10px]">-{onionSkin.prevFramesCount}/+{onionSkin.nextFramesCount}</span>}
+            </button>
+            <button type="button" onClick={() => setPanel(panel === 'light' ? null : 'light')} aria-pressed={panel === 'light'}
+              title={t.animation.lightTableTooltip} className={chip(lightTable.enabled && lightCount > 0)}>
+              <Lamp className="h-3.5 w-3.5" />{t.animation.lightTable}
+              {lightTable.enabled && lightCount > 0 && <span className="font-mono text-[10px]">{lightCount}</span>}
             </button>
             <button type="button" onClick={() => setPanel(panel === 'range' ? null : 'range')} aria-pressed={panel === 'range'}
               title={t.animation.rangeTooltip} className={chip(Boolean(range))}>
@@ -533,9 +587,48 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
             {panel === 'range' && (
               <>
                 <span className="shrink-0 text-neutral-400">{t.animation.range} <b className="font-mono text-white">{rangeText}</b></span>
-                <button type="button" className={chip(false)} onClick={() => engine.setRange({ start: time, end: range?.end ?? length - 1 })}>[{time + 1}</button>
-                <button type="button" className={chip(false)} onClick={() => engine.setRange({ start: range?.start ?? 0, end: time })}>{time + 1}]</button>
+                <button type="button" className={chip(false)} onClick={() => engine.setRange({ start: time, end: range?.end ?? length - 1 })}>[{tc(time)}</button>
+                <button type="button" className={chip(false)} onClick={() => engine.setRange({ start: range?.start ?? 0, end: time })}>{tc(time)}]</button>
                 <button type="button" className={chip(false)} disabled={!range} onClick={() => engine.setRange(null)}>{t.common.clear}</button>
+                <label className="ml-2 flex shrink-0 items-center gap-1 border-l border-neutral-800 pl-2 text-neutral-400" title={t.animation.lengthTooltip}>
+                  {t.animation.length}
+                  <input value={lengthDraft ?? tc(length - 1)} disabled={!can.editFolder} aria-label={t.animation.lengthTooltip} inputMode="numeric"
+                    onChange={(e) => setLengthDraft(e.target.value)} onBlur={commitLength}
+                    onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') { setLengthDraft(null); e.currentTarget.blur(); } }}
+                    className="atelier-field h-6 w-16 px-1 font-mono text-[11px]" />
+                </label>
+                <button type="button" className={chip(!lengthIsSet)} disabled={!can.editFolder || !lengthIsSet} onClick={() => onSetLength(null)}>{t.animation.lengthAuto}</button>
+                <button type="button" onClick={() => setPanel(null)} className={`${iconBtn} ml-auto`}>{t.common.done}</button>
+              </>
+            )}
+            {panel === 'light' && (
+              <>
+                <button type="button" onClick={() => onUpdateLightTable((s) => ({ ...s, enabled: !s.enabled }))} aria-pressed={lightTable.enabled} className={chip(lightTable.enabled)}>
+                  {lightTable.enabled ? t.animation.lightTableOn : t.animation.lightTableOff}
+                </button>
+                <span className="flex shrink-0 overflow-hidden rounded-lg border border-neutral-700/70" role="group" aria-label={t.animation.lightTable}>
+                  {(['cel', 'track'] as const).map((k) => (
+                    <button key={k} type="button" onClick={() => setLightKind(k)} aria-pressed={lightKind === k}
+                      className={`h-7 px-2 text-[11px] font-bold ${lightKind === k ? 'bg-amber-500/15 text-amber-300' : 'text-neutral-300 hover:bg-neutral-800'}`}>
+                      {k === 'cel' ? t.animation.lightThisCel : t.animation.lightWholeTrack}
+                    </button>
+                  ))}
+                </span>
+                {realCels.map((e) => {
+                  const on = Boolean(lightScope && lightTableHas(lightTable, lightScope, e.id));
+                  return (
+                    <button key={e.id} type="button" disabled={!lightScope || (lightKind === 'cel' && e.id === currentCel)} aria-pressed={on}
+                      onClick={() => lightScope && onUpdateLightTable((s) => toggleLightCel(s, lightScope, e.id))} className={chip(on)}>
+                      <AnimThumbImg layerId={e.id} thumbnails={thumbnails} subscribeThumbnails={subscribeThumbnails} getThumbnailsSnapshot={getThumbnailsSnapshot} className="h-5 w-5 rounded bg-white object-contain" />{e.label}
+                    </button>
+                  );
+                })}
+                <label className="flex shrink-0 items-center gap-1 text-neutral-400">{t.animation.lightOpacity}
+                  <input type="range" min="0.05" max="1" step="0.05" value={lightTable.opacity} aria-label={t.animation.lightOpacity}
+                    onChange={(e) => { const opacity = parseFloat(e.target.value); onUpdateLightTable((s) => ({ ...s, opacity })); }} className="h-1 w-16 cursor-pointer accent-amber-500" />
+                </label>
+                <button type="button" className={chip(false)} disabled={!lightScope || !lightCount}
+                  onClick={() => lightScope && onUpdateLightTable((s) => clearLightTable(s, lightScope))}>{t.animation.lightClear}</button>
                 <button type="button" onClick={() => setPanel(null)} className={`${iconBtn} ml-auto`}>{t.common.done}</button>
               </>
             )}
@@ -717,13 +810,24 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 <div style={{ width: TRACK_LABEL_WIDTH }} className="sticky left-0 z-10 shrink-0 border-r border-neutral-800 bg-neutral-900 px-1 text-[10px] leading-5 text-neutral-500">{t.animation.framesHeader}</div>
                 <div role="slider" aria-label={t.animation.timeAria} aria-valuemin={1} aria-valuemax={shownLength} aria-valuenow={time + 1} tabIndex={0}
                   onClick={(e) => engine.goTo(timeAt(e))}
-                  onKeyDown={(e) => { if (e.key === 'ArrowRight') engine.goToNextFrame(); if (e.key === 'ArrowLeft') engine.goToPrevFrame(); }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'ArrowRight') engine.goToNextFrame();
+                    if (e.key === 'ArrowLeft') engine.goToPrevFrame();
+                    if (e.key === 'Home') engine.goToStart();
+                    if (e.key === 'End') engine.goToEnd();
+                  }}
                   className="relative cursor-pointer" style={{ width: shownLength * CELL }}>
                   {range && <div className="absolute inset-y-0 bg-amber-500/20" style={{ left: range.start * CELL, width: (range.end - range.start + 1) * CELL }} />}
-                  {visFrames.map((f) => (
-                    <span key={f} className={`absolute top-0 h-5 border-l text-[9px] leading-5 ${f % 6 === 0 ? 'border-neutral-600 text-neutral-400' : 'border-neutral-800 text-neutral-600'} ${f >= length ? 'opacity-40' : ''}`}
-                      style={{ left: f * CELL, width: CELL, paddingLeft: 2 }}>{f + 1}</span>
-                  ))}
+                  {visFrames.map((f) => {
+                    // Seconds + frames: each second starts with a bright "s+1", the frames after it count up
+                    const second = timecode === 'sf' ? f % fps === 0 : f % 6 === 0;
+                    return (
+                      <span key={f} className={`absolute top-0 h-5 border-l text-[9px] leading-5 ${second ? 'border-neutral-500 font-bold text-neutral-200' : 'border-neutral-800 text-neutral-600'} ${f >= length ? 'opacity-40' : ''}`}
+                        style={{ left: f * CELL, width: CELL, paddingLeft: 2 }}>{timecode === 'sf' && !second ? (f % fps) + 1 : tc(f)}</span>
+                    );
+                  })}
+                  {/* End of the timeline */}
+                  <div aria-hidden className="pointer-events-none absolute inset-y-0 w-0.5 bg-sky-500" style={{ left: length * CELL - 1 }} />
                 </div>
               </div>
               {/* Active Layer Transform Keyframes Lane */}
@@ -825,6 +929,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                               className="flex h-3.5 shrink-0 items-center gap-0.5 truncate px-0.5 text-[9px] font-bold text-neutral-300">
                               {e.ref !== undefined && <Repeat className="h-2.5 w-2.5 shrink-0 text-sky-300" />}
                               {e.isGroup && e.ref === undefined && <Folder className="h-2.5 w-2.5 shrink-0" />}
+                              {isActive && lightTable.enabled && shownId && lightNow.has(shownId) && <Lamp aria-label={t.animation.lightTable} className="h-2.5 w-2.5 shrink-0 text-amber-300" />}
                               <span className="truncate">{e.ref !== undefined ? (track.entries.find((x) => x.id === e.ref)?.label ?? '—') : e.label}</span>
                             </span>
                             <span className="mx-0.5 flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-sm bg-white/90">

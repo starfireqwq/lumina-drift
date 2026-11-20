@@ -45,6 +45,8 @@ export interface OnionSkinConfig {
 }
 
 export const MAX_HOLD = 99;
+/** Longest timeline that can be set (250 s at 24 FPS) */
+export const MAX_TIMELINE_FRAMES = 6000;
 export const MAX_ONION = 5;
 /** Frames past the end of the longest track that the playhead can be put on (to place cels there) */
 export const TIMELINE_SLACK = 24;
@@ -175,6 +177,48 @@ export function timeOfCel(entries: CelEntry[], celId: string): number {
   return i < 0 ? -1 : entryStart(entries, i);
 }
 
+/**
+ * CSP-style in-between: where a cel added at frame `time` goes while later cels keep their frames.
+ * Inside a cel it splits that cel at the playhead (the new cel starts there and runs up to the next
+ * cel); on a cel's first frame it starts one frame later. null when there is no frame to take (a
+ * one-frame cel under the playhead) or the playhead is past the track.
+ */
+export function celInsertAt(
+  entries: ReadonlyArray<{ hold: number }>,
+  time: number
+): { index: number; keep: number; hold: number; start: number } | null {
+  if (time < 0) return null;
+  let start = 0;
+  for (let i = 0; i < entries.length; i++) {
+    const end = start + entries[i].hold;
+    if (time < end) {
+      const at = time > start ? time : start + 1;
+      return at < end ? { index: i, keep: at - start, hold: end - at, start: at } : null;
+    }
+    start = end;
+  }
+  return null;
+}
+
+export type TimecodeMode = 'sf' | 'frames';
+
+/** A timeline frame (0-based) as CSP shows it: seconds + frame of that second ("1+5"), or the frame number */
+export function formatTimecode(frame: number, fps: number, mode: TimecodeMode): string {
+  const n = Math.max(0, Math.round(frame) || 0);
+  if (mode === 'frames') return String(n + 1);
+  const f = Math.max(1, Math.round(fps) || 1);
+  return `${Math.floor(n / f)}+${(n % f) + 1}`;
+}
+
+/** Reads "1+5" (seconds + frame) or "29" (frame number) back as a 0-based frame; null if unreadable */
+export function parseTimecode(text: string, fps: number): number | null {
+  const s = text.trim();
+  const f = Math.max(1, Math.round(fps) || 1);
+  const sf = /^(\d{1,5})\s*\+\s*(\d{1,5})$/.exec(s);
+  if (sf) return Number(sf[2]) >= 1 ? Number(sf[1]) * f + Number(sf[2]) - 1 : null;
+  return /^\d{1,6}$/.test(s) && Number(s) >= 1 ? Number(s) - 1 : null;
+}
+
 export interface AnimationView {
   /** Timeline frame on screen */
   time: number;
@@ -183,6 +227,8 @@ export interface AnimationView {
   onion: OnionSkinConfig | null;
   /** Export: only these animation folders' layers are shown (null = everything) */
   only?: Set<string> | null;
+  /** Light table: these cels are shown faded (`opacity` of their own) as a reference while drawing */
+  light?: { opacity: number; ids: ReadonlySet<string> } | null;
 }
 
 /**
@@ -245,15 +291,23 @@ export function animationDisplay<T extends AnimLayer>(
     for (const l of layers) resolveWorld(l.id);
   }
 
-  // Per cel layer: shown, tinted, or (default) hidden. `fade` scales the onion opacity
-  const celState = new Map<string, { tint?: number; fade?: number }>();
+  // Per cel layer: shown, tinted, on the light table, or (default) hidden. `fade` scales the onion opacity
+  const celState = new Map<string, { tint?: number; fade?: number; light?: number }>();
   const hidden = new Set<string>();
+  const lightIds = view?.light?.ids;
   for (const folder of folders) {
     const entries = celEntriesOf(layers, folder.id);
     for (const e of entries) hidden.add(e.id);
     const idx = entryIndexAt(entries, time);
     const shown = celLayerOf(entries[idx]);
     if (shown) celState.set(shown, {});
+    // Light table cels the painter picked come before onion skin (an explicit choice)
+    if (lightIds?.size) {
+      for (const e of entries) {
+        const id = celLayerOf(e);
+        if (id && lightIds.has(id) && !celState.has(id)) celState.set(id, { light: view!.light!.opacity });
+      }
+    }
     const onion = folder.id === view?.activeFolderId ? view?.onion : null;
     if (!onion?.enabled || idx < 0) continue;
     const walk = (step: -1 | 1, count: number, color: string) => {
@@ -304,6 +358,10 @@ export function animationDisplay<T extends AnimLayer>(
     if (hidden.has(l.id) && !state) {
       return withTransform ? { ...l, isVisible: false, ...withTransform } : { ...l, isVisible: false };
     }
+    if (state?.light !== undefined) {
+      if (!l.isVisible) return withTransform ? { ...l, ...withTransform } : l;
+      return { ...l, opacity: l.opacity * state.light, ...withTransform };
+    }
     if (state?.tint !== undefined) {
       if (!l.isVisible) return withTransform ? { ...l, ...withTransform } : l;
       const faded = opacity * (state.fade ?? 1);
@@ -320,6 +378,7 @@ export function animationDisplay<T extends AnimLayer>(
 }
 
 const ONION_KEY = 'atelier_onion_skin';
+const LOOP_KEY = 'atelier_anim_loop';
 
 /**
  * This viewer's player: the frame on screen, playback, playback range and onion skin are their
@@ -328,6 +387,7 @@ const ONION_KEY = 'atelier_onion_skin';
 export class AnimationEngine {
   private fps = 12;
   private playing = false;
+  private loop = true;
   private time = 0;
   private length = 1;
   private range: { start: number; end: number } | null = null;
@@ -350,6 +410,7 @@ export class AnimationEngine {
     try {
       const saved = JSON.parse(localStorage.getItem(ONION_KEY) || 'null');
       if (saved && typeof saved === 'object') this.onionSkinConfig = AnimationEngine.cleanOnion({ ...this.onionSkinConfig, ...saved });
+      this.loop = localStorage.getItem(LOOP_KEY) !== '0';
     } catch {
       // storage blocked: defaults
     }
@@ -444,6 +505,7 @@ export class AnimationEngine {
     const span = this.range ? this.range.end - this.range.start + 1 : this.length;
     if (this.playing || span < 2) return;
     if (this.range && (this.time < this.range.start || this.time > this.range.end)) this.goTo(this.range.start);
+    else if (this.time >= (this.range?.end ?? this.length - 1)) this.goTo(this.range?.start ?? 0); // from the top again
     this.playing = true;
     this.notifyPlaybackState();
     this.playTimer = setInterval(() => this.tick(), 1000 / this.fps);
@@ -462,7 +524,33 @@ export class AnimationEngine {
   private tick() {
     const start = this.range?.start ?? 0;
     const end = this.range?.end ?? this.length - 1;
-    this.goTo(this.time + 1 > end ? start : this.time + 1);
+    if (this.time + 1 <= end) this.goTo(this.time + 1);
+    else if (this.loop) this.goTo(start);
+    else this.pause(); // played once: stays on the last frame
+  }
+
+  /** Loop playback (CSP 重複播放); off, playback stops on the last frame. This viewer's own */
+  public getLoop(): boolean {
+    return this.loop;
+  }
+
+  public setLoop(loop: boolean) {
+    this.loop = loop;
+    try {
+      localStorage.setItem(LOOP_KEY, loop ? '1' : '0');
+    } catch {
+      // storage blocked: kept for this session
+    }
+    this.notifyPlaybackState();
+  }
+
+  /** First / last frame of the playback range (the whole timeline without one) */
+  public goToStart() {
+    this.goTo(this.range?.start ?? 0);
+  }
+
+  public goToEnd() {
+    this.goTo(this.range?.end ?? this.length - 1);
   }
 
   public goToNextFrame() {

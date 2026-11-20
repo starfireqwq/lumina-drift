@@ -38,7 +38,8 @@ export interface LayerMeta {
    * On a group: it is a CSP-style animation folder, each child layer one cel (bottom = first).
    * shared: other painters can see the track. Adding cels requires the owner's approval.
    */
-  animation?: { fps: number; shared?: boolean };
+  /** length: timeline length in frames set by the painter (none = up to the end of the longest track) */
+  animation?: { fps: number; shared?: boolean; length?: number };
   /**
    * On a cel (a child of an animation folder): how many timeline frames it stays on screen, and
    * ref = the cel it shows instead of itself (reusing one drawing; such entries are empty groups).
