@@ -737,6 +737,8 @@ export const jaJP: Translations = {
     onionModeOriginal: '原色',
     blankFrame: '空セル',
     missingCel: '再利用元のセルが削除されています',
+    originalEdit: '元の位置で描画中',
+    originalEditHint: 'キーフレームは再生時に反映',
     addCel: '新規セル作成',
     duplicateCel: 'セルを複製',
     deleteCel: 'セルを削除',

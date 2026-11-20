@@ -737,6 +737,8 @@ export const zhCN: Translations = {
     onionModeOriginal: '原色',
     blankFrame: '空白格',
     missingCel: '重复使用的那张已被删除',
+    originalEdit: '原位作画',
+    originalEditHint: '关键帧暂停，播放时恢复',
     addCel: '新建画格',
     duplicateCel: '复制画格',
     deleteCel: '删除画格',

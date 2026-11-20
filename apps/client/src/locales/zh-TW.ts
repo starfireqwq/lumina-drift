@@ -737,6 +737,8 @@ export const zhTW: Translations = {
     onionModeOriginal: '原色',
     blankFrame: '空白格',
     missingCel: '重複使用的那張已被刪除',
+    originalEdit: '原位作畫',
+    originalEditHint: '關鍵影格暫停，播放時恢復',
     addCel: '新增賽璐珞格',
     duplicateCel: '複製賽璐珞格',
     deleteCel: '刪除賽璐珞格',

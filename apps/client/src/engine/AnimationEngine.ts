@@ -265,6 +265,23 @@ export interface AnimationView {
   only?: Set<string> | null;
   /** Light table: these cels are shown faded (`opacity` of their own) as a reference while drawing */
   light?: { opacity: number; ids: ReadonlySet<string> } | null;
+  /**
+   * Drawing on this layer: it and the groups around it are shown where they were drawn (their own
+   * keyframes left out), so a stroke lands under the pen; playback and export still move them
+   */
+  original?: string | null;
+}
+
+/** The layer, or a group around it, has keyframes: on screen it may sit somewhere else than where it is drawn */
+export function movedByKeyframes(layers: ReadonlyArray<AnimLayer>, layerId: string | null | undefined): boolean {
+  const byId = new Map<string, AnimLayer>();
+  for (const l of layers) byId.set(l.id, l);
+  let cur = layerId ? byId.get(layerId) : undefined;
+  for (let depth = 0; cur && depth < 32; depth++) {
+    if (cur.meta?.keyframes?.length) return true;
+    cur = cur.parentId ? byId.get(cur.parentId) : undefined;
+  }
+  return false;
 }
 
 /**
@@ -305,9 +322,15 @@ export function animationDisplay<T extends AnimLayer>(
     const defaultPx = canvasWidth / 2;
     const defaultPy = canvasHeight / 2;
     const localMap = new Map<string, Affine2D>();
+    // Drawing on a layer: its own keyframes and those of the groups around it are left out
+    const unmoved = new Set<string>();
+    for (let id = view?.original ?? null, depth = 0; id && depth < 32; depth++) {
+      unmoved.add(id);
+      id = byId.get(id)?.parentId ?? null;
+    }
     for (const l of layers) {
       const kfs = l.meta?.keyframes;
-      if (kfs && kfs.length > 0) {
+      if (kfs && kfs.length > 0 && !unmoved.has(l.id)) {
         const evaluated = evaluateTransformKeyframes(kfs, time, defaultPx, defaultPy);
         localMap.set(l.id, transformToAffineMatrix(evaluated));
       }

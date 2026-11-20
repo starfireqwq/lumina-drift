@@ -89,6 +89,8 @@ interface AnimationTimelineBarProps {
   onReuseCel: (celId: string) => void;
   /** A blank frame at the playhead: this track shows nothing there */
   onAddBlank: () => void;
+  /** The keyframe panel opened or closed (while it is open the canvas shows the motion, also when drawing) */
+  onKeyframePanelChange?: (open: boolean) => void;
   onDeleteFrame: () => void;
   onMoveFrame: (direction: -1 | 1) => void;
   onSetHold: (hold: number) => void;
@@ -142,7 +144,7 @@ const AnimThumbImg: React.FC<{
 
 export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   engine, isOpen, onClose, tracks, activeFolderId, thumbnails = EMPTY_THUMBS, subscribeThumbnails, getThumbnailsSnapshot, ownerNames, can,
-  onCreateFolder, onAddFrame, onDuplicateFrame, onReuseCel, onAddBlank, onDeleteFrame, onMoveFrame, onSetHold, onToggleShared, onFpsChange,
+  onCreateFolder, onAddFrame, onDuplicateFrame, onReuseCel, onAddBlank, onKeyframePanelChange, onDeleteFrame, onMoveFrame, onSetHold, onToggleShared, onFpsChange,
   onSelectCell, planExport, onPlaceEntries, onCopyEntries, onPasteEntries, onSetEntryHold, ripple, onToggleRipple,
   timelineLength, lengthIsSet, onSetLength, lightTable, onUpdateLightTable,
   activeLayer, canvasWidth = 1920, canvasHeight = 1080, onUpdateLayerKeyframes,
@@ -188,6 +190,9 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
     }, PANEL_LEAVE_MS);
   };
   useEffect(() => () => window.clearTimeout(panelTimerRef.current), []);
+  useEffect(() => {
+    onKeyframePanelChange?.(panel === 'keyframes');
+  }, [panel, onKeyframePanelChange]);
   // Opening slides the timeline up from the bottom edge; closing slides it back down before it goes
   const [retained, setRetained] = useState(isOpen);
   useEffect(() => {

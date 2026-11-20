@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { PluginAction } from '../plugins/pluginApi';
 import { Application, Container, type Filter, Graphics, MaskFilter, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
 
@@ -68,6 +68,7 @@ import {
   type ResizeBox,
 } from '../utils/canvasResize';
 import { ViewportToolbar } from './ViewportToolbar';
+import { OverlayPresence } from './OverlayPresence';
 import { CanvasStickersOverlay } from './CanvasStickersOverlay';
 import { ColorWheelStudio } from './ColorWheelStudio';
 import { UserListPanel } from './UserListPanel';
@@ -114,7 +115,7 @@ import type { LayerCanvasItem } from '../engine/layerComposite';
 import { LayerPanel } from './LayerPanel';
 import { getUserColor } from '../utils/userColors';
 import {
-  AnimationEngine, AnimationTrack, animationDisplay, BLANK_CEL_NAME, celEntriesOf, celInsertAt, celLayerOf, celOfLayer, entryIndexAt, entryStart, exportSegments, isAnimationFolder, MAX_HOLD, MAX_TIMELINE_FRAMES,
+  AnimationEngine, AnimationTrack, animationDisplay, BLANK_CEL_NAME, celEntriesOf, celInsertAt, celLayerOf, celOfLayer, entryIndexAt, entryStart, exportSegments, isAnimationFolder, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
   placeEntries, trackLength,
 } from '../engine/AnimationEngine';
 import { lightIdsFor, loadLightTable, saveLightTable, type LightTableState } from '../engine/lightTable';
@@ -207,6 +208,15 @@ type DeletedLayers = { deleted: string[]; lifted: string[] };
 let layerClipboard: LayerClipboard | null = null;
 /** While an animation plays, the cels of this many upcoming frames are decoded ahead (in workers) */
 const ANIM_PREFETCH_FRAMES = 6;
+/**
+ * Tools that draw, erase, fill, warp or pick on the active layer where the pointer is. With one of
+ * them on a layer moved by keyframes, that layer is shown where it is drawn (keyframes paused).
+ */
+const ORIGINAL_POSITION_TOOLS: ReadonlySet<ToolType> = new Set<ToolType>([
+  'brush', 'pencil', 'eraser', 'bucket', 'smart_fill', 'gradient', 'blur', 'smudge', 'liquify', 'mesh_warp', 'transform',
+  'shape', 'shape_rect', 'shape_ellipse', 'shape_line', 'shape_arrow', 'magic_wand', 'lasso', 'select_brush', 'select_eraser',
+  'text', 'vector_pen', 'vector_eraser', 'vector_reshape', 'vector_width', 'vector_bezier', 'vector_edit',
+]);
 const KEEP_CLIPBOARD_KEY = 'atelier_keep_layer_clipboard';
 const CLIPBOARD_KEY = 'atelier_layer_clipboard';
 const keepsLayerClipboard = () => {
@@ -471,6 +481,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
    * the current frame (the edited folder plus onion skin). `time` renders one frame for export;
    * `only` keeps just those animation folders (solo / team export).
    */
+  // The keyframed layer being drawn on (set below once the tool and the timeline are known)
+  const originalEditRef = useRef<string | null>(null);
   const displayLayersFor = (ls: LayerModel[], opts: { personal?: boolean; time?: number; only?: Set<string> | null } = {}) => {
     const vis = localVisibilityRef.current;
     const local = opts.personal === false ? ls : ls.map((l) => (l.id in vis ? { ...l, isVisible: vis[l.id] } : l));
@@ -485,6 +497,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         onion: aids ? engine.getOnionSkinConfig() : null,
         only: opts.only ?? null,
         light: aids ? lightViewFor(local, engine.getTime()) : null,
+        // Drawing on a keyframed layer: shown where it is drawn (never in playback or in files)
+        original: !exporting && !engine?.getIsPlaying() ? originalEditRef.current : null,
       },
       canvas?.width ?? 0,
       canvas?.height ?? 0
@@ -740,6 +754,16 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   // Hand-drawn animation state
   const [isAnimationTimelineOpen, setIsAnimationTimelineOpen] = useState<boolean>(false);
   animTimelineOpenRef.current = isAnimationTimelineOpen;
+  // 原位作畫: with a drawing tool on a layer moved by keyframes, that layer (and the groups around
+  // it) shows where it is drawn, so a stroke lands under the pen; playback and the keyframe panel
+  // show the motion again
+  const [keyframePanelOpen, setKeyframePanelOpen] = useState(false);
+  const [animPlaying, setAnimPlaying] = useState(false);
+  const activeMovedByKeyframes = useMemo(() => movedByKeyframes(layers, activeLayer?.id), [layers, activeLayer?.id]);
+  const originalEditId = activeLayer && activeMovedByKeyframes && ORIGINAL_POSITION_TOOLS.has(currentTool) && !(isAnimationTimelineOpen && keyframePanelOpen)
+    ? activeLayer.id
+    : null;
+  originalEditRef.current = originalEditId;
   const animationByCanvasRef = useRef(new Map<string, AnimationEngine>());
   const [timelineState, setTimelineState] = useState<{ canvasId: string; engine: AnimationEngine } | null>(null);
   const animationEngine = timelineState?.canvasId === canvas?.id ? timelineState?.engine : undefined;
@@ -3852,6 +3876,18 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (lm && animationEngine) lm.syncLayers(displayLayersFor(layersRef.current));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lightTable, animationEngine]);
+  // 原位作畫 started or ended (tool, layer or keyframe panel changed): the layer moves there now
+  useEffect(() => {
+    const lm = layerManagerRef.current;
+    if (lm && isEngineReady) lm.syncLayers(displayLayersFor(layersRef.current));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [originalEditId, isEngineReady]);
+  // Playback shows the motion: the 原位作畫 chip hides meanwhile
+  useEffect(() => {
+    if (!animationEngine) return;
+    setAnimPlaying(animationEngine.getIsPlaying());
+    return animationEngine.onPlaybackStateChange(setAnimPlaying);
+  }, [animationEngine]);
   /** A click on a track: its cel at that frame becomes the active layer (that folder becomes the edited one) */
   const selectAnimationCell = (folderId: string, time: number) => {
     const engine = animationEngine;
@@ -4965,6 +5001,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               {/* Dedicated Pixi Canvas Host Layer (isolated from React DOM reconciler) */}
               <div ref={canvasMountRef} data-canvas-presented={isCanvasPresented}
                 className="atelier-canvas-surface pointer-events-none absolute inset-0 z-0 select-none" />
+              <OverlayPresence open={Boolean(originalEditId) && !animPlaying} kind="popover">
+                <div role="status" data-original-edit
+                  className="atelier-popover atelier-original-chip pointer-events-none absolute left-1/2 top-3 z-20 flex -translate-x-1/2 items-center gap-2 overflow-hidden whitespace-nowrap px-3 py-1.5 text-[11px]">
+                  <span aria-hidden className="text-amber-300">◆</span>
+                  <b className="font-semibold text-white">{t.animation.originalEdit}</b>
+                  <span className="text-neutral-400">{t.animation.originalEditHint}</span>
+                </div>
+              </OverlayPresence>
               <ViewportConsumer subscribe={subscribeViewportZoom} getSnapshot={getViewportZoomSnapshot}>
                 {(viewportState) => (
                   <>
@@ -5193,6 +5237,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 onDuplicateFrame={() => void duplicateAnimationFrame()}
                 onReuseCel={(id) => void reuseAnimationCel(id)}
                 onAddBlank={() => void addBlankAnimationFrame()}
+                onKeyframePanelChange={setKeyframePanelOpen}
                 onDeleteFrame={deleteAnimationFrame}
                 onMoveFrame={moveAnimationFrame}
                 onSetHold={setAnimationHold}

@@ -754,6 +754,8 @@ export interface Translations {
     onionModeOriginal: string;
     blankFrame: string;
     missingCel: string;
+    originalEdit: string;
+    originalEditHint: string;
     addCel: string;
     duplicateCel: string;
     deleteCel: string;

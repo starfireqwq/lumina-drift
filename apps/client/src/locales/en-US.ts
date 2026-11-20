@@ -737,6 +737,8 @@ export const enUS: Translations = {
     onionModeOriginal: 'Original',
     blankFrame: 'Blank',
     missingCel: 'The reused cel was deleted',
+    originalEdit: 'Drawing in place',
+    originalEditHint: 'Keyframes paused until playback',
     addCel: 'New Cel',
     duplicateCel: 'Duplicate Cel',
     deleteCel: 'Delete Cel',

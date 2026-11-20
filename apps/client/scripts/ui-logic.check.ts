@@ -30,7 +30,7 @@ import {
 } from '@atelier/shared';
 import { getBoxPivotCanvasPoint, type TransformBox } from '../src/utils/transformProjection';
 import {
-  AnimationEngine, animationDisplay, celEntriesOf, celInsertAt, celOfLayer, entryIndexAt, exportSegments, formatTimecode, frameSignature, MAX_HOLD, MAX_TIMELINE_FRAMES,
+  AnimationEngine, animationDisplay, celEntriesOf, celInsertAt, celOfLayer, entryIndexAt, exportSegments, formatTimecode, frameSignature, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
   parseTimecode, placeEntries, playbackFrame, removeTransformKeyframe,
   timeOfCel, trackLength, upsertTransformKeyframe,
 } from '../src/engine/AnimationEngine';
@@ -599,6 +599,19 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   const disp = animationDisplay(hier, { time: 10, activeFolderId: null, onion: null }, 1000, 1000);
   const handTransform = (disp.find((l) => l.id === 'hand') as { renderTransform?: Affine2D } | undefined)?.renderTransform;
   assert.ok(handTransform && !handTransform.isIdentity, 'child layer inherits animated parent group matrix');
+  // 原位作畫: drawing on the hand shows it (and the group moving it) where it is drawn; other layers keep moving
+  {
+    const withOther = [...hier, { id: 'other', parentId: null, layerType: 'raster', sortOrder: 3, isVisible: true, opacity: 1, meta: { keyframes: [kfs[1]] } }];
+    const drawing = animationDisplay(withOther, { time: 10, activeFolderId: null, onion: null, original: 'hand' }, 1000, 1000);
+    const moved = (id: string) => (drawing.find((l) => l.id === id) as { renderTransform?: Affine2D }).renderTransform;
+    assert.equal(moved('hand'), undefined, 'the layer drawn on sits where it is drawn');
+    assert.equal(moved('armGrp'), undefined, 'and so does the group that moves it');
+    assert.ok(moved('other') && !moved('other')!.isIdentity, 'other keyframed layers still move');
+    assert.equal(movedByKeyframes(withOther, 'hand'), true, 'moved through its group');
+    assert.equal(movedByKeyframes(withOther, 'other'), true);
+    assert.equal(movedByKeyframes([{ ...hier[1], parentId: null }], 'hand'), false);
+    assert.equal(movedByKeyframes(withOther, null), false);
+  }
   const identTest = multiplyAffine(transformToAffineMatrix(mid), { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0, isIdentity: true });
   assert.equal(identTest.tx, m.tx);
 
