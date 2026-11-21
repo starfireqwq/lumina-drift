@@ -54,23 +54,46 @@ export class ScopedUndoManager {
     this.redoStack = [];
   }
 
+  private countLogicalSteps(stack: ScopedUndoOp[], userId?: string): number {
+    let count = 0;
+    let i = 0;
+    while (i < stack.length) {
+      const op = stack[i];
+      if (userId !== undefined && op.userId !== userId) {
+        i++;
+        continue;
+      }
+      count++;
+      const gid = op.groupId || undefined;
+      i++;
+      if (gid) {
+        while (i < stack.length && stack[i].groupId === gid && (userId === undefined || stack[i].userId === userId)) {
+          i++;
+        }
+      }
+    }
+    return count;
+  }
+
+  private trimStack(stack: ScopedUndoOp[]) {
+    let steps = this.countLogicalSteps(stack);
+    while (steps > this.maxStackSize && stack.length > 0) {
+      const gid = stack[0].groupId || undefined;
+      do {
+        const dropped = stack.shift();
+        if (dropped) {
+          dropped.beforeTiles = [];
+          dropped.afterTiles = [];
+          dropped.foreign = undefined;
+        }
+      } while (gid && stack.length > 0 && stack[0].groupId === gid);
+      steps--;
+    }
+  }
+
   private trimStacks() {
-    while (this.undoStack.length > this.maxStackSize) {
-      const dropped = this.undoStack.shift();
-      if (dropped) {
-        dropped.beforeTiles = [];
-        dropped.afterTiles = [];
-        dropped.foreign = undefined;
-      }
-    }
-    while (this.redoStack.length > this.maxStackSize) {
-      const dropped = this.redoStack.shift();
-      if (dropped) {
-        dropped.beforeTiles = [];
-        dropped.afterTiles = [];
-        dropped.foreign = undefined;
-      }
-    }
+    this.trimStack(this.undoStack);
+    this.trimStack(this.redoStack);
   }
 
   /** A layer came back under a new id (undo of a merge / of a deletion): its history follows it */
@@ -190,6 +213,98 @@ export class ScopedUndoManager {
     if (index < 0) return;
     movedTo.splice(index, 1);
     from.push(op);
+  }
+
+  private popGroup(
+    from: ScopedUndoOp[],
+    to: ScopedUndoOp[],
+    label: 'ScopedUndo' | 'ScopedRedo',
+    userId?: string,
+    checkPermission?: (layerId: string, op?: ScopedUndoOp) => boolean
+  ): ScopedUndoOp[] {
+    for (let i = from.length - 1; i >= 0; i--) {
+      const op = from[i];
+      const gid = op.groupId || undefined;
+      if (userId !== undefined && op.userId !== userId) {
+        if (gid) {
+          while (i > 0 && from[i - 1].groupId === gid && from[i - 1].userId !== userId) {
+            i--;
+          }
+        }
+        continue;
+      }
+
+      let start = i;
+      if (gid) {
+        while (start > 0 && from[start - 1].groupId === gid && (userId === undefined || from[start - 1].userId === userId)) {
+          start--;
+        }
+      }
+
+      let denied: ScopedUndoOp | undefined;
+      if (checkPermission) {
+        for (let k = start; k <= i; k++) {
+          const item = from[k];
+          if (item.opType !== 'SELECTION' && !checkPermission(item.layerId, item)) {
+            denied = item;
+            break;
+          }
+        }
+      }
+      if (denied) {
+        console.warn(`[${label}] User does not have permission on layer ${denied.layerId}`);
+        i = start;
+        continue;
+      }
+
+      const moved = from.splice(start, i - start + 1).reverse();
+      to.push(...moved);
+      this.trimStacks();
+      return moved;
+    }
+    return [];
+  }
+
+  /**
+   * Scoped group undo: pops the latest undoable op (or contiguous `groupId` run) for `userId`
+   * where every non-SELECTION item passes `checkPermission`, returning `[C, B, A]` in undo replay order.
+   */
+  public undoGroup(
+    userId?: string,
+    checkPermission?: (layerId: string, op?: ScopedUndoOp) => boolean
+  ): ScopedUndoOp[] {
+    return this.popGroup(this.undoStack, this.redoStack, 'ScopedUndo', userId, checkPermission);
+  }
+
+  /**
+   * Scoped group redo: mirrors `undoGroup` from `redoStack` back onto `undoStack`,
+   * returning `[A, B, C]` in original execution order.
+   */
+  public redoGroup(
+    userId?: string,
+    checkPermission?: (layerId: string, op?: ScopedUndoOp) => boolean
+  ): ScopedUndoOp[] {
+    return this.popGroup(this.redoStack, this.undoStack, 'ScopedRedo', userId, checkPermission);
+  }
+
+  /**
+   * Rolls back a previously popped group step (`undoGroup`/`redoGroup`) when commit fails,
+   * removing its ops from the destination stack and restoring them to the source stack.
+   */
+  public rollbackGroup(ops: ScopedUndoOp[], wasUndo: boolean): void {
+    if (ops.length === 0) return;
+    const movedTo = wasUndo ? this.redoStack : this.undoStack;
+    const from = wasUndo ? this.undoStack : this.redoStack;
+    const targets = new Set(ops);
+    let removed = false;
+    for (let i = movedTo.length - 1; i >= 0; i--) {
+      if (targets.has(movedTo[i])) {
+        movedTo.splice(i, 1);
+        removed = true;
+      }
+    }
+    if (!removed) return;
+    from.push(...[...ops].reverse());
   }
 
   /** My undo / redo steps that restore this tile: another painter's edit arriving now is marked on them */
@@ -352,12 +467,10 @@ export class ScopedUndoManager {
   }
 
   public getUndoCount(userId?: string): number {
-    if (!userId) return this.undoStack.length;
-    return this.undoStack.filter((op) => op.userId === userId).length;
+    return this.countLogicalSteps(this.undoStack, userId);
   }
 
   public getRedoCount(userId?: string): number {
-    if (!userId) return this.redoStack.length;
-    return this.redoStack.filter((op) => op.userId === userId).length;
+    return this.countLogicalSteps(this.redoStack, userId);
   }
 }

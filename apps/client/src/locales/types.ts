@@ -822,14 +822,14 @@ export interface Translations {
     };
   };
 
-  /** Align the current layer to the canvas or the selection (對齊 L1) */
+  /** Align & distribute layers to objects, canvas, or selection (對齊 L2) */
   align: {
     title: string;
     openTitle: string;
     menuItem: string;
-    oneAtATime: string;
+    targetCount: string;
     basis: string;
-    basisNames: { auto: string; canvas: string; selection: string };
+    basisNames: { auto: string; objects: string; canvas: string; selection: string };
     /** Next to the basis menu while it is on auto: {basis} = the frame in use */
     autoUses: string;
     horizontal: string;
@@ -840,22 +840,37 @@ export interface Translations {
     /** A pad cell's name: {x} and {y} */
     both: string;
     middle: string;
+    distribute: string;
+    distributeH: string;
+    distributeV: string;
+    dist: {
+      left: string;
+      hcenter: string;
+      right: string;
+      hgap: string;
+      top: string;
+      vcenter: string;
+      bottom: string;
+      vgap: string;
+    };
     done: string;
     alreadyAligned: string;
+    distributed: string;
+    alreadyDistributed: string;
     empty: string;
     failed: string;
     noSelection: string;
+    needMulti: string;
     cropTitle: string;
     cropBody: string;
     cropConfirm: string;
     blocked: {
       noLayer: string;
       busy: string;
-      group: string;
       mask: string;
       notEditable: string;
-      hasMask: string;
       keyframes: string;
+      animationFolder: string;
     };
   };
 

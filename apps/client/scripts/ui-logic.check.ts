@@ -8,8 +8,9 @@ import { contrastRatio, resolveTheme, THEME_PRESETS, DEFAULT_CUSTOM_THEME } from
 import { nextSizeStep } from '../src/components/workspace/toolCatalog';
 import { findContentBounds } from '../src/utils/pixelBounds';
 import {
-  alignBlocker, alignCrops, alignDestination, alignOffset, copyRgbaRect, rectMinus, resolveAlignBasis, selectionFrame,
-  type AlignRect,
+  alignCrops, alignDestination, alignManyOffsets, alignOffset, alignTargetsBlocker, copyRgbaRect,
+  distributeOffsets, rectMinus, resolveAlignBasis, resolveAlignTargets, selectionFrame, unionRect,
+  type AlignLayerLike, type AlignRect, type DistributeMode,
 } from '../src/utils/layerAlign';
 import { applyColorOutline } from '../src/engine/colorOutline';
 import { addRecentVisit, lastVisitOn, normalizeServer, parseRecentVisits, removeRecentVisit, RECENT_VISITS_LIMIT, type RecentVisit } from '../src/utils/recentVisits';
@@ -158,6 +159,212 @@ for (const preset of [...THEME_PRESETS.map((p) => p.id), 'custom' as const]) {
   assert.deepEqual(Array.from(tileToRgba(newer.beforeTiles[0])), [...blank, ...blue, ...red]);
   assert.deepEqual(Array.from(tileToRgba(older.beforeTiles[0])), [...blue, ...blue, ...red]);
   assert.deepEqual(Array.from(tileToRgba(newer.afterTiles[0])), [...red, ...blue, ...blue]);
+}
+
+// ScopedUndoManager groupId: atomic multi-layer undo/redo, rollback, permission skip, non-splitting trim, and foreign merge
+{
+  const blank = [0, 0, 0, 0];
+  const blue = [59, 130, 246, 255];
+  const red = [253, 0, 48, 255];
+  const tile = (...pixels: number[][]): TileData => ({
+    col: 0, row: 0, width: pixels.length, height: 1, compression: 'raw', data: Uint8Array.from(pixels.flat()),
+  });
+  const makeOp = (opId: string, layerId: string, userId = 'artist', groupId?: string, extra: Partial<ScopedUndoOp> = {}): ScopedUndoOp => ({
+    opId,
+    userId,
+    layerId,
+    opType: extra.opType ?? 'ALIGN',
+    groupId,
+    timestamp: 0,
+    beforeTiles: [tile(blank, blank)],
+    afterTiles: [tile(red, blank)],
+    ...extra,
+  });
+
+  // 1. undoGroup / redoGroup / rollbackGroup / logical counts
+  const mgr = new ScopedUndoManager();
+  const single = makeOp('s0', 'l0');
+  const peer = makeOp('p0', 'l0', 'other');
+  const gA = makeOp('gA', 'l1', 'artist', 'grp-1');
+  const gB = makeOp('gB', 'l2', 'artist', 'grp-1');
+  const gC = makeOp('gC', 'l3', 'artist', 'grp-1');
+  mgr.push(single);
+  mgr.push(peer);
+  mgr.push(gA);
+  mgr.push(gB);
+  mgr.push(gC);
+  assert.equal(mgr.getUndoCount(), 3, 'Grouped ops count as 1 logical step globally');
+  assert.equal(mgr.getUndoCount('artist'), 2);
+  assert.equal(mgr.getUndoCount('other'), 1);
+  assert.equal(mgr.getRedoCount(), 0);
+
+  const undone = mgr.undoGroup('artist');
+  assert.deepEqual(undone.map((o) => o.opId), ['gC', 'gB', 'gA'], 'undoGroup returns ops in reverse push order');
+  assert.equal(mgr.getUndoCount('artist'), 1);
+  assert.equal(mgr.getRedoCount('artist'), 1);
+
+  mgr.rollbackGroup(undone, true);
+  assert.equal(mgr.getUndoCount('artist'), 2);
+  assert.equal(mgr.getRedoCount('artist'), 0);
+  assert.deepEqual(mgr.inspect().undo.map((o) => o.opId), ['s0', 'p0', 'gA', 'gB', 'gC'], 'rollbackGroup restores undo order');
+
+  const undone2 = mgr.undoGroup('artist');
+  assert.deepEqual(undone2.map((o) => o.opId), ['gC', 'gB', 'gA']);
+  const redone = mgr.redoGroup('artist');
+  assert.deepEqual(redone.map((o) => o.opId), ['gA', 'gB', 'gC'], 'redoGroup returns ops in original order');
+  assert.equal(mgr.getUndoCount('artist'), 2);
+  assert.equal(mgr.getRedoCount('artist'), 0);
+
+  mgr.rollbackGroup(redone, false);
+  assert.equal(mgr.getUndoCount('artist'), 1);
+  assert.equal(mgr.getRedoCount('artist'), 1);
+  assert.deepEqual(mgr.inspect().redo.map((o) => o.opId), ['gC', 'gB', 'gA']);
+  assert.deepEqual(mgr.redoGroup('artist').map((o) => o.opId), ['gA', 'gB', 'gC']);
+
+  // 2. Whole-group permission skip & SELECTION exemption & other-user skip
+  const permMgr = new ScopedUndoManager();
+  const baseOp = makeOp('base', 'l1');
+  const lockA = makeOp('la', 'l1', 'artist', 'grp-lock');
+  const selInGroup = makeOp('sel', '__selection__', 'artist', 'grp-lock', { opType: 'SELECTION' });
+  const lockB = makeOp('lb', 'l-locked', 'artist', 'grp-lock');
+  const otherG1 = makeOp('og1', 'l1', 'other', 'grp-other');
+  const otherG2 = makeOp('og2', 'l2', 'other', 'grp-other');
+  permMgr.push(baseOp);
+  permMgr.push(lockA);
+  permMgr.push(selInGroup);
+  permMgr.push(lockB);
+  permMgr.push(otherG1);
+  permMgr.push(otherG2);
+
+  const popped = permMgr.undoGroup('artist', (layerId) => layerId !== 'l-locked' && layerId !== '__selection__');
+  assert.deepEqual(popped.map((o) => o.opId), ['base'], 'Skips other user group and partially-locked group intact');
+  assert.deepEqual(permMgr.inspect().undo.map((o) => o.opId), ['la', 'sel', 'lb', 'og1', 'og2']);
+
+  // SELECTION inside an editable group passes permission check
+  const selMgr = new ScopedUndoManager();
+  selMgr.push(makeOp('sa', 'l1', 'artist', 'grp-sel'));
+  selMgr.push(makeOp('ss', '__selection__', 'artist', 'grp-sel', { opType: 'SELECTION' }));
+  assert.deepEqual(
+    selMgr.undoGroup('artist', (layerId) => layerId !== '__selection__').map((o) => o.opId),
+    ['ss', 'sa'],
+  );
+
+  // redoGroup permission skip mirrors undoGroup
+  const redoSkipMgr = new ScopedUndoManager();
+  redoSkipMgr.push(makeOp('ok1', 'l1', 'artist', 'grp-ok'));
+  redoSkipMgr.push(makeOp('ok2', 'l2', 'artist', 'grp-ok'));
+  redoSkipMgr.push(makeOp('bad1', 'l1', 'artist', 'grp-bad'));
+  redoSkipMgr.push(makeOp('bad2', 'l-locked', 'artist', 'grp-bad'));
+  redoSkipMgr.undoGroup('artist'); // pops grp-bad -> redoStack = [bad2, bad1]
+  redoSkipMgr.undoGroup('artist'); // pops grp-ok -> redoStack = [bad2, bad1, ok2, ok1]
+  assert.deepEqual(
+    redoSkipMgr.redoGroup('artist', (layerId) => layerId !== 'l1').map((o) => o.opId),
+    [],
+    'Returns [] when no group passes',
+  );
+  assert.deepEqual(
+    redoSkipMgr.redoGroup('artist', (layerId) => layerId !== 'l2').map((o) => o.opId),
+    ['bad1', 'bad2'],
+    'Skips grp-ok when one member is locked and redoes grp-bad instead',
+  );
+
+  // 3. trimStacks counts logical steps and drops whole group without splitting
+  const trimMgr = new ScopedUndoManager(5);
+  const t1 = makeOp('t1', 'l1', 'artist', 'g-old', { foreign: new Map([['0_0', new Uint8Array([1])]]) });
+  const t2 = makeOp('t2', 'l2', 'artist', 'g-old');
+  const t3 = makeOp('t3', 'l3', 'artist', 'g-old');
+  trimMgr.push(t1);
+  trimMgr.push(t2);
+  trimMgr.push(t3);
+  for (let k = 1; k <= 4; k++) trimMgr.push(makeOp(`u${k}`, 'l1'));
+  assert.equal(trimMgr.getUndoCount(), 5, '1 group of 3 + 4 singles = 5 logical steps');
+  assert.equal(trimMgr.inspect().undo.length, 7, 'All 3 ops of oldest group stay intact at limit');
+  trimMgr.push(makeOp('u5', 'l1'));
+  assert.equal(trimMgr.getUndoCount(), 5);
+  assert.deepEqual(trimMgr.inspect().undo.map((o) => o.opId), ['u1', 'u2', 'u3', 'u4', 'u5'], 'Entire oldest group dropped at once');
+  for (const dropped of [t1, t2, t3]) {
+    assert.equal(dropped.beforeTiles.length, 0);
+    assert.equal(dropped.afterTiles.length, 0);
+    assert.equal(dropped.foreign, undefined);
+  }
+
+  // redoStack trimming also drops whole group without splitting
+  const redoTrim = new ScopedUndoManager(6);
+  for (let k = 1; k <= 5; k++) redoTrim.push(makeOp(`rs${k}`, 'l1'));
+  const rOld1 = makeOp('ro1', 'l1', 'artist', 'g-redo-old');
+  const rOld2 = makeOp('ro2', 'l2', 'artist', 'g-redo-old');
+  redoTrim.push(rOld1);
+  redoTrim.push(rOld2);
+  for (let k = 1; k <= 6; k++) redoTrim.undoGroup('artist'); // 1st undo pops g-redo-old -> oldest on redoStack
+  redoTrim.setMaxStackSize(5);
+  assert.equal(redoTrim.getRedoCount(), 5);
+  assert.equal(redoTrim.inspect().redo.length, 5, 'Oldest redo group dropped as one unit');
+  assert.equal(rOld1.beforeTiles.length, 0);
+  assert.equal(rOld2.beforeTiles.length, 0);
+
+  // 4. opsTouchingTile / recordForeignTile / setForeignEditActive / mergeForeignTile / rebaseBeforeTiles / remapLayer on grouped ops
+  const fxMgr = new ScopedUndoManager();
+  const fxA = makeOp('fxA', 'layer-a', 'artist', 'grp-fx', {
+    baseSeq: 4,
+    beforeTiles: [tile(blue, blank)],
+    afterTiles: [tile(red, blank)],
+  });
+  const fxB = makeOp('fxB', 'layer-b', 'artist', 'grp-fx', {
+    baseSeq: 4,
+    beforeTiles: [tile(blank, blank)],
+    afterTiles: [tile(red, red)],
+  });
+  fxMgr.push(fxA);
+  fxMgr.push(fxB);
+  fxMgr.rebaseBeforeTiles('layer-a', 2, 5, tile(blue, blank), tile(blank, blank));
+  assert.deepEqual(Array.from(tileToRgba(fxA.beforeTiles[0])), [...blank, ...blank], 'rebaseBeforeTiles updates grouped op');
+  const touching = fxMgr.opsTouchingTile('layer-a', 0, 0);
+  assert.deepEqual(touching.map((o) => o.opId), ['fxA']);
+  fxMgr.recordForeignTile(touching, '0_0', {
+    edit: fxMgr.foreignEdit('peer', 2),
+    changed: Uint8Array.from([0, 1]),
+  });
+  fxMgr.remapLayer('layer-a', 'layer-a-remapped');
+  assert.equal(fxA.layerId, 'layer-a-remapped');
+  const poppedFx = fxMgr.undoGroup('artist');
+  assert.deepEqual(poppedFx.map((o) => o.opId), ['fxB', 'fxA']);
+  const current = tile(red, blue).data as Uint8Array;
+  const target = tileToRgba(fxA.beforeTiles[0]);
+  const mine = tileToRgba(fxA.afterTiles[0]);
+  const merged = fxMgr.mergeForeignTile(fxA, '0_0', target, mine, current);
+  assert.equal(merged.conflicts, 0);
+  assert.deepEqual(Array.from(merged.pixels), [...blank, ...blue], 'Foreign pixel untouched when own edit did not touch index 1');
+
+  // When own edit DID touch index 1 and peer also painted index 1, conflict is preserved (and disabled when peer undoes)
+  const fxA2 = makeOp('fxA2', 'layer-a2', 'artist', 'grp-fx2', {
+    beforeTiles: [tile(blank, blank)],
+    afterTiles: [tile(red, red)],
+  });
+  fxMgr.push(fxA2);
+  fxMgr.recordForeignTile(fxMgr.opsTouchingTile('layer-a2', 0, 0), '0_0', {
+    edit: fxMgr.foreignEdit('peer2', 3),
+    changed: Uint8Array.from([0, 1]),
+  });
+  const [poppedA2] = fxMgr.undoGroup('artist');
+  const merged2 = fxMgr.mergeForeignTile(
+    poppedA2,
+    '0_0',
+    tileToRgba(poppedA2.beforeTiles[0]),
+    tileToRgba(poppedA2.afterTiles[0]),
+    tile(red, blue).data as Uint8Array,
+  );
+  assert.equal(merged2.conflicts, 1, 'Conflict preserved for grouped op');
+  assert.deepEqual(Array.from(merged2.pixels), [...blank, ...blue]);
+  fxMgr.setForeignEditActive('layer-a2', 3, false);
+  const mergedAfterPeerUndo = fxMgr.mergeForeignTile(
+    poppedA2,
+    '0_0',
+    tileToRgba(poppedA2.beforeTiles[0]),
+    tileToRgba(poppedA2.afterTiles[0]),
+    tile(red, red).data as Uint8Array,
+  );
+  assert.equal(mergedAfterPeerUndo.conflicts, 0, 'Deactivating foreign edit on grouped op restores cleanly');
+  assert.deepEqual(Array.from(mergedAfterPeerUndo.pixels), [...blank, ...blank]);
 }
 
 // Brush size steps
@@ -1190,8 +1397,11 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
 
 // 對齊 L1: basis, whole-pixel offsets, off-canvas parts, and a pixel-level run of the move
 {
-  assert.equal(resolveAlignBasis('auto', false), 'canvas', 'Auto without a selection uses the canvas');
-  assert.equal(resolveAlignBasis('auto', true), 'selection', 'Auto with a selection uses the selection');
+  assert.equal(resolveAlignBasis('auto', false), 'canvas', 'Auto without a selection and 1 target uses the canvas');
+  assert.equal(resolveAlignBasis('auto', false, 2), 'objects', 'Auto without a selection and >=2 targets uses objects');
+  assert.equal(resolveAlignBasis('auto', true, 2), 'selection', 'Auto with a selection prefers selection over objects');
+  assert.equal(resolveAlignBasis('objects', false, 1), null, 'Objects basis requires at least 2 targets');
+  assert.equal(resolveAlignBasis('objects', true, 2), 'objects');
   assert.equal(resolveAlignBasis('selection', false), null, 'The selection basis needs a selection');
   assert.equal(resolveAlignBasis('canvas', true), 'canvas');
 
@@ -1223,15 +1433,232 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
   assert.equal(area(rectMinus(a, { x: 4, y: 6, w: 10, h: 10 })) + 6 * 4, 100, 'Strips + overlap = the whole rect');
   assert.deepEqual(rectMinus(a, { x: -5, y: -5, w: 30, h: 30 }), [], 'Fully covered: nothing to clear');
 
-  assert.equal(alignBlocker(null, { canEdit: true, busy: false, hasMask: false, movedByKeyframes: false }), 'noLayer');
-  const raster = { id: 'r', layerType: 'raster' };
-  assert.equal(alignBlocker(raster, { canEdit: true, busy: false, hasMask: false, movedByKeyframes: false }), null);
-  assert.equal(alignBlocker(raster, { canEdit: true, busy: true, hasMask: false, movedByKeyframes: false }), 'busy');
-  assert.equal(alignBlocker({ id: 'g', layerType: 'group' }, { canEdit: true, busy: false, hasMask: false, movedByKeyframes: false }), 'group');
-  assert.equal(alignBlocker({ id: 'm', layerType: 'mask' }, { canEdit: true, busy: false, hasMask: false, movedByKeyframes: false }), 'mask');
-  assert.equal(alignBlocker(raster, { canEdit: false, busy: false, hasMask: true, movedByKeyframes: true }), 'notEditable');
-  assert.equal(alignBlocker(raster, { canEdit: true, busy: false, hasMask: true, movedByKeyframes: false }), 'hasMask');
-  assert.equal(alignBlocker({ id: 't', layerType: 'text' }, { canEdit: true, busy: false, hasMask: false, movedByKeyframes: true }), 'keyframes');
+  // resolveAlignTargets: multi-select, nested group dedup, masked layers, group masks, animation folders, cycle safety
+  const mkLayer = (
+    id: string,
+    layerType: string,
+    parentId: string | null = null,
+    meta: { animation?: unknown } | null = null,
+  ): AlignLayerLike => ({ id, layerType, parentId, meta });
+
+  const tree: AlignLayerLike[] = [
+    mkLayer('rSolo', 'raster'),
+    mkLayer('mSolo', 'mask', 'rSolo'),
+    mkLayer('grp', 'group'),
+    mkLayer('gm', 'mask', 'grp'),
+    mkLayer('rInGrp', 'raster', 'grp'),
+    mkLayer('mInGrp', 'mask', 'rInGrp'),
+    mkLayer('sub', 'folder', 'grp'),
+    mkLayer('subMask', 'mask', 'sub'),
+    mkLayer('vInSub', 'vector', 'sub'),
+    mkLayer('mInSub', 'mask', 'vInSub'),
+    mkLayer('animRoot', 'group', null, { animation: { fps: 12 } }),
+    mkLayer('animCel', 'raster', 'animRoot'),
+    mkLayer('wrapAnim', 'group'),
+    mkLayer('nestedAnim', 'folder', 'wrapAnim', { animation: { fps: 24 } }),
+    mkLayer('nestedCel', 'raster', 'nestedAnim'),
+    mkLayer('standaloneMask', 'mask'),
+  ];
+
+  // Active fallback and missing selection fallback
+  assert.deepEqual(resolveAlignTargets(tree, null), []);
+  assert.deepEqual(resolveAlignTargets(tree, 'rSolo', new Set(['missing'])).map((t) => t.id), ['rSolo']);
+  const soloTargets = resolveAlignTargets(tree, 'rSolo');
+  assert.equal(soloTargets.length, 1);
+  assert.equal(soloTargets[0].isGroup, false);
+  assert.deepEqual(soloTargets[0].members.map((l) => l.id), ['rSolo']);
+  assert.deepEqual(soloTargets[0].masks.map((l) => l.id), ['mSolo']);
+
+  // Multi-select preserves layers order & deduplicates descendants / masks under selected ancestors
+  const multiTargets = resolveAlignTargets(
+    tree,
+    'rSolo',
+    new Set(['vInSub', 'grp', 'mInGrp', 'rSolo', 'mSolo']),
+  );
+  assert.deepEqual(multiTargets.map((t) => t.id), ['rSolo', 'grp']);
+  const grpUnit = multiTargets[1];
+  assert.equal(grpUnit.isGroup, true);
+  assert.equal(grpUnit.hasAnimationFolder, false);
+  assert.deepEqual(grpUnit.members.map((l) => l.id), ['rInGrp', 'vInSub']);
+  assert.deepEqual(grpUnit.masks.map((l) => l.id), ['gm', 'mInGrp', 'subMask', 'mInSub']);
+
+  // Standalone mask & animation folders
+  const maskTarget = resolveAlignTargets(tree, 'standaloneMask');
+  assert.equal(maskTarget[0].root.layerType, 'mask');
+  assert.equal(maskTarget[0].isGroup, false);
+  assert.equal(resolveAlignTargets(tree, 'animRoot')[0].hasAnimationFolder, true);
+  assert.equal(resolveAlignTargets(tree, 'wrapAnim')[0].hasAnimationFolder, true);
+
+  // Cycle guard on parentId
+  const cyclic: AlignLayerLike[] = [
+    mkLayer('cycA', 'raster', 'cycB'),
+    mkLayer('cycB', 'group', 'cycC'),
+    mkLayer('cycC', 'group', 'cycB'),
+  ];
+  assert.deepEqual(resolveAlignTargets(cyclic, 'cycA').map((t) => t.id), ['cycA']);
+  assert.deepEqual(resolveAlignTargets(cyclic, 'cycB').map((t) => t.id), ['cycB']);
+
+  // alignTargetsBlocker: batch validation, group roots exempt from canEdit, priority order
+  const editableAll = () => true;
+  const noKeys = () => false;
+  assert.equal(alignTargetsBlocker([], { busy: false, canEdit: editableAll, movedByKeyframes: noKeys }), 'noLayer');
+  assert.equal(alignTargetsBlocker(soloTargets, { busy: true, canEdit: editableAll, movedByKeyframes: noKeys }), 'busy');
+  assert.equal(
+    alignTargetsBlocker([...soloTargets, ...maskTarget], { busy: false, canEdit: editableAll, movedByKeyframes: noKeys }),
+    'mask',
+  );
+  assert.equal(
+    alignTargetsBlocker(
+      [...soloTargets, ...resolveAlignTargets(tree, 'wrapAnim')],
+      { busy: false, canEdit: () => false, movedByKeyframes: () => true },
+    ),
+    'animationFolder',
+    'animationFolder beats notEditable and keyframes',
+  );
+
+  // Group root must NEVER be passed to canEdit (canEditOwnPixels returns false on groups)
+  const seenCanEdit = new Set<string>();
+  const batchOk = alignTargetsBlocker(multiTargets, {
+    busy: false,
+    canEdit: (l) => {
+      seenCanEdit.add(l.id);
+      return l.layerType !== 'group' && l.layerType !== 'folder';
+    },
+    movedByKeyframes: noKeys,
+  });
+  assert.equal(batchOk, null);
+  assert.ok(!seenCanEdit.has('grp') && !seenCanEdit.has('sub'));
+  assert.ok(seenCanEdit.has('rInGrp') && seenCanEdit.has('gm') && seenCanEdit.has('mInSub'));
+
+  // Whole-batch rejection if 1 member or 1 mask in multi-target batch fails canEdit
+  assert.equal(
+    alignTargetsBlocker(multiTargets, {
+      busy: false,
+      canEdit: (l) => l.id !== 'mInSub',
+      movedByKeyframes: (id) => id === 'rSolo',
+    }),
+    'notEditable',
+    'Locked mask rejects whole batch before keyframes',
+  );
+  assert.equal(
+    alignTargetsBlocker(multiTargets, { busy: false, canEdit: editableAll, movedByKeyframes: (id) => id === 'grp' }),
+    'keyframes',
+    'Keyframed group root blocks batch',
+  );
+  assert.equal(
+    alignTargetsBlocker(multiTargets, { busy: false, canEdit: editableAll, movedByKeyframes: (id) => id === 'mSolo' }),
+    'keyframes',
+    'Keyframed mask blocks batch',
+  );
+
+  // unionRect & alignManyOffsets
+  assert.equal(unionRect([]), null);
+  const sampleRects: AlignRect[] = [
+    { x: 50, y: 10, w: 12, h: 15 },
+    { x: 10, y: 30, w: 20, h: 25 },
+    { x: 25, y: 5, w: 15, h: 10 },
+  ];
+  const uRect = unionRect(sampleRects)!;
+  assert.deepEqual(uRect, { x: 10, y: 5, w: 52, h: 50 });
+  assert.deepEqual(
+    alignManyOffsets(sampleRects, uRect, 'left', 'top'),
+    [{ dx: -40, dy: -5 }, { dx: 0, dy: -25 }, { dx: -15, dy: 0 }],
+  );
+
+  // distributeOffsets: count guards
+  assert.deepEqual(distributeOffsets([], 'hgap', 'objects', canvasFrame), []);
+  assert.deepEqual(distributeOffsets([{ x: 10, y: 10, w: 10, h: 10 }, { x: 40, y: 10, w: 10, h: 10 }], 'hgap', 'objects', canvasFrame), [
+    { dx: 0, dy: 0 }, { dx: 0, dy: 0 },
+  ]);
+  assert.deepEqual(distributeOffsets([{ x: 10, y: 10, w: 10, h: 10 }], 'hgap', 'canvas', canvasFrame), [{ dx: 0, dy: 0 }]);
+
+  // 2 rects on canvas / selection snap to frame outer edges
+  assert.deepEqual(
+    distributeOffsets([{ x: 40, y: 10, w: 12, h: 8 }, { x: 15, y: 20, w: 10, h: 8 }], 'left', 'canvas', canvasFrame),
+    [{ dx: 48, dy: 0 }, { dx: -15, dy: 0 }],
+    '2 rects on canvas snap first (x=15) to 0 and last (x=40, w=12) to 100-12=88',
+  );
+  const selDistFrame: AlignRect = { x: 20, y: 10, w: 60, h: 40 };
+  assert.deepEqual(
+    distributeOffsets([{ x: 25, y: 30, w: 8, h: 10 }, { x: 25, y: 12, w: 8, h: 6 }], 'vgap', 'selection', selDistFrame),
+    [{ dx: 0, dy: 10 }, { dx: 0, dy: -2 }],
+    '2 rects vertically on selection snap top=10 and bottom=10+40-10=40',
+  );
+
+  // All 8 modes across objects, canvas, selection with 4 unsorted rects of varied sizes & fractional spacing
+  const applyDist = (rects: AlignRect[], mode: DistributeMode, basis: 'objects' | 'canvas' | 'selection', frame: AlignRect) => {
+    const offsets = distributeOffsets(rects, mode, basis, frame);
+    return rects.map((r, i) => ({ x: r.x + offsets[i].dx, y: r.y + offsets[i].dy, w: r.w, h: r.h, dx: offsets[i].dx, dy: offsets[i].dy }));
+  };
+  const fourRects: AlignRect[] = [
+    { x: 63, y: 55, w: 11, h: 9 },
+    { x: 10, y: 5, w: 10, h: 10 },
+    { x: 24, y: 22, w: 7, h: 13 },
+    { x: 41, y: 38, w: 9, h: 8 },
+  ];
+  const allModes: DistributeMode[] = ['left', 'hcenter', 'right', 'hgap', 'top', 'vcenter', 'bottom', 'vgap'];
+  for (const basis of ['objects', 'canvas', 'selection'] as const) {
+    const frame = basis === 'selection' ? { x: 5, y: 4, w: 85, h: 71 } : canvasFrame;
+    for (const mode of allModes) {
+      const horiz = mode === 'left' || mode === 'hcenter' || mode === 'right' || mode === 'hgap';
+      const moved = applyDist(fourRects, mode, basis, frame);
+      for (const m of moved) {
+        if (horiz) assert.equal(m.dy, 0, `${basis}/${mode} keeps dy=0`);
+        else assert.equal(m.dx, 0, `${basis}/${mode} keeps dx=0`);
+      }
+      const key = (r: AlignRect) => {
+        const p = horiz ? r.x : r.y;
+        const s = horiz ? r.w : r.h;
+        if (mode === 'hcenter' || mode === 'vcenter') return p + s / 2;
+        if (mode === 'right' || mode === 'bottom') return p + s;
+        return p;
+      };
+      const byOriginalOrder = fourRects
+        .map((r, idx) => ({ idx, k: key(r), p: horiz ? r.x : r.y }))
+        .sort((a, b) => (a.k - b.k) || (a.p - b.p) || (a.idx - b.idx));
+      const firstMoved = moved[byOriginalOrder[0].idx];
+      const lastMoved = moved[byOriginalOrder[byOriginalOrder.length - 1].idx];
+      if (basis === 'objects') {
+        assert.equal(firstMoved.dx, 0);
+        assert.equal(firstMoved.dy, 0);
+        assert.equal(lastMoved.dx, 0);
+        assert.equal(lastMoved.dy, 0);
+      } else {
+        const fPos = horiz ? frame.x : frame.y;
+        const fSize = horiz ? frame.w : frame.h;
+        assert.equal(horiz ? firstMoved.x : firstMoved.y, fPos, `${basis}/${mode} snaps first to frame start`);
+        assert.equal(
+          (horiz ? lastMoved.x + lastMoved.w : lastMoved.y + lastMoved.h),
+          fPos + fSize,
+          `${basis}/${mode} snaps last to frame end`,
+        );
+      }
+      const orderedMoved = byOriginalOrder.map((e) => moved[e.idx]);
+      if (mode === 'hgap' || mode === 'vgap') {
+        const gaps = orderedMoved.slice(0, -1).map((r, idx) => {
+          const next = orderedMoved[idx + 1];
+          return (horiz ? next.x - (r.x + r.w) : next.y - (r.y + r.h));
+        });
+        assert.ok(Math.max(...gaps) - Math.min(...gaps) <= 1, `${basis}/${mode} gaps differ by <= 1 px (got ${gaps.join(',')})`);
+      } else {
+        const anchors = orderedMoved.map(key);
+        const steps = anchors.slice(0, -1).map((v, idx) => anchors[idx + 1] - v);
+        assert.ok(Math.max(...steps) - Math.min(...steps) <= 1, `${basis}/${mode} anchors evenly spaced within <= 1 px (got ${steps.join(',')})`);
+      }
+    }
+  }
+
+  // Overlapping rects with hgap on objects produce uniform negative gap
+  const overlapping: AlignRect[] = [
+    { x: 0, y: 0, w: 20, h: 10 },
+    { x: 5, y: 0, w: 20, h: 10 },
+    { x: 20, y: 0, w: 20, h: 10 },
+  ];
+  assert.deepEqual(
+    distributeOffsets(overlapping, 'hgap', 'objects', canvasFrame),
+    [{ dx: 0, dy: 0 }, { dx: 5, dy: 0 }, { dx: 0, dy: 0 }],
+    'Overlapping rects equalize to -10px gap',
+  );
 
   // The move as useLayerAlign does it, on a CPU buffer: clear what the pixels leave, write them where they land
   const W = 40;
