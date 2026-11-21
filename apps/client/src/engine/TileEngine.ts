@@ -186,6 +186,7 @@ export class TileEngine {
       height,
       format: 'rgba8unorm',
       alphaMode: 'premultiplied-alpha',
+      scaleMode: 'nearest',
     });
     const texture = new Texture({ source });
     const sprite = new Sprite(texture);
@@ -661,6 +662,7 @@ export class TileEngine {
         // Tiles hold premultiplied RGBA (GPU readback). Premultiplying again on upload darkened
         // every soft edge a little more on each sync, undo and reload.
         alphaMode: 'premultiplied-alpha',
+        scaleMode: 'nearest',
       });
       const tileTexture = new Texture({ source });
       texturesToDestroy.push(tileTexture);

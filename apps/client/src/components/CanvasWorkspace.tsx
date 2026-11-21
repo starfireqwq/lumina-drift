@@ -590,12 +590,21 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     historyOp?: ScopedUndoOp;
   };
   const recentLocalCommitsRef = useRef<LocalTileCommit[]>([]);
+  const localClientOpsRef = useRef<Set<string>>(new Set());
   const appliedClientOpsRef = useRef<Set<string>>(new Set());
   const appliedVectorOpsRef = useRef<Set<string>>(new Set());
   const appliedFootprintOpsRef = useRef<Set<string>>(new Set());
   const speculativeConcurrencyOpsRef = useRef<Set<string>>(new Set());
+  const rememberOpId = (set: Set<string>, id: string) => {
+    set.add(id);
+    if (set.size > 500) {
+      const first = set.values().next().value;
+      if (first !== undefined) set.delete(first);
+    }
+  };
   useEffect(() => {
     recentLocalCommitsRef.current = [];
+    localClientOpsRef.current.clear();
     appliedClientOpsRef.current.clear();
     appliedVectorOpsRef.current.clear();
     appliedFootprintOpsRef.current.clear();
@@ -652,6 +661,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const clientOpId = typeof pObj?.clientOpId === 'string'
       ? pObj.clientOpId
       : `cop_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    if (!OfflineSessionStore.isOfflineCanvas(canvas?.id)) rememberOpId(localClientOpsRef.current, clientOpId);
     const baseSeq = typeof pObj?.baseSeq === 'number' ? pObj.baseSeq : getLatestSeq();
     const tiles = Array.isArray(pObj?.tiles) ? (pObj!.tiles as TileData[]) : null;
     if (tiles?.length) {
@@ -681,6 +691,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (!alreadySynced) layerManagerRef.current?.syncPingPong(layerId);
     refreshLayerThumbnail(layerId);
     const clientOpId = `cop_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    if (!OfflineSessionStore.isOfflineCanvas(canvas?.id)) rememberOpId(localClientOpsRef.current, clientOpId);
     const baseSeq = getLatestSeq();
     if (tiles?.length) {
       const latestUndo = !isUndo && actionDesc !== 'REDO' ? scopedUndoRef.current.peekLatestForLayer(layerId) : undefined;
@@ -3276,13 +3287,22 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
       const payload = latestBroadcastOp.payload as any;
       const clientOpId = typeof payload?.clientOpId === 'string' ? payload.clientOpId : null;
-      const rememberOpId = (set: Set<string>, id: string) => {
-        set.add(id);
-        if (set.size > 500) {
-          const first = set.values().next().value;
-          if (first !== undefined) set.delete(first);
+      const incomingSeq = latestBroadcastOp.seq || 0;
+      if (clientOpId && localClientOpsRef.current.has(clientOpId)) {
+        // An op we already committed on this tab (e.g. replayed via getOpsSince after a socket reconnect):
+        // backfill its server seq if missing, and never mark our own pixels as foreign.
+        if (incomingSeq > 0) {
+          const rec = recentLocalCommitsRef.current.find((r) => r.clientOpId === clientOpId && r.seq === null);
+          if (rec) {
+            rec.seq = incomingSeq;
+            if (rec.historyOp) {
+              rec.historyOp.seq = incomingSeq;
+              rec.historyOp = undefined;
+            }
+          }
         }
-      };
+        return;
+      }
       const hasVectorDelta = Boolean(
         payload && (Array.isArray(payload.vectorAdded) || Array.isArray(payload.vectorRemovedIds) || payload.vectorStroke)
       );
@@ -3304,7 +3324,6 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         // Sync brush footprint even if P2P TILE_PATCH and Socket STROKE arrive in different order
         markForeignFootprint(latestBroadcastOp.layerId, payload);
       }
-      const incomingSeq = latestBroadcastOp.seq || 0;
       const foreignEdit = scopedUndoRef.current.foreignEdit(clientOpId ?? `seq:${incomingSeq}`, incomingSeq);
       const isAuthoritativeResync = Boolean(
         clientOpId &&
