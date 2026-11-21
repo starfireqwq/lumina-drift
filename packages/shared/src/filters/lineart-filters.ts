@@ -109,7 +109,8 @@ export function changeLineWidth(pixels: Uint8Array | Uint8ClampedArray, width: n
     for (let p = 0; p < count; p++) {
       const q = nearest[p];
       if (q < 0 || q === p) continue;
-      const cover = Math.min(1, Math.max(0, amount + 0.5 - Math.sqrt(dist2[p])));
+      // The pixel spans d ± ½ from the line pixel's centre, whose own edge is ½ out: the new edge is amount + ½ out
+      const cover = Math.min(1, Math.max(0, amount + 1 - Math.sqrt(dist2[p])));
       if (cover <= 0) continue;
       const inkAlpha = pixels[q * 4 + 3];
       const alpha = inkAlpha * cover;
@@ -132,7 +133,8 @@ export function changeLineWidth(pixels: Uint8Array | Uint8ClampedArray, width: n
     for (let x = 0; x < width; x++) {
       const p = y * width + x;
       const d = dist[p];
-      let keep = Math.min(1, Math.max(0, d - by + 0.5));
+      // The paper's edge moves `by` pixels in: what is left of this pixel
+      let keep = Math.min(1, Math.max(0, d - by));
       if (keep < 1 && keepThin && d > 0) {
         // A ridge: no lower than both neighbours across some direction, and higher than one of them
         for (const [dx, dy] of [[1, 0], [0, 1], [1, 1], [1, -1]]) {

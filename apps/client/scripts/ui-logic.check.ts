@@ -1007,14 +1007,18 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
   const line = (from: number, to: number) => picture(W, H, (x) => (x >= from && x <= to ? [0, 0, 0, 255] : null));
 
   const grown = run('lineWidth', { amount: 2 }, line(4, 4));
-  assert.equal(alphaAt(grown, W, 5, 4), 255, 'One pixel out is fully inked');
-  assert.ok(alphaAt(grown, W, 6, 4) > 100 && alphaAt(grown, W, 6, 4) < 160, 'The new edge is soft');
+  assert.equal(alphaAt(grown, W, 5, 4), 255, 'One pixel out is inked');
+  assert.equal(alphaAt(grown, W, 6, 4), 255, 'Two pixels out is inked: 2 px more on each side');
   assert.equal(alphaAt(grown, W, 7, 4), 0, 'Three pixels out stays clear');
   assert.deepEqual([...grown.slice((4 * W + 5) * 4, (4 * W + 5) * 4 + 3)], [0, 0, 0], 'Grown ink takes the line colour');
+  const dot = picture(W, H, (x, y) => (x === 4 && y === 4 ? [0, 0, 0, 255] : null));
+  const ring = alphaAt(run('lineWidth', { amount: 1 }, dot), W, 5, 5);
+  assert.ok(ring > 0 && ring < 255, 'Diagonal edges come out soft');
 
-  const thinned = run('lineWidth', { amount: -2, keepThin: false }, line(3, 5));
-  assert.equal(alphaAt(thinned, W, 3, 4), 0, 'Thinning clears the edges');
-  assert.ok(alphaAt(thinned, W, 4, 4) > 0 && alphaAt(thinned, W, 4, 4) < 255, 'The middle fades');
+  const thinned = run('lineWidth', { amount: -1, keepThin: false }, line(3, 5));
+  assert.equal(alphaAt(thinned, W, 3, 4), 0, 'Thinning by 1 clears one pixel on each side');
+  assert.equal(alphaAt(thinned, W, 4, 4), 255, 'And keeps the middle');
+  assert.equal(alphaAt(run('lineWidth', { amount: -2, keepThin: false }, line(3, 5)), W, 4, 4), 0, 'Thinning a 3 px line by 2 clears it');
   assert.equal(alphaAt(run('lineWidth', { amount: -2, keepThin: true }, line(3, 5)), W, 4, 4), 255, 'Keeping thin lines keeps the middle');
   assert.equal(alphaAt(run('lineWidth', { amount: -3, keepThin: true }, line(4, 4)), W, 4, 4), 255, 'A 1 px line survives');
   assert.equal(alphaAt(run('lineWidth', { amount: -3, keepThin: false }, line(4, 4)), W, 4, 4), 0, 'Unless asked not to keep it');
