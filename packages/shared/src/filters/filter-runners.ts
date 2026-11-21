@@ -10,8 +10,8 @@ import {
 } from './pixel-filters';
 import { adjustColor, grayscalePixels, levelsLut, mapChannels, monoTintPixels, thresholdPixels } from './color-filters';
 import { changeLineWidth, despeckle, extractLines, recolorLines, smoothJaggies } from './lineart-filters';
-import { boxBlur, glow, mosaic, outline, radialChromatic } from './effect-filters';
-import { motionBlur, soften, spherize, unsharpMask, wave, zoomBlur } from './blur-distort-filters';
+import { boxBlur, dropShadow, edgeToLineart, emboss, glow, mosaic, outline, radialChromatic } from './effect-filters';
+import { highPass, motionBlur, pinch, polarCoords, soften, spherize, unsharpMask, wave, zigzagRipple, zoomBlur } from './blur-distort-filters';
 import { focusLines, gridPattern, perlinNoise } from './render-filters';
 import { downscale, upscale } from './resample';
 
@@ -138,6 +138,32 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
     run: ({ pixels, width, height }, v) =>
       unsharpMask(pixels, width, height, filterNumber(v, 'radius', 2), filterNumber(v, 'amount', 100), filterNumber(v, 'threshold', 0)),
   },
+  highPass: {
+    colorOnly: true,
+    run: ({ pixels, width, height }, v) => highPass(pixels, width, height, filterNumber(v, 'radius', 4)),
+  },
+  polarCoords: {
+    draft: {},
+    run: ({ pixels, width, height }, v) =>
+      polarCoords(pixels, width, height, filterChoice(v, 'mode', ['rectToPolar', 'polarToRect'] as const)),
+  },
+  zigzagRipple: {
+    draft: { points: ['center'] },
+    run: ({ pixels, width, height }, v) => {
+      const c = filterPoint(v, 'center', width, height);
+      return zigzagRipple(
+        pixels, width, height, c.x, c.y,
+        filterChoice(v, 'style', ['pond', 'radial'] as const),
+        filterNumber(v, 'amount', 30), filterNumber(v, 'ridges', 5),
+      );
+    },
+  },
+  pinch: {
+    run: ({ pixels, width, height }, v) => {
+      const c = filterPoint(v, 'center', width, height);
+      return pinch(pixels, width, height, c.x, c.y, filterNumber(v, 'strength', 50), filterNumber(v, 'radius', 300));
+    },
+  },
   gaussian: { draft: { lengths: ['radius'] }, run: (ctx, v) => applyGaussianBlur(ctx, filterNumber(v, 'radius', 8)) },
   spin: {
     draft: { points: ['center'] },
@@ -255,6 +281,27 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
     draft: { lengths: ['size'] },
     run: ({ pixels, width, height }, v) => outline(pixels, width, height, filterNumber(v, 'size', 3), filterColor(v, 'color', '#ffffff'),
       filterChoice(v, 'position', ['outside', 'inside', 'center'] as const)),
+  },
+  emboss: {
+    colorOnly: true,
+    run: ({ pixels, width, height }, v) => emboss(
+      pixels, width, height,
+      filterNumber(v, 'angle', 135), filterNumber(v, 'height', 2), filterNumber(v, 'amount', 120), v.keepColor === true,
+    ),
+  },
+  dropShadow: {
+    draft: { lengths: ['offsetX', 'offsetY', 'radius'] },
+    run: ({ pixels, width, height }, v) => dropShadow(
+      pixels, width, height,
+      filterNumber(v, 'offsetX', 8), filterNumber(v, 'offsetY', 8), filterNumber(v, 'radius', 12),
+      filterNumber(v, 'opacity', 55), filterColor(v, 'color', '#0f172a'), v.shadowOnly === true,
+    ),
+  },
+  edgeToLineart: {
+    run: ({ pixels, width, height }, v) => edgeToLineart(
+      pixels, width, height,
+      filterNumber(v, 'sensitivity', 50), filterNumber(v, 'thickness', 1), v.keepColor === true, v.whiteBg === true,
+    ),
   },
   halftone: {
     colorOnly: true,

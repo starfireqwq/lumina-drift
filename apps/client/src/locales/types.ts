@@ -763,6 +763,13 @@ export interface Translations {
       perlinNoise: string;
       gridPattern: string;
       focusLines: string;
+      emboss: string;
+      dropShadow: string;
+      edgeToLineart: string;
+      polarCoords: string;
+      zigzagRipple: string;
+      pinch: string;
+      highPass: string;
     };
     /** Parameter names; a select's option names share this table */
     params: {
@@ -831,6 +838,18 @@ export interface Translations {
       opacity: string;
       innerRadius: string;
       jitter: string;
+      height: string;
+      keepOriginalColor: string;
+      shadowOnly: string;
+      sensitivity: string;
+      thickness: string;
+      whiteBg: string;
+      polarRectToPolar: string;
+      polarToRect: string;
+      rippleStyle: string;
+      ripplePond: string;
+      rippleRadial: string;
+      ridges: string;
     };
   };
 

@@ -208,3 +208,243 @@ export function outline(pixels: Uint8Array | Uint8ClampedArray, width: number, h
   }
   return output;
 }
+
+/**
+ * 浮雕 (straight colour, alpha untouched): directional light slope along `angleDeg` at `heightPx`
+ * spacing. Without `keepColor`, flat regions become neutral 128 grey (ready for Overlay blend).
+ */
+export function emboss(
+  pixels: Uint8Array | Uint8ClampedArray,
+  width: number,
+  height: number,
+  angleDeg: number,
+  heightPx: number,
+  amountPct: number,
+  keepColor: boolean,
+) {
+  const output = new Uint8Array(pixels);
+  const rad = angleDeg * Math.PI / 180;
+  const dist = Math.max(1, heightPx);
+  const dx = Math.round(Math.cos(rad) * dist);
+  const dy = Math.round(-Math.sin(rad) * dist);
+  const gain = Math.max(0, amountPct) / 100 * 0.5;
+  const clampCoord = (v: number, max: number) => (v < 0 ? 0 : v >= max ? max - 1 : v);
+
+  // Precompute weighted luminance (0 where transparent so shapes on clear backgrounds bevel cleanly)
+  const field = new Float32Array(width * height);
+  for (let p = 0, i = 0; p < field.length; p++, i += 4) {
+    const a = pixels[i + 3];
+    field[p] = a ? luma(pixels[i], pixels[i + 1], pixels[i + 2]) * (a / 255) : 0;
+  }
+
+  for (let y = 0; y < height; y++) {
+    const y1 = clampCoord(y + dy, height) * width;
+    const y2 = clampCoord(y - dy, height) * width;
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      const i = (row + x) * 4;
+      if (!pixels[i + 3]) continue;
+      const x1 = clampCoord(x + dx, width);
+      const x2 = clampCoord(x - dx, width);
+      const diff = (field[y1 + x1] - field[y2 + x2]) * gain;
+      if (keepColor) {
+        output[i] = Math.min(255, Math.max(0, Math.round(pixels[i] + diff)));
+        output[i + 1] = Math.min(255, Math.max(0, Math.round(pixels[i + 1] + diff)));
+        output[i + 2] = Math.min(255, Math.max(0, Math.round(pixels[i + 2] + diff)));
+      } else {
+        const v = Math.min(255, Math.max(0, Math.round(128 + diff)));
+        output[i] = v;
+        output[i + 1] = v;
+        output[i + 2] = v;
+      }
+    }
+  }
+  return output;
+}
+
+/** 1-channel separable 3-pass box blur on an alpha buffer (4x less work than blurring RGBA) */
+function blurAlpha(alpha: Uint8Array, width: number, height: number, radius: number) {
+  const r = Math.max(0, Math.round(radius));
+  if (r <= 0 || width <= 0 || height <= 0) return alpha;
+  const side = r * 2 + 1;
+  let src: Uint8Array = alpha;
+  const tmp = new Uint8Array(alpha.length);
+  let dst: Uint8Array = new Uint8Array(alpha.length);
+  const clamp = (v: number, max: number) => (v < 0 ? 0 : v >= max ? max - 1 : v);
+
+  for (let pass = 0; pass < 3; pass++) {
+    for (let y = 0; y < height; y++) {
+      const row = y * width;
+      let sum = 0;
+      for (let k = -r; k <= r; k++) sum += src[row + clamp(k, width)];
+      for (let x = 0; x < width; x++) {
+        tmp[row + x] = (sum + (side >> 1)) / side | 0;
+        sum -= src[row + clamp(x - r, width)];
+        sum += src[row + clamp(x + r + 1, width)];
+      }
+    }
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      for (let k = -r; k <= r; k++) sum += tmp[clamp(k, height) * width + x];
+      for (let y = 0; y < height; y++) {
+        dst[y * width + x] = (sum + (side >> 1)) / side | 0;
+        sum -= tmp[clamp(y - r, height) * width + x];
+        sum += tmp[clamp(y + r + 1, height) * width + x];
+      }
+    }
+    const next = src;
+    src = dst;
+    dst = next;
+  }
+  return src;
+}
+
+/**
+ * 投影 (premultiplied RGBA): shifts and blurs the layer's alpha silhouette into a coloured shadow
+ * underneath the original artwork (or outputs only the shadow when `shadowOnly` is true).
+ */
+export function dropShadow(
+  pixels: Uint8Array | Uint8ClampedArray,
+  width: number,
+  height: number,
+  offsetX: number,
+  offsetY: number,
+  radius: number,
+  opacityPct: number,
+  hex: string,
+  shadowOnly: boolean,
+) {
+  const ox = Math.round(offsetX);
+  const oy = Math.round(offsetY);
+  const alphaBuf = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) {
+    const sy = y - oy;
+    if (sy < 0 || sy >= height) continue;
+    const dstRow = y * width;
+    const srcRow = sy * width;
+    for (let x = 0; x < width; x++) {
+      const sx = x - ox;
+      if (sx < 0 || sx >= width) continue;
+      alphaBuf[dstRow + x] = pixels[(srcRow + sx) * 4 + 3];
+    }
+  }
+  const blurred = blurAlpha(alphaBuf, width, height, Math.max(0, radius) / 2);
+  const { r: sr, g: sg, b: sb } = hexToRgb(hex);
+  const op = Math.min(1, Math.max(0, opacityPct / 100));
+  const output = new Uint8Array(pixels.length);
+  for (let p = 0, i = 0; p < blurred.length; p++, i += 4) {
+    const sa = (blurred[p] / 255) * op;
+    const shR = sr * sa;
+    const shG = sg * sa;
+    const shB = sb * sa;
+    const shA = 255 * sa;
+    if (shadowOnly) {
+      output[i] = Math.round(shR);
+      output[i + 1] = Math.round(shG);
+      output[i + 2] = Math.round(shB);
+      output[i + 3] = Math.round(shA);
+    } else {
+      const oa = pixels[i + 3];
+      const under = 1 - oa / 255;
+      output[i] = Math.min(255, Math.round(pixels[i] + shR * under));
+      output[i + 1] = Math.min(255, Math.round(pixels[i + 1] + shG * under));
+      output[i + 2] = Math.min(255, Math.round(pixels[i + 2] + shB * under));
+      output[i + 3] = Math.min(255, Math.round(oa + shA * under));
+    }
+  }
+  return output;
+}
+
+/**
+ * 邊緣偵測轉線稿 (premultiplied RGBA): Sobel edge magnitude on luma & alpha, with optional
+ * thickness dilation, colour preservation, and transparent or white background.
+ */
+export function edgeToLineart(
+  pixels: Uint8Array | Uint8ClampedArray,
+  width: number,
+  height: number,
+  sensitivity: number,
+  thickness: number,
+  keepColor: boolean,
+  whiteBg: boolean,
+) {
+  const count = width * height;
+  const lField = new Float32Array(count);
+  const aField = new Float32Array(count);
+  for (let p = 0, i = 0; p < count; p++, i += 4) {
+    const a = pixels[i + 3];
+    aField[p] = a;
+    lField[p] = a ? luma(pixels[i], pixels[i + 1], pixels[i + 2]) * 255 / a : 255;
+  }
+
+  let mag = new Float32Array(count);
+  const clamp = (v: number, max: number) => (v < 0 ? 0 : v >= max ? max - 1 : v);
+  for (let y = 0; y < height; y++) {
+    const ym = clamp(y - 1, height) * width;
+    const y0 = y * width;
+    const yp = clamp(y + 1, height) * width;
+    for (let x = 0; x < width; x++) {
+      const xm = clamp(x - 1, width);
+      const xp = clamp(x + 1, width);
+      const glx = (lField[ym + xp] + 2 * lField[y0 + xp] + lField[yp + xp]) - (lField[ym + xm] + 2 * lField[y0 + xm] + lField[yp + xm]);
+      const gly = (lField[yp + xm] + 2 * lField[yp + x] + lField[yp + xp]) - (lField[ym + xm] + 2 * lField[ym + x] + lField[ym + xp]);
+      const gax = (aField[ym + xp] + 2 * aField[y0 + xp] + aField[yp + xp]) - (aField[ym + xm] + 2 * aField[y0 + xm] + aField[yp + xm]);
+      const gay = (aField[yp + xm] + 2 * aField[yp + x] + aField[yp + xp]) - (aField[ym + xm] + 2 * aField[ym + x] + aField[ym + xp]);
+      mag[y0 + x] = Math.max(Math.hypot(glx, gly), Math.hypot(gax, gay)) * 0.25;
+    }
+  }
+
+  const dilateR = Math.min(4, Math.max(0, Math.round(thickness) - 1));
+  if (dilateR > 0) {
+    const tmp = new Float32Array(count);
+    for (let y = 0; y < height; y++) {
+      const row = y * width;
+      for (let x = 0; x < width; x++) {
+        let best = 0;
+        const lo = Math.max(0, x - dilateR), hi = Math.min(width - 1, x + dilateR);
+        for (let k = lo; k <= hi; k++) if (mag[row + k] > best) best = mag[row + k];
+        tmp[row + x] = best;
+      }
+    }
+    const outMag = new Float32Array(count);
+    for (let y = 0; y < height; y++) {
+      const lo = Math.max(0, y - dilateR), hi = Math.min(height - 1, y + dilateR);
+      const row = y * width;
+      for (let x = 0; x < width; x++) {
+        let best = 0;
+        for (let k = lo; k <= hi; k++) if (tmp[k * width + x] > best) best = tmp[k * width + x];
+        outMag[row + x] = best;
+      }
+    }
+    mag = outMag;
+  }
+
+  const sens = Math.min(100, Math.max(1, sensitivity));
+  const floor = Math.max(2, (100 - sens) * 0.55);
+  const span = Math.max(12, 110 - sens * 0.85);
+  const output = new Uint8Array(pixels.length);
+
+  for (let p = 0, i = 0; p < count; p++, i += 4) {
+    const ink = Math.min(1, Math.max(0, (mag[p] - floor) / span));
+    let lr = 0, lg = 0, lb = 0;
+    if (keepColor && pixels[i + 3] > 0) {
+      const a = pixels[i + 3];
+      lr = Math.min(255, pixels[i] * 255 / a);
+      lg = Math.min(255, pixels[i + 1] * 255 / a);
+      lb = Math.min(255, pixels[i + 2] * 255 / a);
+    }
+    if (whiteBg) {
+      const inv = 1 - ink;
+      output[i] = Math.round(lr * ink + 255 * inv);
+      output[i + 1] = Math.round(lg * ink + 255 * inv);
+      output[i + 2] = Math.round(lb * ink + 255 * inv);
+      output[i + 3] = 255;
+    } else if (ink > 0) {
+      output[i] = Math.round(lr * ink);
+      output[i + 1] = Math.round(lg * ink);
+      output[i + 2] = Math.round(lb * ink);
+      output[i + 3] = Math.round(255 * ink);
+    }
+  }
+  return output;
+}

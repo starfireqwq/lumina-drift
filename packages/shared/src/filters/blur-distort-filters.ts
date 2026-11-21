@@ -230,3 +230,121 @@ export function unsharpMask(pixels: Uint8Array | Uint8ClampedArray, width: numbe
   }
   return output;
 }
+
+export type PolarMode = 'rectToPolar' | 'polarToRect';
+
+/**
+ * 極座標: maps between rectangular coordinates and polar coordinates around the canvas centre.
+ */
+export function polarCoords(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, mode: PolarMode) {
+  if (width < 2 || height < 2) return new Uint8Array(pixels);
+  const cx = (width - 1) * 0.5;
+  const cy = (height - 1) * 0.5;
+  const rx = cx || 1;
+  const ry = cy || 1;
+  const TWO_PI = Math.PI * 2;
+  if (mode === 'rectToPolar') {
+    return remap(pixels, width, height, (x, y) => {
+      const nx = (x - cx) / rx;
+      const ny = (y - cy) / ry;
+      const r = Math.hypot(nx, ny);
+      if (r > 1) return [-10, -10];
+      let theta = Math.atan2(ny, nx) + Math.PI * 0.5;
+      if (theta < 0) theta += TWO_PI;
+      return [(theta / TWO_PI) * (width - 1), r * (height - 1)];
+    });
+  }
+  return remap(pixels, width, height, (x, y) => {
+    const theta = (x / (width - 1)) * TWO_PI - Math.PI * 0.5;
+    const r = y / (height - 1);
+    return [cx + Math.cos(theta) * r * rx, cy + Math.sin(theta) * r * ry];
+  });
+}
+
+export type ZigzagStyle = 'pond' | 'radial';
+
+/**
+ * 鋸齒波紋: concentric ripple waves around (cx, cy). `pond` displaces pixels radially;
+ * `radial` oscillates them tangentially for a wavy swirl pattern.
+ */
+export function zigzagRipple(
+  pixels: Uint8Array | Uint8ClampedArray,
+  width: number,
+  height: number,
+  cx: number,
+  cy: number,
+  style: ZigzagStyle,
+  amount: number,
+  ridges: number,
+) {
+  const s = Math.min(100, Math.max(-100, amount)) / 100;
+  if (!s) return new Uint8Array(pixels);
+  const maxR = Math.min(width, height) * 0.5 || 1;
+  const cycles = Math.max(1, ridges) * Math.PI * 2;
+  return remap(pixels, width, height, (x, y) => {
+    const dx = x - cx;
+    const dy = y - cy;
+    const d = Math.hypot(dx, dy);
+    if (d >= maxR || d === 0) return null;
+    const norm = d / maxR;
+    const env = 1 - norm;
+    const waveVal = Math.sin(norm * cycles) * env * s;
+    if (style === 'radial') {
+      const da = waveVal * 0.7;
+      const c = Math.cos(da);
+      const sn = Math.sin(da);
+      return [cx + dx * c - dy * sn, cy + dx * sn + dy * c];
+    }
+    const nr = Math.max(0, d + waveVal * maxR * 0.18);
+    const ratio = nr / d;
+    return [cx + dx * ratio, cy + dy * ratio];
+  });
+}
+
+/**
+ * 捏合: inside `radius` around (cx, cy), positive strength pinches pixels inward toward the centre,
+ * negative strength pushes them outward. Zero seam at the boundary.
+ */
+export function pinch(
+  pixels: Uint8Array | Uint8ClampedArray,
+  width: number,
+  height: number,
+  cx: number,
+  cy: number,
+  strength: number,
+  radius: number,
+) {
+  const s = Math.min(100, Math.max(-100, strength)) / 100;
+  if (!s || radius < 1) return new Uint8Array(pixels);
+  const rMax = Math.max(1, radius);
+  const power = -s * 0.85;
+  return remap(pixels, width, height, (x, y) => {
+    const dx = x - cx;
+    const dy = y - cy;
+    const d = Math.hypot(dx, dy);
+    if (d >= rMax || d === 0) return null;
+    const t = d / rMax;
+    const k = Math.sin(Math.PI * 0.5 * t);
+    const scale = Math.min(1 / t, Math.pow(Math.max(1e-6, k), power));
+    return [cx + dx * scale, cy + dy * scale];
+  });
+}
+
+/**
+ * 高反差保留 (straight colour, alpha untouched): isolates high-frequency edge detail around
+ * neutral 128 grey (`128 + (pixel - blurred) * 0.5`), ready for Overlay / Soft Light sharpening.
+ */
+export function highPass(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, radius: number) {
+  const r = Math.max(0.5, radius);
+  const blurred = r < 1.5
+    ? soften(pixels, width, height)
+    : tripleBoxBlur(pixels, width, height, Math.round(r));
+  const output = new Uint8Array(pixels);
+  for (let i = 0; i < output.length; i += 4) {
+    if (!output[i + 3]) continue;
+    for (let k = 0; k < 3; k++) {
+      output[i + k] = Math.min(255, Math.max(0, Math.round(128 + (pixels[i + k] - blurred[i + k]) * 0.5)));
+    }
+  }
+  return output;
+}

@@ -1445,6 +1445,66 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
   assert.ok(outerHits > 0, 'FocusLines draws rays toward the outer edge');
 }
 
+// 濾鏡 F3 Batch 2: 浮雕、投影、邊緣轉線稿、極座標、鋸齒波紋、捏合、高反差保留
+{
+  const W = 16, H = 16;
+  const run = (id: string, values: FilterValues, pixels: Uint8Array) => runPixelFilter(PIXEL_FILTER_RUNNERS[id], pixels, W, H, values);
+  const split = picture(W, H, (x) => (x < 8 ? [40, 40, 40, 255] : [220, 220, 220, 255]));
+  const box = picture(W, H, (x, y) => (x >= 5 && x <= 10 && y >= 5 && y <= 10 ? [200, 80, 60, 255] : null));
+
+  // emboss: colorOnly preserves alpha & clear pixels, neutral 128 on flat regions, bevel at step
+  const emb = run('emboss', { angle: 0, height: 1, amount: 150, keepColor: false }, split);
+  assert.deepEqual([...emb.slice((8 * W + 2) * 4, (8 * W + 2) * 4 + 4)], [128, 128, 128, 255], 'Emboss turns flat area to neutral grey');
+  assert.ok(emb[(8 * W + 8) * 4] > 128, 'Emboss highlights lit edge');
+  const embClear = run('emboss', { angle: 135, height: 1, amount: 120, keepColor: false }, box);
+  assert.equal(alphaAt(embClear, W, 0, 0), 0, 'Emboss leaves clear pixels clear');
+  assert.equal(alphaAt(embClear, W, 7, 7), 255, 'Emboss keeps opaque alpha intact');
+
+  // dropShadow: casts coloured shadow into shifted transparent area; shadowOnly hides original
+  const sh = run('dropShadow', { offsetX: 3, offsetY: 3, radius: 2, opacity: 80, color: '#000000', shadowOnly: false }, box);
+  assert.equal(alphaAt(sh, W, 7, 7), 255, 'DropShadow keeps original object opaque');
+  assert.ok(alphaAt(sh, W, 12, 12) > 0, 'DropShadow casts shadow offset down-right');
+  assert.equal(alphaAt(sh, W, 1, 1), 0, 'DropShadow leaves far opposite corner clear');
+  const shOnly = run('dropShadow', { offsetX: 4, offsetY: 4, radius: 0, opacity: 100, color: '#000000', shadowOnly: true }, box);
+  assert.equal(alphaAt(shOnly, W, 5, 5), 0, 'Shadow-only omits unshifted original corner');
+  assert.equal(alphaAt(shOnly, W, 12, 12), 255, 'Shadow-only keeps shifted silhouette');
+
+  // edgeToLineart: draws edge pixels at step, transparent elsewhere when whiteBg=false
+  const edges = run('edgeToLineart', { sensitivity: 60, thickness: 1, keepColor: false, whiteBg: false }, split);
+  assert.ok(alphaAt(edges, W, 7, 8) > 120 && alphaAt(edges, W, 8, 8) > 120, 'EdgeToLineart detects vertical contrast edge');
+  assert.equal(alphaAt(edges, W, 1, 8), 0, 'EdgeToLineart keeps flat area transparent');
+  const edgesWhite = run('edgeToLineart', { sensitivity: 60, thickness: 1, keepColor: false, whiteBg: true }, split);
+  assert.deepEqual([...edgesWhite.slice((8 * W + 1) * 4, (8 * W + 1) * 4 + 4)], [255, 255, 255, 255], 'White background fills flat area with white');
+
+  // polarCoords: both modes run cleanly and alter geometry
+  const r2p = run('polarCoords', { mode: 'rectToPolar' }, split);
+  assert.equal(alphaAt(r2p, W, 0, 0), 0, 'Rect-to-polar corners outside unit circle turn clear');
+  assert.notDeepEqual(r2p, split, 'Rect-to-polar remaps pixels');
+  const p2r = run('polarCoords', { mode: 'polarToRect' }, box);
+  assert.notDeepEqual(p2r, box, 'Polar-to-rect remaps pixels');
+
+  // zigzagRipple: alters interior, keeps outside circle untouched, amount=0 is identity
+  const gridImg = picture(W, H, (x, y) => (x % 3 === 0 || y % 3 === 0 ? [30, 60, 90, 255] : null));
+  assert.deepEqual(run('zigzagRipple', { style: 'pond', amount: 0, ridges: 4, center: { x: 8, y: 8 } }, gridImg), gridImg, 'Zero ripple is identity');
+  const rip = run('zigzagRipple', { style: 'pond', amount: 60, ridges: 3, center: { x: 8, y: 8 } }, gridImg);
+  assert.notDeepEqual(rip, gridImg, 'Pond ripple distorts interior');
+  const ripRad = run('zigzagRipple', { style: 'radial', amount: 60, ridges: 3, center: { x: 8, y: 8 } }, gridImg);
+  assert.notDeepEqual(ripRad, gridImg, 'Radial ripple distorts interior');
+
+  // pinch: alters pixels within radius, leaves corners outside radius untouched
+  const pinched = run('pinch', { strength: 70, radius: 5, center: { x: 8, y: 8 } }, gridImg);
+  assert.notDeepEqual(pinched, gridImg, 'Pinch distorts inside radius');
+  assert.deepEqual([...pinched.slice(0, 4)], [...gridImg.slice(0, 4)], 'Pinch leaves pixels outside radius intact');
+  assert.deepEqual(run('pinch', { strength: 0, radius: 5, center: { x: 8, y: 8 } }, gridImg), gridImg, 'Zero pinch is identity');
+
+  // highPass: colorOnly preserves alpha, turns flat region to neutral 128, highlights edges
+  const hp = run('highPass', { radius: 2 }, split);
+  assert.deepEqual([...hp.slice((8 * W + 1) * 4, (8 * W + 1) * 4 + 4)], [128, 128, 128, 255], 'HighPass turns flat area to neutral 128 grey');
+  assert.ok(hp[(8 * W + 7) * 4] < 128 && hp[(8 * W + 8) * 4] > 128, 'HighPass preserves high-frequency edge contrast');
+  const hpBox = run('highPass', { radius: 1 }, box);
+  assert.equal(alphaAt(hpBox, W, 0, 0), 0, 'HighPass leaves transparent pixels transparent');
+}
+
 // 對齊 L1: basis, whole-pixel offsets, off-canvas parts, and a pixel-level run of the move
 {
   assert.equal(resolveAlignBasis('auto', false), 'canvas', 'Auto without a selection and 1 target uses the canvas');

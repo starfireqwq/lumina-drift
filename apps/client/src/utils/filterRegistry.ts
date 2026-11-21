@@ -145,6 +145,26 @@ export const BUILTIN_FILTERS: readonly FilterDef[] = [
     { kind: 'color', key: 'color', label: 'inkColor', initial: '#ffffff' },
     choice('position', 'position', [['outside', 'positionOutside'], ['inside', 'positionInside'], ['center', 'positionCenter']]),
   ] },
+  { id: 'emboss', group: 'effect', label: 'emboss', source: 'builtin', params: [
+    range('angle', 'angle', 135, -180, 180),
+    range('height', 'height', 2, 1, 16),
+    range('amount', 'amount', 120, 10, 300),
+    toggle('keepColor', 'keepOriginalColor', false),
+  ] },
+  { id: 'dropShadow', group: 'effect', label: 'dropShadow', source: 'builtin', draft: true, params: [
+    range('offsetX', 'offsetX', 8, -200, 200),
+    range('offsetY', 'offsetY', 8, -200, 200),
+    range('radius', 'radius', 12, 0, 64),
+    range('opacity', 'opacity', 55, 5, 100),
+    { kind: 'color', key: 'color', label: 'inkColor', initial: '#0f172a' },
+    toggle('shadowOnly', 'shadowOnly', false),
+  ] },
+  { id: 'edgeToLineart', group: 'effect', label: 'edgeToLineart', source: 'builtin', params: [
+    range('sensitivity', 'sensitivity', 50, 1, 100),
+    range('thickness', 'thickness', 1, 1, 5),
+    toggle('keepColor', 'keepOriginalColor', false),
+    toggle('whiteBg', 'whiteBg', false),
+  ] },
   { id: 'box', group: 'blur', label: 'box', source: 'builtin', params: [range('radius', 'radius', 4, 1, 32)] },
   { id: 'gaussian', group: 'blur', label: 'gaussian', source: 'builtin', draft: true, params: [range('radius', 'radius', 8, 1, 32)] },
   { id: 'motionBlur', group: 'blur', label: 'motionBlur', source: 'builtin', draft: true, params: [
@@ -167,11 +187,27 @@ export const BUILTIN_FILTERS: readonly FilterDef[] = [
   { id: 'spherize', group: 'distort', label: 'spherize', source: 'builtin', pointRadius: 'radius', params: [
     range('strength', 'amount', 50, -100, 100), range('radius', 'radius', 300, 10, 4000), range('squash', 'squash', 0, -90, 90), center(),
   ] },
+  { id: 'polarCoords', group: 'distort', label: 'polarCoords', source: 'builtin', draft: true, params: [
+    choice('mode', 'mode', [['rectToPolar', 'polarRectToPolar'], ['polarToRect', 'polarToRect']]),
+  ] },
+  { id: 'zigzagRipple', group: 'distort', label: 'zigzagRipple', source: 'builtin', draft: true, params: [
+    choice('style', 'rippleStyle', [['pond', 'ripplePond'], ['radial', 'rippleRadial']]),
+    range('amount', 'amount', 30, -100, 100),
+    range('ridges', 'ridges', 5, 1, 20),
+    center(),
+  ] },
+  { id: 'pinch', group: 'distort', label: 'pinch', source: 'builtin', pointRadius: 'radius', params: [
+    range('strength', 'amount', 50, -100, 100),
+    range('radius', 'radius', 300, 10, 4000),
+    center(),
+  ] },
   { id: 'liquify', group: 'distort', label: 'liquify', source: 'builtin', params: [], tool: 'liquify' },
   { id: 'meshWarp', group: 'distort', label: 'meshWarp', source: 'builtin', params: [], tool: 'mesh' },
   { id: 'sharpen', group: 'sharpen', label: 'sharpen', source: 'builtin', params: [], hint: 'sharpenHint' },
   { id: 'unsharp', group: 'sharpen', label: 'unsharp', source: 'builtin',
     params: [range('radius', 'radius', 2, 1, 50), range('amount', 'amount', 100, 0, 500), range('threshold', 'threshold', 0, 0, 255)] },
+  { id: 'highPass', group: 'sharpen', label: 'highPass', source: 'builtin',
+    params: [range('radius', 'radius', 4, 0.5, 64, 0.5)] },
 ];
 
 export const getFilter = (id: string | null | undefined) => BUILTIN_FILTERS.find((def) => def.id === id) ?? null;
