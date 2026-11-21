@@ -333,7 +333,7 @@ interface CanvasWorkspaceProps {
   onReleaseLayer?: (layerId: string) => void;
   onClaimLayer?: (layerId: string, force?: boolean) => void;
   onTransferLayer?: (layerId: string, targetUserId: string) => void;
-  roomMembers?: Array<{ userId: string; displayName: string; role?: string }>;
+  roomMembers?: Array<{ userId: string; displayName: string; canvasRole?: string; role?: string }>;
   folderAccess: FolderAccess;
   onReorderLayer?: (layerId: string, newSortOrder: number, ascendingIds?: string[]) => void | Promise<void>;
   onUpdateLayerProps?: (layerId: string, props: Partial<LayerModel>) => void | Promise<void>;
@@ -999,12 +999,25 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     setCanRedoState(scopedUndoRef.current.canRedo(effectiveUserId));
   };
 
+  const resolveCurrentCanvasRole = (): 'owner' | 'admin' | 'editor' | 'viewer' | undefined => {
+    const uid = userRef.current?.id ?? user?.id;
+    if (!uid) return undefined;
+    const raw = (roomMembers && roomMembers.length > 0 ? roomMembers : members).find((m) => m.userId === uid);
+    const roleRaw = raw
+      ? ('canvasRole' in raw && raw.canvasRole ? raw.canvasRole : 'role' in raw ? raw.role : undefined)
+      : undefined;
+    return roleRaw === 'owner' || roleRaw === 'admin' || roleRaw === 'editor' || roleRaw === 'viewer'
+      ? roleRaw
+      : undefined;
+  };
+  const isCanvasViewer = resolveCurrentCanvasRole() === 'viewer';
+
   const canEditPixels = (raw: LayerModel) => {
     const layer = (raw.layerType === 'mask' && layersRef.current.find((l) => l.id === raw.parentId)) || raw;
     // A group's mask is painted by whoever may edit the group (the group itself has no pixels)
     return canEditOwnPixels(layer !== raw && layer.layerType === 'group' ? { ...layer, layerType: 'raster' } : layer);
   };
-  const canEditOwnPixels = (layer: LayerModel) => !isGuest && !layer.isLocked && layer.layerType !== 'group' && Boolean(
+  const canEditOwnPixels = (layer: LayerModel) => !isGuest && !isCanvasViewer && !layer.isLocked && layer.layerType !== 'group' && Boolean(
     layer.ownerId === user?.id || (!layer.isPublic && layer.ownerId && layer.aclMode === 'shared_all')
   );
 
@@ -2453,7 +2466,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       .catch(() => { /* the canvas middle stays */ });
   };
 
-  const canCreateFilterLayer = Boolean(onCreateLayer && !isGuest && canvas && isEngineReady && !transformLayerIdRef.current);
+  const canCreateFilterLayer = Boolean(onCreateLayer && !isGuest && !isCanvasViewer && canvas && isEngineReady && !transformLayerIdRef.current);
   const filterCanvasSizeKey = canvas ? `${canvas.id}:${canvas.width}x${canvas.height}` : '';
   const filterMemoryPlan = useMemo(
     () => canvas
@@ -2542,7 +2555,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const item = toNewLayer ? null : getFilterLayer();
     const engine = tileEngineRef.current;
     if ((!toNewLayer && !item) || !engine || !canvas) return false;
-    if (toNewLayer && (!onCreateLayer || isGuest || !isEngineReady || transformLayerIdRef.current)) return false;
+    if (toNewLayer && (!onCreateLayer || isGuest || isCanvasViewer || !isEngineReady || transformLayerIdRef.current)) return false;
     const { width, height } = canvas;
     const memoryPlan = toNewLayer ? assessFilterCompositeMemory(width, height, coarsePointer()) : null;
     if (toNewLayer && memoryPlan?.tier === 'block') return false;
@@ -4893,7 +4906,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       });
       return true;
     }
-    if (isGuest || !onCreateLayer) return false;
+    if (isGuest || isCanvasViewer || !onCreateLayer) return false;
     if (action.kind === 'layer') return Boolean(await onCreateLayer(action.name, 'normal', 'raster'));
 
     const source = document.createElement('canvas');
@@ -4948,14 +4961,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       return [...merged.values()];
     };
 
-    const currentMemberRaw = (roomMembers && roomMembers.length > 0 ? roomMembers : members).find(
-      (m) => m.userId === userRef.current?.id,
-    );
-    const roleRaw = currentMemberRaw && 'role' in currentMemberRaw ? currentMemberRaw.role : undefined;
-    const validRole: 'owner' | 'admin' | 'editor' | 'viewer' | undefined =
-      roleRaw === 'owner' || roleRaw === 'admin' || roleRaw === 'editor' || roleRaw === 'viewer'
-        ? roleRaw
-        : undefined;
+    const validRole = resolveCurrentCanvasRole();
     const canvasMember = validRole && userRef.current
       ? {
           canvasId: canvas.id,

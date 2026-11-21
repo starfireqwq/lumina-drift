@@ -1473,7 +1473,13 @@ export const App: React.FC = () => {
 
       {currentCanvas && !roomLocked && (() => {
         const currentMemberRaw = members.find((m) => m.userId === user?.id);
-        const roleRaw = currentMemberRaw && 'role' in currentMemberRaw ? currentMemberRaw.role : undefined;
+        const roleRaw = currentMemberRaw
+          ? ('canvasRole' in currentMemberRaw && currentMemberRaw.canvasRole
+              ? currentMemberRaw.canvasRole
+              : 'role' in currentMemberRaw
+                ? currentMemberRaw.role
+                : undefined)
+          : undefined;
         const validRole: CanvasMemberModel['role'] | undefined =
           roleRaw === 'owner' || roleRaw === 'admin' || roleRaw === 'editor' || roleRaw === 'viewer'
             ? roleRaw
