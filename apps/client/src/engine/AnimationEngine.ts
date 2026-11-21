@@ -126,6 +126,145 @@ export function removeTimelineLabel(
   return normalizeTimelineLabels(list).filter((l) => l.frame !== f);
 }
 
+export interface RepeatCelPlanItem {
+  /** '' for blank frame, otherwise the real cel layer id to reference */
+  ref: string;
+  hold: number;
+  blank?: boolean;
+  /** Display name for the created ref group layer */
+  name: string;
+}
+
+export interface RepeatCelPlan {
+  items: RepeatCelPlanItem[];
+  /** Total timeline frames covered by the original selected run plus all repeated items */
+  totalFrames: number;
+  /** Number of extra frames added by the repeated items */
+  addedFrames: number;
+  /** Whether the plan was capped by maxItems */
+  capped: boolean;
+}
+
+export const MAX_REPEAT_CREATED_ITEMS = 200;
+
+/**
+ * Computes the extra ref/blank entries needed to repeat a selected sequence of cels.
+ * - mode 'count': total cycles including the original selection (e.g. 4 cels × count 3 = 12 frames, adding 2 cycles = 8 items).
+ * - mode 'toEnd': repeats until `targetEndFrame` (timeline length), trimming the last item's hold if needed.
+ */
+export function planRepeatCels(
+  allEntries: ReadonlyArray<CelEntry>,
+  selectedIds: ReadonlyArray<string>,
+  opts: { mode: 'count' | 'toEnd'; count?: number; targetEndFrame?: number; maxItems?: number },
+): RepeatCelPlan {
+  const idSet = new Set(selectedIds);
+  const picked: Array<{ entry: CelEntry; index: number }> = [];
+  allEntries.forEach((entry, index) => {
+    if (idSet.has(entry.id)) picked.push({ entry, index });
+  });
+  if (picked.length === 0) return { items: [], totalFrames: 0, addedFrames: 0, capped: false };
+
+  const byId = new Map(allEntries.map((e) => [e.id, e]));
+  const template = picked.map(({ entry }) => {
+    const targetId = celLayerOf(entry);
+    if (!targetId) {
+      return { ref: '', hold: entry.hold, blank: true, name: BLANK_CEL_NAME };
+    }
+    const targetLabel = byId.get(targetId)?.label || entry.label || '1';
+    return { ref: targetId, hold: entry.hold, name: `↻ ${targetLabel}` };
+  });
+  const baseFrames = template.reduce((sum, item) => sum + item.hold, 0);
+  const maxItems = Math.max(1, opts.maxItems ?? MAX_REPEAT_CREATED_ITEMS);
+  const items: RepeatCelPlanItem[] = [];
+  let addedFrames = 0;
+  let capped = false;
+
+  if (opts.mode === 'count') {
+    const cycles = Math.max(1, Math.min(100, Math.round(opts.count ?? 2)));
+    const extraCycles = cycles - 1;
+    for (let c = 0; c < extraCycles; c++) {
+      for (const tpl of template) {
+        if (items.length >= maxItems) {
+          capped = true;
+          break;
+        }
+        items.push({ ...tpl });
+        addedFrames += tpl.hold;
+      }
+      if (capped) break;
+    }
+  } else {
+    const lastIdx = picked[picked.length - 1].index;
+    const afterStart = entryStart(allEntries as CelEntry[], lastIdx) + picked[picked.length - 1].entry.hold;
+    const targetEnd = Math.max(afterStart, Math.min(MAX_TIMELINE_FRAMES, Math.round(opts.targetEndFrame ?? afterStart)));
+    let remaining = targetEnd - afterStart;
+    let cursor = 0;
+    while (remaining > 0) {
+      if (items.length >= maxItems) {
+        capped = true;
+        break;
+      }
+      const tpl = template[cursor % template.length];
+      const hold = Math.min(tpl.hold, remaining);
+      items.push({ ...tpl, hold });
+      addedFrames += hold;
+      remaining -= hold;
+      cursor++;
+    }
+  }
+
+  return {
+    items,
+    totalFrames: baseFrames + addedFrames,
+    addedFrames,
+    capped,
+  };
+}
+
+export interface SequentialRenamePlan {
+  renames: Array<{ id: string; name: string }>;
+  skippedOthers: number;
+}
+
+/**
+ * Plans sequential cel renames (1, 2, 3...) following timeline appearance order.
+ * Applies to raster and folder cels alike; skips blank frames and ref entries for numbering,
+ * while keeping editable ref labels synced (`↻ <newName>`). Other painters' cels are skipped.
+ */
+export function planSequentialCelRenames(
+  entries: ReadonlyArray<CelEntry>,
+  canEdit: (entryId: string) => boolean,
+): SequentialRenamePlan {
+  const renames: Array<{ id: string; name: string }> = [];
+  const newNameById = new Map<string, string>();
+  let skippedOthers = 0;
+  let seq = 0;
+
+  for (const e of entries) {
+    if (e.ref !== undefined || e.blank) continue;
+    seq += 1;
+    const desired = String(seq);
+    if (!canEdit(e.id)) {
+      skippedOthers += 1;
+      newNameById.set(e.id, e.label);
+      continue;
+    }
+    newNameById.set(e.id, desired);
+    if (e.label !== desired) renames.push({ id: e.id, name: desired });
+  }
+
+  for (const e of entries) {
+    if (!e.ref || e.blank) continue;
+    if (!canEdit(e.id)) continue;
+    const targetName = newNameById.get(e.ref);
+    if (!targetName) continue;
+    const desired = `↻ ${targetName}`;
+    if (e.label !== desired) renames.push({ id: e.id, name: desired });
+  }
+
+  return { renames, skippedOthers };
+}
+
 export function upsertTransformKeyframe(
   list: ReadonlyArray<TransformKeyframe> | undefined | null,
   kf: TransformKeyframe

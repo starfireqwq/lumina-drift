@@ -1011,6 +1011,15 @@ export const zhCN: Translations = {
     timelineLabelPlaceholder: '例如：眨眼、台词…',
     timelineLabelDelete: '删除标签',
     timelineLabelFrame: '第 {frame} 格',
+    repeatCels: '重复…',
+    repeatModalTitle: '重复指定胶片',
+    repeatModeCount: '指定次数',
+    repeatModeToEnd: '重复到结尾',
+    repeatCountLabel: '循环次数（含原格）',
+    repeatSummary: '共 {total} 格（新增 {added} 个参照）',
+    repeatNoRoom: '已达时间轴结尾，没有可填满的格数。',
+    renameInOrder: '依序命名',
+    renameInOrderTooltip: '依时间轴出场顺序改名为 1、2、3…',
   },
 
   comic: {

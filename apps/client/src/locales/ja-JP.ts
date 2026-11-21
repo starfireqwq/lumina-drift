@@ -1011,6 +1011,15 @@ export const jaJP: Translations = {
     timelineLabelPlaceholder: '例：まばたき、セリフ…',
     timelineLabelDelete: 'ラベル削除',
     timelineLabelFrame: '{frame} フレーム',
+    repeatCels: '繰り返し…',
+    repeatModalTitle: 'セルの繰り返し指定',
+    repeatModeCount: '回数指定',
+    repeatModeToEnd: '最後まで繰り返す',
+    repeatCountLabel: '繰り返し回数',
+    repeatSummary: '計 {total} フレーム（+{added} 参照）',
+    repeatNoRoom: 'タイムライン末尾のため追加できません。',
+    renameInOrder: '連番リネーム',
+    renameInOrderTooltip: 'タイムライン順に 1, 2, 3… へリネーム',
   },
 
   comic: {

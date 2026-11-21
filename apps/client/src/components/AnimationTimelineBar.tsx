@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
   AnimationEngine, AnimationTrack, MAX_HOLD, MAX_ONION, MAX_TIMELINE_FRAMES, ONION_MODES, OnionSkinConfig, TIMELINE_SLACK, celLayerOf, entryIndexAt, entryStart,
-  formatTimecode, parseTimecode, removeTimelineLabel, trackLength, upsertTimelineLabel, upsertTransformKeyframe, removeTransformKeyframe, type OnionMode, type TimecodeMode,
+  formatTimecode, parseTimecode, planRepeatCels, removeTimelineLabel, trackLength, upsertTimelineLabel, upsertTransformKeyframe, removeTransformKeyframe, type OnionMode, type TimecodeMode,
 } from '../engine/AnimationEngine';
 import { clearLightTable, lightTableHas, toggleLightCel, type LightTableScope, type LightTableState } from '../engine/lightTable';
 import {
@@ -13,7 +13,7 @@ import {
   type TransformKeyframe,
 } from '@atelier/shared';
 import {
-  ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Eye, Film, Folder, Lamp, Loader2, MessageSquare, Minus, Pause, Play, Plus,
+  ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Eye, Film, Folder, Lamp, ListOrdered, Loader2, MessageSquare, Minus, Pause, Play, Plus,
   Repeat, Repeat2, SkipBack, SkipForward, Tag, Trash2, Users, X,
 } from 'lucide-react';
 import { AtelierModal, modalButton } from './AtelierModal';
@@ -100,6 +100,10 @@ interface AnimationTimelineBarProps {
   onUpdateCelMeta: (entryId: string, patch: { mark?: CelMark | null; note?: string | null }) => void;
   /** Save timeline frame labels on the edited folder */
   onUpdateLabels: (labels: TimelineLabel[]) => void;
+  /** Repeat selected cels using ref entries (returns true if created) */
+  onRepeatEntries: (folderId: string, entryIds: string[], opts: { mode: 'count' | 'toEnd'; count: number }) => Promise<boolean>;
+  /** Rename cels in timeline appearance order (1, 2, 3...) */
+  onRenameInOrder: (folderId: string) => void;
   onToggleShared: () => void;
   onFpsChange: (fps: number) => void;
   /** A click on a track: that folder becomes the edited one, at that frame */
@@ -150,7 +154,7 @@ const AnimThumbImg: React.FC<{
 
 export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   engine, isOpen, onClose, tracks, activeFolderId, thumbnails = EMPTY_THUMBS, subscribeThumbnails, getThumbnailsSnapshot, ownerNames, can,
-  onCreateFolder, onAddFrame, onDuplicateFrame, onReuseCel, onAddBlank, onKeyframePanelChange, onDeleteFrame, onMoveFrame, onSetHold, onUpdateCelMeta, onUpdateLabels, onToggleShared, onFpsChange,
+  onCreateFolder, onAddFrame, onDuplicateFrame, onReuseCel, onAddBlank, onKeyframePanelChange, onDeleteFrame, onMoveFrame, onSetHold, onUpdateCelMeta, onUpdateLabels, onRepeatEntries, onRenameInOrder, onToggleShared, onFpsChange,
   onSelectCell, planExport, onPlaceEntries, onCopyEntries, onPasteEntries, onSetEntryHold, ripple, onToggleRipple,
   timelineLength, lengthIsSet, onSetLength, lightTable, onUpdateLightTable,
   activeLayer, canvasWidth = 1920, canvasHeight = 1080, onUpdateLayerKeyframes,
@@ -235,6 +239,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   const [celMenu, setCelMenu] = useState<{ entryId: string; x: number; y: number } | null>(null);
   const [noteModal, setNoteModal] = useState<{ entryId: string; label: string; text: string } | null>(null);
   const [labelModal, setLabelModal] = useState<{ frame: number; text: string; existing: boolean } | null>(null);
+  const [repeatModal, setRepeatModal] = useState<{ folderId: string; entryIds: string[]; mode: 'count' | 'toEnd'; count: number; busy: boolean } | null>(null);
   const [exportFormat, setExportFormat] = useState<'gif' | 'mp4'>('gif');
   const [exportResolution, setExportResolution] = useState<VideoExportResolution>('4k');
   const [exportScope, setExportScope] = useState<AnimationExportScope>('folder');
@@ -895,6 +900,31 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 <button type="button" onClick={onAddBlank} disabled={!can.addCel} title={t.animation.blankFrame} className={iconBtn}>
                   <span aria-hidden className="text-sm leading-none text-neutral-400">×</span>{t.animation.blankFrame}
                 </button>
+                <button
+                  type="button"
+                  disabled={!can.addCel || (!selection && !current)}
+                  title={t.animation.repeatModalTitle}
+                  onClick={() => {
+                    const folderId = selection?.folderId ?? activeFolderId;
+                    const ids = selection && selection.ids.size > 0
+                      ? (tracks.find((tr) => tr.folderId === selection.folderId)?.entries.filter((x) => selection.ids.has(x.id)).map((x) => x.id) ?? [])
+                      : current ? [current.id] : [];
+                    if (!folderId || ids.length === 0) return;
+                    setRepeatModal({ folderId, entryIds: ids, mode: 'count', count: 2, busy: false });
+                  }}
+                  className={iconBtn}
+                >
+                  <Repeat2 className="h-3.5 w-3.5" />{t.animation.repeatCels}
+                </button>
+                <button
+                  type="button"
+                  disabled={!activeFolderId || realCels.length === 0}
+                  title={t.animation.renameInOrderTooltip}
+                  onClick={() => activeFolderId && onRenameInOrder(activeFolderId)}
+                  className={iconBtn}
+                >
+                  <ListOrdered className="h-3.5 w-3.5" />{t.animation.renameInOrder}
+                </button>
                 <span className="mx-1 h-4 w-px shrink-0 bg-neutral-800" />
                 {current
                   ? holdStepper(t.animation.celHoldFrames, current.hold, (n) => onSetHold(Math.max(1, Math.min(MAX_HOLD, n))), canEditEntry)
@@ -1244,6 +1274,21 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 <MessageSquare className="h-3.5 w-3.5 shrink-0 text-neutral-400" />
                 <span className="flex-1 truncate">{t.animation.celNote}</span>
               </button>
+              <button type="button" role="menuitem" disabled={!can.addCel || !menuEditable} className={itemCls}
+                onClick={() => {
+                  const menuTrack = tracks.find((tr) => tr.entries.some((x) => x.id === menuEntry.id));
+                  if (menuTrack) {
+                    const useSelection = selection?.folderId === menuTrack.folderId && selection.ids.has(menuEntry.id) && selection.ids.size > 0;
+                    const ids = useSelection
+                      ? menuTrack.entries.filter((x) => selection!.ids.has(x.id)).map((x) => x.id)
+                      : [menuEntry.id];
+                    setRepeatModal({ folderId: menuTrack.folderId, entryIds: ids, mode: 'count', count: 2, busy: false });
+                  }
+                  setCelMenu(null);
+                }}>
+                <Repeat2 className="h-3.5 w-3.5 shrink-0 text-neutral-400" />
+                <span className="flex-1 truncate">{t.animation.repeatCels}</span>
+              </button>
             </div>
           );
         })()}
@@ -1355,6 +1400,97 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
             />
           </AtelierModal>
         )}
+      </OverlayPresence>
+
+      <OverlayPresence open={Boolean(repeatModal)}>
+        {repeatModal && (() => {
+          const targetTrack = tracks.find((tr) => tr.folderId === repeatModal.folderId);
+          const preview = targetTrack
+            ? planRepeatCels(targetTrack.entries, repeatModal.entryIds, {
+                mode: repeatModal.mode,
+                count: repeatModal.count,
+                targetEndFrame: length,
+              })
+            : { items: [], totalFrames: 0, addedFrames: 0, capped: false };
+          const canApply = !repeatModal.busy && preview.items.length > 0;
+          const submitRepeat = async () => {
+            if (!canApply) return;
+            setRepeatModal((prev) => (prev ? { ...prev, busy: true } : null));
+            const ok = await onRepeatEntries(repeatModal.folderId, repeatModal.entryIds, {
+              mode: repeatModal.mode,
+              count: repeatModal.count,
+            });
+            setRepeatModal((prev) => (ok ? null : prev ? { ...prev, busy: false } : null));
+          };
+          return (
+            <AtelierModal
+              title={t.animation.repeatModalTitle}
+              icon={<Repeat2 />}
+              width="sm"
+              onClose={() => !repeatModal.busy && setRepeatModal(null)}
+              footer={
+                <>
+                  <button type="button" className={modalButton.secondary} disabled={repeatModal.busy} onClick={() => setRepeatModal(null)}>{t.common.cancel}</button>
+                  <button type="button" className={modalButton.primary} disabled={!canApply} onClick={() => void submitRepeat()}>
+                    {repeatModal.busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    {t.common.confirm}
+                  </button>
+                </>
+              }
+            >
+              <div className="space-y-3">
+                <div role="radiogroup" className="grid grid-cols-2 gap-2">
+                  {([
+                    ['count', t.animation.repeatModeCount],
+                    ['toEnd', t.animation.repeatModeToEnd],
+                  ] as const).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      role="radio"
+                      aria-checked={repeatModal.mode === mode}
+                      onClick={() => setRepeatModal({ ...repeatModal, mode })}
+                      className={`atelier-tl-row rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+                        repeatModal.mode === mode
+                          ? 'border-indigo-400 bg-indigo-500/20 text-white'
+                          : 'border-neutral-800 bg-neutral-900/60 text-neutral-400 hover:bg-neutral-800'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {repeatModal.mode === 'count' && (
+                  <label className="flex items-center justify-between gap-2 text-xs text-neutral-300">
+                    <span>{t.animation.repeatCountLabel}</span>
+                    <input
+                      type="number"
+                      min={2}
+                      max={100}
+                      value={repeatModal.count}
+                      onChange={(e) => {
+                        const n = Math.max(2, Math.min(100, Math.round(Number(e.target.value) || 2)));
+                        setRepeatModal({ ...repeatModal, count: n });
+                      }}
+                      onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === 'Enter') void submitRepeat();
+                      }}
+                      className="atelier-field h-8 w-20 px-2 text-center font-mono text-xs font-bold text-white"
+                    />
+                  </label>
+                )}
+                <p className="text-[11px] text-neutral-400">
+                  {preview.items.length > 0
+                    ? t.animation.repeatSummary
+                        .replace('{total}', String(preview.totalFrames))
+                        .replace('{added}', String(preview.items.length))
+                    : t.animation.repeatNoRoom}
+                </p>
+              </div>
+            </AtelierModal>
+          );
+        })()}
       </OverlayPresence>
 
       <OverlayPresence open={showExportModal}>

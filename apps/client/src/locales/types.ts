@@ -1022,6 +1022,15 @@ export interface Translations {
     timelineLabelPlaceholder: string;
     timelineLabelDelete: string;
     timelineLabelFrame: string;
+    repeatCels: string;
+    repeatModalTitle: string;
+    repeatModeCount: string;
+    repeatModeToEnd: string;
+    repeatCountLabel: string;
+    repeatSummary: string;
+    repeatNoRoom: string;
+    renameInOrder: string;
+    renameInOrderTooltip: string;
   };
 
   comic: {

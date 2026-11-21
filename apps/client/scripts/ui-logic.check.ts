@@ -37,7 +37,7 @@ import {
 import { getBoxPivotCanvasPoint, type TransformBox } from '../src/utils/transformProjection';
 import {
   AnimationEngine, animationDisplay, celEntriesOf, celInsertAt, celOfLayer, entryIndexAt, exportSegments, formatTimecode, frameSignature, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
-  normalizeTimelineLabels, parseTimecode, placeEntries, playbackFrame, removeTimelineLabel, removeTransformKeyframe,
+  normalizeTimelineLabels, parseTimecode, placeEntries, planRepeatCels, planSequentialCelRenames, playbackFrame, removeTimelineLabel, removeTransformKeyframe,
   timeOfCel, trackLength, upsertTimelineLabel, upsertTransformKeyframe,
 } from '../src/engine/AnimationEngine';
 import { cleanLightTable, clearLightTable, emptyLightTable, lightIdsFor, toggleLightCel } from '../src/engine/lightTable';
@@ -1758,5 +1758,49 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
   assert.deepEqual(labels.map((l) => l.frame), [2, 10], 'Empty upsert removes label');
   labels = removeTimelineLabel(labels, 2);
   assert.deepEqual(labels, [{ frame: 10, text: '改名' }]);
+}
+
+// Animation Phase B3 & B4: repeat cels & sequential cel renaming
+{
+  const cels = celEntriesOf([
+    { id: 'f', parentId: null, layerType: 'group', sortOrder: 10, isVisible: true, opacity: 1, meta: { animation: { fps: 12 } } },
+    { id: 'c1', parentId: 'f', layerType: 'raster', sortOrder: 1, isVisible: true, opacity: 1, name: 'A', ownerId: 'u1', meta: { cel: { hold: 1 } } },
+    { id: 'c2', parentId: 'f', layerType: 'group', sortOrder: 2, isVisible: true, opacity: 1, name: 'B', ownerId: 'u2', meta: { cel: { hold: 1 } } },
+    { id: 'c3', parentId: 'f', layerType: 'raster', sortOrder: 3, isVisible: true, opacity: 1, name: 'C', ownerId: 'u1', meta: { cel: { hold: 1 } } },
+    { id: 'c4', parentId: 'f', layerType: 'group', sortOrder: 4, isVisible: true, opacity: 1, name: '×', ownerId: 'u1', meta: { cel: { hold: 1, ref: '' } } },
+  ], 'f');
+  // 1-4 cels repeated 3 times -> 12 total frames (8 extra ref/blank items)
+  const rep3 = planRepeatCels(cels, ['c1', 'c2', 'c3', 'c4'], { mode: 'count', count: 3 });
+  assert.equal(rep3.totalFrames, 12);
+  assert.equal(rep3.addedFrames, 8);
+  assert.equal(rep3.items.length, 8);
+  assert.equal(rep3.items[0].ref, 'c1');
+  assert.equal(rep3.items[3].ref, '', 'Blank frames repeat as blank frames');
+  assert.equal(rep3.items[3].blank, true);
+
+  // Fill to end trims last hold cleanly
+  const held = [
+    { id: 'h1', label: '1', hold: 3, ownerId: 'u1', isGroup: false },
+    { id: 'h2', label: '2', hold: 2, ownerId: 'u1', isGroup: false },
+  ];
+  const toEnd = planRepeatCels(held, ['h1', 'h2'], { mode: 'toEnd', targetEndFrame: 12 });
+  assert.equal(toEnd.totalFrames, 12);
+  assert.deepEqual(toEnd.items.map((x) => [x.ref, x.hold]), [['h1', 3], ['h2', 2], ['h1', 2]]);
+
+  // Sequential rename skips other painters' cels and includes folder cels
+  const shuffled = celEntriesOf([
+    { id: 'f', parentId: null, layerType: 'group', sortOrder: 10, isVisible: true, opacity: 1, meta: { animation: { fps: 12 } } },
+    { id: 'c3', parentId: 'f', layerType: 'raster', sortOrder: 1, isVisible: true, opacity: 1, name: '3', ownerId: 'u1' },
+    { id: 'c2', parentId: 'f', layerType: 'group', sortOrder: 2, isVisible: true, opacity: 1, name: 'Other', ownerId: 'u2' },
+    { id: 'c1', parentId: 'f', layerType: 'group', sortOrder: 3, isVisible: true, opacity: 1, name: 'FolderCel', ownerId: 'u1' },
+    { id: 'r1', parentId: 'f', layerType: 'group', sortOrder: 4, isVisible: true, opacity: 1, name: '↻ 3', ownerId: 'u1', meta: { cel: { ref: 'c3' } } },
+  ], 'f');
+  const ren = planSequentialCelRenames(shuffled, (id) => shuffled.find((x) => x.id === id)?.ownerId === 'u1');
+  assert.equal(ren.skippedOthers, 1);
+  assert.deepEqual(ren.renames, [
+    { id: 'c3', name: '1' },
+    { id: 'c1', name: '3' },
+    { id: 'r1', name: '↻ 1' },
+  ]);
 }
 console.log('ui-logic checks passed');

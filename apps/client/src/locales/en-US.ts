@@ -1011,6 +1011,15 @@ export const enUS: Translations = {
     timelineLabelPlaceholder: 'e.g. Blink, Line…',
     timelineLabelDelete: 'Delete label',
     timelineLabelFrame: 'Frame {frame}',
+    repeatCels: 'Repeat…',
+    repeatModalTitle: 'Repeat Cels',
+    repeatModeCount: 'Repeat count',
+    repeatModeToEnd: 'Fill to end',
+    repeatCountLabel: 'Total cycles',
+    repeatSummary: '{total} frames (+{added} refs)',
+    repeatNoRoom: 'Already at timeline end.',
+    renameInOrder: 'Renumber',
+    renameInOrderTooltip: 'Rename cels 1, 2, 3… in timeline order',
   },
 
   comic: {

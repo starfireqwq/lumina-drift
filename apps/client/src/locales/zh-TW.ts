@@ -1011,6 +1011,15 @@ export const zhTW: Translations = {
     timelineLabelPlaceholder: '例如：眨眼、台詞…',
     timelineLabelDelete: '刪除標籤',
     timelineLabelFrame: '第 {frame} 格',
+    repeatCels: '重複…',
+    repeatModalTitle: '重複指定膠片',
+    repeatModeCount: '指定次數',
+    repeatModeToEnd: '重複到結尾',
+    repeatCountLabel: '循環次數（含原格）',
+    repeatSummary: '共 {total} 格（新增 {added} 個參照）',
+    repeatNoRoom: '已達時間軸結尾，沒有可填滿的格數。',
+    renameInOrder: '依序命名',
+    renameInOrderTooltip: '依時間軸出場順序改名為 1、2、3…',
   },
 
   comic: {

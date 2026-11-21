@@ -124,7 +124,7 @@ import { LayerPanel } from './LayerPanel';
 import { getUserColor } from '../utils/userColors';
 import {
   AnimationEngine, AnimationTrack, animationDisplay, BLANK_CEL_NAME, celEntriesOf, celInsertAt, celLayerOf, celOfLayer, entryIndexAt, entryStart, exportSegments, isAnimationFolder, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
-  normalizeTimelineLabels, placeEntries, trackLength,
+  normalizeTimelineLabels, placeEntries, planRepeatCels, planSequentialCelRenames, trackLength,
 } from '../engine/AnimationEngine';
 import { lightIdsFor, loadLightTable, saveLightTable, type LightTableState } from '../engine/lightTable';
 import { DEFAULT_TEXT, renderText, textBounds } from '../engine/textLayer';
@@ -3165,16 +3165,17 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   }, [canvas?.id, canvas?.width, canvas?.height]);
 
   /** 新增圖層／圖層組 (buttons, shortcuts, 群組): Ctrl+Z takes it away again, redo brings it back */
-  const recordLayerCreation = (created: LayerModel, afterTiles: TileData[] = []) => {
+  const recordLayerCreation = (created: LayerModel, afterTiles: TileData[] = [], opts?: { groupId?: string; desc?: string }) => {
     scopedUndoRef.current.push({
       opId: `op_new_layer_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       userId: userRef.current?.id || user?.id || 'guest',
       layerId: created.id,
       opType: 'LAYER_CREATE',
+      ...(opts?.groupId ? { groupId: opts.groupId } : null),
       beforeTiles: [],
       afterTiles,
       timestamp: Date.now(),
-      desc: `新增${created.layerType === 'group' ? '圖層組' : '圖層'}「${created.name}」`,
+      desc: opts?.desc ?? `新增${created.layerType === 'group' ? '圖層組' : '圖層'}「${created.name}」`,
       layerCreated: { model: created },
     });
     updateUndoRedoState();
@@ -4087,6 +4088,81 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (cleaned.length > 0) animation.labels = cleaned;
     else delete animation.labels;
     onUpdateLayerProps?.(animFolder.id, { meta: { ...animFolder.meta, animation } });
+  };
+  /**
+   * Repeat a selected run of cels using ref entries (single grouped undo step).
+   * Rejects the entire batch without creating anything if it would touch or shift another painter's cel.
+   */
+  const repeatAnimationEntries = async (
+    folderId: string,
+    entryIds: string[],
+    opts: { mode: 'count' | 'toEnd'; count: number },
+  ): Promise<boolean> => {
+    const folder = layersRef.current.find((l) => l.id === folderId);
+    if (!onCreateLayer || !folder) return false;
+    if (!canAddCel(folder)) {
+      warn('這個動畫資料夾沒有共用，只有建立者能加格。');
+      return false;
+    }
+    const entries = celEntriesOf(layersRef.current, folderId);
+    const pickedSet = new Set(entryIds);
+    const pickedIndices: number[] = [];
+    entries.forEach((e, i) => { if (pickedSet.has(e.id)) pickedIndices.push(i); });
+    if (pickedIndices.length === 0) return false;
+
+    const lastPickedIdx = pickedIndices[pickedIndices.length - 1];
+    const touchedIds = new Set<string>([
+      ...pickedIndices.map((i) => entries[i].id),
+      ...entries.slice(lastPickedIdx + 1).map((e) => e.id),
+    ]);
+    for (const id of touchedIds) {
+      const l = entryLayer(id);
+      if (!l || !canManageLayer(l)) {
+        warn('重複指定會動到其他畫師的格，已取消整批操作。', 3200);
+        return false;
+      }
+    }
+
+    const plan = planRepeatCels(entries, pickedIndices.map((i) => entries[i].id), {
+      mode: opts.mode,
+      count: opts.count,
+      targetEndFrame: animTimelineLength,
+    });
+    if (plan.items.length === 0) return false;
+
+    const groupId = `anim_repeat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    let afterId = entries[lastPickedIdx].id;
+    const createdIds: string[] = [];
+    for (const item of plan.items) {
+      const celMeta: NonNullable<LayerMeta['cel']> = {
+        ref: item.ref,
+        ...(item.hold > 1 ? { hold: item.hold } : {}),
+      };
+      const created = await onCreateLayer(item.name, 'normal', 'group', afterId, folderId, {
+        meta: { cel: celMeta },
+        select: false,
+      });
+      if (!created) break;
+      afterId = created.id;
+      createdIds.push(created.id);
+      recordLayerCreation(created, [], { groupId, desc: '動畫：重複指定' });
+    }
+    if (createdIds.length > 0) await waitForLayerModels(createdIds);
+    return createdIds.length > 0;
+  };
+  /** Rename cels (1, 2, 3...) in timeline appearance order; skips other painters' cels with a notice */
+  const renameAnimationCelsInOrder = (folderId: string) => {
+    const entries = celEntriesOf(layersRef.current, folderId);
+    const plan = planSequentialCelRenames(entries, (id) => {
+      const l = entryLayer(id);
+      return Boolean(l && canManageLayer(l));
+    });
+    for (const r of plan.renames) {
+      onUpdateLayerProps?.(r.id, { name: r.name });
+    }
+    if (plan.skippedOthers > 0) {
+      warn(`已依序重新命名（略過 ${plan.skippedOthers} 張其他畫師的膠片）。`, 3200);
+    }
   };
   /** Timeline length in frames, kept on the edited folder; null = up to the end of the longest track */
   const setAnimationLength = (frames: number | null) => {
@@ -5528,6 +5604,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 onSetHold={setAnimationHold}
                 onUpdateCelMeta={updateAnimationCelMeta}
                 onUpdateLabels={setAnimationLabels}
+                onRepeatEntries={repeatAnimationEntries}
+                onRenameInOrder={renameAnimationCelsInOrder}
                 onToggleShared={toggleAnimationShared}
                 onFpsChange={setAnimationFps}
                 onSelectCell={selectAnimationCell}
