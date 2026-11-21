@@ -212,7 +212,7 @@ export const BUILTIN_FILTERS: readonly FilterDef[] = [
 
 export const getFilter = (id: string | null | undefined) => BUILTIN_FILTERS.find((def) => def.id === id) ?? null;
 export const filtersInGroup = (group: FilterGroup) => BUILTIN_FILTERS.filter((def) => def.group === group);
-export const filterGroupsInUse = () => FILTER_GROUPS.filter((group) => filtersInGroup(group).length > 0);
+export const filterGroupsInUse = () => FILTER_GROUPS.filter((group) => group === 'library' || filtersInGroup(group).length > 0);
 
 export const filterLabel = (def: FilterDef, t: Translations) => t.filters.items[def.label];
 export const filterParamLabel = (param: Pick<FilterParam, 'label'>, t: Translations) => t.filters.params[param.label];

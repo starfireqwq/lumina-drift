@@ -746,6 +746,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const [isColorCurvesOpen, setIsColorCurvesOpen] = useState<boolean>(false);
   const [isGradientMapOpen, setIsGradientMapOpen] = useState<boolean>(false);
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
+  const filterMenuOpenRef = useRef(false);
+  filterMenuOpenRef.current = filterMenuOpen;
   // The filter window keeps showing its last filter while it fades out, so the id outlives filterMenuOpen
   const [layerFilterId, setLayerFilterId] = useState<string | null>(null);
   const shownFilterId = filterMenuOpen ? layerFilterId : null;
@@ -2690,6 +2692,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   const filterRunnerRef = useRef(runLayerFilter);
   filterRunnerRef.current = runLayerFilter;
+  const startFilterPointRef = useRef(startFilterPoint);
+  startFilterPointRef.current = startFilterPoint;
   const [filterCallbacks] = useState(() => ({
     curves: (options: ColorCurvesOptions | null) => filterRunnerRef.current(options ? { id: 'curves', values: { options } } : null, true),
     gradient: (stops: GradientStop[] | null, opacity: number) =>
@@ -2698,6 +2702,20 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       // A preview timer that fires while the window fades out must not start a new preview
       const id = filterIdRef.current;
       if (id) filterRunnerRef.current(values ? { id, values } : null, true);
+    },
+    libraryPreview: (job: FilterJob | null) => {
+      if (!filterMenuOpenRef.current && job) return;
+      void filterRunnerRef.current(job, true);
+    },
+    readThumbnail: () => {
+      const lm = layerManagerRef.current;
+      if (!lm) return Promise.resolve(null);
+      const layerId = filterApplyNewLayerRef.current ? null : (activeLayerRef.current?.id ?? null);
+      return lm.readFilterThumbnailPixels(layerId, filterApplyNewLayerRef.current ? filterIncludeBgRef.current : false, 96);
+    },
+    startPoint: (id: string | null) => {
+      if (!id) { filterPoint.clear(); return; }
+      startFilterPointRef.current(filterApplyNewLayerRef.current ? null : (activeLayerRef.current?.id ?? null));
     },
   }));
 
@@ -5969,9 +5987,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       <OverlayPresence open={filterMenuOpen} kind="popover">
         <Suspense fallback={null}><LayerFilterDialog key={layerFilterId ?? 'list'} filterId={layerFilterId} busy={filterBusy} refining={filterRefining}
           layerName={activeLayer?.name ?? ''} layerType={activeLayer?.layerType} histogram={filterHistogram} target={filterTargetOptions}
+          onReadThumbnail={filterCallbacks.readThumbnail} onStartPoint={filterCallbacks.startPoint}
           onChoose={chooseFilter} onBack={() => chooseFilter(null)} onClose={closeFilters}
-          onPreview={filterCallbacks.parameters}
-          onApply={(values) => layerFilterId ? runLayerFilter({ id: layerFilterId, values }, false) : Promise.resolve(false)} /></Suspense>
+          onPreview={filterCallbacks.parameters} onPreviewJob={filterCallbacks.libraryPreview}
+          onApply={(values) => layerFilterId ? runLayerFilter({ id: layerFilterId, values }, false) : Promise.resolve(false)}
+          onApplyJob={(job) => runLayerFilter(job, false)} /></Suspense>
       </OverlayPresence>
       {isColorCurvesOpen && <Suspense fallback={null}><ColorCurvesModal
         isOpen={isColorCurvesOpen}

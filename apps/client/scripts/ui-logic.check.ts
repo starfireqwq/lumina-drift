@@ -70,6 +70,7 @@ import {
 } from '../src/utils/filterRegistry';
 import { COLOR_ADJUST_PRESETS, matchColorPreset } from '../src/utils/filterPresets';
 import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../src/utils/filterMemoryGuard';
+import { BUILTIN_LIBRARY_CARDS, createFavoriteCard, parseFavoriteCards, scaleFilterValuesForThumbnail } from '../src/utils/filterLibrary';
 
 const hex = (channels: string) => `#${channels.split(' ').map((n) => Number(n).toString(16).padStart(2, '0')).join('')}`;
 
@@ -1069,7 +1070,7 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
       if (param.kind === 'range') assert.ok(param.min <= param.initial && param.initial <= param.max, `${def.id}.${param.key} default is in range`);
     }
   }
-  assert.deepEqual(filterGroupsInUse(), ['color', 'lineart', 'render', 'effect', 'blur', 'distort', 'sharpen'], 'Groups with no filters yet stay out of the menu');
+  assert.deepEqual(filterGroupsInUse(), ['color', 'library', 'lineart', 'render', 'effect', 'blur', 'distort', 'sharpen'], 'All 8 filter groups are active');
   assert.equal(filterFitsLayer(getFilter('despeckle')!, 'mask'), false, 'Line-art fixes stay off masks');
   assert.equal(filterFitsLayer(getFilter('despeckle')!, 'raster'), true);
 
@@ -1546,6 +1547,24 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
   assert.equal(pGroup.afterLayerId, 'grp', 'Active group places new layer above the group');
   assert.equal(pGroup.parentId, null, 'as a sibling of the group');
   assert.equal(pGroup.overlayZIndex, 4.5, 'and preview sits above all group descendants');
+
+  // Filter Library cards, thumbnail scaling, and favorite card validation
+  assert.equal(new Set(BUILTIN_LIBRARY_CARDS.map((c) => c.id)).size, BUILTIN_LIBRARY_CARDS.length, 'Library card ids are unique');
+  for (const card of BUILTIN_LIBRARY_CARDS) {
+    const def = getFilter(card.filterId);
+    assert.ok(def && PIXEL_FILTER_RUNNERS[card.filterId], `Library card ${card.id} targets a runnable filter`);
+    const scaled = scaleFilterValuesForThumbnail(def, card.values, 2000, 2000, 96, 96);
+    const sampleThumb = runPixelFilter(PIXEL_FILTER_RUNNERS[card.filterId], box, W, H, scaled);
+    assert.equal(sampleThumb.length, box.length, `Library card ${card.id} renders cleanly at thumbnail size`);
+  }
+  const scaledGlow = scaleFilterValuesForThumbnail(getFilter('glow')!, { radius: 40, strength: 100, threshold: 140 }, 1000, 1000, 100, 100);
+  assert.equal(scaledGlow.radius, 4, 'Thumbnail scaling shrinks pixel radii proportionally');
+  assert.equal(scaledGlow.strength, 100, 'Thumbnail scaling keeps percentage strength unchanged');
+  const createdFav = createFavoriteCard('  我的柔和發光  ', 'glow', { radius: 24, strength: 999, threshold: 140 });
+  assert.ok(createdFav && createdFav.name === '我的柔和發光', 'createFavoriteCard trims name');
+  assert.equal(createdFav.values.strength, 200, 'createFavoriteCard clamps out-of-range values');
+  const parsedFavs = parseFavoriteCards([createdFav, { id: 'bad', name: 'x', filterId: 'unknown', values: {} }, null]);
+  assert.equal(parsedFavs.length, 1, 'parseFavoriteCards filters out invalid entries safely');
 }
 
 // 對齊 L1: basis, whole-pixel offsets, off-canvas parts, and a pixel-level run of the move

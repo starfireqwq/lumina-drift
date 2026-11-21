@@ -720,6 +720,27 @@ export interface Translations {
     newLayerConfirmBody: string;
     stayCurrentLayer: string;
     continueNewLayer: string;
+    libraryFeatured: string;
+    libraryFavorites: string;
+    libraryEmptyFavs: string;
+    saveFavorite: string;
+    favoriteNamePlaceholder: string;
+    favoriteSaved: string;
+    renameFavorite: string;
+    libraryCards: {
+      softGlow: string;
+      retroMono: string;
+      mangaTone: string;
+      prismSplit: string;
+      inkSketch: string;
+      pixelBlock: string;
+      stoneRelief: string;
+      dreamBlur: string;
+      posterPop: string;
+      speedFocus: string;
+      filmGrain: string;
+      crispDetail: string;
+    };
     colorPresets: {
       original: string;
       morningGlow: string;

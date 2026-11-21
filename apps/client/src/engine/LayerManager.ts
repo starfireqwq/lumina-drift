@@ -3298,6 +3298,80 @@ export class LayerManager {
     }
   }
 
+  /**
+   * Low-resolution premultiplied RGBA pixels of either one layer or the visible composite,
+   * drawn directly at thumbnail scale (<= 96×96 ≈ 36 KB) so the Filter Library never allocates
+   * a full-canvas buffer even on 10000×8000 canvases.
+   */
+  public async readFilterThumbnailPixels(
+    layerId: string | null,
+    includeBackground = false,
+    maxSide = 96,
+  ): Promise<{ pixels: Uint8Array; width: number; height: number; origWidth: number; origHeight: number } | null> {
+    const w = this.canvasWidth;
+    const h = this.canvasHeight;
+    if (w <= 0 || h <= 0) return null;
+    const scale = Math.min(1, maxSide / Math.max(w, h));
+    const tw = Math.max(1, Math.round(w * scale));
+    const th = Math.max(1, Math.round(h * scale));
+    const small = RenderTexture.create({ width: tw, height: th, resolution: 1 });
+    const previewVisible = this.previewContainer.visible;
+    const overlayVisible = this.filterOverlaySprite?.visible ?? false;
+    this.previewContainer.visible = false;
+    if (this.filterOverlaySprite) this.filterOverlaySprite.visible = false;
+    try {
+      const clearColor = includeBackground ? this.parseCssColorRgba(this.lastBgColor) : [0, 0, 0, 0];
+      const item = layerId ? this.layersMap.get(layerId) : null;
+      if (item) {
+        const holder = new Container();
+        const temporary: Texture[] = [];
+        this.populateThumbContainer(item, holder, temporary, tw, th);
+        this.renderer.render({ container: holder, target: small, clear: true, clearColor });
+        holder.destroy({ children: true });
+        temporary.forEach((t) => t.destroy(true));
+      } else {
+        this.withAllTilesVisible(() => {
+          this.renderer.render({
+            container: this.layersContainer,
+            target: small,
+            clear: true,
+            clearColor,
+            transform: new Matrix().scale(scale, scale),
+          });
+        });
+      }
+      if (this.reader) {
+        const [pixels] = await this.reader(small, [{ x: 0, y: 0, w: tw, h: th }]);
+        return { pixels, width: tw, height: th, origWidth: w, origHeight: h };
+      }
+      const extracted = this.renderer.extract.canvas({ target: small }) as HTMLCanvasElement;
+      const ctx = extracted.getContext('2d');
+      if (!ctx) return null;
+      const raw = ctx.getImageData(0, 0, tw, th).data;
+      const premul = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i += 4) {
+        const a = raw[i + 3];
+        if (!a) continue;
+        if (a === 255) {
+          premul[i] = raw[i]; premul[i + 1] = raw[i + 1]; premul[i + 2] = raw[i + 2]; premul[i + 3] = 255;
+        } else {
+          premul[i] = ((raw[i] * a + 127) / 255) | 0;
+          premul[i + 1] = ((raw[i + 1] * a + 127) / 255) | 0;
+          premul[i + 2] = ((raw[i + 2] * a + 127) / 255) | 0;
+          premul[i + 3] = a;
+        }
+      }
+      return { pixels: premul, width: tw, height: th, origWidth: w, origHeight: h };
+    } catch (err) {
+      console.warn('[LayerManager] Filter thumbnail read failed:', err);
+      return null;
+    } finally {
+      this.previewContainer.visible = previewVisible;
+      if (this.filterOverlaySprite) this.filterOverlaySprite.visible = overlayVisible;
+      small.destroy(true);
+    }
+  }
+
   /** Full-size picture as shown (background, masks, current animation frames), for GIF / video frames */
   public renderCompositeCanvas(): HTMLCanvasElement {
     const w = this.canvasWidth;
