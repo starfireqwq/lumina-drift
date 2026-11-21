@@ -183,7 +183,7 @@ export function FilterLibraryView({
           {t.filters.libraryEmptyFavs}
         </p>
       ) : (
-        <div className={`grid gap-1.5 ${phone ? 'grid-cols-2' : 'grid-cols-2'}`}>
+        <div className={`grid gap-1.5 ${phone ? 'grid-cols-2' : 'grid-cols-2'} ${selectedKey ? 'max-h-48 overflow-y-auto overscroll-contain pr-0.5' : ''}`}>
           {entries.map((entry, idx) => {
             const def = getFilter(entry.filterId);
             const fits = !def || applyToNewLayer || filterFitsLayer(def, layerType);
