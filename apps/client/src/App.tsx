@@ -226,15 +226,19 @@ export const App: React.FC = () => {
   // The canvas picked on the gateway. The list fetched as the gateway closes opens it directly,
   // instead of joining the list's first (or the last opened) canvas on the way there.
   const gatewayCanvasRef = useRef<string | null>(null);
+  // True while the gateway's "create new room" flow is still running, so the effect on
+  // showGateway=false does not briefly join an existing room before createCanvas resolves.
+  const gatewayCreatingRoomRef = useRef(false);
 
   // Load all available canvases on boot or user change
   const fetchCanvases = async () => {
+    if (gatewayCreatingRoomRef.current) return;
     const origin = ApiService.getServerOrigin();
     const offline = OfflineSessionStore.isOfflineMode();
     const sameTarget = () => origin === ApiService.getServerOrigin() && offline === OfflineSessionStore.isOfflineMode();
     try {
       const list = await ApiService.listCanvases();
-      if (!sameTarget()) return;
+      if (!sameTarget() || gatewayCreatingRoomRef.current) return;
       const picked = gatewayCanvasRef.current;
       gatewayCanvasRef.current = null;
       setCanvases(list);
@@ -272,6 +276,8 @@ export const App: React.FC = () => {
     canvasOptions?: InitialCanvasOptions
   ) => {
     gatewayCanvasRef.current = canvasOptions?.canvasId ?? null;
+    const creatingNewRoom = Boolean(!canvasOptions?.canvasId && canvasOptions?.title);
+    gatewayCreatingRoomRef.current = creatingNewRoom;
     if ((targetServerUrl === 'offline' || canvasOptions?.offline) && OfflineSessionStore.canUseOfflineMode()) {
       OfflineSessionStore.setSessionMode('offline');
       reconnectServer('offline');
@@ -293,6 +299,8 @@ export const App: React.FC = () => {
         if (chosen) joinCanvas(chosen.id);
       } catch (err) {
         console.error('Failed to initialize offline canvas:', err);
+      } finally {
+        gatewayCreatingRoomRef.current = false;
       }
       return;
     }
@@ -308,7 +316,10 @@ export const App: React.FC = () => {
     // Transition and fetch canvases from target server
     setTimeout(async () => {
       const opts = canvasOptions;
-      if (origin !== ApiService.getServerOrigin() || OfflineSessionStore.isOfflineMode()) return;
+      if (origin !== ApiService.getServerOrigin() || OfflineSessionStore.isOfflineMode()) {
+        if (creatingNewRoom) gatewayCreatingRoomRef.current = false;
+        return;
+      }
       try {
         if (opts?.openLogin) setIsAuthModalOpen(true);
         if (opts?.canvasId) {
@@ -340,19 +351,22 @@ export const App: React.FC = () => {
         }
       } catch (err: any) {
         if (opts?.title) alert(err?.message || '建立房間失敗');
+      } finally {
+        if (creatingNewRoom) gatewayCreatingRoomRef.current = false;
       }
       if (origin === ApiService.getServerOrigin() && !authLoading) fetchCanvases();
     }, 150);
   };
 
   useEffect(() => {
-    if (!showGateway && !authLoading) {
+    if (!showGateway && !authLoading && !gatewayCreatingRoomRef.current) {
       fetchCanvases();
     }
   }, [user?.id, showGateway, authLoading]);
 
   // Ensure valid canvas is auto-selected when canvases load
   useEffect(() => {
+    if (gatewayCreatingRoomRef.current) return;
     if (canvases.length > 0 && !canvases.some((c) => c.id === activeCanvasId)) {
       const savedCanvasId = typeof window !== 'undefined' ? localStorage.getItem('atelier_active_canvas_id') : null;
       joinCanvas(canvases.find((c) => c.id === savedCanvasId)?.id ?? canvases[0].id);
