@@ -1000,6 +1000,17 @@ export const jaJP: Translations = {
     lightWholeTrack: 'トラック全体',
     lightOpacity: '不透明度',
     lightClear: 'すべて解除',
+    celMarkKey: '原画 ○',
+    celMarkInbetween: '中割り ●',
+    celMarkClear: '印を消す',
+    celNote: 'メモ',
+    celNotePlaceholder: 'セルメモを入力…',
+    celNoteClear: '消去',
+    timelineLabel: 'ラベル',
+    timelineLabelAdd: 'ラベル追加・編集',
+    timelineLabelPlaceholder: '例：まばたき、セリフ…',
+    timelineLabelDelete: 'ラベル削除',
+    timelineLabelFrame: '{frame} フレーム',
   },
 
   comic: {

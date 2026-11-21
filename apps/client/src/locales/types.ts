@@ -1011,6 +1011,17 @@ export interface Translations {
     lightWholeTrack: string;
     lightOpacity: string;
     lightClear: string;
+    celMarkKey: string;
+    celMarkInbetween: string;
+    celMarkClear: string;
+    celNote: string;
+    celNotePlaceholder: string;
+    celNoteClear: string;
+    timelineLabel: string;
+    timelineLabelAdd: string;
+    timelineLabelPlaceholder: string;
+    timelineLabelDelete: string;
+    timelineLabelFrame: string;
   };
 
   comic: {

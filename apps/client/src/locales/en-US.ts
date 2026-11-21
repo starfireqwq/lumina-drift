@@ -1000,6 +1000,17 @@ export const enUS: Translations = {
     lightWholeTrack: 'Whole track',
     lightOpacity: 'Opacity',
     lightClear: 'Remove all',
+    celMarkKey: 'Key ○',
+    celMarkInbetween: 'Inbetween ●',
+    celMarkClear: 'Clear mark',
+    celNote: 'Note',
+    celNotePlaceholder: 'Enter cel note…',
+    celNoteClear: 'Clear',
+    timelineLabel: 'Label',
+    timelineLabelAdd: 'Add / edit label',
+    timelineLabelPlaceholder: 'e.g. Blink, Line…',
+    timelineLabelDelete: 'Delete label',
+    timelineLabelFrame: 'Frame {frame}',
   },
 
   comic: {

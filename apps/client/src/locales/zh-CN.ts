@@ -1000,6 +1000,17 @@ export const zhCN: Translations = {
     lightWholeTrack: '整条轨道',
     lightOpacity: '不透明度',
     lightClear: '全部解除',
+    celMarkKey: '原画 ○',
+    celMarkInbetween: '中割 ●',
+    celMarkClear: '清除记号',
+    celNote: '备注',
+    celNotePlaceholder: '输入胶片备注…',
+    celNoteClear: '清除',
+    timelineLabel: '标签',
+    timelineLabelAdd: '新增／编辑标签',
+    timelineLabelPlaceholder: '例如：眨眼、台词…',
+    timelineLabelDelete: '删除标签',
+    timelineLabelFrame: '第 {frame} 格',
   },
 
   comic: {

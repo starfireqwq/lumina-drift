@@ -1,6 +1,8 @@
 import {
   Affine2D,
+  CelMark,
   IDENTITY_AFFINE,
+  TimelineLabel,
   TransformKeyframe,
   evaluateTransformKeyframes,
   multiplyAffine,
@@ -25,6 +27,10 @@ export interface CelEntry {
   ref?: string;
   /** A blank frame put on the timeline on purpose (meta.cel.ref = ''), not a reuse of a deleted cel */
   blank?: boolean;
+  /** Key drawing (○) or inbetween (●) badge */
+  mark?: CelMark;
+  /** Optional short memo for this cel */
+  note?: string;
   ownerId: string | null;
   isGroup: boolean;
 }
@@ -35,6 +41,8 @@ export interface AnimationTrack {
   ownerId: string | null;
   shared: boolean;
   entries: CelEntry[];
+  /** Shared timeline frame labels stored on the folder's meta.animation.labels */
+  labels?: TimelineLabel[];
 }
 
 /**
@@ -74,8 +82,49 @@ type AnimLayer = {
   opacity: number;
   name?: string;
   ownerId?: string | null;
-  meta?: { animation?: unknown; cel?: { hold?: number; ref?: string }; keyframes?: TransformKeyframe[] } | null;
+  meta?: {
+    animation?: { fps?: number; shared?: boolean; length?: number; labels?: TimelineLabel[] } | unknown;
+    cel?: { hold?: number; ref?: string; mark?: CelMark; note?: string };
+    keyframes?: TransformKeyframe[];
+  } | null;
 };
+
+/** Sanitize and sort timeline labels by frame (deduplicating same frame, last wins) */
+export function normalizeTimelineLabels(list: ReadonlyArray<TimelineLabel> | undefined | null): TimelineLabel[] {
+  if (!Array.isArray(list) || list.length === 0) return [];
+  const byFrame = new Map<number, string>();
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const frame = Math.round(Number(item.frame));
+    if (!Number.isFinite(frame) || frame < 0 || frame >= MAX_TIMELINE_FRAMES) continue;
+    const text = typeof item.text === 'string' ? item.text.trim().slice(0, 40) : '';
+    if (!text) continue;
+    byFrame.set(frame, text);
+  }
+  return [...byFrame.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([frame, text]) => ({ frame, text }));
+}
+
+export function upsertTimelineLabel(
+  list: ReadonlyArray<TimelineLabel> | undefined | null,
+  frame: number,
+  text: string,
+): TimelineLabel[] {
+  const f = Math.max(0, Math.min(MAX_TIMELINE_FRAMES - 1, Math.round(frame)));
+  const cleaned = text.trim().slice(0, 40);
+  const rest = normalizeTimelineLabels(list).filter((l) => l.frame !== f);
+  if (!cleaned) return rest;
+  return normalizeTimelineLabels([...rest, { frame: f, text: cleaned }]);
+}
+
+export function removeTimelineLabel(
+  list: ReadonlyArray<TimelineLabel> | undefined | null,
+  frame: number,
+): TimelineLabel[] {
+  const f = Math.round(frame);
+  return normalizeTimelineLabels(list).filter((l) => l.frame !== f);
+}
 
 export function upsertTransformKeyframe(
   list: ReadonlyArray<TransformKeyframe> | undefined | null,
@@ -113,7 +162,19 @@ export function celEntriesOf(layers: AnimLayer[], folderId: string): CelEntry[] 
       ref = target && target.id !== l.id && target.meta?.cel?.ref === undefined ? target.id : '';
     }
     const blank = cel?.ref === '' ? { blank: true } : null;
-    return { id: l.id, label: l.name ?? '', hold, ref, ...blank, ownerId: l.ownerId ?? null, isGroup: l.layerType === 'group' };
+    const mark: CelMark | undefined = cel?.mark === 'key' || cel?.mark === 'inbetween' ? cel.mark : undefined;
+    const note = typeof cel?.note === 'string' && cel.note.trim() ? cel.note.trim().slice(0, 120) : undefined;
+    return {
+      id: l.id,
+      label: l.name ?? '',
+      hold,
+      ref,
+      ...blank,
+      ...(mark ? { mark } : null),
+      ...(note ? { note } : null),
+      ownerId: l.ownerId ?? null,
+      isGroup: l.layerType === 'group',
+    };
   });
 }
 

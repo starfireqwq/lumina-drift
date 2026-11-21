@@ -1,18 +1,20 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
   AnimationEngine, AnimationTrack, MAX_HOLD, MAX_ONION, MAX_TIMELINE_FRAMES, ONION_MODES, OnionSkinConfig, TIMELINE_SLACK, celLayerOf, entryIndexAt, entryStart,
-  formatTimecode, parseTimecode, trackLength, upsertTransformKeyframe, removeTransformKeyframe, type OnionMode, type TimecodeMode,
+  formatTimecode, parseTimecode, removeTimelineLabel, trackLength, upsertTimelineLabel, upsertTransformKeyframe, removeTransformKeyframe, type OnionMode, type TimecodeMode,
 } from '../engine/AnimationEngine';
 import { clearLightTable, lightTableHas, toggleLightCel, type LightTableScope, type LightTableState } from '../engine/lightTable';
 import {
   evaluateTransformKeyframes,
+  type CelMark,
   type KeyframeEasing,
   type LayerModel,
+  type TimelineLabel,
   type TransformKeyframe,
 } from '@atelier/shared';
 import {
-  ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Eye, Film, Folder, Lamp, Loader2, Minus, Pause, Play, Plus,
-  Repeat, Repeat2, SkipBack, SkipForward, Trash2, Users, X,
+  ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Eye, Film, Folder, Lamp, Loader2, MessageSquare, Minus, Pause, Play, Plus,
+  Repeat, Repeat2, SkipBack, SkipForward, Tag, Trash2, Users, X,
 } from 'lucide-react';
 import { AtelierModal, modalButton } from './AtelierModal';
 import { OverlayPresence } from './OverlayPresence';
@@ -94,6 +96,10 @@ interface AnimationTimelineBarProps {
   onDeleteFrame: () => void;
   onMoveFrame: (direction: -1 | 1) => void;
   onSetHold: (hold: number) => void;
+  /** Update ○/● mark or short memo on a cel */
+  onUpdateCelMeta: (entryId: string, patch: { mark?: CelMark | null; note?: string | null }) => void;
+  /** Save timeline frame labels on the edited folder */
+  onUpdateLabels: (labels: TimelineLabel[]) => void;
   onToggleShared: () => void;
   onFpsChange: (fps: number) => void;
   /** A click on a track: that folder becomes the edited one, at that frame */
@@ -144,7 +150,7 @@ const AnimThumbImg: React.FC<{
 
 export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   engine, isOpen, onClose, tracks, activeFolderId, thumbnails = EMPTY_THUMBS, subscribeThumbnails, getThumbnailsSnapshot, ownerNames, can,
-  onCreateFolder, onAddFrame, onDuplicateFrame, onReuseCel, onAddBlank, onKeyframePanelChange, onDeleteFrame, onMoveFrame, onSetHold, onToggleShared, onFpsChange,
+  onCreateFolder, onAddFrame, onDuplicateFrame, onReuseCel, onAddBlank, onKeyframePanelChange, onDeleteFrame, onMoveFrame, onSetHold, onUpdateCelMeta, onUpdateLabels, onToggleShared, onFpsChange,
   onSelectCell, planExport, onPlaceEntries, onCopyEntries, onPasteEntries, onSetEntryHold, ripple, onToggleRipple,
   timelineLength, lengthIsSet, onSetLength, lightTable, onUpdateLightTable,
   activeLayer, canvasWidth = 1920, canvasHeight = 1080, onUpdateLayerKeyframes,
@@ -226,6 +232,9 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   const [bezierDragIdx, setBezierDragIdx] = useState<null | 1 | 2>(null);
   const [gridViewport, setGridViewport] = useState({ left: 0, width: 960 });
   const [showExportModal, setShowExportModal] = useState(false);
+  const [celMenu, setCelMenu] = useState<{ entryId: string; x: number; y: number } | null>(null);
+  const [noteModal, setNoteModal] = useState<{ entryId: string; label: string; text: string } | null>(null);
+  const [labelModal, setLabelModal] = useState<{ frame: number; text: string; existing: boolean } | null>(null);
   const [exportFormat, setExportFormat] = useState<'gif' | 'mp4'>('gif');
   const [exportResolution, setExportResolution] = useState<VideoExportResolution>('4k');
   const [exportScope, setExportScope] = useState<AnimationExportScope>('folder');
@@ -289,6 +298,8 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   }, [time, isOpen]);
 
   // While dragging: follow the pointer over the tracks; drop moves the cel or sets its hold
+  const activeLabels = tracks.find((tr) => tr.folderId === activeFolderId)?.labels ?? [];
+  const showLabelRow = activeLabels.length > 0;
   const activeKfs = activeLayer?.meta?.keyframes ?? [];
   const showKfRow = Boolean(activeLayer && (panel === 'keyframes' || activeKfs.length > 0));
   const dragging = Boolean(drag);
@@ -297,7 +308,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
     const at = (e: PointerEvent) => {
       const el = gridRef.current!;
       const r = el.getBoundingClientRect();
-      const trackTop = RULER_HEIGHT * (showKfRow ? 2 : 1);
+      const trackTop = RULER_HEIGHT * (1 + (showLabelRow ? 1 : 0) + (showKfRow ? 1 : 0));
       return { t: (e.clientX - r.left + el.scrollLeft - TRACK_LABEL_WIDTH) / CELL, row: Math.floor((e.clientY - r.top + el.scrollTop - trackTop) / ROW) };
     };
     const onMove = (e: PointerEvent) => {
@@ -347,7 +358,25 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
     };
-  }, [dragging, tracks, can.addableFolderIds, onPlaceEntries, onSetEntryHold, showKfRow]);
+  }, [dragging, tracks, can.addableFolderIds, onPlaceEntries, onSetEntryHold, showLabelRow, showKfRow]);
+
+  // Dismiss cel context menu on outside click or Escape
+  useEffect(() => {
+    if (!celMenu) return;
+    const onDown = (ev: PointerEvent) => {
+      if ((ev.target as HTMLElement | null)?.closest('[data-cel-menu]')) return;
+      setCelMenu(null);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') setCelMenu(null);
+    };
+    window.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [celMenu]);
 
   // A selection whose cels are gone (deleted, moved by someone) shrinks with them
   useEffect(() => {
@@ -873,6 +902,34 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 <button type="button" onClick={() => onMoveFrame(-1)} disabled={!canEditEntry || currentIdx <= 0} title={t.animation.prevCel} aria-label={t.animation.prevCel} className={iconBtn}>◀</button>
                 <button type="button" onClick={() => onMoveFrame(1)} disabled={!canEditEntry || currentIdx < 0 || currentIdx >= entries.length - 1} title={t.animation.nextCel} aria-label={t.animation.nextCel} className={iconBtn}>▶</button>
                 <button type="button" onClick={onDeleteFrame} disabled={!canEditEntry || entries.length <= 1} title={t.animation.deleteCel} aria-label={t.animation.deleteCel} className={`${iconBtn} hover:!text-rose-400`}><Trash2 className="h-3.5 w-3.5" /></button>
+                <span className="mx-1 h-4 w-px shrink-0 bg-neutral-800" />
+                <button type="button"
+                  disabled={!canEditEntry || !current}
+                  aria-pressed={current?.mark === 'key'}
+                  title={t.animation.celMarkKey}
+                  onClick={() => current && onUpdateCelMeta(current.id, { mark: current.mark === 'key' ? null : 'key' })}
+                  className={chip(current?.mark === 'key')}>○</button>
+                <button type="button"
+                  disabled={!canEditEntry || !current}
+                  aria-pressed={current?.mark === 'inbetween'}
+                  title={t.animation.celMarkInbetween}
+                  onClick={() => current && onUpdateCelMeta(current.id, { mark: current.mark === 'inbetween' ? null : 'inbetween' })}
+                  className={chip(current?.mark === 'inbetween')}>●</button>
+                <button type="button"
+                  disabled={!canEditEntry || !current}
+                  aria-pressed={Boolean(current?.note)}
+                  title={current?.note ? `${t.animation.celNote}: ${current.note}` : t.animation.celNote}
+                  onClick={() => current && setNoteModal({ entryId: current.id, label: current.blank ? t.animation.blankFrame : current.label, text: current.note ?? '' })}
+                  className={chip(Boolean(current?.note))}><MessageSquare className="h-3.5 w-3.5" /></button>
+                <button type="button"
+                  disabled={!can.editFolder}
+                  aria-pressed={activeLabels.some((l) => l.frame === time)}
+                  title={t.animation.timelineLabelAdd}
+                  onClick={() => {
+                    const existing = activeLabels.find((l) => l.frame === time);
+                    setLabelModal({ frame: time, text: existing?.text ?? '', existing: Boolean(existing) });
+                  }}
+                  className={chip(activeLabels.some((l) => l.frame === time))}><Tag className="h-3.5 w-3.5" />{t.animation.timelineLabel}</button>
                 {can.editFolder && (
                   <button type="button" onClick={onToggleShared} aria-pressed={Boolean(active?.shared)}
                     title={t.animation.sharedFolderTooltip}
@@ -906,6 +963,19 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 <div style={{ width: TRACK_LABEL_WIDTH }} className="sticky left-0 z-10 shrink-0 border-r border-neutral-800 bg-neutral-900 px-1 text-[10px] leading-5 text-neutral-500">{t.animation.framesHeader}</div>
                 <div role="slider" aria-label={t.animation.timeAria} aria-valuemin={1} aria-valuemax={shownLength} aria-valuenow={time + 1} tabIndex={0}
                   onClick={(e) => engine.goTo(timeAt(e))}
+                  onDoubleClick={(e) => {
+                    if (!can.editFolder) return;
+                    const f = timeAt(e);
+                    const existing = activeLabels.find((l) => l.frame === f);
+                    setLabelModal({ frame: f, text: existing?.text ?? '', existing: Boolean(existing) });
+                  }}
+                  onContextMenu={(e) => {
+                    if (!can.editFolder) return;
+                    e.preventDefault();
+                    const f = timeAt(e);
+                    const existing = activeLabels.find((l) => l.frame === f);
+                    setLabelModal({ frame: f, text: existing?.text ?? '', existing: Boolean(existing) });
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'ArrowRight') engine.goToNextFrame();
                     if (e.key === 'ArrowLeft') engine.goToPrevFrame();
@@ -926,6 +996,49 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                   <div aria-hidden className="pointer-events-none absolute inset-y-0 w-0.5 bg-sky-500" style={{ left: length * CELL - 1 }} />
                 </div>
               </div>
+              {/* Timeline Labels Lane */}
+              {showLabelRow && (
+                <div data-timeline-labels className="sticky z-20 flex border-b border-neutral-800/80 bg-neutral-950/90" style={{ top: RULER_HEIGHT, height: RULER_HEIGHT }}>
+                  <div style={{ width: TRACK_LABEL_WIDTH }} className="sticky left-0 z-10 flex shrink-0 items-center gap-1 border-r border-neutral-800 bg-neutral-900 px-1.5 text-[9px] font-semibold text-sky-300 truncate">
+                    <Tag className="h-2.5 w-2.5 shrink-0" /><span className="truncate">{t.animation.timelineLabel}</span>
+                  </div>
+                  <div className="relative" style={{ width: shownLength * CELL }}>
+                    {activeLabels
+                      .filter((lbl) => lbl.frame >= visFrameStart - 6 && lbl.frame <= visFrameEnd + 2)
+                      .map((lbl) => (
+                        <button
+                          key={lbl.frame}
+                          type="button"
+                          data-timeline-label={lbl.frame}
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            engine.goTo(lbl.frame);
+                          }}
+                          onContextMenu={(ev) => {
+                            if (!can.editFolder) return;
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            setLabelModal({ frame: lbl.frame, text: lbl.text, existing: true });
+                          }}
+                          onDoubleClick={(ev) => {
+                            if (!can.editFolder) return;
+                            ev.stopPropagation();
+                            setLabelModal({ frame: lbl.frame, text: lbl.text, existing: true });
+                          }}
+                          title={`${t.animation.timelineLabelFrame.replace('{frame}', String(lbl.frame + 1))}: ${lbl.text}`}
+                          style={{ left: lbl.frame * CELL + 1 }}
+                          className={`absolute top-0.5 z-10 flex h-4 max-w-[132px] items-center gap-0.5 truncate rounded px-1.5 text-[9px] font-semibold leading-none transition-colors ${
+                            lbl.frame === time
+                              ? 'border border-sky-400/80 bg-sky-500/30 text-sky-100'
+                              : 'border border-sky-500/40 bg-sky-950/80 text-sky-300 hover:bg-sky-900/80 hover:text-white'
+                          }`}
+                        >
+                          <span className="truncate">{lbl.text}</span>
+                        </button>
+                      ))}
+                  </div>
+                </div>
+              )}
               {/* Active Layer Transform Keyframes Lane */}
               {showKfRow && (
                 <div className="flex border-b border-neutral-800/80 bg-neutral-950/80" style={{ height: RULER_HEIGHT }}>
@@ -1007,12 +1120,24 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                         const isSelected = selection?.folderId === track.folderId && selection.ids.has(e.id);
                         // A reuse whose drawing was deleted shows nothing too, but by accident: it is flagged
                         const broken = e.ref === '' && !e.blank;
+                        const tooltipParts: string[] = [];
+                        if (e.mark === 'key') tooltipParts.push(t.animation.celMarkKey);
+                        else if (e.mark === 'inbetween') tooltipParts.push(t.animation.celMarkInbetween);
+                        if (e.note) tooltipParts.push(e.note);
+                        if (broken) tooltipParts.push(t.animation.missingCel);
+                        const celTooltip = tooltipParts.length > 0 ? tooltipParts.join(' · ') : undefined;
                         return (
-                          <div key={e.id} data-entry data-blank={e.blank ? '' : undefined} onPointerDown={(ev) => startDrag(ev, track, i)}
+                          <div key={e.id} data-entry data-entry-id={e.id} data-blank={e.blank ? '' : undefined} data-mark={e.mark ?? undefined} onPointerDown={(ev) => startDrag(ev, track, i)}
                             onClick={(ev) => { if (!suppressClickRef.current && pickForSelection(ev, track, e.id)) ev.stopPropagation(); }}
+                            onContextMenu={(ev) => {
+                              ev.preventDefault();
+                              ev.stopPropagation();
+                              onSelectCell(track.folderId, start);
+                              setCelMenu({ entryId: e.id, x: ev.clientX, y: ev.clientY });
+                            }}
                             aria-selected={isSelected}
-                            aria-label={`${track.name} #${start + 1}: ${e.blank ? t.animation.blankFrame : broken ? t.animation.missingCel : e.label} (${e.hold})`}
-                            title={broken ? t.animation.missingCel : undefined}
+                            aria-label={`${track.name} #${start + 1}: ${e.blank ? t.animation.blankFrame : broken ? t.animation.missingCel : e.label} (${e.hold})${e.mark === 'key' ? ` ${t.animation.celMarkKey}` : e.mark === 'inbetween' ? ` ${t.animation.celMarkInbetween}` : ''}${e.note ? ` · ${e.note}` : ''}`}
+                            title={celTooltip}
                             className={`absolute top-1 bottom-1 flex flex-col overflow-hidden rounded-md border ${
                               isSelected ? 'border-sky-400 ring-2 ring-sky-400/70' : isCurrent ? 'border-rose-400 ring-2 ring-rose-500/70' : broken ? 'border-amber-500/80' : onion === 'prev' ? 'border-red-500/70' : onion === 'next' ? 'border-emerald-500/70' : 'border-neutral-700'
                             } ${e.blank ? 'atelier-blank-cel border-dashed' : e.ref !== undefined ? 'border-dashed bg-neutral-800/60' : 'bg-neutral-900'} ${editable ? 'cursor-grab' : ''} ${isDragged && drag.mode === 'move' ? 'opacity-40' : ''}`}
@@ -1030,7 +1155,18 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                               {e.isGroup && e.ref === undefined && <Folder className="h-2.5 w-2.5 shrink-0" />}
                               {isActive && lightTable.enabled && shownId && lightNow.has(shownId) && <Lamp aria-label={t.animation.lightTable} className="h-2.5 w-2.5 shrink-0 text-amber-300" />}
                               <span className="truncate">{e.blank ? '' : e.ref !== undefined ? (track.entries.find((x) => x.id === e.ref)?.label ?? '—') : e.label}</span>
+                              {e.mark && (
+                                <span
+                                  aria-hidden
+                                  className={`ml-auto shrink-0 pr-0.5 text-[10px] leading-none ${e.mark === 'key' ? 'text-amber-300' : 'text-sky-300'}`}
+                                >
+                                  {e.mark === 'key' ? '○' : '●'}
+                                </span>
+                              )}
                             </span>
+                            {e.note && (
+                              <span aria-hidden className="pointer-events-none absolute bottom-1.5 right-1.5 z-10 h-1.5 w-1.5 rounded-full bg-amber-400 ring-1 ring-neutral-950" />
+                            )}
                             {e.blank ? (
                               <span aria-hidden className="atelier-blank-mark mx-0.5 flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-sm text-lg font-light leading-none">×</span>
                             ) : (
@@ -1054,6 +1190,172 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
           })()}
         </>
       )}
+
+      <OverlayPresence open={Boolean(celMenu)}>
+        {(() => {
+          if (!celMenu) return null;
+          const menuEntry = tracks.flatMap((tr) => tr.entries).find((x) => x.id === celMenu.entryId);
+          if (!menuEntry) return null;
+          const menuEditable = can.editableEntryIds.has(menuEntry.id);
+          const left = typeof window !== 'undefined' ? Math.min(window.innerWidth - 184, Math.max(8, celMenu.x)) : celMenu.x;
+          const top = typeof window !== 'undefined' ? Math.min(window.innerHeight - 196, Math.max(8, celMenu.y)) : celMenu.y;
+          const itemCls = 'flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs text-neutral-200 hover:bg-neutral-800 disabled:opacity-40 disabled:hover:bg-transparent';
+          return (
+            <div
+              data-cel-menu
+              role="menu"
+              style={{ left, top }}
+              className="atelier-tl-row fixed z-50 w-44 rounded-xl border border-neutral-700/90 bg-neutral-900/95 p-1 shadow-2xl backdrop-blur"
+            >
+              <button type="button" role="menuitem" disabled={!menuEditable} className={itemCls}
+                onClick={() => {
+                  onUpdateCelMeta(menuEntry.id, { mark: menuEntry.mark === 'key' ? null : 'key' });
+                  setCelMenu(null);
+                }}>
+                <span className="w-4 text-center text-amber-300">○</span>
+                <span className="flex-1 truncate">{t.animation.celMarkKey}</span>
+                {menuEntry.mark === 'key' && <span className="text-[10px] text-amber-300">✓</span>}
+              </button>
+              <button type="button" role="menuitem" disabled={!menuEditable} className={itemCls}
+                onClick={() => {
+                  onUpdateCelMeta(menuEntry.id, { mark: menuEntry.mark === 'inbetween' ? null : 'inbetween' });
+                  setCelMenu(null);
+                }}>
+                <span className="w-4 text-center text-sky-300">●</span>
+                <span className="flex-1 truncate">{t.animation.celMarkInbetween}</span>
+                {menuEntry.mark === 'inbetween' && <span className="text-[10px] text-sky-300">✓</span>}
+              </button>
+              {menuEntry.mark && (
+                <button type="button" role="menuitem" disabled={!menuEditable} className={itemCls}
+                  onClick={() => {
+                    onUpdateCelMeta(menuEntry.id, { mark: null });
+                    setCelMenu(null);
+                  }}>
+                  <span className="w-4 text-center text-neutral-500">×</span>
+                  <span className="flex-1 truncate">{t.animation.celMarkClear}</span>
+                </button>
+              )}
+              <div className="my-1 h-px bg-neutral-800" />
+              <button type="button" role="menuitem" disabled={!menuEditable} className={itemCls}
+                onClick={() => {
+                  setNoteModal({ entryId: menuEntry.id, label: menuEntry.blank ? t.animation.blankFrame : menuEntry.label, text: menuEntry.note ?? '' });
+                  setCelMenu(null);
+                }}>
+                <MessageSquare className="h-3.5 w-3.5 shrink-0 text-neutral-400" />
+                <span className="flex-1 truncate">{t.animation.celNote}</span>
+              </button>
+            </div>
+          );
+        })()}
+      </OverlayPresence>
+
+      <OverlayPresence open={Boolean(noteModal)}>
+        {noteModal && (
+          <AtelierModal
+            title={`${t.animation.celNote} · ${noteModal.label}`}
+            icon={<MessageSquare />}
+            width="sm"
+            onClose={() => setNoteModal(null)}
+            footer={
+              <>
+                {noteModal.text.trim() && (
+                  <button
+                    type="button"
+                    className={`${modalButton.secondary} mr-auto`}
+                    onClick={() => {
+                      onUpdateCelMeta(noteModal.entryId, { note: null });
+                      setNoteModal(null);
+                    }}
+                  >
+                    {t.animation.celNoteClear}
+                  </button>
+                )}
+                <button type="button" className={modalButton.secondary} onClick={() => setNoteModal(null)}>{t.common.cancel}</button>
+                <button
+                  type="button"
+                  className={modalButton.primary}
+                  onClick={() => {
+                    onUpdateCelMeta(noteModal.entryId, { note: noteModal.text.trim() || null });
+                    setNoteModal(null);
+                  }}
+                >
+                  {t.common.confirm}
+                </button>
+              </>
+            }
+          >
+            <input
+              autoFocus
+              maxLength={120}
+              value={noteModal.text}
+              placeholder={t.animation.celNotePlaceholder}
+              onChange={(e) => setNoteModal({ ...noteModal, text: e.target.value })}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter') {
+                  onUpdateCelMeta(noteModal.entryId, { note: noteModal.text.trim() || null });
+                  setNoteModal(null);
+                }
+              }}
+              className="atelier-field w-full px-3 py-2 text-xs text-white"
+            />
+          </AtelierModal>
+        )}
+      </OverlayPresence>
+
+      <OverlayPresence open={Boolean(labelModal)}>
+        {labelModal && (
+          <AtelierModal
+            title={`${t.animation.timelineLabel} · ${t.animation.timelineLabelFrame.replace('{frame}', String(labelModal.frame + 1))}`}
+            icon={<Tag />}
+            width="sm"
+            onClose={() => setLabelModal(null)}
+            footer={
+              <>
+                {labelModal.existing && (
+                  <button
+                    type="button"
+                    className={`${modalButton.danger} mr-auto`}
+                    onClick={() => {
+                      onUpdateLabels(removeTimelineLabel(activeLabels, labelModal.frame));
+                      setLabelModal(null);
+                    }}
+                  >
+                    {t.animation.timelineLabelDelete}
+                  </button>
+                )}
+                <button type="button" className={modalButton.secondary} onClick={() => setLabelModal(null)}>{t.common.cancel}</button>
+                <button
+                  type="button"
+                  className={modalButton.primary}
+                  onClick={() => {
+                    onUpdateLabels(upsertTimelineLabel(activeLabels, labelModal.frame, labelModal.text));
+                    setLabelModal(null);
+                  }}
+                >
+                  {t.common.confirm}
+                </button>
+              </>
+            }
+          >
+            <input
+              autoFocus
+              maxLength={40}
+              value={labelModal.text}
+              placeholder={t.animation.timelineLabelPlaceholder}
+              onChange={(e) => setLabelModal({ ...labelModal, text: e.target.value })}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter') {
+                  onUpdateLabels(upsertTimelineLabel(activeLabels, labelModal.frame, labelModal.text));
+                  setLabelModal(null);
+                }
+              }}
+              className="atelier-field w-full px-3 py-2 text-xs text-white"
+            />
+          </AtelierModal>
+        )}
+      </OverlayPresence>
 
       <OverlayPresence open={showExportModal}>
         <AtelierModal title={t.animation.exportModalTitle} icon={<Film />} onClose={() => !exportProgress && setShowExportModal(false)}

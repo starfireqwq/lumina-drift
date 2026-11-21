@@ -41,6 +41,8 @@ import {
   TilePatchPacket,
   ToolType,
   CanvasUnit,
+  CelMark,
+  TimelineLabel,
   clampDpi,
 } from '@atelier/shared';
 import { useAuth } from '../context/AuthContext';
@@ -122,7 +124,7 @@ import { LayerPanel } from './LayerPanel';
 import { getUserColor } from '../utils/userColors';
 import {
   AnimationEngine, AnimationTrack, animationDisplay, BLANK_CEL_NAME, celEntriesOf, celInsertAt, celLayerOf, celOfLayer, entryIndexAt, entryStart, exportSegments, isAnimationFolder, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
-  placeEntries, trackLength,
+  normalizeTimelineLabels, placeEntries, trackLength,
 } from '../engine/AnimationEngine';
 import { lightIdsFor, loadLightTable, saveLightTable, type LightTableState } from '../engine/lightTable';
 import { DEFAULT_TEXT, renderText, textBounds } from '../engine/textLayer';
@@ -838,7 +840,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   lastAnimFolderRef.current = animFolder?.id ?? null;
   animFolderIdRef.current = animFolder?.id ?? null;
   const animTracks: AnimationTrack[] = animFolders.map((f) => ({
-    folderId: f.id, name: f.name, ownerId: f.ownerId, shared: Boolean(f.meta?.animation?.shared), entries: celEntriesOf(layers, f.id),
+    folderId: f.id,
+    name: f.name,
+    ownerId: f.ownerId,
+    shared: Boolean(f.meta?.animation?.shared),
+    entries: celEntriesOf(layers, f.id),
+    labels: normalizeTimelineLabels(f.meta?.animation?.labels),
   }));
   const animEntries = animTracks.find((t) => t.folderId === animFolder?.id)?.entries ?? [];
   const animEntriesRef = useRef(animEntries);
@@ -4052,6 +4059,35 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const setAnimationFps = (fps: number) => {
     if (animFolder && canManageLayer(animFolder)) onUpdateLayerProps?.(animFolder.id, { meta: { ...animFolder.meta, animation: { ...animFolder.meta?.animation, fps } } });
   };
+  /** Update key/inbetween mark (○/●) or memo note on a single cel */
+  const updateAnimationCelMeta = (entryId: string, patch: { mark?: CelMark | null; note?: string | null }) => {
+    const layer = layersRef.current.find((l) => l.id === entryId);
+    if (!layer) return;
+    if (!canManageLayer(layer)) return warn('這一格是其他畫師的，只有他能編輯記號或備註。');
+    const cel: NonNullable<LayerMeta['cel']> = { ...layer.meta?.cel };
+    if (patch.mark !== undefined) {
+      if (patch.mark === 'key' || patch.mark === 'inbetween') cel.mark = patch.mark;
+      else delete cel.mark;
+    }
+    if (patch.note !== undefined) {
+      const cleaned = typeof patch.note === 'string' ? patch.note.trim().slice(0, 120) : '';
+      if (cleaned) cel.note = cleaned;
+      else delete cel.note;
+    }
+    const nextMeta: LayerMeta = { ...layer.meta };
+    if (Object.keys(cel).length > 0) nextMeta.cel = cel;
+    else delete nextMeta.cel;
+    onUpdateLayerProps?.(layer.id, { meta: nextMeta });
+  };
+  /** Save timeline frame labels on the active animation folder */
+  const setAnimationLabels = (labels: TimelineLabel[]) => {
+    if (!animFolder || !canManageLayer(animFolder)) return;
+    const cleaned = normalizeTimelineLabels(labels);
+    const animation: NonNullable<LayerMeta['animation']> = { fps: 12, ...animFolder.meta?.animation };
+    if (cleaned.length > 0) animation.labels = cleaned;
+    else delete animation.labels;
+    onUpdateLayerProps?.(animFolder.id, { meta: { ...animFolder.meta, animation } });
+  };
   /** Timeline length in frames, kept on the edited folder; null = up to the end of the longest track */
   const setAnimationLength = (frames: number | null) => {
     if (!animFolder || !canManageLayer(animFolder)) return;
@@ -5490,6 +5526,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 onDeleteFrame={deleteAnimationFrame}
                 onMoveFrame={moveAnimationFrame}
                 onSetHold={setAnimationHold}
+                onUpdateCelMeta={updateAnimationCelMeta}
+                onUpdateLabels={setAnimationLabels}
                 onToggleShared={toggleAnimationShared}
                 onFpsChange={setAnimationFps}
                 onSelectCell={selectAnimationCell}

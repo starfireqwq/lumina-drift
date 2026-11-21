@@ -1000,6 +1000,17 @@ export const zhTW: Translations = {
     lightWholeTrack: '整個軌道',
     lightOpacity: '不透明度',
     lightClear: '全部解除',
+    celMarkKey: '原畫 ○',
+    celMarkInbetween: '中割 ●',
+    celMarkClear: '清除記號',
+    celNote: '備註',
+    celNotePlaceholder: '輸入膠片備註…',
+    celNoteClear: '清除',
+    timelineLabel: '標籤',
+    timelineLabelAdd: '新增／編輯標籤',
+    timelineLabelPlaceholder: '例如：眨眼、台詞…',
+    timelineLabelDelete: '刪除標籤',
+    timelineLabelFrame: '第 {frame} 格',
   },
 
   comic: {

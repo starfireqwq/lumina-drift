@@ -37,8 +37,8 @@ import {
 import { getBoxPivotCanvasPoint, type TransformBox } from '../src/utils/transformProjection';
 import {
   AnimationEngine, animationDisplay, celEntriesOf, celInsertAt, celOfLayer, entryIndexAt, exportSegments, formatTimecode, frameSignature, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
-  parseTimecode, placeEntries, playbackFrame, removeTransformKeyframe,
-  timeOfCel, trackLength, upsertTransformKeyframe,
+  normalizeTimelineLabels, parseTimecode, placeEntries, playbackFrame, removeTimelineLabel, removeTransformKeyframe,
+  timeOfCel, trackLength, upsertTimelineLabel, upsertTransformKeyframe,
 } from '../src/engine/AnimationEngine';
 import { cleanLightTable, clearLightTable, emptyLightTable, lightIdsFor, toggleLightCel } from '../src/engine/lightTable';
 import { nextGroupName } from '../src/utils/canvasName';
@@ -1729,5 +1729,34 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
   assert.deepEqual(parseRecentVisits(JSON.stringify([...list, { mode: 'online', server: 'nope', canvasId: 'z', title: '', width: 1, height: 1, at: 1 }, 5, null])), list, 'Bad entries are dropped');
   assert.deepEqual(parseRecentVisits('{broken'), []);
   assert.deepEqual(parseRecentVisits(null), []);
+}
+// Animation Phase B1 & B2: cel marks (○/●), notes, and timeline labels
+{
+  const entries = celEntriesOf([
+    { id: 'f', parentId: null, layerType: 'group', sortOrder: 10, isVisible: true, opacity: 1, meta: { animation: { fps: 24 } } },
+    { id: 'c1', parentId: 'f', layerType: 'raster', sortOrder: 1, isVisible: true, opacity: 1, name: '1', meta: { cel: { hold: 2, mark: 'key', note: '  眨眼起點  ' } } },
+    { id: 'c2', parentId: 'f', layerType: 'raster', sortOrder: 2, isVisible: true, opacity: 1, name: '2', meta: { cel: { mark: 'inbetween', note: '   ' } } },
+    { id: 'c3', parentId: 'f', layerType: 'raster', sortOrder: 3, isVisible: true, opacity: 1, name: '3', meta: { cel: { mark: 'bogus' as unknown as 'key' } } },
+  ], 'f');
+  assert.equal(entries[0].mark, 'key');
+  assert.equal(entries[0].note, '眨眼起點', 'Note is trimmed');
+  assert.equal(entries[1].mark, 'inbetween');
+  assert.equal(entries[1].note, undefined, 'Whitespace-only note is omitted');
+  assert.equal(entries[2].mark, undefined, 'Unknown mark values are ignored');
+
+  let labels = normalizeTimelineLabels([
+    { frame: 10, text: '台詞' },
+    { frame: 2, text: '  眨眼  ' },
+    { frame: 10, text: '改名' },
+    { frame: -1, text: '無效' },
+    { frame: 5, text: '   ' },
+  ]);
+  assert.deepEqual(labels, [{ frame: 2, text: '眨眼' }, { frame: 10, text: '改名' }], 'Labels sorted, trimmed, deduplicated');
+  labels = upsertTimelineLabel(labels, 6, '轉頭');
+  assert.deepEqual(labels.map((l) => l.frame), [2, 6, 10]);
+  labels = upsertTimelineLabel(labels, 6, '  ');
+  assert.deepEqual(labels.map((l) => l.frame), [2, 10], 'Empty upsert removes label');
+  labels = removeTimelineLabel(labels, 2);
+  assert.deepEqual(labels, [{ frame: 10, text: '改名' }]);
 }
 console.log('ui-logic checks passed');
