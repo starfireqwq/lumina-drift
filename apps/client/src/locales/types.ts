@@ -1038,6 +1038,10 @@ export interface Translations {
     flipbook: string;
     flipbookTooltip: string;
     flipbookSpan: string;
+    moreOptions: string;
+    celActions: string;
+    playbackAndExport: string;
+    multiSelect: string;
   };
 
   comic: {

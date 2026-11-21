@@ -1027,6 +1027,10 @@ export const zhTW: Translations = {
     flipbook: '手翻書',
     flipbookTooltip: '按住來回翻看前後數張，放開回原格',
     flipbookSpan: '翻看張數',
+    moreOptions: '更多',
+    celActions: '膠片操作',
+    playbackAndExport: '播放與設定',
+    multiSelect: '多選',
   },
 
   comic: {

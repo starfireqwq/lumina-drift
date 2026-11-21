@@ -1027,6 +1027,10 @@ export const jaJP: Translations = {
     flipbook: 'フリップ',
     flipbookTooltip: '長押しで前後をパラパラ確認、離すと戻る',
     flipbookSpan: 'フリップ枚数',
+    moreOptions: 'その他',
+    celActions: 'セル操作',
+    playbackAndExport: '再生と設定',
+    multiSelect: '複数選択',
   },
 
   comic: {

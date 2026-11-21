@@ -1027,6 +1027,10 @@ export const enUS: Translations = {
     flipbook: 'Flip',
     flipbookTooltip: 'Hold to flip nearby frames, release to return',
     flipbookSpan: 'Flip span',
+    moreOptions: 'More',
+    celActions: 'Cel actions',
+    playbackAndExport: 'Playback & tools',
+    multiSelect: 'Multi-select',
   },
 
   comic: {
