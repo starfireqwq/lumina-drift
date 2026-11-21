@@ -1,0 +1,241 @@
+{
+  "apiVersion": 2,
+  "id": "lumina.drift-studio-kit",
+  "name": "Lumina Drift Kit",
+  "version": "2.0.0",
+  "author": "Lumina Drift",
+  "description": "Original Plugin API v2 showcase: tiled prism & aurora filters, selection glow framing command, and a declarative workshop panel.",
+  "i18n": {
+    "zh-TW": {
+      "name": "流光工坊套件",
+      "description": "原創插件 API v2 示範：分塊稜鏡與極光濾鏡、選區流光描邊指令，以及宣告式工具面板。"
+    },
+    "zh-CN": {
+      "name": "流光工坊套件",
+      "description": "原创插件 API v2 示例：分块棱镜与极光滤镜、选区流光描边命令，以及声明式工具面板。"
+    },
+    "ja-JP": {
+      "name": "ルミナ工房キット",
+      "description": "オリジナル Plugin API v2 サンプル：タイル型プリズム・オーロラフィルター、選択範囲グロー枠コマンド、宣言型パネル。"
+    }
+  },
+  "permissions": [
+    "layers:read",
+    "layers:write",
+    "pixels:read",
+    "pixels:write",
+    "selection",
+    "filters",
+    "commands",
+    "ui:panel"
+  ],
+  "commands": [
+    {
+      "id": "halo-frame",
+      "label": "Selection Glow Frame",
+      "i18nLabel": {
+        "zh-TW": "選區流光描邊",
+        "zh-CN": "选区流光描边",
+        "ja-JP": "選択範囲グロー枠"
+      },
+      "group": "Glow",
+      "suggestedShortcut": "Alt+Shift+KeyG"
+    },
+    {
+      "id": "prism-swatches",
+      "label": "Create Drift Swatches",
+      "i18nLabel": {
+        "zh-TW": "建立流光色票",
+        "zh-CN": "创建流光色票",
+        "ja-JP": "流光スウォッチ作成"
+      },
+      "group": "Generate"
+    }
+  ],
+  "filters": [
+    {
+      "id": "drift-prism",
+      "label": "Drift Prism Shift",
+      "i18nLabel": {
+        "zh-TW": "流光稜鏡色移",
+        "zh-CN": "流光棱镜色移",
+        "ja-JP": "流光プリズムシフト"
+      },
+      "group": "plugin",
+      "tilePadding": 4,
+      "draft": true,
+      "params": [
+        {
+          "kind": "range",
+          "key": "shift",
+          "label": "Shift",
+          "i18nLabel": { "zh-TW": "色移距離", "zh-CN": "色移距离", "ja-JP": "シフト幅" },
+          "initial": 2,
+          "min": 0,
+          "max": 4,
+          "step": 1,
+          "unit": "px"
+        },
+        {
+          "kind": "range",
+          "key": "mix",
+          "label": "Mix",
+          "i18nLabel": { "zh-TW": "混合強度", "zh-CN": "混合强度", "ja-JP": "適用量" },
+          "initial": 75,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        }
+      ]
+    },
+    {
+      "id": "aurora-duotone",
+      "label": "Aurora Duotone",
+      "i18nLabel": {
+        "zh-TW": "極光雙色調",
+        "zh-CN": "极光双色调",
+        "ja-JP": "オーロラデュオトーン"
+      },
+      "group": "color",
+      "tilePadding": 0,
+      "draft": false,
+      "params": [
+        {
+          "kind": "color",
+          "key": "shadow",
+          "label": "Shadow",
+          "i18nLabel": { "zh-TW": "暗部色", "zh-CN": "暗部色", "ja-JP": "シャドウ" },
+          "initial": "#1a2240"
+        },
+        {
+          "kind": "color",
+          "key": "highlight",
+          "label": "Highlight",
+          "i18nLabel": { "zh-TW": "高光色", "zh-CN": "高光色", "ja-JP": "ハイライト" },
+          "initial": "#7ef9ff"
+        },
+        {
+          "kind": "range",
+          "key": "mix",
+          "label": "Intensity",
+          "i18nLabel": { "zh-TW": "強度", "zh-CN": "强度", "ja-JP": "強さ" },
+          "initial": 80,
+          "min": 0,
+          "max": 100,
+          "step": 1,
+          "unit": "%"
+        }
+      ]
+    }
+  ],
+  "panels": [
+    {
+      "id": "drift-workshop",
+      "title": "Drift Glow Lab",
+      "i18nTitle": {
+        "zh-TW": "流光描邊工坊",
+        "zh-CN": "流光描边工坊",
+        "ja-JP": "流光グロー工房"
+      },
+      "icon": "sparkles",
+      "defaultWidth": 292,
+      "fields": [
+        {
+          "kind": "section",
+          "key": "secTarget",
+          "label": "Target & Glow",
+          "i18nLabel": { "zh-TW": "目標與光暈", "zh-CN": "目标与光晕", "ja-JP": "対象とグロー" }
+        },
+        {
+          "kind": "text",
+          "key": "hint",
+          "text": "Frames the active selection (or layer bounds) in a single undoable step.",
+          "i18nText": {
+            "zh-TW": "沿選取範圍（無選區時自動取圖層內容框）繪製流光描邊，單次 Ctrl+Z 即可還原。",
+            "zh-CN": "沿选区（无选区时自动取图层内容框）绘制流光描边，单次 Ctrl+Z 即可还原。",
+            "ja-JP": "選択範囲（未選択時はレイヤー境界）にグロー枠を描画します。1回の元に戻すで復元できます。"
+          }
+        },
+        {
+          "kind": "layer",
+          "key": "targetLayer",
+          "label": "Source Layer",
+          "i18nLabel": { "zh-TW": "來源圖層", "zh-CN": "来源图层", "ja-JP": "対象レイヤー" }
+        },
+        {
+          "kind": "range",
+          "key": "thickness",
+          "label": "Thickness",
+          "i18nLabel": { "zh-TW": "描邊粗細", "zh-CN": "描边粗细", "ja-JP": "枠の太さ" },
+          "initial": 6,
+          "min": 1,
+          "max": 32,
+          "step": 1,
+          "unit": "px"
+        },
+        {
+          "kind": "number",
+          "key": "inset",
+          "label": "Padding",
+          "i18nLabel": { "zh-TW": "外擴間距", "zh-CN": "外扩间距", "ja-JP": "余白" },
+          "initial": 4,
+          "min": 0,
+          "max": 48,
+          "step": 1,
+          "unit": "px"
+        },
+        {
+          "kind": "color",
+          "key": "color",
+          "label": "Glow Color",
+          "i18nLabel": { "zh-TW": "流光色彩", "zh-CN": "流光色彩", "ja-JP": "グロー色" },
+          "initial": "#62c5df"
+        },
+        {
+          "kind": "select",
+          "key": "style",
+          "label": "Edge Style",
+          "i18nLabel": { "zh-TW": "光暈風格", "zh-CN": "光晕风格", "ja-JP": "エッジスタイル" },
+          "initial": "soft",
+          "options": [
+            { "value": "soft", "label": "Soft Drift", "i18nLabel": { "zh-TW": "柔和流光", "zh-CN": "柔和流光", "ja-JP": "ソフト流光" } },
+            { "value": "crisp", "label": "Crisp Neon", "i18nLabel": { "zh-TW": "銳利霓虹", "zh-CN": "锐利霓虹", "ja-JP": "シャープネオン" } }
+          ]
+        },
+        {
+          "kind": "toggle",
+          "key": "newLayer",
+          "label": "Output to New Layer",
+          "i18nLabel": { "zh-TW": "輸出至新圖層", "zh-CN": "输出到新图层", "ja-JP": "新規レイヤーに出力" },
+          "initial": true
+        },
+        {
+          "kind": "input",
+          "key": "layerName",
+          "label": "Layer Name",
+          "i18nLabel": { "zh-TW": "新圖層名稱", "zh-CN": "新图层名称", "ja-JP": "レイヤー名" },
+          "initial": "Drift Glow Frame",
+          "placeholder": "Drift Glow Frame",
+          "maxLength": 48,
+          "when": { "key": "newLayer", "is": [true] }
+        }
+      ],
+      "actions": [
+        {
+          "id": "reset",
+          "label": "Reset",
+          "i18nLabel": { "zh-TW": "重設", "zh-CN": "重置", "ja-JP": "リセット" },
+          "variant": "secondary"
+        },
+        {
+          "id": "apply",
+          "label": "Apply Glow",
+          "i18nLabel": { "zh-TW": "套用流光", "zh-CN": "应用流光", "ja-JP": "適用" },
+          "variant": "primary"
+        }
+      ]
+    }
+  ],
+  "script": "function __hexToRgb(hex) {\n  const clean = typeof hex === 'string' && /^#[0-9a-f]{6}$/i.test(hex) ? hex.slice(1) : '62c5df';\n  return [\n    parseInt(clean.slice(0, 2), 16),\n    parseInt(clean.slice(2, 4), 16),\n    parseInt(clean.slice(4, 6), 16)\n  ];\n}\n\nfunction onFilter(filterId, tile, params) {\n  const src = tile.rgba;\n  const w = tile.width;\n  const h = tile.height;\n  if (filterId === 'drift-prism') {\n    const shift = Math.max(0, Math.min(tile.padLeft, Math.round(params.shift || 0)));\n    const mix = Math.max(0, Math.min(100, Number(params.mix ?? 75))) / 100;\n    const out = new Uint8Array(src.length);\n    out.set(src);\n    for (let y = tile.padTop; y < h - tile.padBottom; y++) {\n      const row = y * w;\n      for (let x = tile.padLeft; x < w - tile.padRight; x++) {\n        const i = (row + x) * 4;\n        const a = src[i + 3];\n        if (a === 0) continue;\n        const lx = Math.max(0, x - shift);\n        const rx = Math.min(w - 1, x + shift);\n        const li = (row + lx) * 4;\n        const ri = (row + rx) * 4;\n        const rShift = src[ri];\n        const gShift = src[i + 1];\n        const bShift = src[li + 2];\n        out[i] = Math.round(src[i] * (1 - mix) + rShift * mix);\n        out[i + 1] = Math.round(src[i + 1] * (1 - mix) + gShift * mix);\n        out[i + 2] = Math.round(src[i + 2] * (1 - mix) + bShift * mix);\n        out[i + 3] = a;\n      }\n    }\n    return out;\n  }\n  if (filterId === 'aurora-duotone') {\n    const [sr, sg, sb] = __hexToRgb(params.shadow || '#1a2240');\n    const [hr, hg, hb] = __hexToRgb(params.highlight || '#7ef9ff');\n    const mix = Math.max(0, Math.min(100, Number(params.mix ?? 80))) / 100;\n    for (let i = 0; i < src.length; i += 4) {\n      const a = src[i + 3];\n      if (a === 0) continue;\n      const luma = (0.299 * src[i] + 0.587 * src[i + 1] + 0.114 * src[i + 2]) / 255;\n      const tr = sr + (hr - sr) * luma;\n      const tg = sg + (hg - sg) * luma;\n      const tb = sb + (hb - sb) * luma;\n      src[i] = Math.round(src[i] * (1 - mix) + tr * mix);\n      src[i + 1] = Math.round(src[i + 1] * (1 - mix) + tg * mix);\n      src[i + 2] = Math.round(src[i + 2] * (1 - mix) + tb * mix);\n    }\n    return src;\n  }\n  return src;\n}\n\nasync function __drawGlowFrame(api, opts) {\n  const cw = api.canvas.width;\n  const ch = api.canvas.height;\n  const thickness = Math.max(1, Math.min(32, Math.round(opts.thickness || 6)));\n  const pad = Math.max(0, Math.min(48, Math.round(opts.inset || 0)));\n  const [r, g, b] = __hexToRgb(opts.color || '#62c5df');\n  const soft = opts.style !== 'crisp';\n\n  let sel = await api.selection.getInfo();\n  let rect = sel.hasSelection && sel.bounds ? sel.bounds : null;\n  let sourceLayerId = opts.targetLayer;\n  if (!sourceLayerId) {\n    const active = await api.layers.getActive();\n    sourceLayerId = active ? active.id : null;\n  }\n  if (!rect && sourceLayerId) {\n    rect = await api.pixels.getNonEmptyBounds(sourceLayerId);\n  }\n  if (!rect) {\n    const margin = Math.max(16, Math.min(96, Math.floor(Math.min(cw, ch) * 0.12)));\n    rect = { x: margin, y: margin, width: Math.max(8, cw - margin * 2), height: Math.max(8, ch - margin * 2) };\n  }\n\n  const x0 = Math.max(0, rect.x - pad);\n  const y0 = Math.max(0, rect.y - pad);\n  const x1 = Math.min(cw, rect.x + rect.width + pad);\n  const y1 = Math.min(ch, rect.y + rect.height + pad);\n  const fw = Math.max(1, x1 - x0);\n  const fh = Math.max(1, y1 - y0);\n  await api.selection.selectRect({ x: x0, y: y0, width: fw, height: fh }, 'replace');\n\n  let destLayerId = sourceLayerId;\n  if (opts.newLayer !== false || !destLayerId) {\n    const created = await api.layers.create({\n      name: (typeof opts.layerName === 'string' && opts.layerName.trim()) ? opts.layerName.trim().slice(0, 48) : 'Drift Glow Frame',\n      blendMode: 'screen',\n      aboveLayerId: sourceLayerId || undefined\n    });\n    destLayerId = created.id;\n  }\n\n  const writeBar = async (bx, by, bw, bh, horizontal) => {\n    if (bw <= 0 || bh <= 0) return;\n    const chunk = 256;\n    for (let cy = 0; cy < bh; cy += chunk) {\n      const sh = Math.min(chunk, bh - cy);\n      for (let cx = 0; cx < bw; cx += chunk) {\n        const sw = Math.min(chunk, bw - cx);\n        const buf = new Uint8Array(sw * sh * 4);\n        for (let ly = 0; ly < sh; ly++) {\n          const py = by + cy + ly;\n          const distY = Math.min(py - y0, (y1 - 1) - py);\n          for (let lx = 0; lx < sw; lx++) {\n            const px = bx + cx + lx;\n            const distX = Math.min(px - x0, (x1 - 1) - px);\n            const edgeDist = Math.min(distX, distY);\n            const fade = soft ? Math.max(0.25, 1 - edgeDist / Math.max(1, thickness)) : 1;\n            const t = horizontal ? ((px - x0) / Math.max(1, fw - 1)) : ((py - y0) / Math.max(1, fh - 1));\n            const idx = (ly * sw + lx) * 4;\n            buf[idx] = Math.round(r * (1 - t * 0.25) + 251 * (t * 0.25));\n            buf[idx + 1] = Math.round(g * (1 - t * 0.25) + 113 * (t * 0.25));\n            buf[idx + 2] = Math.round(b * (1 - t * 0.25) + 133 * (t * 0.25));\n            buf[idx + 3] = Math.round(255 * fade);\n          }\n        }\n        await api.pixels.write(destLayerId, { x: bx + cx, y: by + cy, width: sw, height: sh, data: buf, respectSelection: true });\n      }\n    }\n  };\n\n  const t = Math.min(thickness, Math.floor(Math.min(fw, fh) / 2) || 1);\n  await writeBar(x0, y0, fw, t, true);\n  await writeBar(x0, y1 - t, fw, t, true);\n  await writeBar(x0, y0 + t, t, Math.max(0, fh - t * 2), false);\n  await writeBar(x1 - t, y0 + t, t, Math.max(0, fh - t * 2), false);\n\n  return { fw, fh, destLayerId };\n}\n\nasync function onCommand(commandId, api) {\n  if (commandId === 'halo-frame') {\n    const res = await __drawGlowFrame(api, { thickness: 6, inset: 4, color: '#62c5df', style: 'soft', newLayer: true, layerName: 'Drift Glow Frame' });\n    return { notice: 'Drift Glow Frame applied (' + res.fw + 'x' + res.fh + ' px)' };\n  }\n  if (commandId === 'prism-swatches') {\n    const palette = [\n      [21, 30, 64],\n      [56, 123, 232],\n      [98, 197, 223],\n      [183, 240, 231],\n      [251, 113, 133]\n    ];\n    const cell = Math.max(12, Math.min(40, Math.floor(api.canvas.width / 12)));\n    const w = cell * palette.length;\n    const h = cell;\n    const layer = await api.layers.create({ name: 'Drift Swatches' });\n    const data = new Uint8Array(w * h * 4);\n    for (let y = 0; y < h; y++) {\n      for (let x = 0; x < w; x++) {\n        const c = palette[Math.min(palette.length - 1, Math.floor(x / cell))];\n        const idx = (y * w + x) * 4;\n        data[idx] = c[0];\n        data[idx + 1] = c[1];\n        data[idx + 2] = c[2];\n        data[idx + 3] = 255;\n      }\n    }\n    await api.pixels.write(layer.id, { x: 16, y: 16, width: w, height: h, data, respectSelection: false });\n    return { notice: 'Created Drift Swatches layer' };\n  }\n  return { notice: 'Unknown command: ' + commandId };\n}\n\nasync function onPanelAction(panelId, actionId, values, api) {\n  if (panelId !== 'drift-workshop') return {};\n  if (actionId === 'reset') {\n    return {\n      patchValues: {\n        thickness: 6,\n        inset: 4,\n        color: '#62c5df',\n        style: 'soft',\n        newLayer: true,\n        layerName: 'Drift Glow Frame'\n      },\n      statusText: 'Parameters restored to defaults.'\n    };\n  }\n  if (actionId === 'apply') {\n    const res = await __drawGlowFrame(api, values || {});\n    return {\n      statusText: 'Applied glow frame: ' + res.fw + ' × ' + res.fh + ' px',\n      notice: 'Drift Glow Frame applied'\n    };\n  }\n  return {};\n}\n"
+}

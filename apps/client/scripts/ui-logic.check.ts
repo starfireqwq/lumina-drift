@@ -3,6 +3,9 @@
  * Run: npx tsx apps/client/scripts/ui-logic.check.ts   (from the repo root; exits non-zero on failure)
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { FLOATS_PER_DAB, StrokeWorkerEngine, type WorkerBrushConfig } from '../src/workers/stroke.worker';
 import { contrastRatio, resolveTheme, THEME_PRESETS, DEFAULT_CUSTOM_THEME } from '../src/theme/themes';
 import { nextSizeStep } from '../src/components/workspace/toolCatalog';
@@ -3297,5 +3300,161 @@ await (async () => {
   assert.equal(patched.tag, '0123456789', 'input clamped to maxLength');
   assert.equal('unknownKey' in patched, false, 'unknown patch key ignored');
   assert.equal(isPluginPanelFieldVisible(tagField, patched), true, 'when condition reveals field after toggle');
+})();
+
+// Plugin API v2.0 Batch 7: Validate shipped original v2 sample plugin end-to-end
+await (async () => {
+  const scriptDir = dirname(fileURLToPath(import.meta.url));
+  const kitPath = resolve(scriptDir, '../public/plugins/lumina-drift-studio-kit.lumina-plugin');
+  const rawBytes = readFileSync(kitPath);
+  assert.ok(rawBytes.byteLength <= PLUGIN_LIMITS.maxPackageBytesV2, 'v2 sample kit must fit within 256 KiB limit');
+  const kit = parsePlugin(JSON.parse(rawBytes.toString('utf8'))) as PluginManifestV2;
+  assert.equal(kit.apiVersion, 2);
+  assert.equal(kit.id, 'lumina.drift-studio-kit');
+  assert.equal(kit.commands.length, 2);
+  assert.equal(kit.filters.length, 2);
+  assert.equal(kit.panels.length, 1);
+  assert.ok(kit.filters.some((f) => f.group === 'plugin'), 'v2 sample includes a dedicated plugin-group filter');
+  assert.ok(kit.filters.some((f) => f.group === 'color'), 'v2 sample includes an existing-group filter with puzzle badge');
+
+  // Execute both filters from the shipped kit in QuickJS tiled filter engine
+  const W = 64;
+  const H = 64;
+  const samplePixels = new Uint8Array(W * H * 4);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      samplePixels[i] = (x * 4) & 255;
+      samplePixels[i + 1] = (y * 4) & 255;
+      samplePixels[i + 2] = 180;
+      samplePixels[i + 3] = 255;
+    }
+  }
+  const prismRes = await runPluginFilterTiled({
+    script: kit.script,
+    filterId: 'drift-prism',
+    pixels: samplePixels,
+    width: W,
+    height: H,
+    params: { shift: 2, mix: 80 },
+    tilePadding: 4,
+    previewOnly: true,
+  });
+  assert.equal(prismRes.cancelled, false);
+  assert.ok(prismRes.output && prismRes.output.some((v, idx) => v !== samplePixels[idx]), 'drift-prism transforms pixels');
+
+  const auroraRes = await runPluginFilterTiled({
+    script: kit.script,
+    filterId: 'aurora-duotone',
+    pixels: samplePixels,
+    width: W,
+    height: H,
+    params: { shadow: '#1a2240', highlight: '#7ef9ff', mix: 80 },
+    tilePadding: 0,
+    previewOnly: false,
+  });
+  assert.equal(auroraRes.cancelled, false);
+  assert.ok(auroraRes.output && auroraRes.output.some((v, idx) => v !== samplePixels[idx]), 'aurora-duotone transforms pixels');
+
+  // Execute halo-frame command and panel reset/apply actions with single-groupId undo
+  const sel = createHeadlessSelectionBridge(W, H);
+  const layers: LayerModel[] = [
+    {
+      id: 'base', canvasId: 'c1', ownerId: 'u1', parentId: null, name: 'Paint',
+      layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+      alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+      sortOrder: 0, createdAt: 1, updatedAt: 1,
+    },
+  ];
+  const tileStore = new Map<string, Uint8Array>([['base', new Uint8Array(W * H * 4)]]);
+  const undo = new ScopedUndoManager();
+  let seq = 1;
+  const adapter: PluginCanvasHostAdapter = {
+    canvasWidth: W,
+    canvasHeight: H,
+    tileSize: W,
+    acl: { user: { id: 'u1', username: 'u1', displayName: 'U1', serverRole: 'user' }, isGuest: false, canvasMember: null },
+    getLayers: () => [...layers],
+    getActiveLayerId: () => 'base',
+    setActiveLayer: () => {},
+    createLayer: async (opts) => {
+      const created: LayerModel = {
+        id: `gen-${seq++}`, canvasId: 'c1', ownerId: 'u1', parentId: opts.parentId ?? null,
+        name: opts.name, layerType: opts.layerType ?? 'raster', blendMode: opts.blendMode ?? 'normal',
+        opacity: opts.opacity ?? 1, isVisible: true, isLocked: false, alphaLocked: false,
+        clipToBelow: false, isPublic: false, aclMode: 'owner_only', sortOrder: layers.length,
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      layers.push(created);
+      tileStore.set(created.id, new Uint8Array(W * H * 4));
+      return created;
+    },
+    updateLayerProps: async () => {},
+    reorderLayers: async () => {},
+    deleteLayer: async (id) => {
+      const idx = layers.findIndex((l) => l.id === id);
+      if (idx === -1) return false;
+      layers.splice(idx, 1);
+      tileStore.delete(id);
+      return true;
+    },
+    restoreDeletedLayer: async (layer) => {
+      layers.push(layer);
+      tileStore.set(layer.id, new Uint8Array(W * H * 4));
+      return layer;
+    },
+    getOccupiedTiles: () => [{ col: 0, row: 0 }],
+    readLayerTile: async (id) => (tileStore.get(id) ?? new Uint8Array(W * H * 4)).slice(),
+    readLayerRect: async (id, rect) => {
+      const buf = tileStore.get(id) ?? new Uint8Array(W * H * 4);
+      const out = new Uint8Array(rect.width * rect.height * 4);
+      for (let y = 0; y < rect.height; y++) {
+        const src = ((rect.y + y) * W + rect.x) * 4;
+        out.set(buf.subarray(src, src + rect.width * 4), y * rect.width * 4);
+      }
+      return out;
+    },
+    readCompositeRect: async (rect) => new Uint8Array(rect.width * rect.height * 4),
+    applyLayerTiles: (id, tiles) => {
+      if (tiles[0]) tileStore.set(id, (tiles[0].data as Uint8Array).slice());
+    },
+    commitTilePatch: () => {},
+    pushUndoOp: (op) => undo.push(op),
+    selection: sel,
+  };
+
+  // Run panel reset action
+  const txReset = new PluginCanvasTransaction(adapter);
+  const resetOut = await startPluginV2Direct(
+    kit,
+    { kind: 'panel', panelId: 'drift-workshop', actionId: 'reset', values: {} },
+    { width: W, height: H, dpi: 300 },
+    txReset.createRpcHandler(),
+  ).promise;
+  assert.equal(resetOut.patchValues?.thickness, 6);
+  assert.ok(resetOut.statusText);
+  await txReset.rollback();
+
+  // Run panel apply action -> creates new glow layer + writes pixels + sets selection in one groupId
+  const txApply = new PluginCanvasTransaction(adapter);
+  const applyOut = await startPluginV2Direct(
+    kit,
+    {
+      kind: 'panel',
+      panelId: 'drift-workshop',
+      actionId: 'apply',
+      values: { targetLayer: 'base', thickness: 4, inset: 2, color: '#62c5df', style: 'soft', newLayer: true, layerName: 'My Glow' },
+    },
+    { width: W, height: H, dpi: 300 },
+    txApply.createRpcHandler(),
+  ).promise;
+  txApply.commit('Drift Glow Lab');
+  assert.ok(applyOut.notice);
+  assert.equal(layers.length, 2, 'Panel apply created new glow layer');
+  const glowBuf = tileStore.get(layers[1].id)!;
+  assert.ok(glowBuf.some((v) => v > 0), 'Glow frame pixels written');
+  const undoOps = undo.undoGroup('u1');
+  assert.ok(undoOps.length >= 2, 'Single undoGroup covers layer creation, pixels, and selection');
+  assert.ok(new Set(undoOps.map((o) => o.groupId)).size === 1, 'All ops share one groupId');
 })();
 console.log('ui-logic checks passed');

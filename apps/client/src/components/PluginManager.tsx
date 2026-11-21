@@ -193,6 +193,13 @@ export function PluginManager({ plugins, onClose }: { plugins: InstalledPlugin[]
             <Upload />{strings.import}
           </button>
           <a
+            href={`${import.meta.env.BASE_URL}plugins/lumina-drift-studio-kit.lumina-plugin`}
+            download
+            className={modalButton.secondary}
+          >
+            <Download />{strings.sampleV2}
+          </a>
+          <a
             href={`${import.meta.env.BASE_URL}plugins/studio-tools.lumina-plugin`}
             download
             className={modalButton.secondary}
