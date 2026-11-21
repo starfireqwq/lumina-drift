@@ -14,6 +14,7 @@ import { AtelierModal } from './components/AtelierModal';
 import type { CanvasPluginAccess, CanvasProjectAccess } from './components/CanvasWorkspace';
 import { getPlugins, subscribePlugins } from './plugins/pluginStore';
 import { getPluginLabels } from './plugins/pluginLabels';
+import { resolvePluginName } from './plugins/pluginApi';
 import { ConnectionGateway, InitialCanvasOptions } from './components/ConnectionGateway';
 import { DeleteCanvasConfirmModal } from './components/DeleteCanvasConfirmModal';
 import { LiveChatDrawer } from './components/LiveChatDrawer';
@@ -656,7 +657,19 @@ export const App: React.FC = () => {
     const canvasId = currentCanvas?.id;
     if (!currentCanvas || roomLocked || pluginAccessRef.current?.canvasId !== canvasId) return showProjectToast(strings.needed);
     runningPlugin.current = true;
+    const displayName = resolvePluginName(plugin, language);
     try {
+      if (plugin.apiVersion === 2) {
+        const access = pluginAccessRef.current;
+        if (!access || access.canvasId !== canvasId) return;
+        const result = await access.runV2Command(plugin, commandId, {
+          onSlowStart: () => showProjectToast(strings.working),
+        });
+        if (!getPlugins().some(entry => entry.enabled && entry.manifest === plugin)) return;
+        if (canvasIdRef.current !== canvasId) return;
+        showProjectToast(result.notice || `${displayName} · ${strings.done}`);
+        return;
+      }
       const { runPlugin } = await import('./plugins/runPlugin');
       const action = await runPlugin(plugin, commandId, {
         width: currentCanvas.width, height: currentCanvas.height, dpi: clampDpi(currentCanvas.dpi ?? 300),
@@ -666,7 +679,7 @@ export const App: React.FC = () => {
       if (canvasIdRef.current !== canvasId || !access || access.canvasId !== canvasId) return;
       if (action.kind === 'message') return showProjectToast(action.text);
       if (!await access.apply(action)) return showProjectToast(strings.failed);
-      showProjectToast(`${plugin.name} · ${strings.done}`);
+      showProjectToast(`${displayName} · ${strings.done}`);
     } catch (error) {
       showProjectToast(`${strings.failed} ${error instanceof Error ? error.message : ''}`);
     } finally {

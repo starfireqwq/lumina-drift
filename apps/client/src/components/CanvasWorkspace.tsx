@@ -1,5 +1,7 @@
 import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { PluginAction } from '../plugins/pluginApi';
+import type { PluginAction, PluginManifestV2 } from '../plugins/pluginApi';
+import type { PluginV2Result } from '../plugins/pluginRpc';
+import { PluginCanvasTransaction, type PluginCanvasHostAdapter } from '../plugins/pluginCanvasBridge';
 import { Application, Container, type Filter, Graphics, MaskFilter, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
 
 function parseWorkspaceBgColor(cssColor: string, fallback = 0x0d0e12): number {
@@ -22,6 +24,7 @@ import {
   AtelierBrushPreset,
   MIN_BRUSH_SPACING,
   CanvasModel,
+  DEFAULT_TILE_SIZE,
   computeSmartEncloseFillMask,
   expandSelectionMask,
   floodFillMagicWand,
@@ -285,6 +288,18 @@ export interface CanvasProjectAccess {
 export interface CanvasPluginAccess {
   canvasId: string;
   apply(action: Exclude<PluginAction, { kind: 'message' }>): Promise<boolean>;
+  runV2Command(
+    plugin: PluginManifestV2,
+    commandId: string,
+    options?: { onSlowStart?: () => void; signal?: AbortSignal },
+  ): Promise<PluginV2Result>;
+  runV2PanelAction(
+    plugin: PluginManifestV2,
+    panelId: string,
+    actionId: string,
+    values: Record<string, unknown>,
+    options?: { onSlowStart?: () => void; signal?: AbortSignal },
+  ): Promise<PluginV2Result>;
 }
 
 interface CanvasWorkspaceProps {
@@ -4861,9 +4876,205 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
   const pluginActionRef = useRef(applyPluginAction);
   pluginActionRef.current = applyPluginAction;
+
+  const runPluginV2 = async (
+    plugin: PluginManifestV2,
+    invocation:
+      | { kind: 'command'; commandId: string }
+      | { kind: 'panel'; panelId: string; actionId: string; values: Record<string, unknown> },
+    options?: { onSlowStart?: () => void; signal?: AbortSignal },
+  ): Promise<PluginV2Result> => {
+    const manager = layerManagerRef.current;
+    const tileEngine = tileEngineRef.current;
+    if (!canvas || !manager || !tileEngine || transformLayerIdRef.current || textEdit || importingRef.current) {
+      throw new Error('Canvas is busy or unavailable.');
+    }
+
+    // Snapshot-augmented layer view so multi-step create/update/reorder/delete within a single run
+    // sees immediate changes even before React commits state updates.
+    const liveOverlay = new Map<string, LayerModel>();
+    const deletedOverlay = new Set<string>();
+    const getOverlayLayers = (): LayerModel[] => {
+      const merged = new Map<string, LayerModel>();
+      for (const l of layersRef.current) {
+        if (!deletedOverlay.has(l.id)) merged.set(l.id, l);
+      }
+      for (const [id, l] of liveOverlay.entries()) {
+        if (!deletedOverlay.has(id)) merged.set(id, l);
+      }
+      return [...merged.values()];
+    };
+
+    const currentMemberRaw = (roomMembers && roomMembers.length > 0 ? roomMembers : members).find(
+      (m) => m.userId === userRef.current?.id,
+    );
+    const roleRaw = currentMemberRaw && 'role' in currentMemberRaw ? currentMemberRaw.role : undefined;
+    const validRole: 'owner' | 'admin' | 'editor' | 'viewer' | undefined =
+      roleRaw === 'owner' || roleRaw === 'admin' || roleRaw === 'editor' || roleRaw === 'viewer'
+        ? roleRaw
+        : undefined;
+    const canvasMember = validRole && userRef.current
+      ? {
+          canvasId: canvas.id,
+          userId: userRef.current.id,
+          role: validRole,
+          canCreateLayer: validRole !== 'viewer',
+          canDeleteOtherLayer: validRole === 'owner' || validRole === 'admin',
+          canExport: true,
+          canManageMembers: validRole === 'owner' || validRole === 'admin',
+          joinedAt: 0,
+        }
+      : null;
+
+    const adapter: PluginCanvasHostAdapter = {
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
+      tileSize: DEFAULT_TILE_SIZE,
+      acl: {
+        user: userRef.current ?? user ?? null,
+        isGuest,
+        canvasMember,
+      },
+      getLayers: getOverlayLayers,
+      getActiveLayerId: () => activeLayerRef.current?.id ?? null,
+      setActiveLayer: (layerId) => {
+        onSelectLayer?.(layerId);
+      },
+      getBrush: () => ({
+        color: brushPropsRef.current?.color ?? brushProps.color,
+        size: brushPropsRef.current?.size ?? brushProps.size,
+      }),
+      setBrush: (patch) => {
+        handleBrushPropsChange({
+          ...(patch.color !== undefined ? { color: patch.color } : {}),
+          ...(patch.size !== undefined ? { size: patch.size } : {}),
+        });
+      },
+      createLayer: async (opts) => {
+        if (!onCreateLayer) return null;
+        const created = await onCreateLayer(
+          opts.name,
+          opts.blendMode,
+          opts.layerType,
+          opts.aboveLayerId,
+          opts.parentId,
+          { select: opts.select },
+        );
+        if (!created) return null;
+        const withProps: LayerModel = { ...created, opacity: opts.opacity };
+        if (opts.opacity !== 1) {
+          await onUpdateLayerProps?.(created.id, { opacity: opts.opacity });
+        }
+        liveOverlay.set(created.id, withProps);
+        deletedOverlay.delete(created.id);
+        await waitForLayerItem(created.id);
+        return withProps;
+      },
+      updateLayerProps: async (layerId, patch) => {
+        await onUpdateLayerProps?.(layerId, patch);
+        const existing = getOverlayLayers().find((l) => l.id === layerId);
+        if (existing) liveOverlay.set(layerId, { ...existing, ...patch });
+      },
+      reorderLayers: async (layerId, ascendingIds, parentIdPatch) => {
+        if (parentIdPatch !== undefined) {
+          await onUpdateLayerProps?.(layerId, { parentId: parentIdPatch });
+          const existing = getOverlayLayers().find((l) => l.id === layerId);
+          if (existing) liveOverlay.set(layerId, { ...existing, parentId: parentIdPatch });
+        }
+        await onReorderLayer?.(layerId, 0, ascendingIds);
+        ascendingIds.forEach((id, idx) => {
+          const existing = getOverlayLayers().find((l) => l.id === id);
+          if (existing) liveOverlay.set(id, { ...existing, sortOrder: (idx + 1) * 10 });
+        });
+      },
+      deleteLayer: async (layerId, opts) => {
+        const res = await onDeleteLayer?.(layerId, opts);
+        if (res === false) return false;
+        deletedOverlay.add(layerId);
+        liveOverlay.delete(layerId);
+        return true;
+      },
+      restoreDeletedLayer: async (model, tiles, belowId) => {
+        const restored = await recreateLayer(model, tiles, undefined, belowId ?? undefined);
+        if (restored) {
+          deletedOverlay.delete(restored.id);
+          liveOverlay.set(restored.id, restored);
+        }
+        return restored;
+      },
+      getOccupiedTiles: (layerId) => manager.occupiedTiles(layerId),
+      readLayerTile: async (layerId, col, row) => {
+        const tx = col * DEFAULT_TILE_SIZE;
+        const ty = row * DEFAULT_TILE_SIZE;
+        const w = Math.min(DEFAULT_TILE_SIZE, canvas.width - tx);
+        const h = Math.min(DEFAULT_TILE_SIZE, canvas.height - ty);
+        const [buf] = await manager.readAsync(layerId, [{ x: tx, y: ty, w, h }], 'after');
+        return buf ?? new Uint8Array(w * h * 4);
+      },
+      readLayerRect: async (layerId, rect) => {
+        const [buf] = await manager.readAsync(layerId, [{ x: rect.x, y: rect.y, w: rect.width, h: rect.height }], 'after');
+        return buf ?? new Uint8Array(rect.width * rect.height * 4);
+      },
+      readCompositeRect: async (rect, includeBackground) => {
+        const tex = manager.getCompositeTexture(includeBackground);
+        const [buf] = await tileEngine.readRegionsAsync(tex, [{ x: rect.x, y: rect.y, w: rect.width, h: rect.height }]);
+        return buf ?? new Uint8Array(rect.width * rect.height * 4);
+      },
+      applyLayerTiles: (layerId, tiles) => {
+        manager.applyTiles(layerId, tiles);
+        requestRenderRef.current();
+      },
+      commitTilePatch: (layerId, tiles, desc, beforeTiles) => {
+        commitTilePatch(layerId, tiles, false, desc, false, beforeTiles);
+      },
+      pushUndoOp: (op) => {
+        scopedUndoRef.current.push(op);
+      },
+      onTransactionCommitted: () => {
+        updateUndoRedoState();
+        requestRenderRef.current();
+      },
+    };
+
+    const tx = new PluginCanvasTransaction(adapter);
+    const { startPluginCommandV2, startPluginPanelActionV2 } = await import('../plugins/runPlugin');
+    const ctx = {
+      width: canvas.width,
+      height: canvas.height,
+      dpi: clampDpi(canvas.dpi ?? 300),
+      tileSize: DEFAULT_TILE_SIZE,
+    };
+
+    const handle = invocation.kind === 'command'
+      ? startPluginCommandV2(plugin, invocation.commandId, ctx, tx.createRpcHandler(), options)
+      : startPluginPanelActionV2(plugin, invocation.panelId, invocation.actionId, invocation.values, ctx, tx.createRpcHandler(), options);
+
+    try {
+      const result = await handle.promise;
+      if (layerManagerRef.current !== manager) {
+        await tx.rollback();
+        throw new Error('Canvas changed during plugin execution.');
+      }
+      tx.commit(`Plugin: ${plugin.name}`);
+      return result;
+    } catch (err) {
+      await tx.rollback();
+      throw err;
+    }
+  };
+  const runPluginV2Ref = useRef(runPluginV2);
+  runPluginV2Ref.current = runPluginV2;
+
   useLayoutEffect(() => {
     if (!canvas?.id || !isCanvasPresented || !isEngineReady || !onRegisterPluginAccess) return;
-    onRegisterPluginAccess({ canvasId: canvas.id, apply: (action) => pluginActionRef.current(action) });
+    onRegisterPluginAccess({
+      canvasId: canvas.id,
+      apply: (action) => pluginActionRef.current(action),
+      runV2Command: (plugin, commandId, options) =>
+        runPluginV2Ref.current(plugin, { kind: 'command', commandId }, options),
+      runV2PanelAction: (plugin, panelId, actionId, values, options) =>
+        runPluginV2Ref.current(plugin, { kind: 'panel', panelId, actionId, values }, options),
+    });
     return () => onRegisterPluginAccess(null);
   }, [canvas?.id, isCanvasPresented, isEngineReady, onRegisterPluginAccess]);
 

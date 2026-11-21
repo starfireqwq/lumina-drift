@@ -61,6 +61,13 @@ import {
 } from '../src/plugins/pluginStore';
 import { executePluginV1 } from '../src/plugins/pluginSandboxCore';
 import { startPluginV2Direct } from '../src/plugins/pluginHost';
+import {
+  PluginCanvasTransaction,
+  premultipliedToStraight,
+  straightToPremultiplied,
+  type PluginCanvasHostAdapter,
+} from '../src/plugins/pluginCanvasBridge';
+import type { LayerModel } from '@atelier/shared';
 import { verticalRuns } from '../src/engine/textLayer';
 import { deleteAnchor, isCornerAnchor, moveHandle, penPointsToAnchors, toggleCorner } from '../src/engine/vectorEditing';
 import {
@@ -2430,5 +2437,319 @@ await (async () => {
     ).promise,
     /never settled/i,
   );
+})();
+
+// Plugin API v2.0 Batch 3: Layer tree, tile pixel I/O, straight<->premul, ACL, groupId undo, and rollback
+await (async () => {
+  // 1. Straight <-> Premultiplied RGBA conversion accuracy (semi-transparent without dark fringing)
+  const straightIn = new Uint8Array([200, 100, 50, 128, 255, 0, 128, 0, 10, 20, 30, 255]);
+  const premul = straightToPremultiplied(straightIn);
+  assert.deepEqual([...premul], [100, 50, 25, 128, 0, 0, 0, 0, 10, 20, 30, 255]);
+  const straightBack = premultipliedToStraight(premul);
+  assert.ok(Math.abs(straightBack[0] - 200) <= 1 && Math.abs(straightBack[1] - 100) <= 1 && straightBack[3] === 128);
+  assert.deepEqual([...straightBack.subarray(4, 12)], [0, 0, 0, 0, 10, 20, 30, 255]);
+
+  // Helper: in-memory canvas adapter backed by 256x256 premultiplied tiles + ScopedUndoManager
+  const makeMockCanvas = (aclOverride?: Partial<PluginCanvasHostAdapter['acl']>) => {
+    const W = 512;
+    const H = 512;
+    const TS = 256;
+    const layers: LayerModel[] = [
+      {
+        id: 'l-own', canvasId: 'c1', ownerId: 'u1', parentId: null, name: 'My Layer',
+        layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+        alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+        sortOrder: 10, createdAt: 1, updatedAt: 1,
+      },
+      {
+        id: 'l-other', canvasId: 'c1', ownerId: 'u2', parentId: null, name: 'Other Layer',
+        layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+        alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+        sortOrder: 20, createdAt: 1, updatedAt: 1,
+      },
+      {
+        id: 'l-locked', canvasId: 'c1', ownerId: 'u1', parentId: null, name: 'Locked Layer',
+        layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: true,
+        alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+        sortOrder: 30, createdAt: 1, updatedAt: 1,
+      },
+      {
+        id: 'l-shared', canvasId: 'c1', ownerId: 'u2', parentId: null, name: 'Shared Layer',
+        layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+        alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'shared_all',
+        sortOrder: 40, createdAt: 1, updatedAt: 1,
+      },
+      {
+        id: 'l-alpha', canvasId: 'c1', ownerId: 'u1', parentId: null, name: 'Alpha Locked',
+        layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+        alphaLocked: true, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+        sortOrder: 50, createdAt: 1, updatedAt: 1,
+      },
+    ];
+    let activeId: string | null = 'l-own';
+    const tileStore = new Map<string, Map<string, Uint8Array>>();
+    const undo = new ScopedUndoManager();
+    const committedPatches: Array<{ layerId: string; count: number }> = [];
+    let createdSeq = 1;
+
+    const getTile = (layerId: string, col: number, row: number): Uint8Array => {
+      const lm = tileStore.get(layerId);
+      const t = lm?.get(`${col}_${row}`);
+      return t ? t.slice() : new Uint8Array(TS * TS * 4);
+    };
+    const setTile = (layerId: string, col: number, row: number, data: Uint8Array) => {
+      let lm = tileStore.get(layerId);
+      if (!lm) {
+        lm = new Map();
+        tileStore.set(layerId, lm);
+      }
+      lm.set(`${col}_${row}`, data.slice());
+    };
+
+    // Seed 1 pixel on l-alpha at (2, 2) with premultiplied RGBA (50, 50, 50, 128)
+    const alphaTile = new Uint8Array(TS * TS * 4);
+    const seedIdx = (2 * TS + 2) * 4;
+    alphaTile[seedIdx] = 50; alphaTile[seedIdx + 1] = 50; alphaTile[seedIdx + 2] = 50; alphaTile[seedIdx + 3] = 128;
+    setTile('l-alpha', 0, 0, alphaTile);
+
+    const adapter: PluginCanvasHostAdapter = {
+      canvasWidth: W,
+      canvasHeight: H,
+      tileSize: TS,
+      acl: {
+        user: { id: 'u1', username: 'alice', displayName: 'Alice', serverRole: 'user' },
+        isGuest: false,
+        canvasMember: null,
+        ...aclOverride,
+      },
+      getLayers: () => layers,
+      getActiveLayerId: () => activeId,
+      setActiveLayer: (id) => { activeId = id; },
+      createLayer: async (opts) => {
+        const model: LayerModel = {
+          id: `l-new-${createdSeq++}`,
+          canvasId: 'c1',
+          ownerId: aclOverride?.user?.id ?? 'u1',
+          parentId: opts.parentId,
+          name: opts.name,
+          layerType: opts.layerType,
+          blendMode: opts.blendMode,
+          opacity: opts.opacity,
+          isVisible: true,
+          isLocked: false,
+          alphaLocked: false,
+          clipToBelow: false,
+          isPublic: false,
+          aclMode: 'owner_only',
+          sortOrder: (layers.length + 1) * 10,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        layers.push(model);
+        if (opts.select) activeId = model.id;
+        return model;
+      },
+      updateLayerProps: async (layerId, patch) => {
+        const l = layers.find((x) => x.id === layerId);
+        if (l) Object.assign(l, patch);
+      },
+      reorderLayers: async (layerId, ascendingIds, parentIdPatch) => {
+        if (parentIdPatch !== undefined) {
+          const l = layers.find((x) => x.id === layerId);
+          if (l) l.parentId = parentIdPatch;
+        }
+        ascendingIds.forEach((id, idx) => {
+          const l = layers.find((x) => x.id === id);
+          if (l) l.sortOrder = (idx + 1) * 10;
+        });
+      },
+      deleteLayer: async (layerId) => {
+        const idx = layers.findIndex((x) => x.id === layerId);
+        if (idx < 0) return false;
+        layers.splice(idx, 1);
+        tileStore.delete(layerId);
+        return true;
+      },
+      restoreDeletedLayer: async (model, tiles) => {
+        layers.push({ ...model });
+        for (const t of tiles) setTile(model.id, t.col, t.row, t.data as Uint8Array);
+        return model;
+      },
+      getOccupiedTiles: (layerId) => {
+        const lm = tileStore.get(layerId);
+        if (!lm) return [];
+        return [...lm.keys()].map((k) => {
+          const [col, row] = k.split('_').map(Number);
+          return { col, row };
+        });
+      },
+      readLayerTile: async (layerId, col, row) => getTile(layerId, col, row),
+      readLayerRect: async (layerId, rect) => {
+        const out = new Uint8Array(rect.width * rect.height * 4);
+        for (let y = 0; y < rect.height; y++) {
+          for (let x = 0; x < rect.width; x++) {
+            const gx = rect.x + x;
+            const gy = rect.y + y;
+            const t = getTile(layerId, Math.floor(gx / TS), Math.floor(gy / TS));
+            const si = ((gy % TS) * TS + (gx % TS)) * 4;
+            const di = (y * rect.width + x) * 4;
+            out.set(t.subarray(si, si + 4), di);
+          }
+        }
+        return out;
+      },
+      readCompositeRect: async (rect) => new Uint8Array(rect.width * rect.height * 4),
+      applyLayerTiles: (layerId, tiles) => {
+        for (const t of tiles) setTile(layerId, t.col, t.row, t.data as Uint8Array);
+      },
+      commitTilePatch: (layerId, tiles) => {
+        committedPatches.push({ layerId, count: tiles.length });
+      },
+      pushUndoOp: (op) => undo.push(op),
+    };
+    return { adapter, layers, undo, getTile, committedPatches };
+  };
+
+  const makeManifest = (script: string, permissions: PluginManifestV2['permissions']): PluginManifestV2 =>
+    parsePlugin({
+      apiVersion: 2,
+      id: 'lumina.b3-test',
+      name: 'B3 Test',
+      version: '1.0.0',
+      author: 'Tester',
+      description: 'Batch 3 bridge tests',
+      permissions,
+      commands: [{ id: 'go', label: 'Go' }],
+      script,
+    }) as PluginManifestV2;
+
+  // 2. Multi-layer create + write + read-staged + alphaLock + sparse bounds + single groupId undo
+  {
+    const mock = makeMockCanvas();
+    const tx = new PluginCanvasTransaction(mock.adapter);
+    const manifest = makeManifest(
+      `async function onCommand(_id, api) {
+        const list = await api.layers.list();
+        const other = list.find(l => l.id === 'l-other');
+        const shared = list.find(l => l.id === 'l-shared');
+        const locked = list.find(l => l.id === 'l-locked');
+        if (other.canEditPixels !== false || other.canManage !== false) throw new Error('ACL mismatch on other');
+        if (locked.canEditPixels !== false || locked.canManage !== false) throw new Error('ACL mismatch on locked');
+        if (shared.canEditPixels !== true || shared.canManage !== false) throw new Error('ACL mismatch on shared');
+
+        // Write straight semi-transparent red into l-own at (10, 12)
+        const px = new Uint8Array([200, 40, 20, 128]);
+        await api.pixels.write('l-own', { x: 10, y: 12, width: 1, height: 1, data: px });
+        // Immediately read back staged pixel before commit
+        const readBack = await api.pixels.read('l-own', { x: 10, y: 12, width: 1, height: 1 });
+        if (Math.abs(readBack.data[0] - 200) > 1 || readBack.data[3] !== 128) throw new Error('Staged read failed');
+
+        // Sparse non-empty bounds should report exact 1x1 box at (10,12)
+        const bounds = await api.pixels.getNonEmptyBounds('l-own');
+        if (!bounds || bounds.x !== 10 || bounds.y !== 12 || bounds.width !== 1 || bounds.height !== 1) {
+          throw new Error('Bounds mismatch: ' + JSON.stringify(bounds));
+        }
+
+        // Alpha-locked write: (2,2) keeps alpha=128 with new color; (3,2) stays transparent
+        const aPatch = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255]);
+        await api.pixels.write('l-alpha', { x: 2, y: 2, width: 2, height: 1, data: aPatch });
+
+        // Create a new layer and draw a pixel into it
+        const created = await api.layers.create({ name: 'Generated Glow', blendMode: 'add', opacity: 0.75 });
+        await api.pixels.write(created.id, { x: 0, y: 0, width: 1, height: 1, data: new Uint8Array([0, 255, 255, 255]) });
+
+        return { notice: created.id };
+      }`,
+      ['commands', 'layers:read', 'layers:write', 'pixels:read', 'pixels:write'],
+    );
+    const res = await startPluginV2Direct(
+      manifest,
+      { kind: 'command', commandId: 'go' },
+      { width: 512, height: 512, dpi: 300 },
+      tx.createRpcHandler(),
+    ).promise;
+    // Before commit, l-own tile in canvas store is still untouched
+    assert.equal(mock.getTile('l-own', 0, 0)[(12 * 256 + 10) * 4 + 3], 0, 'Canvas pixels untouched before commit');
+    tx.commit('Plugin: B3 Test');
+
+    // After commit, l-own has premultiplied (100, 20, 10, 128)
+    const ownTile = mock.getTile('l-own', 0, 0);
+    const idx = (12 * 256 + 10) * 4;
+    assert.deepEqual([...ownTile.subarray(idx, idx + 4)], [100, 20, 10, 128]);
+
+    // Alpha-locked layer preserved original alpha=128 at (2,2) and kept (3,2) transparent
+    const aTile = mock.getTile('l-alpha', 0, 0);
+    const aIdx0 = (2 * 256 + 2) * 4;
+    const aIdx1 = (2 * 256 + 3) * 4;
+    assert.deepEqual([...aTile.subarray(aIdx0, aIdx0 + 4)], [128, 0, 0, 128]);
+    assert.deepEqual([...aTile.subarray(aIdx1, aIdx1 + 4)], [0, 0, 0, 0]);
+
+    // Single undoGroup pops ALL ops from this plugin run together (shared groupId)
+    const undoneOps = mock.undo.undoGroup('u1');
+    assert.equal(undoneOps.length, 3, 'Created layer + 2 modified layers share one undo group');
+    assert.equal(new Set(undoneOps.map((o) => o.groupId)).size, 1, 'All ops share identical groupId');
+    assert.ok(undoneOps.some((o) => o.layerCreated && o.layerId === res.notice));
+  }
+
+  // 3. Failure rollback: discards staged pixels, deletes created layer, restores updated props, pushes 0 undo ops
+  {
+    const mock = makeMockCanvas();
+    const tx = new PluginCanvasTransaction(mock.adapter);
+    const failManifest = makeManifest(
+      `async function onCommand(_id, api) {
+        await api.layers.update('l-own', { name: 'Renamed Before Crash', opacity: 0.25 });
+        const created = await api.layers.create({ name: 'Temp Layer' });
+        await api.pixels.write('l-own', { x: 1, y: 1, width: 1, height: 1, data: new Uint8Array([255, 255, 255, 255]) });
+        await api.pixels.write(created.id, { x: 0, y: 0, width: 1, height: 1, data: new Uint8Array([255, 0, 0, 255]) });
+        throw new Error('Intentional mid-run failure');
+      }`,
+      ['commands', 'layers:read', 'layers:write', 'pixels:write'],
+    );
+    await assert.rejects(
+      startPluginV2Direct(
+        failManifest,
+        { kind: 'command', commandId: 'go' },
+        { width: 512, height: 512, dpi: 300 },
+        tx.createRpcHandler(),
+      ).promise,
+      /Intentional mid-run failure/,
+    );
+    await tx.rollback();
+    assert.equal(mock.layers.find((l) => l.name === 'Temp Layer'), undefined, 'Created layer removed on rollback');
+    assert.equal(mock.layers.find((l) => l.id === 'l-own')?.name, 'My Layer', 'Layer name restored on rollback');
+    assert.equal(mock.layers.find((l) => l.id === 'l-own')?.opacity, 1, 'Layer opacity restored on rollback');
+    assert.equal(mock.getTile('l-own', 0, 0)[(1 * 256 + 1) * 4 + 3], 0, 'Staged pixels discarded on rollback');
+    assert.equal(mock.undo.canUndo('u1'), false, 'No undo ops pushed on rollback');
+  }
+
+  // 4. ACL enforcement & forbidden mutations (guest, viewer, other's layer, locked layer, forbidden props, >512px)
+  {
+    const mock = makeMockCanvas();
+    const tx = new PluginCanvasTransaction(mock.adapter);
+    const rpc = tx.createRpcHandler();
+    await assert.rejects(rpc('pixels.write', { layerId: 'l-other', patch: { x: 0, y: 0, width: 1, height: 1 } }, new Uint8Array(4).buffer));
+    await assert.rejects(rpc('pixels.write', { layerId: 'l-locked', patch: { x: 0, y: 0, width: 1, height: 1 } }, new Uint8Array(4).buffer));
+    await assert.rejects(rpc('layers.delete', { layerId: 'l-shared' }));
+    await assert.rejects(rpc('layers.update', { layerId: 'l-own', patch: { isLocked: true } }), /Disallowed layer property/);
+    await assert.rejects(rpc('layers.update', { layerId: 'l-own', patch: { aclMode: 'shared_all' } }), /Disallowed layer property/);
+    await assert.rejects(rpc('layers.update', { layerId: 'l-own', patch: { isPublic: true } }), /Disallowed layer property/);
+    await assert.rejects(rpc('pixels.read', { layerId: 'l-own', rect: { x: 0, y: 0, width: 513, height: 1 } }), /512/);
+    await tx.rollback();
+
+    const guestMock = makeMockCanvas({ isGuest: true, user: null });
+    const guestTx = new PluginCanvasTransaction(guestMock.adapter);
+    await assert.rejects(guestTx.createRpcHandler()('layers.create', { name: 'Guest Layer' }), /Guests/);
+    await guestTx.rollback();
+
+    const viewerMock = makeMockCanvas({
+      canvasMember: {
+        canvasId: 'c1', userId: 'u1', role: 'viewer',
+        canCreateLayer: false, canDeleteOtherLayer: false, canExport: false, canManageMembers: false, joinedAt: 0,
+      },
+    });
+    const viewerTx = new PluginCanvasTransaction(viewerMock.adapter);
+    await assert.rejects(viewerTx.createRpcHandler()('layers.create', { name: 'Viewer Layer' }), /Viewers/);
+    await viewerTx.rollback();
+  }
 })();
 console.log('ui-logic checks passed');
