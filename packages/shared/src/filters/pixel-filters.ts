@@ -47,24 +47,30 @@ export function applyGaussianBlur(
     weights[i] /= weightSum;
   }
 
-  // Pass 1: Horizontal Blur (writes into intermediate buffer)
+  // The kernel is symmetric: the two pixels k away on either side share one weight (half the
+  // multiplications). Pass 1: Horizontal Blur (writes into intermediate buffer)
   const temp = new Uint8Array(width * height * 4);
+  const lastX = width - 1;
+  const w0 = weights[rad];
 
   for (let y = 0; y < height; y++) {
+    const row = y * width;
     for (let x = 0; x < width; x++) {
-      let r = 0, g = 0, b = 0, a = 0;
+      const centre = (row + x) * 4;
+      let r = pixels[centre] * w0, g = pixels[centre + 1] * w0, b = pixels[centre + 2] * w0, a = pixels[centre + 3] * w0;
 
-      for (let k = -rad; k <= rad; k++) {
-        const sampleX = Math.max(0, Math.min(width - 1, x + k));
-        const idx = (y * width + sampleX) * 4;
-        const w = weights[k + rad];
-        r += pixels[idx] * w;
-        g += pixels[idx + 1] * w;
-        b += pixels[idx + 2] * w;
-        a += pixels[idx + 3] * w;
+      for (let k = 1; k <= rad; k++) {
+        const lx = x - k, rx = x + k;
+        const li = (row + (lx < 0 ? 0 : lx)) * 4;
+        const ri = (row + (rx > lastX ? lastX : rx)) * 4;
+        const w = weights[rad + k];
+        r += (pixels[li] + pixels[ri]) * w;
+        g += (pixels[li + 1] + pixels[ri + 1]) * w;
+        b += (pixels[li + 2] + pixels[ri + 2]) * w;
+        a += (pixels[li + 3] + pixels[ri + 3]) * w;
       }
 
-      const outIdx = (y * width + x) * 4;
+      const outIdx = (row + x) * 4;
       temp[outIdx] = Math.round(r);
       temp[outIdx + 1] = Math.round(g);
       temp[outIdx + 2] = Math.round(b);
@@ -72,40 +78,35 @@ export function applyGaussianBlur(
     }
   }
 
-  // Pass 2: Vertical Blur (writes into final buffer with selection mask support)
+  // Pass 2: Vertical Blur, a whole row at a time (read in memory order), into the final buffer with
+  // selection mask support
   const output = new Uint8Array(width * height * 4);
+  const len = width * 4;
+  const lastY = height - 1;
+  const sums = new Float64Array(len);
 
   for (let y = 0; y < height; y++) {
+    const centre = y * len;
+    for (let i = 0; i < len; i++) sums[i] = temp[centre + i] * w0;
+    for (let k = 1; k <= rad; k++) {
+      const up = (y - k < 0 ? 0 : y - k) * len;
+      const down = (y + k > lastY ? lastY : y + k) * len;
+      const w = weights[rad + k];
+      for (let i = 0; i < len; i++) sums[i] += (temp[up + i] + temp[down + i]) * w;
+    }
+    const row = y * len;
+    if (!selectionMask) {
+      for (let i = 0; i < len; i++) output[row + i] = Math.round(sums[i]);
+      continue;
+    }
     for (let x = 0; x < width; x++) {
-      const outIdx = (y * width + x) * 4;
-      const maskFactor = getSelectionMaskFactor(selectionMask || null, x, y, width, height);
-
-      // If masked out, preserve original pixel
-      if (maskFactor <= 0.0) {
-        output[outIdx] = pixels[outIdx];
-        output[outIdx + 1] = pixels[outIdx + 1];
-        output[outIdx + 2] = pixels[outIdx + 2];
-        output[outIdx + 3] = pixels[outIdx + 3];
-        continue;
+      const at = x * 4;
+      const outIdx = row + at;
+      const maskFactor = getSelectionMaskFactor(selectionMask, x, y, width, height);
+      for (let c = 0; c < 4; c++) {
+        // Masked out: the original pixel; else the filtered pixel blended in by maskFactor
+        output[outIdx + c] = maskFactor <= 0.0 ? pixels[outIdx + c] : Math.round(pixels[outIdx + c] * (1.0 - maskFactor) + sums[at + c] * maskFactor);
       }
-
-      let r = 0, g = 0, b = 0, a = 0;
-
-      for (let k = -rad; k <= rad; k++) {
-        const sampleY = Math.max(0, Math.min(height - 1, y + k));
-        const idx = (sampleY * width + x) * 4;
-        const w = weights[k + rad];
-        r += temp[idx] * w;
-        g += temp[idx + 1] * w;
-        b += temp[idx + 2] * w;
-        a += temp[idx + 3] * w;
-      }
-
-      // Blend filtered pixel with original according to maskFactor
-      output[outIdx] = Math.round(pixels[outIdx] * (1.0 - maskFactor) + r * maskFactor);
-      output[outIdx + 1] = Math.round(pixels[outIdx + 1] * (1.0 - maskFactor) + g * maskFactor);
-      output[outIdx + 2] = Math.round(pixels[outIdx + 2] * (1.0 - maskFactor) + b * maskFactor);
-      output[outIdx + 3] = Math.round(pixels[outIdx + 3] * (1.0 - maskFactor) + a * maskFactor);
     }
   }
 

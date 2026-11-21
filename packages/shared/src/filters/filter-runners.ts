@@ -53,25 +53,47 @@ export function filterChoice<T extends string>(values: FilterValues, key: string
   return choices.includes(value as T) ? value as T : choices[0];
 }
 
+/**
+ * 旋轉模糊: 13 reads along an arc round the centre. The parts of each read's position that depend
+ * on x alone, and on y alone, are worked out once (the same sums in the same order as before).
+ */
 function spinBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, degrees: number, cx: number, cy: number) {
   const result = new Uint8Array(pixels.length);
-  const samples = Array.from({ length: 13 }, (_, index) => {
-    const angle = radians(degrees) * (index / 12 - 0.5);
-    return [Math.cos(angle), Math.sin(angle)];
-  });
-  const sums = [0, 0, 0, 0];
-  for (let y = 0; y < height; y++) {
+  const count = 13;
+  const cos = new Float64Array(count), sin = new Float64Array(count);
+  for (let s = 0; s < count; s++) {
+    const angle = radians(degrees) * (s / 12 - 0.5);
+    cos[s] = Math.cos(angle);
+    sin[s] = Math.sin(angle);
+  }
+  // sx = (cx + (x − cx)·cos) − (y − cy)·sin, sy = (cy + (x − cx)·sin) + (y − cy)·cos
+  const alongX = new Float64Array(count * width), downX = new Float64Array(count * width);
+  for (let s = 0; s < count; s++) {
     for (let x = 0; x < width; x++) {
-      sums.fill(0);
-      for (const [cos, sin] of samples) {
-        const sx = Math.round(cx + (x - cx) * cos - (y - cy) * sin);
-        const sy = Math.round(cy + (x - cx) * sin + (y - cy) * cos);
+      alongX[s * width + x] = cx + (x - cx) * cos[s];
+      downX[s * width + x] = cy + (x - cx) * sin[s];
+    }
+  }
+  const alongY = new Float64Array(count), downY = new Float64Array(count);
+  for (let y = 0; y < height; y++) {
+    for (let s = 0; s < count; s++) {
+      alongY[s] = (y - cy) * sin[s];
+      downY[s] = (y - cy) * cos[s];
+    }
+    for (let x = 0; x < width; x++) {
+      let r = 0, g = 0, b = 0, a = 0;
+      for (let s = 0; s < count; s++) {
+        const sx = Math.round(alongX[s * width + x] - alongY[s]);
+        const sy = Math.round(downX[s * width + x] + downY[s]);
         if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
         const src = (sy * width + sx) * 4;
-        for (let k = 0; k < 4; k++) sums[k] += pixels[src + k];
+        r += pixels[src]; g += pixels[src + 1]; b += pixels[src + 2]; a += pixels[src + 3];
       }
       const dst = (y * width + x) * 4;
-      for (let k = 0; k < 4; k++) result[dst + k] = Math.round(sums[k] / samples.length);
+      result[dst] = Math.round(r / count);
+      result[dst + 1] = Math.round(g / count);
+      result[dst + 2] = Math.round(b / count);
+      result[dst + 3] = Math.round(a / count);
     }
   }
   return result;
@@ -230,13 +252,37 @@ export function runPixelFilter(
   const result = runner.run(context, values);
   // A runner may hand back its input: never write over the caller's pixels
   const output = result === pixels ? new Uint8Array(result) : result;
-  for (let i = 0; i < output.length; i += 4) {
-    const factor = mask ? mask[i / 4] / 255 : 1;
-    const alpha = output[i + 3];
-    for (let k = 0; k < 4; k++) {
-      const filtered = runner.colorOnly && k < 3 ? output[i + k] * alpha / 255 : output[i + k];
-      output[i + k] = Math.round(pixels[i + k] * (1 - factor) + filtered * factor);
-    }
-  }
+  blendFiltered(pixels, output, mask, runner.colorOnly === true);
   return output;
 }
+
+/**
+ * Puts `output` (the filter's result, changed in place) in through the selection mask: the original
+ * where the mask is 0, the result where it is 255. Colour-only results are re-premultiplied by their
+ * alpha. Whole-number arithmetic: x / 255 and x / 65025 never land on .5 for a whole x, so
+ * `(x + 127) / 255 | 0` rounds exactly like Math.round did on the floating-point blend.
+ */
+export function blendFiltered(pixels: ArrayLike<number>, output: Uint8Array, mask: Uint8Array | null | undefined, colorOnly: boolean) {
+  if (!mask && !colorOnly) return;
+  for (let i = 0, p = 0; i < output.length; i += 4, p++) {
+    const m = mask ? mask[p] : 255;
+    if (m === 0) {
+      output[i] = pixels[i]; output[i + 1] = pixels[i + 1]; output[i + 2] = pixels[i + 2]; output[i + 3] = pixels[i + 3];
+      continue;
+    }
+    if (colorOnly) {
+      const alpha = output[i + 3];
+      if (m === 255) {
+        for (let k = 0; k < 3; k++) output[i + k] = ((output[i + k] * alpha + 127) / 255) | 0;
+      } else {
+        const keep = 255 - m;
+        for (let k = 0; k < 3; k++) output[i + k] = ((pixels[i + k] * keep * 255 + output[i + k] * alpha * m + 32512) / 65025) | 0;
+        output[i + 3] = ((pixels[i + 3] * keep + alpha * m + 127) / 255) | 0;
+      }
+    } else if (m !== 255) {
+      const keep = 255 - m;
+      for (let k = 0; k < 4; k++) output[i + k] = ((pixels[i + k] * keep + output[i + k] * m + 127) / 255) | 0;
+    }
+  }
+}
+

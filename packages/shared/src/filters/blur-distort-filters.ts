@@ -4,7 +4,7 @@
  * motion blur, repeated sparse passes for zoom blur, inverse mapping with bilinear sampling for
  * the distortions, and unsharp masking.
  */
-import { boxBlur } from './effect-filters';
+import { tripleBoxBlur } from './effect-filters';
 
 export type MotionDirection = 'both' | 'forward' | 'backward';
 
@@ -108,18 +108,25 @@ export function zoomBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, 
   let start = direction === 'in' ? -span : direction === 'out' ? 0 : -span / 2;
   let current: Uint8Array | Uint8ClampedArray = pixels;
   let step = span / taps;
+  // A read's column depends only on x and its row only on y: both are worked out once per pass
+  const columns = new Int32Array(taps * width);
+  const rows = new Int32Array(taps);
   for (let pass = 0; pass < 3; pass++) {
     const next = new Uint8Array(pixels.length);
+    for (let t = 0; t < taps; t++) {
+      const scale = 1 + start + t * step;
+      for (let x = 0; x < width; x++) columns[t * width + x] = Math.min(width - 1, Math.max(0, Math.round(cx + (x - cx) * scale)));
+    }
     for (let y = 0; y < height; y++) {
       const dy = y - cy;
+      for (let t = 0; t < taps; t++) {
+        const scale = 1 + start + t * step;
+        rows[t] = Math.min(height - 1, Math.max(0, Math.round(cy + dy * scale))) * width;
+      }
       for (let x = 0; x < width; x++) {
-        const dx = x - cx;
         let r = 0, g = 0, b = 0, a = 0;
         for (let t = 0; t < taps; t++) {
-          const scale = 1 + start + t * step;
-          const sx = Math.min(width - 1, Math.max(0, Math.round(cx + dx * scale)));
-          const sy = Math.min(height - 1, Math.max(0, Math.round(cy + dy * scale)));
-          const p = (sy * width + sx) * 4;
+          const p = (rows[t] + columns[t * width + x]) * 4;
           r += current[p];
           g += current[p + 1];
           b += current[p + 2];
@@ -139,25 +146,32 @@ export function zoomBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, 
   return current as Uint8Array;
 }
 
-/** 柔化: a light 3 × 3 blur (1-2-1 weights) */
+/**
+ * 柔化: a light 3 × 3 blur (1-2-1 weights), done as a row pass and a column pass. The row sums are
+ * kept whole (three rows at a time), so the result is the same as the 3 × 3 sum rounded once.
+ */
 export function soften(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number) {
   const output = new Uint8Array(pixels.length);
-  const weights = [1, 2, 1];
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const i = (y * width + x) * 4;
-      for (let k = 0; k < 4; k++) {
-        let sum = 0;
-        for (let j = -1; j <= 1; j++) {
-          const yy = Math.min(height - 1, Math.max(0, y + j));
-          for (let m = -1; m <= 1; m++) {
-            const xx = Math.min(width - 1, Math.max(0, x + m));
-            sum += pixels[(yy * width + xx) * 4 + k] * weights[j + 1] * weights[m + 1];
-          }
-        }
-        output[i + k] = Math.round(sum / 16);
-      }
+  const len = width * 4;
+  if (!len || !height) return output;
+  const rowSums = (y: number, into: Uint16Array) => {
+    const base = y * len;
+    for (let i = 0; i < len; i++) {
+      const left = i < 4 ? i : i - 4;
+      const right = i >= len - 4 ? i : i + 4;
+      into[i] = pixels[base + left] + 2 * pixels[base + i] + pixels[base + right];
     }
+  };
+  let above = new Uint16Array(len), middle = new Uint16Array(len), below = new Uint16Array(len);
+  rowSums(0, middle);
+  above.set(middle);
+  for (let y = 0; y < height; y++) {
+    if (y + 1 < height) rowSums(y + 1, below);
+    else below.set(middle);
+    const row = y * len;
+    // Math.round(sum / 16), .5 rounding up
+    for (let i = 0; i < len; i++) output[row + i] = (above[i] + 2 * middle[i] + below[i] + 8) >> 4;
+    [above, middle, below] = [middle, below, above];
   }
   return output;
 }
@@ -202,8 +216,7 @@ export function spherize(pixels: Uint8Array | Uint8ClampedArray, width: number, 
  */
 export function unsharpMask(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, radius: number, amount: number, threshold: number) {
   // Three box passes of the radius itself, so each step of the radius slider blurs a little more
-  const r = Math.max(1, Math.round(radius));
-  const blurred = boxBlur(boxBlur(boxBlur(pixels, width, height, r), width, height, r), width, height, r);
+  const blurred = tripleBoxBlur(pixels, width, height, radius);
   const gain = Math.max(0, amount) / 100;
   const output = new Uint8Array(pixels.length);
   for (let i = 0; i < pixels.length; i += 4) {

@@ -5,38 +5,78 @@
  */
 import { hexToRgb } from '../color/pigment-blend';
 import { INK_ALPHA, distanceField, inkMap } from './lineart-filters';
+import { downscale, upscale } from './resample';
 
 const luma = (r: number, g: number, b: number) => 0.299 * r + 0.587 * g + 0.114 * b;
+
+/**
+ * One running-sum box blur of radius `r` (≥ 1, edges clamped) from `source` into `target`, through
+ * `scratch` (all the same length). The rows are read first, so `target` may be `source`. All four
+ * channels move together and the vertical pass walks whole rows with a row of column sums, which
+ * keeps memory reads in order (about four times faster than a pass per channel and column).
+ */
+function boxBlurInto(source: ArrayLike<number>, width: number, height: number, r: number, scratch: Uint8Array, target: Uint8Array) {
+  // sum / span rounded: a sum of whole numbers over an odd span never lands on .5
+  const inv = 1 / (r * 2 + 1);
+  const lastX = width - 1;
+  for (let y = 0; y < height; y++) {
+    const row = y * width * 4;
+    let s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    for (let k = -r; k <= r; k++) {
+      const i = row + (k < 0 ? 0 : k > lastX ? lastX : k) * 4;
+      s0 += source[i]; s1 += source[i + 1]; s2 += source[i + 2]; s3 += source[i + 3];
+    }
+    for (let x = 0; x < width; x++) {
+      const o = row + x * 4;
+      scratch[o] = (s0 * inv + 0.5) | 0;
+      scratch[o + 1] = (s1 * inv + 0.5) | 0;
+      scratch[o + 2] = (s2 * inv + 0.5) | 0;
+      scratch[o + 3] = (s3 * inv + 0.5) | 0;
+      const out = row + (x - r < 0 ? 0 : x - r) * 4;
+      const into = row + (x + r + 1 > lastX ? lastX : x + r + 1) * 4;
+      s0 += source[into] - source[out];
+      s1 += source[into + 1] - source[out + 1];
+      s2 += source[into + 2] - source[out + 2];
+      s3 += source[into + 3] - source[out + 3];
+    }
+  }
+  const len = width * 4;
+  const lastY = height - 1;
+  const sums = new Int32Array(len);
+  for (let k = -r; k <= r; k++) {
+    const base = (k < 0 ? 0 : k > lastY ? lastY : k) * len;
+    for (let i = 0; i < len; i++) sums[i] += scratch[base + i];
+  }
+  for (let y = 0; y < height; y++) {
+    const row = y * len;
+    const out = (y - r < 0 ? 0 : y - r) * len;
+    const into = (y + r + 1 > lastY ? lastY : y + r + 1) * len;
+    for (let i = 0; i < len; i++) {
+      target[row + i] = (sums[i] * inv + 0.5) | 0;
+      sums[i] += scratch[into + i] - scratch[out + i];
+    }
+  }
+  return target;
+}
 
 /** Running-sum box blur on each RGBA channel, radius ≥ 1, edges clamped */
 export function boxBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, radius: number) {
   const r = Math.max(1, Math.round(radius));
-  const horizontal = new Uint8Array(pixels.length);
-  const output = new Uint8Array(pixels.length);
-  const span = r * 2 + 1;
-  const pass = (source: ArrayLike<number>, target: Uint8Array, length: number, lines: number, stride: number, lineStride: number) => {
-    for (let line = 0; line < lines; line++) {
-      const base = line * lineStride;
-      for (let channel = 0; channel < 4; channel++) {
-        let sum = 0;
-        for (let k = -r; k <= r; k++) sum += source[base + Math.min(length - 1, Math.max(0, k)) * stride + channel];
-        for (let at = 0; at < length; at++) {
-          target[base + at * stride + channel] = Math.round(sum / span);
-          sum -= source[base + Math.max(0, at - r) * stride + channel];
-          sum += source[base + Math.min(length - 1, at + r + 1) * stride + channel];
-        }
-      }
-    }
-  };
-  pass(pixels, horizontal, width, height, 4, width * 4);
-  pass(horizontal, output, height, width, width * 4, 4);
-  return output;
+  return boxBlurInto(pixels, width, height, r, new Uint8Array(pixels.length), new Uint8Array(pixels.length));
+}
+
+/** Three box blurs of radius `r` in a row (two buffers in all) */
+export function tripleBoxBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, radius: number) {
+  const r = Math.max(1, Math.round(radius));
+  const scratch = new Uint8Array(pixels.length);
+  const output = boxBlurInto(pixels, width, height, r, scratch, new Uint8Array(pixels.length));
+  boxBlurInto(output, width, height, r, scratch, output);
+  return boxBlurInto(output, width, height, r, scratch, output);
 }
 
 /** Three box blurs in a row: close to a Gaussian of about `radius` */
 export function softBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, radius: number) {
-  const r = Math.max(1, Math.round(radius / 2));
-  return boxBlur(boxBlur(boxBlur(pixels, width, height, r), width, height, r), width, height, r);
+  return tripleBoxBlur(pixels, width, height, Math.max(1, Math.round(radius / 2)));
 }
 
 /**
@@ -104,16 +144,26 @@ export function glow(pixels: Uint8Array | Uint8ClampedArray, width: number, heig
     if (!t) continue;
     for (let k = 0; k < 4; k++) bright[i + k] = Math.round(pixels[i + k] * t);
   }
-  const halo = softBlur(bright, width, height, radius);
+  // A wide halo is soft anyway: blur it at half size and stretch it back (about four times less work)
+  let halo: Uint8Array;
+  if (radius >= HALF_SIZE_GLOW_RADIUS && width >= 4 && height >= 4) {
+    const small = downscale(bright, width, height, 2);
+    halo = upscale(softBlur(small.pixels, small.width, small.height, radius / 2), small.width, small.height, width, height, 2);
+  } else {
+    halo = softBlur(bright, width, height, radius);
+  }
   const gain = Math.max(0, strength) / 100;
-  const output = new Uint8Array(pixels.length);
+  // Screened over the picture, written into the halo's buffer
   for (let i = 0; i < pixels.length; i++) {
     const s = pixels[i] / 255;
     const h = Math.min(1, (halo[i] / 255) * gain);
-    output[i] = Math.round((s + h - s * h) * 255);
+    halo[i] = ((s + h - s * h) * 255 + 0.5) | 0;
   }
-  return output;
+  return halo;
 }
+
+/** From this radius up, glow's halo is blurred at half size (the difference stays within a few levels) */
+export const HALF_SIZE_GLOW_RADIUS = 8;
 
 export type OutlinePosition = 'outside' | 'inside' | 'center';
 
