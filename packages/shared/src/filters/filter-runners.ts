@@ -11,6 +11,7 @@ import {
 import { adjustColor, grayscalePixels, levelsLut, mapChannels, thresholdPixels } from './color-filters';
 import { changeLineWidth, despeckle, extractLines, recolorLines } from './lineart-filters';
 import { boxBlur, glow, mosaic, outline, radialChromatic } from './effect-filters';
+import { motionBlur, soften, spherize, unsharpMask, wave, zoomBlur } from './blur-distort-filters';
 
 /** A '#rrggbb' setting, or the fallback */
 function filterColor(values: FilterValues, key: string, fallback: string) {
@@ -79,6 +80,32 @@ function spinBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, height:
 /** Built-in filters. Each id matches an entry of the client's filter registry. */
 export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> = {
   box: { run: ({ pixels, width, height }, v) => boxBlur(pixels, width, height, filterNumber(v, 'radius', 4)) },
+  motionBlur: {
+    run: ({ pixels, width, height }, v) => motionBlur(pixels, width, height, filterNumber(v, 'distance', 20), filterNumber(v, 'angle', 0),
+      filterChoice(v, 'direction', ['both', 'forward', 'backward'] as const)),
+  },
+  radialBlur: {
+    run: ({ pixels, width, height }, v) => {
+      const center = filterPoint(v, 'center', width, height);
+      return zoomBlur(pixels, width, height, center.x, center.y, filterNumber(v, 'strength', 30), filterChoice(v, 'direction', ['both', 'in', 'out'] as const));
+    },
+  },
+  soften: { run: ({ pixels, width, height }) => soften(pixels, width, height) },
+  wave: {
+    run: ({ pixels, width, height }, v) => wave(pixels, width, height, filterChoice(v, 'direction', ['horizontal', 'vertical', 'both'] as const),
+      filterNumber(v, 'amplitude', 10), filterNumber(v, 'wavelength', 120)),
+  },
+  spherize: {
+    run: ({ pixels, width, height }, v) => {
+      const center = filterPoint(v, 'center', width, height);
+      return spherize(pixels, width, height, center.x, center.y, filterNumber(v, 'strength', 50), filterNumber(v, 'radius', 300), filterNumber(v, 'squash', 0));
+    },
+  },
+  sharpen: { run: ({ pixels, width, height }) => unsharpMask(pixels, width, height, 1, 60, 0) },
+  unsharp: {
+    run: ({ pixels, width, height }, v) =>
+      unsharpMask(pixels, width, height, filterNumber(v, 'radius', 2), filterNumber(v, 'amount', 100), filterNumber(v, 'threshold', 0)),
+  },
   gaussian: { run: (ctx, v) => applyGaussianBlur(ctx, filterNumber(v, 'radius', 8)) },
   spin: {
     run: ({ pixels, width, height }, v) => {

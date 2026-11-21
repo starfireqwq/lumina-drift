@@ -859,7 +859,7 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
       if (param.kind === 'range') assert.ok(param.min <= param.initial && param.initial <= param.max, `${def.id}.${param.key} default is in range`);
     }
   }
-  assert.deepEqual(filterGroupsInUse(), ['color', 'lineart', 'effect', 'blur', 'distort'], 'Groups with no filters yet stay out of the menu');
+  assert.deepEqual(filterGroupsInUse(), ['color', 'lineart', 'effect', 'blur', 'distort', 'sharpen'], 'Groups with no filters yet stay out of the menu');
   assert.equal(filterFitsLayer(getFilter('despeckle')!, 'mask'), false, 'Line-art fixes stay off masks');
   assert.equal(filterFitsLayer(getFilter('despeckle')!, 'raster'), true);
 
@@ -1086,6 +1086,60 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
   const straddle = run('outline', { size: 2, color: '#ff0000', position: 'center' }, block);
   assert.deepEqual(pixelAt(straddle, 6, 4), [255, 0, 0, 255], 'On the edge: half outside');
   assert.deepEqual(pixelAt(straddle, 5, 4), [255, 0, 0, 255], 'and half inside');
+}
+
+// 模糊、變形、銳化: streaks follow the angle and direction, the distortions move what they should
+{
+  const W = 15, H = 9;
+  const run = (id: string, values: FilterValues, pixels: Uint8Array) => runPixelFilter(PIXEL_FILTER_RUNNERS[id], pixels, W, H, values);
+  const dot = picture(W, H, (x, y) => (x === 7 && y === 4 ? [255, 255, 255, 255] : null));
+
+  const both = run('motionBlur', { distance: 4, angle: 0, direction: 'both' }, dot);
+  assert.ok(alphaAt(both, W, 5, 4) > 0 && alphaAt(both, W, 9, 4) > 0, 'Both ways: the streak runs left and right');
+  assert.equal(alphaAt(both, W, 7, 6), 0, 'Not up or down');
+  const forward = run('motionBlur', { distance: 4, angle: 0, direction: 'forward' }, dot);
+  assert.ok(alphaAt(forward, W, 10, 4) > 0 && alphaAt(forward, W, 5, 4) === 0, 'Forward at 0°: the streak trails to the right');
+  const backward = run('motionBlur', { distance: 4, angle: 0, direction: 'backward' }, dot);
+  assert.ok(alphaAt(backward, W, 4, 4) > 0 && alphaAt(backward, W, 9, 4) === 0, 'Backward: to the left');
+  const upward = run('motionBlur', { distance: 4, angle: 90, direction: 'forward' }, dot);
+  assert.ok(alphaAt(upward, W, 7, 1) > 0 && alphaAt(upward, W, 7, 6) === 0, 'Forward at 90°: upwards');
+  const slanted = run('motionBlur', { distance: 6, angle: 45, direction: 'both' }, dot);
+  assert.ok(alphaAt(slanted, W, 9, 2) > 0 && alphaAt(slanted, W, 9, 6) === 0, '45°: up and to the right');
+
+  const zoomed = run('radialBlur', { strength: 60, direction: 'out', center: { x: 7, y: 4 } }, dot);
+  assert.ok(alphaAt(zoomed, W, 7, 4) > 0, 'Zoom blur keeps what sits on its centre');
+  const ray = picture(W, H, (x, y) => (y === 4 && x >= 10 ? [255, 255, 255, 255] : null));
+  assert.equal(alphaAt(run('radialBlur', { strength: 60, direction: 'out', center: { x: 0, y: 4 } }, ray), W, 10, 0), 0,
+    'It smears along lines through the centre, not across them');
+
+  const soft = run('soften', {}, dot);
+  assert.deepEqual([alphaAt(soft, W, 7, 4), alphaAt(soft, W, 8, 4), alphaAt(soft, W, 8, 5)], [64, 32, 16], 'Soften spreads with 1-2-1 weights');
+
+  const column = picture(W, H, (x) => (x === 7 ? [255, 255, 255, 255] : null));
+  const swayed = run('wave', { direction: 'horizontal', amplitude: 2, wavelength: 8 }, column);
+  assert.equal(alphaAt(swayed, W, 9, 2), 255, 'A quarter wave down, the row moves 2 px over');
+  assert.equal(alphaAt(swayed, W, 7, 2), 0, 'and leaves its old place');
+  assert.equal(alphaAt(swayed, W, 7, 0), 255, 'Rows on the axis stay');
+  const bobbed = run('wave', { direction: 'vertical', amplitude: 2, wavelength: 8 }, column);
+  assert.ok(alphaAt(bobbed, W, 7, 3) === 255 && alphaAt(bobbed, W, 8, 3) === 0, 'Swaying up and down keeps a vertical line in its column');
+
+  const grid = picture(W, H, (x, y) => (x % 3 === 0 || y % 3 === 0 ? [0, 0, 0, 255] : null));
+  const bulged = run('spherize', { strength: 80, radius: 4, squash: 0, center: { x: 7, y: 4 } }, grid);
+  assert.notDeepEqual(bulged, grid, 'Spherize moves what is inside its circle');
+  for (const [x, y] of [[0, 0], [14, 8], [1, 4], [13, 4]]) {
+    assert.deepEqual([...bulged.slice((y * W + x) * 4, (y * W + x) * 4 + 4)], [...grid.slice((y * W + x) * 4, (y * W + x) * 4 + 4)], 'and nothing outside it');
+  }
+  assert.deepEqual(run('spherize', { strength: 0, radius: 4, center: { x: 7, y: 4 } }, grid), grid, 'No strength, no change');
+
+  const step = picture(W, H, (x) => (x < 7 ? [100, 100, 100, 255] : [150, 150, 150, 255]));
+  const crisp = run('unsharp', { radius: 1, amount: 100, threshold: 0 }, step);
+  assert.ok(crisp[(4 * W + 6) * 4] < 100 && crisp[(4 * W + 7) * 4] > 150, 'Sharpening pushes the two sides of an edge apart');
+  assert.equal(crisp[(4 * W + 0) * 4], 100, 'Flat areas stay');
+  assert.deepEqual(run('unsharp', { radius: 1, amount: 100, threshold: 100 }, step), step, 'Differences under the threshold are left alone');
+  const fringe = run('sharpen', {}, picture(W, H, (x) => (x < 7 ? [200, 200, 200, 200] : null)));
+  for (let i = 0; i < fringe.length; i += 4) {
+    assert.ok(fringe[i] <= fringe[i + 3] && fringe[i + 1] <= fringe[i + 3] && fringe[i + 2] <= fringe[i + 3], 'Sharpened colour never exceeds alpha');
+  }
 }
 
 // 對齊 L1: basis, whole-pixel offsets, off-canvas parts, and a pixel-level run of the move

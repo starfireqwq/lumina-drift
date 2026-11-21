@@ -707,6 +707,8 @@ export interface Translations {
     recenter: string;
     grayscaleHint: string;
     histogramAria: string;
+    softenHint: string;
+    sharpenHint: string;
     /** Small headings inside a filter's parameters */
     sections: {
       tone: string;
@@ -749,6 +751,13 @@ export interface Translations {
       mosaic: string;
       glow: string;
       outline: string;
+      motionBlur: string;
+      radialBlur: string;
+      soften: string;
+      wave: string;
+      spherize: string;
+      sharpen: string;
+      unsharp: string;
     };
     /** Parameter names; a select's option names share this table */
     params: {
@@ -797,6 +806,19 @@ export interface Translations {
       positionOutside: string;
       positionInside: string;
       positionCenter: string;
+      distance: string;
+      direction: string;
+      dirBoth: string;
+      dirForward: string;
+      dirBackward: string;
+      dirIn: string;
+      dirOut: string;
+      waveHorizontal: string;
+      waveVertical: string;
+      waveBoth: string;
+      amplitude: string;
+      wavelength: string;
+      squash: string;
     };
   };
 

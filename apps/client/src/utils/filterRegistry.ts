@@ -14,7 +14,7 @@ type FilterTexts = Translations['filters'];
 export type FilterItemKey = keyof FilterTexts['items'];
 export type FilterParamKey = keyof FilterTexts['params'];
 export type FilterSectionKey = keyof FilterTexts['sections'];
-export type FilterHintKey = 'invertHint' | 'grayscaleHint';
+export type FilterHintKey = 'invertHint' | 'grayscaleHint' | 'softenHint' | 'sharpenHint';
 
 interface ParamBase {
   /** Values are stored under this key, never by position */
@@ -115,11 +115,31 @@ export const BUILTIN_FILTERS: readonly FilterDef[] = [
   ] },
   { id: 'box', group: 'blur', label: 'box', source: 'builtin', params: [range('radius', 'radius', 4, 1, 32)] },
   { id: 'gaussian', group: 'blur', label: 'gaussian', source: 'builtin', params: [range('radius', 'radius', 8, 1, 32)] },
+  { id: 'motionBlur', group: 'blur', label: 'motionBlur', source: 'builtin', params: [
+    range('distance', 'distance', 20, 1, 200), range('angle', 'angle', 0, -180, 180),
+    choice('direction', 'direction', [['both', 'dirBoth'], ['forward', 'dirForward'], ['backward', 'dirBackward']]),
+  ] },
+  { id: 'radialBlur', group: 'blur', label: 'radialBlur', source: 'builtin', params: [
+    range('strength', 'amount', 30, 1, 100),
+    choice('direction', 'direction', [['both', 'dirBoth'], ['in', 'dirIn'], ['out', 'dirOut']]),
+    center(),
+  ] },
   { id: 'spin', group: 'blur', label: 'spin', source: 'builtin', params: [range('angle', 'angle', 15, 1, 90), center()] },
+  { id: 'soften', group: 'blur', label: 'soften', source: 'builtin', params: [], hint: 'softenHint' },
   { id: 'twirl', group: 'distort', label: 'twirl', source: 'builtin', pointRadius: 'radius',
     params: [range('radius', 'radius', 300, 10, 2000), range('angle', 'angle', 135, -360, 360), center()] },
+  { id: 'wave', group: 'distort', label: 'wave', source: 'builtin', params: [
+    choice('direction', 'direction', [['horizontal', 'waveHorizontal'], ['vertical', 'waveVertical'], ['both', 'waveBoth']]),
+    range('amplitude', 'amplitude', 10, 1, 200), range('wavelength', 'wavelength', 120, 4, 2000),
+  ] },
+  { id: 'spherize', group: 'distort', label: 'spherize', source: 'builtin', pointRadius: 'radius', params: [
+    range('strength', 'amount', 50, -100, 100), range('radius', 'radius', 300, 10, 4000), range('squash', 'squash', 0, -90, 90), center(),
+  ] },
   { id: 'liquify', group: 'distort', label: 'liquify', source: 'builtin', params: [], tool: 'liquify' },
   { id: 'meshWarp', group: 'distort', label: 'meshWarp', source: 'builtin', params: [], tool: 'mesh' },
+  { id: 'sharpen', group: 'sharpen', label: 'sharpen', source: 'builtin', params: [], hint: 'sharpenHint' },
+  { id: 'unsharp', group: 'sharpen', label: 'unsharp', source: 'builtin',
+    params: [range('radius', 'radius', 2, 1, 50), range('amount', 'amount', 100, 0, 500), range('threshold', 'threshold', 0, 0, 255)] },
 ];
 
 export const getFilter = (id: string | null | undefined) => BUILTIN_FILTERS.find((def) => def.id === id) ?? null;
