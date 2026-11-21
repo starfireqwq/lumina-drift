@@ -705,6 +705,8 @@ export interface Translations {
     lineartNotOnMask: string;
     dragCenter: string;
     recenter: string;
+    grayscaleHint: string;
+    histogramAria: string;
     /** Small headings inside a filter's parameters */
     sections: {
       tone: string;
@@ -736,6 +738,10 @@ export interface Translations {
       gradient: string;
       liquify: string;
       meshWarp: string;
+      colorAdjust: string;
+      levels: string;
+      grayscale: string;
+      threshold: string;
     };
     /** Parameter names; a select's option names share this table */
     params: {
@@ -749,6 +755,20 @@ export interface Translations {
       density: string;
       dotSize: string;
       center: string;
+      brightness: string;
+      contrast: string;
+      hue: string;
+      saturation: string;
+      temperature: string;
+      tint: string;
+      blackPoint: string;
+      whitePoint: string;
+      midtones: string;
+      threshold: string;
+      target: string;
+      targetColor: string;
+      targetAlpha: string;
+      targetBoth: string;
     };
   };
 

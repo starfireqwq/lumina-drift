@@ -713,6 +713,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const filterWorkerRef = useRef<FilterWorkerClient | null>(null);
   const filterRequestRef = useRef(0);
   const [filterBusy, setFilterBusy] = useState(false);
+  /** The layer's tone counts for the levels window (counted by the filter worker on the first preview) */
+  const [filterHistogram, setFilterHistogram] = useState<Uint32Array | null>(null);
+  const filterHistogramRef = useRef<Uint32Array | null>(null);
   const filterPreviewRef = useRef<{ item: NonNullable<ReturnType<LayerManager['getLayerItem']>>; texture: RenderTexture } | null>(null);
 
   // Tools & Properties State
@@ -2206,11 +2209,17 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     filterWorkerRef.current?.cancel();
   };
 
+  const forgetFilterHistogram = () => {
+    filterHistogramRef.current = null;
+    setFilterHistogram(null);
+  };
+
   const closeFilters = () => {
     cancelFilterWork();
     setFilterBusy(false);
     clearFilterPreview();
     filterPoint.clear();
+    forgetFilterHistogram();
     setFilterMenuOpen(false);
     setIsColorCurvesOpen(false);
     setIsGradientMapOpen(false);
@@ -2234,6 +2243,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     cancelFilterWork();
     setFilterBusy(false);
     clearFilterPreview();
+    forgetFilterHistogram();
     if (filterPointParam(def) && layer) startFilterPoint(layer.id);
     else filterPoint.clear();
     setLayerFilterId(def && !def.dialog ? def.id : null);
@@ -2304,7 +2314,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       const [source] = await lm.readAsync(item.model.id, [{ x: 0, y: 0, w: width, h: height }]);
       if (request !== filterRequestRef.current) return false;
       const client = filterWorkerRef.current ??= new FilterWorkerClient();
-      const pixels = await client.run(filter.id, new Uint8Array(source), width, height, filter.values, mask);
+      const wantHistogram = previewOnly && Boolean(getFilter(filter.id)?.histogram) && !filterHistogramRef.current;
+      const result = await client.run(filter.id, new Uint8Array(source), width, height, filter.values, mask, { histogram: wantHistogram });
+      const pixels = result?.output ?? null;
+      if (result?.histogram && request === filterRequestRef.current) {
+        filterHistogramRef.current = result.histogram;
+        setFilterHistogram(result.histogram);
+      }
       if (!pixels || request !== filterRequestRef.current || tileEngineRef.current !== engine || activeLayerRef.current?.id !== item.model.id || getFilterLayer() !== item) return false;
       if (previewOnly) {
         if (filterPreviewRef.current?.item !== item) clearFilterPreview();
@@ -5490,7 +5506,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       </OverlayPresence>
       <OverlayPresence open={filterMenuOpen} kind="popover">
         <Suspense fallback={null}><LayerFilterDialog key={layerFilterId ?? 'list'} filterId={layerFilterId} busy={filterBusy}
-          layerName={activeLayer?.name ?? ''} layerType={activeLayer?.layerType} onChoose={chooseFilter} onBack={() => chooseFilter(null)} onClose={closeFilters}
+          layerName={activeLayer?.name ?? ''} layerType={activeLayer?.layerType} histogram={filterHistogram} onChoose={chooseFilter} onBack={() => chooseFilter(null)} onClose={closeFilters}
           onPreview={filterCallbacks.parameters}
           onApply={(values) => layerFilterId ? runLayerFilter({ id: layerFilterId, values }, false) : Promise.resolve(false)} /></Suspense>
       </OverlayPresence>

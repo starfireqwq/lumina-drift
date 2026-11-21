@@ -58,7 +58,7 @@ import { buildCanvasGroupEntries, toggleCollapsedCanvasGroup } from '../src/util
 import { buildRoomShareUrl } from '../src/utils/serverLinks';
 import { apiErrorMessage, isForeignApiReply } from '../src/utils/apiErrors';
 import { translations, type Language } from '../src/locales';
-import { DEFAULT_COMMUNITY_PRESETS, MIN_BRUSH_SPACING, PIXEL_FILTER_RUNNERS, runPixelFilter, type CanvasModel } from '@atelier/shared';
+import { DEFAULT_COMMUNITY_PRESETS, MIN_BRUSH_SPACING, PIXEL_FILTER_RUNNERS, runPixelFilter, toneHistogram, type CanvasModel, type FilterValues } from '@atelier/shared';
 import {
   BUILTIN_FILTERS, FILTER_GROUPS, defaultFilterValues, filterFitsLayer, filterGroupsInUse, filterPointParam, getFilter,
   normalizeFilterValues, paramShown, snapRange,
@@ -930,6 +930,50 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   assert.notDeepEqual(corner, middle, 'Moving the centre moves the twirl');
   const spun = runPixelFilter(PIXEL_FILTER_RUNNERS.spin, source, width, height, { angle: 60, center: { x: 0, y: 4 } });
   assert.notDeepEqual(spun, runPixelFilter(PIXEL_FILTER_RUNNERS.spin, source, width, height, { angle: 60 }), 'Spin blur turns round its centre');
+}
+
+/** One premultiplied pixel through a filter */
+const filterPixel = (id: string, values: FilterValues, pixel: number[]) =>
+  [...runPixelFilter(PIXEL_FILTER_RUNNERS[id], new Uint8Array(pixel), 1, 1, values)];
+
+// 色彩濾鏡: neutral settings change nothing, each setting moves colour the right way, alpha stays
+{
+  const grey = [100, 100, 100, 255];
+  assert.deepEqual(filterPixel('colorAdjust', {}, grey), grey, 'Neutral colour adjust changes nothing');
+  assert.ok(filterPixel('colorAdjust', { brightness: 50 }, grey)[0] > 100, 'Brightness lightens');
+  assert.ok(filterPixel('colorAdjust', { contrast: 50 }, [200, 200, 200, 255])[0] > 200, 'Contrast pushes light tones lighter');
+  assert.ok(filterPixel('colorAdjust', { contrast: -50 }, [200, 200, 200, 255])[0] < 200, 'Less contrast pulls them to grey');
+  const warm = filterPixel('colorAdjust', { temperature: 60 }, grey);
+  assert.ok(warm[0] > warm[2], 'Warmer is redder than bluer');
+  const magenta = filterPixel('colorAdjust', { tint: 60 }, grey);
+  assert.ok(magenta[1] < magenta[0] && magenta[1] < magenta[2], 'Towards magenta pulls green down');
+  const flat = filterPixel('colorAdjust', { saturation: -100 }, [200, 50, 50, 255]);
+  assert.ok(Math.abs(flat[0] - flat[1]) <= 1 && Math.abs(flat[1] - flat[2]) <= 1, 'No saturation is grey');
+  const turned = filterPixel('colorAdjust', { hue: 120 }, [200, 40, 40, 255]);
+  assert.ok(turned[1] > turned[0] && turned[1] > turned[2], 'Red turned 120° is green');
+  assert.deepEqual(filterPixel('colorAdjust', { brightness: 40 }, [50, 50, 50, 128]), [76, 76, 76, 128], 'Half-clear colour is adjusted straight, alpha kept');
+  assert.deepEqual(filterPixel('colorAdjust', { brightness: 40 }, [0, 0, 0, 0]), [0, 0, 0, 0], 'Clear stays clear');
+
+  assert.deepEqual(filterPixel('levels', {}, [10, 128, 250, 255]), [10, 128, 250, 255], 'Default levels change nothing');
+  assert.deepEqual(filterPixel('levels', { inBlack: 50, inWhite: 200 }, [50, 125, 200, 255]), [0, 128, 255, 255], 'Input points stretch the range');
+  assert.ok(filterPixel('levels', { midtones: 50 }, grey)[0] > 100, 'Positive midtones brighten');
+  assert.ok(filterPixel('levels', { midtones: -50 }, grey)[0] < 100, 'Negative midtones darken');
+  assert.deepEqual(filterPixel('levels', { outBlack: 20, outWhite: 220 }, [0, 0, 255, 255]), [20, 20, 220, 255], 'Output points squeeze it');
+  assert.deepEqual(filterPixel('levels', { inBlack: 200, inWhite: 100 }, [150, 150, 150, 255]).length, 4, 'Crossed points do not break');
+
+  assert.deepEqual(filterPixel('grayscale', {}, [255, 0, 0, 255]), [76, 76, 76, 255], 'Grayscale uses luma weights');
+
+  assert.deepEqual(filterPixel('threshold', { threshold: 128, target: 'color' }, [200, 200, 200, 255]), [255, 255, 255, 255]);
+  assert.deepEqual(filterPixel('threshold', { threshold: 128, target: 'color' }, [30, 30, 30, 255]), [0, 0, 0, 255]);
+  assert.deepEqual(filterPixel('threshold', { threshold: 128, target: 'alpha' }, [60, 30, 0, 100]), [0, 0, 0, 0], 'Faint alpha clears');
+  assert.deepEqual(filterPixel('threshold', { threshold: 128, target: 'alpha' }, [100, 50, 0, 200]), [128, 64, 0, 255], 'Strong alpha turns opaque, colour kept');
+  assert.deepEqual(filterPixel('threshold', { threshold: 128, target: 'both' }, [100, 50, 0, 200]), [0, 0, 0, 255], 'Both: opaque and black');
+
+  const bins = toneHistogram(new Uint8Array([255, 255, 255, 255, 0, 0, 0, 0, 32, 32, 32, 128]), 3, 1);
+  assert.equal(bins[255], 1, 'White counted');
+  assert.equal(bins[64], 1, 'Half-clear grey counted by its straight tone');
+  assert.equal(bins.reduce((sum, n) => sum + n, 0), 2, 'Clear pixels are not counted');
+  assert.equal(toneHistogram(new Uint8Array([255, 255, 255, 255, 0, 0, 0, 255]), 2, 1, new Uint8Array([0, 255]))[255], 0, 'Only inside the selection');
 }
 
 // 對齊 L1: basis, whole-pixel offsets, off-canvas parts, and a pixel-level run of the move

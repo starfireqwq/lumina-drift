@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState, useSyncExternalStore, type CSSProperties } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { ArrowLeft, ArrowUpRight, Check, ChevronDown, Crosshair, RotateCcw, SlidersHorizontal } from 'lucide-react';
 import type { FilterValues } from '@atelier/shared';
 import {
@@ -15,6 +15,8 @@ interface Props {
   layerName: string;
   /** The active layer's type: line-art fixes stay off masks */
   layerType?: string;
+  /** The layer's tone counts (levels), once the first preview has counted them */
+  histogram?: Uint32Array | null;
   busy: boolean;
   onChoose: (id: string) => void;
   onBack: () => void;
@@ -34,7 +36,7 @@ const readGroup = (groups: FilterGroup[]) => {
   }
 };
 
-export function LayerFilterDialog({ filterId, layerName, layerType, busy, onChoose, onBack, onPreview, onApply, onClose }: Props) {
+export function LayerFilterDialog({ filterId, layerName, layerType, histogram, busy, onChoose, onBack, onPreview, onApply, onClose }: Props) {
   const { t } = useI18n();
   const phone = usePhoneLayout();
   const definition = getFilter(filterId);
@@ -152,6 +154,7 @@ export function LayerFilterDialog({ filterId, layerName, layerType, busy, onChoo
       {!definition ? menu : (
         <div className="space-y-3">
           {definition.hint && <p className="text-neutral-300">{t.filters[definition.hint]}</p>}
+          {definition.histogram && <ToneHistogram data={histogram ?? null} values={values} />}
           {definition.params.filter((param) => paramShown(param, values)).map((param, index, shown) => (
             <div key={param.key} className="space-y-1.5">
               {param.section && param.section !== shown[index - 1]?.section && (
@@ -211,6 +214,67 @@ function ParamControl({ param, index, label, value, busy, onChange }: {
     case 'point':
       return <PointControl label={label} busy={busy} className={row} style={style} />;
   }
+}
+
+const numberOr = (value: unknown, fallback: number) => (typeof value === 'number' && Number.isFinite(value) ? value : fallback);
+
+/**
+ * The layer's tones (levels window): bars on a square-root scale so thin line art still shows,
+ * the parts outside the input range dimmed, and a mark where the midtones land.
+ */
+function ToneHistogram({ data, values }: { data: Uint32Array | null; values: FilterValues }) {
+  const { t } = useI18n();
+  const ref = useRef<HTMLCanvasElement>(null);
+  const lo = numberOr(values.inBlack, 0);
+  const hi = Math.max(lo + 1, numberOr(values.inWhite, 255));
+  const mid = numberOr(values.midtones, 0);
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+    const draw = () => {
+      const ratio = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      if (!w || !h) return;
+      canvas.width = Math.round(w * ratio);
+      canvas.height = Math.round(h * ratio);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      if (data) {
+        let peak = 0;
+        for (let v = 0; v < 256; v++) peak = Math.max(peak, data[v]);
+        const top = Math.sqrt(peak) || 1;
+        ctx.fillStyle = 'rgb(165 180 252 / .8)';
+        for (let v = 0; v < 256; v++) {
+          const bar = (Math.sqrt(data[v]) / top) * (h - 3);
+          if (bar > 0) ctx.fillRect((v / 256) * w, h - bar, Math.max(1, w / 256), bar);
+        }
+      }
+      const x = (v: number) => (v / 255) * w;
+      ctx.fillStyle = 'rgb(0 0 0 / .5)';
+      ctx.fillRect(0, 0, x(lo), h);
+      ctx.fillRect(x(hi), 0, w - x(hi), h);
+      const midAt = lo + (hi - lo) * Math.pow(0.5, Math.pow(3, mid / 100));
+      ctx.lineWidth = 1.5;
+      for (const [at, color] of [[lo, 'rgb(23 23 23)'], [midAt, 'rgb(163 163 163)'], [hi, 'rgb(250 250 250)']] as const) {
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(x(at), 0);
+        ctx.lineTo(x(at), h);
+        ctx.stroke();
+      }
+    };
+    draw();
+    const observer = new ResizeObserver(draw);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [data, lo, hi, mid]);
+  return (
+    <canvas ref={ref} role="img" aria-label={t.filters.histogramAria}
+      className="atelier-filter-item block h-14 w-full rounded-md border border-neutral-800 bg-neutral-950/60" />
+  );
 }
 
 /** Where the centre is (dragged on the canvas), and a button that puts it back on the content */

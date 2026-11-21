@@ -8,6 +8,7 @@ import {
   applyHalftoneDot, applyNoiseGrain, applyTwirlDistortion,
   type ColorCurvesOptions, type FilterContext, type GradientStop,
 } from './pixel-filters';
+import { adjustColor, grayscalePixels, levelsLut, mapChannels, thresholdPixels } from './color-filters';
 
 /** A filter's settings, by parameter key (never by position) */
 export type FilterValues = Record<string, unknown>;
@@ -118,6 +119,28 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
       }
       return result;
     },
+  },
+  colorAdjust: {
+    colorOnly: true,
+    run: ({ pixels }, v) => adjustColor(pixels, {
+      brightness: filterNumber(v, 'brightness', 0),
+      contrast: filterNumber(v, 'contrast', 0),
+      hue: filterNumber(v, 'hue', 0),
+      saturation: filterNumber(v, 'saturation', 0),
+      temperature: filterNumber(v, 'temperature', 0),
+      tint: filterNumber(v, 'tint', 0),
+    }),
+  },
+  levels: {
+    colorOnly: true,
+    run: ({ pixels }, v) => mapChannels(pixels, levelsLut(
+      filterNumber(v, 'inBlack', 0), filterNumber(v, 'inWhite', 255), filterNumber(v, 'midtones', 0),
+      filterNumber(v, 'outBlack', 0), filterNumber(v, 'outWhite', 255),
+    )),
+  },
+  grayscale: { colorOnly: true, run: ({ pixels }) => grayscalePixels(pixels) },
+  threshold: {
+    run: ({ pixels }, v) => thresholdPixels(pixels, filterNumber(v, 'threshold', 128), filterChoice(v, 'target', ['color', 'alpha', 'both'] as const)),
   },
   noise: { colorOnly: true, run: (ctx, v) => applyNoiseGrain(ctx, filterNumber(v, 'amount', 25) / 100, filterNumber(v, 'grain', 1)) },
   chromatic: { colorOnly: true, run: (ctx, v) => applyChromaticAberration(ctx, filterNumber(v, 'offsetX', 6), filterNumber(v, 'offsetY', 0)) },

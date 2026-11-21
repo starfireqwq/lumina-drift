@@ -14,7 +14,7 @@ type FilterTexts = Translations['filters'];
 export type FilterItemKey = keyof FilterTexts['items'];
 export type FilterParamKey = keyof FilterTexts['params'];
 export type FilterSectionKey = keyof FilterTexts['sections'];
-export type FilterHintKey = 'invertHint';
+export type FilterHintKey = 'invertHint' | 'grayscaleHint';
 
 interface ParamBase {
   /** Values are stored under this key, never by position */
@@ -58,10 +58,28 @@ export type FilterJob = { id: string; values: FilterValues };
 const range = (key: string, label: FilterParamKey, initial: number, min: number, max: number, step?: number): FilterParam =>
   ({ kind: 'range', key, label, initial, min, max, step });
 const center = (when?: ParamBase['when']): FilterParam => ({ kind: 'point', key: 'center', label: 'center', when });
+const inSection = (section: FilterSectionKey, params: FilterParam[]) => params.map((param) => ({ ...param, section }));
+/** A drop-down: [stored value, name] pairs, the first is the default */
+const choice = (key: string, label: FilterParamKey, options: readonly (readonly [string, FilterParamKey])[], when?: ParamBase['when']): FilterParam =>
+  ({ kind: 'select', key, label, initial: options[0][0], options: options.map(([value, name]) => ({ value, label: name })), when });
 
 export const BUILTIN_FILTERS: readonly FilterDef[] = [
+  { id: 'colorAdjust', group: 'color', label: 'colorAdjust', source: 'builtin', params: [
+    ...inSection('tone', [range('brightness', 'brightness', 0, -100, 100), range('contrast', 'contrast', 0, -100, 100)]),
+    ...inSection('color', [
+      range('hue', 'hue', 0, -180, 180), range('saturation', 'saturation', 0, -100, 100),
+      range('temperature', 'temperature', 0, -100, 100), range('tint', 'tint', 0, -100, 100),
+    ]),
+  ] },
+  { id: 'levels', group: 'color', label: 'levels', source: 'builtin', histogram: true, params: [
+    ...inSection('input', [range('inBlack', 'blackPoint', 0, 0, 254), range('midtones', 'midtones', 0, -100, 100), range('inWhite', 'whitePoint', 255, 1, 255)]),
+    ...inSection('output', [range('outBlack', 'blackPoint', 0, 0, 255), range('outWhite', 'whitePoint', 255, 0, 255)]),
+  ] },
   { id: 'curves', group: 'color', label: 'curves', source: 'builtin', params: [], dialog: 'curves' },
   { id: 'gradient', group: 'color', label: 'gradient', source: 'builtin', params: [], dialog: 'gradient' },
+  { id: 'grayscale', group: 'color', label: 'grayscale', source: 'builtin', params: [], hint: 'grayscaleHint' },
+  { id: 'threshold', group: 'color', label: 'threshold', source: 'builtin',
+    params: [range('threshold', 'threshold', 128, 1, 255), choice('target', 'target', [['color', 'targetColor'], ['alpha', 'targetAlpha'], ['both', 'targetBoth']])] },
   { id: 'invert', group: 'color', label: 'invert', source: 'builtin', params: [], hint: 'invertHint' },
   { id: 'posterize', group: 'color', label: 'posterize', source: 'builtin', params: [range('levels', 'levels', 6, 2, 32)] },
   { id: 'noise', group: 'effect', label: 'noise', source: 'builtin', params: [range('amount', 'amount', 25, 0, 100), range('grain', 'grain', 1, 1, 16)] },
