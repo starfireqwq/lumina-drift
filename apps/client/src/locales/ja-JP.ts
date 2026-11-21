@@ -747,6 +747,7 @@ export const jaJP: Translations = {
       blur: 'ぼかし',
       distort: '変形',
       sharpen: 'シャープ',
+      plugin: 'プラグイン',
     },
     items: {
       box: 'ぼかし',

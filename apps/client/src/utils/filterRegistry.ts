@@ -4,11 +4,13 @@
  * id); this file holds what the interface needs: group, name, parameters (all i18n keys).
  */
 import type { FilterValues } from '@atelier/shared';
-import type { Translations } from '../locales';
+import type { Language, Translations } from '../locales';
+import type { PluginFilterDeclaration, PluginFilterParam, PluginLocaleMap } from '../plugins/pluginApi';
+import { getPlugins, subscribePlugins, type InstalledPlugin } from '../plugins/pluginStore';
 
-export type FilterGroup = 'color' | 'library' | 'lineart' | 'render' | 'effect' | 'blur' | 'distort' | 'sharpen';
+export type FilterGroup = 'color' | 'library' | 'lineart' | 'render' | 'effect' | 'blur' | 'distort' | 'sharpen' | 'plugin';
 /** Menu order. A group with no filters yet is left out of the menu. */
-export const FILTER_GROUPS: readonly FilterGroup[] = ['color', 'library', 'lineart', 'render', 'effect', 'blur', 'distort', 'sharpen'];
+export const FILTER_GROUPS: readonly FilterGroup[] = ['color', 'library', 'lineart', 'render', 'effect', 'blur', 'distort', 'sharpen', 'plugin'];
 
 type FilterTexts = Translations['filters'];
 export type FilterItemKey = keyof FilterTexts['items'];
@@ -19,15 +21,29 @@ export type FilterHintKey = 'invertHint' | 'grayscaleHint' | 'softenHint' | 'sha
 interface ParamBase {
   /** Values are stored under this key, never by position */
   key: string;
-  label: FilterParamKey;
+  label?: FilterParamKey;
+  /** Raw display label for plugin filters (falls back when no i18n key is used) */
+  rawLabel?: string;
+  /** Localized display labels for plugin filters */
+  rawLabelI18n?: PluginLocaleMap;
   /** A small heading above this parameter (shown where it differs from the one before) */
   section?: FilterSectionKey;
+  /** Raw section heading for plugin filters */
+  rawSection?: string;
+  /** Optional unit label displayed after range values (e.g. px, %) */
+  unit?: string;
   /** Shown, and used, only while another parameter has one of these values */
   when?: { key: string; is: readonly (string | boolean)[] };
 }
+export type FilterParamOption = {
+  value: string;
+  label?: FilterParamKey;
+  rawLabel?: string;
+  rawLabelI18n?: PluginLocaleMap;
+};
 export type FilterParam =
   | ParamBase & { kind: 'range'; initial: number; min: number; max: number; step?: number }
-  | ParamBase & { kind: 'select'; initial: string; options: readonly { value: string; label: FilterParamKey }[] }
+  | ParamBase & { kind: 'select'; initial: string; options: readonly FilterParamOption[] }
   | ParamBase & { kind: 'toggle'; initial: boolean }
   | ParamBase & { kind: 'color'; initial: string }
   /** A spot on the canvas, dragged with a handle there. Never stored: it starts on the selection or the layer's content each time. */
@@ -36,9 +52,21 @@ export type FilterParam =
 export interface FilterDef {
   id: string;
   group: FilterGroup;
-  label: FilterItemKey;
-  /** Plugin filters (plugin API v2) will run in the plugin sandbox, never in the filter worker */
+  label?: FilterItemKey;
+  /** Plugin filters (plugin API v2) run in the dedicated plugin filter worker, never in the builtin filter worker */
   source: 'builtin' | 'plugin';
+  /** Raw display label for plugin filters */
+  rawLabel?: string;
+  /** Localized display labels for plugin filters */
+  rawLabelI18n?: PluginLocaleMap;
+  /** Owning plugin id (for source === 'plugin') */
+  pluginId?: string;
+  /** Owning plugin display name (for source === 'plugin') */
+  pluginName?: string;
+  /** Filter id declared inside the plugin manifest (for source === 'plugin') */
+  pluginFilterId?: string;
+  /** Tile halo padding (0..32 px) for plugin filters */
+  tilePadding?: number;
   params: readonly FilterParam[];
   /** Opens a window of its own instead of the parameter window */
   dialog?: 'curves' | 'gradient';
@@ -210,12 +238,132 @@ export const BUILTIN_FILTERS: readonly FilterDef[] = [
     params: [range('radius', 'radius', 4, 0.5, 64, 0.5)] },
 ];
 
-export const getFilter = (id: string | null | undefined) => BUILTIN_FILTERS.find((def) => def.id === id) ?? null;
-export const filtersInGroup = (group: FilterGroup) => BUILTIN_FILTERS.filter((def) => def.group === group);
+export const makePluginFilterId = (pluginId: string, filterId: string) => `plugin:${pluginId}:${filterId}`;
+
+function mapPluginParam(param: PluginFilterParam): FilterParam {
+  const base: ParamBase = {
+    key: param.key,
+    rawLabel: param.label,
+    rawLabelI18n: param.i18nLabel,
+    rawSection: param.section,
+    when: param.when,
+  };
+  switch (param.kind) {
+    case 'range':
+      return {
+        ...base,
+        kind: 'range',
+        initial: param.initial,
+        min: param.min,
+        max: param.max,
+        step: param.step,
+        unit: param.unit,
+      };
+    case 'select':
+      return {
+        ...base,
+        kind: 'select',
+        initial: param.initial,
+        options: param.options.map((opt) => ({
+          value: opt.value,
+          rawLabel: opt.label,
+          rawLabelI18n: opt.i18nLabel,
+        })),
+      };
+    case 'toggle':
+      return { ...base, kind: 'toggle', initial: param.initial };
+    case 'color':
+      return { ...base, kind: 'color', initial: param.initial };
+  }
+}
+
+function mapPluginFilter(plugin: InstalledPlugin, decl: PluginFilterDeclaration): FilterDef {
+  // 'library' is a gallery tab rather than a plain filter list; route such declarations to 'plugin'
+  const group: FilterGroup = decl.group === 'library' ? 'plugin' : decl.group;
+  return {
+    id: makePluginFilterId(plugin.manifest.id, decl.id),
+    group,
+    source: 'plugin',
+    rawLabel: decl.label,
+    rawLabelI18n: decl.i18nLabel,
+    pluginId: plugin.manifest.id,
+    pluginName: plugin.manifest.name,
+    pluginFilterId: decl.id,
+    tilePadding: decl.tilePadding,
+    draft: decl.draft,
+    params: decl.params.map(mapPluginParam),
+  };
+}
+
+let pluginFilters: readonly FilterDef[] = [];
+let registryVersion = 0;
+const registryListeners = new Set<() => void>();
+
+export function syncPluginFilters(installedPlugins: readonly InstalledPlugin[]): readonly FilterDef[] {
+  const next: FilterDef[] = [];
+  for (const item of installedPlugins) {
+    if (!item.enabled || item.manifest.apiVersion !== 2) continue;
+    if (!item.manifest.permissions.includes('filters')) continue;
+    for (const decl of item.manifest.filters) {
+      next.push(mapPluginFilter(item, decl));
+    }
+  }
+  pluginFilters = next;
+  registryVersion++;
+  for (const listener of registryListeners) listener();
+  return pluginFilters;
+}
+
+export const getPluginFilters = (): readonly FilterDef[] => pluginFilters;
+export const getAllFilters = (): readonly FilterDef[] => (pluginFilters.length ? [...BUILTIN_FILTERS, ...pluginFilters] : BUILTIN_FILTERS);
+export const getFilterRegistryVersion = () => registryVersion;
+export const subscribeFilterRegistry = (listener: () => void) => {
+  registryListeners.add(listener);
+  return () => { registryListeners.delete(listener); };
+};
+
+// Keep registry synchronized with pluginStore enable/disable/install/remove changes
+syncPluginFilters(getPlugins());
+subscribePlugins(() => {
+  syncPluginFilters(getPlugins());
+});
+
+export const getFilter = (id: string | null | undefined) => {
+  if (!id) return null;
+  return BUILTIN_FILTERS.find((def) => def.id === id) ?? pluginFilters.find((def) => def.id === id) ?? null;
+};
+export const filtersInGroup = (group: FilterGroup) => getAllFilters().filter((def) => def.group === group);
 export const filterGroupsInUse = () => FILTER_GROUPS.filter((group) => group === 'library' || filtersInGroup(group).length > 0);
 
-export const filterLabel = (def: FilterDef, t: Translations) => t.filters.items[def.label];
-export const filterParamLabel = (param: Pick<FilterParam, 'label'>, t: Translations) => t.filters.params[param.label];
+const pickLocalizedText = (rawLabel: string | undefined, i18nMap: PluginLocaleMap | undefined, language?: Language): string => {
+  if (language && i18nMap?.[language]) return i18nMap[language]!;
+  if (i18nMap?.['en-US']) return i18nMap['en-US']!;
+  return rawLabel ?? '';
+};
+
+export const filterLabel = (def: FilterDef, t: Translations, language?: Language) => {
+  if (def.source === 'plugin' || !def.label) {
+    return pickLocalizedText(def.rawLabel, def.rawLabelI18n, language) || def.id;
+  }
+  return t.filters.items[def.label];
+};
+
+export const filterParamLabel = (
+  param: Pick<ParamBase, 'label' | 'rawLabel' | 'rawLabelI18n'>,
+  t: Translations,
+  language?: Language,
+) => {
+  if (param.rawLabel !== undefined || param.rawLabelI18n !== undefined) {
+    return pickLocalizedText(param.rawLabel, param.rawLabelI18n, language);
+  }
+  return param.label ? t.filters.params[param.label] : '';
+};
+
+export const filterSectionLabel = (param: Pick<ParamBase, 'section' | 'rawSection'>, t: Translations): string => {
+  if (param.rawSection) return param.rawSection;
+  return param.section ? t.filters.sections[param.section] : '';
+};
+
 export const filterGroupLabel = (group: FilterGroup, t: Translations) => t.filters.groups[group];
 
 /** The filter's centre parameter, if it has one */

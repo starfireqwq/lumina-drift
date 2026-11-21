@@ -151,6 +151,7 @@ import { VectorEngine } from '../engine/VectorEngine';
 import { filterDraftFactor, filterFitsLayer, filterLabel, filterPointParam, getFilter, type FilterJob } from '../utils/filterRegistry';
 import { filterPoint } from '../utils/filterPoint';
 import { FilterWorkerClient } from '../engine/filterWorkerClient';
+import { PluginFilterWorkerClient } from '../plugins/pluginFilterClient';
 import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../utils/filterMemoryGuard';
 import type { FilterTargetOptions } from './FilterTargetBar';
 import { AtelierModal, modalButton } from './AtelierModal';
@@ -398,7 +399,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   } = useSocket();
   // A phone keeps this layout when turned sideways; 桌面模式 switches it to the desktop layout.
   const isPhone = usePhoneLayout();
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const dockLayout = useDockLayout();
   const railRight = !isPhone && dockLayout.railSide === 'right';
   const [mobileSheet, setMobileSheet] = useState<PanelId | null>(null);
@@ -773,6 +774,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   filterIdRef.current = shownFilterId;
   /** One resident filter worker for this canvas (created on first use, idles out on its own) */
   const filterWorkerRef = useRef<FilterWorkerClient | null>(null);
+  /** Dedicated QuickJS filter worker for Plugin API v2 filters (strictly isolated from layer-filter.worker.ts) */
+  const pluginFilterWorkerRef = useRef<PluginFilterWorkerClient | null>(null);
   const filterRequestRef = useRef(0);
   const [filterBusy, setFilterBusy] = useState(false);
   /** A preview is still being worked out (a draft is shown, or it is slow): the filter window shows a light sweep */
@@ -1540,6 +1543,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         app, viewport, layerManager, tileEngine, selectionEngine, vectorEngine, animationEngine: timeline,
         undo: scopedUndoRef.current, tileToRgba,
         get filterWorker() { return filterWorkerRef.current; },
+        get pluginFilterWorker() { return pluginFilterWorkerRef.current; },
       };
 
       // 6.1 Initialize Rulers
@@ -2349,6 +2353,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const cancelFilterWork = () => {
     filterRequestRef.current++;
     filterWorkerRef.current?.cancel();
+    pluginFilterWorkerRef.current?.cancel();
   };
 
   /**
@@ -2565,15 +2570,25 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           : (await lm.readAsync(item!.model.id, [{ x: 0, y: 0, w: width, h: height }]))[0];
       }
       if (request !== filterRequestRef.current) return false;
-      const client = filterWorkerRef.current ??= new FilterWorkerClient();
       const def = getFilter(filter.id);
-      let wantHistogram = previewOnly && Boolean(def?.histogram) && !filterHistogramRef.current;
+      const isPluginFilter = def?.source === 'plugin';
+      let wantHistogram = !isPluginFilter && previewOnly && Boolean(def?.histogram) && !filterHistogramRef.current;
       // Line colour and gap filling can use the colour being painted with
       const values = { ...filter.values, currentColor: brushProps.color };
       const stale = () => request !== filterRequestRef.current || tileEngineRef.current !== engine ||
         filterApplyNewLayerRef.current !== toNewLayer ||
         (toNewLayer ? filterIncludeBgRef.current !== includeBg : (activeLayerRef.current?.id !== item!.model.id || getFilterLayer() !== item));
       const compute = async (draft: number) => {
+        if (isPluginFilter && def) {
+          const pluginClient = pluginFilterWorkerRef.current ??= new PluginFilterWorkerClient();
+          const result = await pluginClient.run(def, new Uint8Array(source), width, height, values, mask, {
+            draft,
+            previewOnly,
+            isTouch: coarsePointer(),
+          });
+          return result?.output ?? null;
+        }
+        const client = filterWorkerRef.current ??= new FilterWorkerClient();
         const result = await client.run(filter.id, new Uint8Array(source), width, height, values, mask, { histogram: wantHistogram, draft });
         if (result?.histogram && request === filterRequestRef.current) {
           wantHistogram = false;
@@ -2635,7 +2650,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       const coords = bounds && selectionEngineRef.current?.hasSelection()
         ? engine.getDirtyTilesForBounds(bounds.minX, bounds.minY, bounds.maxX + 1, bounds.maxY + 1)
         : engine.getAllTileCoords();
-      const label = def ? filterLabel(def, t) : filter.id;
+      const label = def ? filterLabel(def, t, language) : filter.id;
 
       if (toNewLayer) {
         const nonEmptyCoords = filterNonEmptyTileCoords(pixels, width, height, engine.tileSize, coords);
@@ -2704,7 +2719,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     }
   };
 
-  useEffect(() => () => filterWorkerRef.current?.dispose(), []);
+  useEffect(() => () => {
+    filterWorkerRef.current?.dispose();
+    pluginFilterWorkerRef.current?.dispose();
+  }, []);
 
   const filterRunnerRef = useRef(runLayerFilter);
   filterRunnerRef.current = runLayerFilter;

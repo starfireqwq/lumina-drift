@@ -91,9 +91,11 @@ import {
   type CanvasModel, type FilterValues,
 } from '@atelier/shared';
 import {
-  BUILTIN_FILTERS, FILTER_DRAFT, FILTER_GROUPS, defaultFilterValues, filterDraftFactor, filterFitsLayer, filterGroupsInUse, filterPointParam, getFilter,
-  normalizeFilterValues, paramShown, snapRange,
+  BUILTIN_FILTERS, FILTER_DRAFT, FILTER_GROUPS, defaultFilterValues, filterDraftFactor, filterFitsLayer, filterGroupsInUse, filterLabel,
+  filterParamLabel, filterPointParam, filtersInGroup, getFilter, makePluginFilterId, normalizeFilterValues, paramShown, snapRange,
+  syncPluginFilters,
 } from '../src/utils/filterRegistry';
+import { runPluginFilterTiled } from '../src/plugins/pluginFilterCore';
 import { COLOR_ADJUST_PRESETS, matchColorPreset } from '../src/utils/filterPresets';
 import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../src/utils/filterMemoryGuard';
 import { BUILTIN_LIBRARY_CARDS, createFavoriteCard, parseFavoriteCards, scaleFilterValuesForThumbnail } from '../src/utils/filterLibrary';
@@ -2976,6 +2978,189 @@ await (async () => {
     await assert.rejects(rpc('selection.feather', { radius: 129 }), /1 and 128/);
     await assert.rejects(rpc('selection.selectPolygon', { points: [{ x: 0, y: 0 }, { x: 1, y: 1 }] }), /between 3 and 4096/);
     await tx2.rollback();
+  }
+})();
+
+// Plugin API v2.0 Batch 5: Plugin filters in F1 filterRegistry & isolated QuickJS tiled filter engine
+await (async () => {
+  // 1. Dynamic filterRegistry sync: 'plugin' group hidden when empty, visible when enabled, supports existing groups
+  syncPluginFilters([]);
+  assert.equal(filterGroupsInUse().includes('plugin'), false, 'plugin filter group hidden when no plugin filters active');
+
+  const filterPluginManifest = parsePlugin({
+    apiVersion: 2,
+    id: 'lumina.test-filter-kit',
+    name: 'Test Filter Kit',
+    version: '1.0.0',
+    author: 'Lumina Drift',
+    description: 'Test filter plugin.',
+    permissions: ['filters'],
+    filters: [
+      {
+        id: 'prism-tint',
+        label: 'Prism Tint',
+        i18nLabel: { 'zh-TW': '稜鏡著色' },
+        group: 'plugin',
+        tilePadding: 2,
+        draft: true,
+        params: [
+          { kind: 'range', key: 'boost', label: 'Boost', i18nLabel: { 'zh-TW': '增幅' }, initial: 40, min: 0, max: 100, step: 1, unit: '%' },
+        ],
+      },
+      {
+        id: 'warm-shift',
+        label: 'Warm Shift',
+        group: 'color',
+        tilePadding: 0,
+        params: [],
+      },
+    ],
+    script: `function onFilter(id, tile, params) { return tile.rgba; }`,
+  }) as PluginManifestV2;
+
+  syncPluginFilters([{ manifest: filterPluginManifest, enabled: true, installedAt: 1 }]);
+  assert.equal(filterGroupsInUse().includes('plugin'), true, 'plugin filter group shown when enabled');
+  const prismId = makePluginFilterId('lumina.test-filter-kit', 'prism-tint');
+  const warmId = makePluginFilterId('lumina.test-filter-kit', 'warm-shift');
+  const prismDef = getFilter(prismId);
+  const warmDef = getFilter(warmId);
+  assert.ok(prismDef && prismDef.source === 'plugin' && prismDef.group === 'plugin');
+  assert.ok(warmDef && warmDef.source === 'plugin' && warmDef.group === 'color');
+  assert.equal(filtersInGroup('color').some((d) => d.id === warmId), true, 'plugin filter can belong to existing group');
+  assert.equal(filterLabel(prismDef!, translations['zh-TW'], 'zh-TW'), '稜鏡著色');
+  assert.equal(filterLabel(prismDef!, translations['en-US'], 'en-US'), 'Prism Tint');
+  assert.equal(filterParamLabel(prismDef!.params[0], translations['zh-TW'], 'zh-TW'), '增幅');
+
+  // Disabling plugin removes filters and hides 'plugin' group again
+  syncPluginFilters([{ manifest: filterPluginManifest, enabled: false, installedAt: 1 }]);
+  assert.equal(getFilter(prismId), null);
+  assert.equal(filterGroupsInUse().includes('plugin'), false, 'plugin filter group hidden after disable');
+
+  // 2. Multi-tile (300x270 -> 4 tiles) execution with tilePadding clamp + premul<->straight roundtrip
+  {
+    const W = 300;
+    const H = 270;
+    const src = new Uint8Array(W * H * 4);
+    // Fill with premultiplied 50% alpha red (straight R=200, A=128 -> premul R=100, A=128)
+    for (let i = 0; i < src.length; i += 4) {
+      src[i] = 100;
+      src[i + 1] = 0;
+      src[i + 2] = 0;
+      src[i + 3] = 128;
+    }
+    const script = `
+      function onFilter(filterId, tile, params) {
+        if (filterId !== 'box-check') throw new Error('unexpected filterId');
+        // Verify halo padding dimensions match padLeft/padTop/padRight/padBottom
+        const expectedLen = tile.width * tile.height * 4;
+        if (tile.rgba.byteLength !== expectedLen) throw new Error('length mismatch');
+        const out = new Uint8Array(expectedLen);
+        const addG = params.addG || 0;
+        for (let y = tile.padTop; y < tile.height - tile.padBottom; y++) {
+          for (let x = tile.padLeft; x < tile.width - tile.padRight; x++) {
+            // Read left neighbor across padding boundary to prove clamped halo is populated
+            const leftIdx = (y * tile.width + (x - 1)) * 4;
+            const idx = (y * tile.width + x) * 4;
+            out[idx] = tile.rgba[leftIdx];
+            out[idx + 1] = Math.min(255, tile.rgba[idx + 1] + addG);
+            out[idx + 2] = tile.rgba[idx + 2];
+            out[idx + 3] = tile.rgba[idx + 3];
+          }
+        }
+        return out;
+      }
+    `;
+    const res = await runPluginFilterTiled({
+      script,
+      filterId: 'box-check',
+      pixels: src,
+      width: W,
+      height: H,
+      params: { addG: 100 },
+      tilePadding: 2,
+      previewOnly: true,
+    });
+    assert.equal(res.cancelled, false);
+    assert.equal(res.tilesProcessed, 4, '300x270 spans 2x2 tiles of 256x256');
+    assert.ok(res.output);
+    // Pixel (0,0) and cross-tile pixel (256, 256) should both have premul R~100, G~50 (100*128/255), A=128
+    for (const [px, py] of [[0, 0], [256, 256], [299, 269]]) {
+      const idx = (py * W + px) * 4;
+      assert.ok(Math.abs(res.output![idx] - 100) <= 1, `R preserved at (${px},${py})`);
+      assert.ok(Math.abs(res.output![idx + 1] - 50) <= 1, `G premultiplied at (${px},${py})`);
+      assert.equal(res.output![idx + 3], 128, `A preserved at (${px},${py})`);
+    }
+  }
+
+  // 3. Selection mask blending & draft downscale preview
+  {
+    const W = 16;
+    const H = 16;
+    const src = new Uint8Array(W * H * 4);
+    for (let i = 0; i < src.length; i += 4) {
+      src[i] = 20;
+      src[i + 1] = 20;
+      src[i + 2] = 20;
+      src[i + 3] = 255;
+    }
+    const mask = new Uint8Array(W * H);
+    mask[0] = 255; // fully selected
+    mask[1] = 128; // half feathered
+    mask[2] = 0;   // unselected
+    const invertScript = `
+      function onFilter(_id, tile) {
+        for (let i = 0; i < tile.rgba.length; i += 4) {
+          tile.rgba[i] = 220;
+          tile.rgba[i + 1] = 220;
+          tile.rgba[i + 2] = 220;
+        }
+      }
+    `;
+    const maskedRes = await runPluginFilterTiled({
+      script: invertScript,
+      filterId: 'fill',
+      pixels: src,
+      width: W,
+      height: H,
+      params: {},
+      mask,
+      draft: 2,
+      previewOnly: true,
+    });
+    assert.ok(maskedRes.output);
+    assert.equal(maskedRes.output![0], 220, 'Selected pixel receives filtered value even under draft');
+    assert.ok(Math.abs(maskedRes.output![4] - 120) <= 2, 'Feathered pixel blends original (20) and filtered (220)');
+    assert.equal(maskedRes.output![8], 20, 'Unselected pixel stays untouched');
+  }
+
+  // 4. Cancellation & per-tile CPU interrupt timeout
+  {
+    const src = new Uint8Array(32 * 32 * 4);
+    const cancelledRes = await runPluginFilterTiled({
+      script: `function onFilter(_id, tile) { return tile.rgba; }`,
+      filterId: 'noop',
+      pixels: src,
+      width: 32,
+      height: 32,
+      params: {},
+      isCancelled: () => true,
+    });
+    assert.equal(cancelledRes.cancelled, true);
+    assert.equal(cancelledRes.output, null);
+
+    await assert.rejects(
+      runPluginFilterTiled({
+        script: `function onFilter() { while (true) {} }`,
+        filterId: 'hang',
+        pixels: src,
+        width: 32,
+        height: 32,
+        params: {},
+        tileCpuLimitMs: 40,
+        totalCpuLimitMs: 120,
+      }),
+      /CPU limit/,
+    );
   }
 })();
 console.log('ui-logic checks passed');

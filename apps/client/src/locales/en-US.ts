@@ -747,6 +747,7 @@ export const enUS: Translations = {
       blur: 'Blur',
       distort: 'Distort',
       sharpen: 'Sharpen',
+      plugin: 'Plugins',
     },
     items: {
       box: 'Blur',

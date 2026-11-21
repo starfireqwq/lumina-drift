@@ -747,6 +747,7 @@ export const zhCN: Translations = {
       blur: '模糊',
       distort: '变形',
       sharpen: '锐化',
+      plugin: '插件',
     },
     items: {
       box: '模糊',

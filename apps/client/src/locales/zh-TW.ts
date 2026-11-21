@@ -747,6 +747,7 @@ export const zhTW: Translations = {
       blur: '模糊',
       distort: '變形',
       sharpen: '銳化',
+      plugin: '插件',
     },
     items: {
       box: '模糊',

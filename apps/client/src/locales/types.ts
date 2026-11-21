@@ -767,6 +767,7 @@ export interface Translations {
       blur: string;
       distort: string;
       sharpen: string;
+      plugin: string;
     };
     items: {
       box: string;
