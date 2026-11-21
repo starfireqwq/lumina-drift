@@ -18,7 +18,7 @@ export function PluginManager({ plugins, onClose }: { plugins: InstalledPlugin[]
     setError('');
     setPending(null);
     try {
-      if (file.size > MAX_PLUGIN_BYTES) throw new Error('Maximum package size: 128 KiB.');
+      if (file.size > MAX_PLUGIN_BYTES) throw new Error(`Maximum package size: ${Math.round(MAX_PLUGIN_BYTES / 1024)} KiB.`);
       setPending(parsePlugin(JSON.parse(await file.text())));
     } catch (cause) {
       setError(`${strings.invalid} ${cause instanceof Error ? cause.message : ''}`);

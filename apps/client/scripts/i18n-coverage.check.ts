@@ -3,6 +3,8 @@ import { translations, SUPPORTED_LANGUAGES, type Language, type Translations } f
 import { getLocalizedToolGroups, ALL_TOOLS } from '../src/components/workspace/toolCatalog';
 import { getLocalizedBlendModeGroups } from '../src/components/LayerPanel';
 import { BUILTIN_FILTERS, FILTER_GROUPS, filterGroupLabel, filterLabel, filterParamLabel } from '../src/utils/filterRegistry';
+import { PLUGIN_PERMISSIONS_V1, PLUGIN_PERMISSIONS_V2 } from '../src/plugins/pluginApi';
+import { getPluginLabels, getPluginPermissionLabel } from '../src/plugins/pluginLabels';
 
 console.log('--- Running i18n Verification & Quality Checks ---');
 
@@ -173,5 +175,19 @@ for (const lang of REQUIRED_LOCALES) {
   }
 }
 console.log('✓ Filter groups, names and parameters localized across all 4 locales');
+
+// 5e. Plugin API v1/v2 labels and permission descriptions across all 4 locales
+const pluginBaselineKeys = Object.keys(getPluginLabels('en-US')).sort();
+for (const lang of REQUIRED_LOCALES) {
+  const pl = getPluginLabels(lang);
+  assert.deepEqual(Object.keys(pl).sort(), pluginBaselineKeys, `Plugin labels keys mismatch in ${lang}`);
+  for (const [k, v] of Object.entries(pl)) {
+    assert.ok(typeof v === 'string' && v.trim().length > 0, `Plugin label '${k}' must not be empty in ${lang}`);
+  }
+  for (const perm of [...PLUGIN_PERMISSIONS_V1, ...PLUGIN_PERMISSIONS_V2]) {
+    assert.ok(getPluginPermissionLabel(lang, perm).trim().length > 0, `Permission '${perm}' needs label in ${lang}`);
+  }
+}
+console.log('✓ Plugin v1/v2 labels and permissions verified across all 4 locales');
 
 console.log('--- ALL i18n VERIFICATION CHECKS PASSED SUCCESSFULLY! ---');

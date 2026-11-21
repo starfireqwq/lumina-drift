@@ -43,6 +43,22 @@ import {
 import { ShortcutManager } from '../src/engine/ShortcutManager';
 import { cleanLightTable, clearLightTable, emptyLightTable, lightIdsFor, toggleLightCel } from '../src/engine/lightTable';
 import { nextGroupName } from '../src/utils/canvasName';
+import {
+  PLUGIN_LIMITS,
+  PLUGIN_PERMISSIONS_V2_CORE,
+  parsePlugin,
+  parsePluginAction,
+  resolvePluginDescription,
+  resolvePluginName,
+  resolvePluginText,
+  type PluginManifestV2,
+} from '../src/plugins/pluginApi';
+import {
+  createPluginStore,
+  PLUGIN_STORAGE_KEY_V1,
+  PLUGIN_STORAGE_KEY_V2,
+  type PluginStorageBackend,
+} from '../src/plugins/pluginStore';
 import { verticalRuns } from '../src/engine/textLayer';
 import { deleteAnchor, isCornerAnchor, moveHandle, penPointsToAnchors, toggleCorner } from '../src/engine/vectorEditing';
 import {
@@ -2038,5 +2054,205 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
     assert.equal(seen.has(s.defaultCombo), false, `Duplicate defaultCombo ${s.defaultCombo} (${seen.get(s.defaultCombo)} vs ${s.id})`);
     seen.set(s.defaultCombo, s.id);
   }
+}
+
+// Plugin API v2.0 Batch 1: Manifest v1/v2 parsing, permissions, limits, and store migration
+{
+  assert.equal(PLUGIN_PERMISSIONS_V2_CORE.length, 8);
+  assert.equal(PLUGIN_LIMITS.maxPackageBytesV1, 128 * 1024);
+  assert.equal(PLUGIN_LIMITS.maxPackageBytesV2, 256 * 1024);
+  assert.equal(PLUGIN_LIMITS.maxInstalledPlugins, 24);
+
+  // v1 backward compatibility
+  const v1Raw = {
+    apiVersion: 1,
+    id: 'studio.v1-sample',
+    name: 'Studio V1',
+    version: '1.0.0',
+    author: 'Tester',
+    description: 'Legacy plugin',
+    permissions: ['brush', 'layers', 'artwork'],
+    commands: [{ id: 'hello', label: 'Hello' }],
+    script: 'function run() { return { kind: "message", text: "hi" }; }',
+  };
+  const v1 = parsePlugin(v1Raw);
+  assert.equal(v1.apiVersion, 1);
+  assert.equal(v1.commands.length, 1);
+  assert.equal(parsePluginAction({ kind: 'brush', color: '#112233', size: 12 }, v1).kind, 'brush');
+
+  // v1 must reject v2 permissions & oversized >128 KiB scripts
+  assert.throws(() => parsePlugin({ ...v1Raw, permissions: ['layers:read'] }));
+  assert.throws(() => parsePlugin({ ...v1Raw, script: 'x'.repeat(PLUGIN_LIMITS.maxPackageBytesV1 + 1) }));
+
+  // v2 full manifest parsing
+  const v2Raw = {
+    apiVersion: 2,
+    id: 'lumina.edge-glow-kit',
+    name: 'Edge Glow Kit',
+    version: '2.0.0',
+    author: 'Lumina Drift',
+    description: 'Custom filter, command, and panel.',
+    i18n: {
+      'zh-TW': { name: '邊緣流光套件', description: '自訂濾鏡與面板。' },
+    },
+    permissions: [
+      'layers:read', 'layers:write', 'pixels:read', 'pixels:write',
+      'selection', 'filters', 'commands', 'ui:panel', 'brush',
+    ],
+    commands: [
+      {
+        id: 'outline-selection',
+        label: 'Outline Selection',
+        i18nLabel: { 'zh-TW': '選區描邊' },
+        group: 'Generate',
+        suggestedShortcut: 'Alt+Shift+KeyG',
+      },
+    ],
+    filters: [
+      {
+        id: 'duotone-glow',
+        label: 'Duotone Glow',
+        i18nLabel: { 'zh-TW': '雙色流光' },
+        group: 'plugin',
+        tilePadding: 4,
+        draft: true,
+        params: [
+          { kind: 'color', key: 'shadow', label: 'Shadow', initial: '#1a2240' },
+          { kind: 'range', key: 'mix', label: 'Intensity', initial: 80, min: 0, max: 100, step: 1, unit: '%' },
+          { kind: 'toggle', key: 'invert', label: 'Invert', initial: false },
+          {
+            kind: 'select', key: 'mode', label: 'Mode', initial: 'soft',
+            when: { key: 'invert', is: [false] },
+            options: [{ value: 'soft', label: 'Soft' }, { value: 'hard', label: 'Hard' }],
+          },
+        ],
+      },
+    ],
+    panels: [
+      {
+        id: 'glow-panel',
+        title: 'Edge Glow',
+        i18nTitle: { 'zh-TW': '邊緣流光' },
+        icon: 'sparkles',
+        defaultWidth: 280,
+        fields: [
+          { kind: 'section', key: 'sec1', label: 'Options' },
+          { kind: 'text', key: 'info', text: 'Ready' },
+          { kind: 'layer', key: 'targetLayer', label: 'Target Layer' },
+          { kind: 'range', key: 'thickness', label: 'Thickness', initial: 4, min: 1, max: 32, step: 1, unit: 'px', live: true },
+          { kind: 'number', key: 'seed', label: 'Seed', initial: 7, min: 0, max: 999 },
+          { kind: 'color', key: 'color', label: 'Color', initial: '#62C5DF' },
+          { kind: 'toggle', key: 'newLayer', label: 'New Layer', initial: true },
+          { kind: 'select', key: 'style', label: 'Style', initial: 'outer', options: [{ value: 'outer', label: 'Outer' }, { value: 'inner', label: 'Inner' }] },
+          { kind: 'input', key: 'tag', label: 'Tag', initial: 'glow', maxLength: 40, when: { key: 'newLayer', is: [true] } },
+        ],
+        actions: [
+          { id: 'apply', label: 'Apply', i18nLabel: { 'zh-TW': '套用' }, variant: 'primary' },
+          { id: 'reset', label: 'Reset', variant: 'secondary' },
+        ],
+      },
+    ],
+    script: 'async function onCommand() { return { notice: "ok" }; }',
+  };
+
+  const v2 = parsePlugin(v2Raw) as PluginManifestV2;
+  assert.equal(v2.apiVersion, 2);
+  assert.equal(v2.commands.length, 1);
+  assert.equal(v2.filters.length, 1);
+  assert.equal(v2.filters[0].group, 'plugin');
+  assert.equal(v2.filters[0].tilePadding, 4);
+  assert.equal(v2.panels.length, 1);
+  assert.equal(v2.panels[0].fields.length, 9);
+  assert.equal(resolvePluginName(v2, 'zh-TW'), '邊緣流光套件');
+  assert.equal(resolvePluginName(v2, 'ja-JP'), 'Edge Glow Kit');
+  assert.equal(resolvePluginDescription(v2, 'zh-TW'), '自訂濾鏡與面板。');
+  assert.equal(resolvePluginText(v2.commands[0].label, v2.commands[0].i18nLabel, 'zh-TW'), '選區描邊');
+  assert.equal(resolvePluginText(v2.commands[0].label, v2.commands[0].i18nLabel, 'en-US'), 'Outline Selection');
+
+  // v2 accepts scripts up to 256 KiB and rejects > 256 KiB
+  const v2LargeScript = ' '.repeat(PLUGIN_LIMITS.maxPackageBytesV1 + 1024) + 'function onCommand(){}';
+  assert.equal(parsePlugin({ ...v2Raw, script: v2LargeScript }).apiVersion, 2);
+  assert.throws(() => parsePlugin({ ...v2Raw, script: 'x'.repeat(PLUGIN_LIMITS.maxPackageBytesV2 + 1) }));
+
+  // v2 strict validation edge cases
+  assert.throws(() => parsePlugin({ ...v2Raw, apiVersion: 3 }));
+  assert.throws(() => parsePlugin({ ...v2Raw, permissions: ['layers'] }), 'v2 must reject legacy layers permission');
+  assert.throws(() => parsePlugin({ ...v2Raw, permissions: ['artwork'] }), 'v2 must reject legacy artwork permission');
+  assert.throws(() => parsePlugin({ ...v2Raw, commands: [], filters: [], panels: [] }), 'v2 requires at least one contribution');
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, permissions: v2Raw.permissions.filter((p) => p !== 'commands') }),
+    'declaring commands without commands permission must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, permissions: v2Raw.permissions.filter((p) => p !== 'filters') }),
+    'declaring filters without filters permission must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, permissions: v2Raw.permissions.filter((p) => p !== 'ui:panel') }),
+    'declaring panels without ui:panel permission must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, permissions: v2Raw.permissions.filter((p) => p !== 'layers:read') }),
+    'panel layer field without layers:read permission must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, filters: [{ ...v2Raw.filters[0], tilePadding: 33 }] }),
+    'tilePadding > 32 must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, commands: [{ ...v2Raw.commands[0], suggestedShortcut: 'BadMod+KeyA' }] }),
+    'invalid shortcut modifier must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, filters: [{ ...v2Raw.filters[0], params: [{ kind: 'range', key: 'r', label: 'R', initial: 5, min: 10, max: 20 }] }] }),
+    'range initial outside min..max must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, filters: [{ ...v2Raw.filters[0], params: [{ kind: 'select', key: 's', label: 'S', initial: 'missing', options: [{ value: 'a', label: 'A' }] }] }] }),
+    'select initial not in options must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, filters: [{ ...v2Raw.filters[0], params: [{ kind: 'toggle', key: 't', label: 'T', initial: true, when: { key: 'ghost', is: [true] } }] }] }),
+    'condition referencing unknown key must fail',
+  );
+
+  // pluginStore v1 -> v2 migration, damaged record tolerance, replacement disables, and 24-plugin cap
+  const mem = new Map<string, string>();
+  mem.set(PLUGIN_STORAGE_KEY_V1, JSON.stringify([
+    { manifest: v1, enabled: true },
+    { manifest: { apiVersion: 99, broken: true }, enabled: true },
+  ]));
+  const backend: PluginStorageBackend = {
+    storageKey: PLUGIN_STORAGE_KEY_V2,
+    legacyKeys: [PLUGIN_STORAGE_KEY_V1],
+    readRaw: () => mem.get(PLUGIN_STORAGE_KEY_V2) ?? null,
+    readLegacyRaw: (k) => mem.get(k) ?? null,
+    writeRaw: (s) => { mem.set(PLUGIN_STORAGE_KEY_V2, s); },
+  };
+  const store = createPluginStore(backend);
+  assert.equal(store.getPlugins().length, 1, 'Migrates valid v1 record and skips damaged one');
+  assert.equal(store.getPlugins()[0].manifest.id, v1.id);
+  assert.equal(store.getPlugins()[0].enabled, true);
+  assert.ok(mem.has(PLUGIN_STORAGE_KEY_V2), 'Migration persists to v2 storage key');
+
+  // Install v2, enable, then replace same id -> must reset enabled to false
+  store.installPlugin(v2);
+  assert.equal(store.getPlugins().find((p) => p.manifest.id === v2.id)?.enabled, false);
+  store.setPluginEnabled(v2.id, true);
+  assert.equal(store.getPlugins().find((p) => p.manifest.id === v2.id)?.enabled, true);
+  store.installPlugin({ ...v2, version: '2.0.1' });
+  assert.equal(store.getPlugins().find((p) => p.manifest.id === v2.id)?.enabled, false, 'Replacing plugin must reset enabled to false');
+  assert.equal(store.getPlugins().find((p) => p.manifest.id === v2.id)?.manifest.version, '2.0.1');
+
+  // Enforce 24-plugin capacity limit
+  for (let i = store.getPlugins().length; i < PLUGIN_LIMITS.maxInstalledPlugins; i++) {
+    store.installPlugin(parsePlugin({ ...v2Raw, id: `lumina.cap-test-${i}` }));
+  }
+  assert.equal(store.getPlugins().length, PLUGIN_LIMITS.maxInstalledPlugins);
+  assert.throws(
+    () => store.installPlugin(parsePlugin({ ...v2Raw, id: 'lumina.cap-overflow' })),
+    'Installing beyond maxInstalledPlugins (24) must throw',
+  );
+  store.dispose();
 }
 console.log('ui-logic checks passed');
