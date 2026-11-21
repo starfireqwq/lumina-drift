@@ -1067,7 +1067,7 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
       if (param.kind === 'range') assert.ok(param.min <= param.initial && param.initial <= param.max, `${def.id}.${param.key} default is in range`);
     }
   }
-  assert.deepEqual(filterGroupsInUse(), ['color', 'lineart', 'effect', 'blur', 'distort', 'sharpen'], 'Groups with no filters yet stay out of the menu');
+  assert.deepEqual(filterGroupsInUse(), ['color', 'lineart', 'render', 'effect', 'blur', 'distort', 'sharpen'], 'Groups with no filters yet stay out of the menu');
   assert.equal(filterFitsLayer(getFilter('despeckle')!, 'mask'), false, 'Line-art fixes stay off masks');
   assert.equal(filterFitsLayer(getFilter('despeckle')!, 'raster'), true);
 
@@ -1394,6 +1394,55 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
   for (let i = 0; i < fringe.length; i += 4) {
     assert.ok(fringe[i] <= fringe[i + 3] && fringe[i + 1] <= fringe[i + 3] && fringe[i + 2] <= fringe[i + 3], 'Sharpened colour never exceeds alpha');
   }
+}
+
+// 濾鏡 F3 Batch 1: 單色著色、平滑鋸齒、柏林雜訊、格線、集中線
+{
+  // monoTint: colorOnly keeps alpha & clear pixels, shifts midtones to chosen tint
+  assert.deepEqual(filterPixel('monoTint', { color: '#ff8040', strength: 100, preserveLuma: true }, [0, 0, 0, 0]), [0, 0, 0, 0], 'MonoTint leaves clear pixels clear');
+  const tintedMid = filterPixel('monoTint', { color: '#ff8040', strength: 100, preserveLuma: true }, [128, 128, 128, 255]);
+  assert.ok(tintedMid[0] > tintedMid[1] && tintedMid[1] > tintedMid[2] && tintedMid[3] === 255, 'MonoTint tints midtones toward chosen hue');
+  const tintedSemi = filterPixel('monoTint', { color: '#0080ff', strength: 100, preserveLuma: false }, [64, 64, 64, 128]);
+  assert.equal(tintedSemi[3], 128, 'MonoTint keeps semi-transparent alpha intact');
+  assert.ok(tintedSemi[2] > tintedSemi[0], 'MonoTint shifts blue channel higher for blue tint');
+
+  // smoothJaggies: softens diagonal staircase corners while keeping flat & vertical lines sharp
+  const W = 12, H = 12;
+  const diag = picture(W, H, (x, y) => (x === y ? [0, 0, 0, 255] : null));
+  const smoothed = runPixelFilter(PIXEL_FILTER_RUNNERS.smoothJaggies, diag, W, H, { strength: 80 });
+  assert.ok(alphaAt(smoothed, W, 5, 4) > 0 && alphaAt(smoothed, W, 4, 5) > 0, 'SmoothJaggies softens diagonal staircase corners');
+  const vert = picture(W, H, (x) => (x === 6 ? [0, 0, 0, 255] : null));
+  assert.deepEqual(runPixelFilter(PIXEL_FILTER_RUNNERS.smoothJaggies, vert, W, H, { strength: 80 }), vert, 'SmoothJaggies leaves straight vertical strokes sharp');
+
+  // perlinNoise: deterministic non-flat opaque greyscale
+  const blank = new Uint8Array(24 * 24 * 4);
+  const p1 = runPixelFilter(PIXEL_FILTER_RUNNERS.perlinNoise, blank, 24, 24, { scale: 12, amplitude: 80, persistence: 0.5, octaves: 4, offsetX: 0, offsetY: 0 });
+  const p2 = runPixelFilter(PIXEL_FILTER_RUNNERS.perlinNoise, blank, 24, 24, { scale: 12, amplitude: 80, persistence: 0.5, octaves: 4, offsetX: 0, offsetY: 0 });
+  assert.deepEqual(p1, p2, 'PerlinNoise is deterministic between preview and apply');
+  let pMin = 255, pMax = 0;
+  for (let i = 0; i < p1.length; i += 4) {
+    assert.equal(p1[i + 3], 255, 'PerlinNoise output is opaque');
+    assert.ok(p1[i] === p1[i + 1] && p1[i + 1] === p1[i + 2], 'PerlinNoise is greyscale');
+    if (p1[i] < pMin) pMin = p1[i];
+    if (p1[i] > pMax) pMax = p1[i];
+  }
+  assert.ok(pMax - pMin > 40, 'PerlinNoise produces varied values');
+
+  // gridPattern: draws grid lines on cell intervals and leaves interior clear on blank layer
+  const gridded = runPixelFilter(PIXEL_FILTER_RUNNERS.gridPattern, blank, 24, 24, { cell: 8, lineWidth: 1, color: '#ff0000', opacity: 100, offsetX: 0, offsetY: 0 });
+  assert.equal(alphaAt(gridded, 24, 0, 4), 255, 'Grid line at x=0 is drawn');
+  assert.equal(alphaAt(gridded, 24, 8, 4), 255, 'Grid line at x=8 is drawn');
+  assert.equal(alphaAt(gridded, 24, 4, 4), 0, 'Interior cell stays transparent');
+
+  // focusLines: clear center stays transparent, outer ring receives rays
+  const focused = runPixelFilter(PIXEL_FILTER_RUNNERS.focusLines, new Uint8Array(40 * 40 * 4), 40, 40,
+    { density: 48, lineWidth: 3, innerRadius: 40, jitter: 20, color: '#000000', center: { x: 20, y: 20 } });
+  assert.equal(alphaAt(focused, 40, 20, 20), 0, 'FocusLines keeps the inner center clear');
+  let outerHits = 0;
+  for (let x = 0; x < 40; x++) {
+    if (alphaAt(focused, 40, x, 1) > 0) outerHits++;
+  }
+  assert.ok(outerHits > 0, 'FocusLines draws rays toward the outer edge');
 }
 
 // 對齊 L1: basis, whole-pixel offsets, off-canvas parts, and a pixel-level run of the move

@@ -161,3 +161,49 @@ export function toneHistogram(pixels: Uint8Array | Uint8ClampedArray, width: num
   }
   return bins;
 }
+
+function parseHexRgb(hex: string) {
+  const clean = /^#[0-9a-f]{6}$/i.test(hex) ? hex : '#9a6b4c';
+  const n = parseInt(clean.slice(1), 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+
+/**
+ * 單色著色 (straight colour, alpha untouched): maps each pixel's brightness into a monochrome tint.
+ * With `preserveLuma`, midtones land on the chosen colour while black stays black and white stays white;
+ * without it, brightness scales the tint colour directly from black to full tint.
+ */
+export function monoTintPixels(pixels: Uint8Array | Uint8ClampedArray, hex: string, strength: number, preserveLuma = true) {
+  const output = new Uint8Array(pixels);
+  const s = Math.min(1, Math.max(0, strength / 100));
+  if (s <= 0) return output;
+  const keep = 1 - s;
+  const { r: tr, g: tg, b: tb } = parseHexRgb(hex);
+  for (let i = 0; i < output.length; i += 4) {
+    if (!output[i + 3]) continue;
+    const r = output[i], g = output[i + 1], b = output[i + 2];
+    const y = luma(r, g, b) / 255;
+    let nr: number, ng: number, nb: number;
+    if (preserveLuma) {
+      if (y <= 0.5) {
+        const k = y * 2;
+        nr = tr * k;
+        ng = tg * k;
+        nb = tb * k;
+      } else {
+        const k = (y - 0.5) * 2;
+        nr = tr + (255 - tr) * k;
+        ng = tg + (255 - tg) * k;
+        nb = tb + (255 - tb) * k;
+      }
+    } else {
+      nr = tr * y;
+      ng = tg * y;
+      nb = tb * y;
+    }
+    output[i] = Math.round(clamp255(r * keep + nr * s));
+    output[i + 1] = Math.round(clamp255(g * keep + ng * s));
+    output[i + 2] = Math.round(clamp255(b * keep + nb * s));
+  }
+  return output;
+}

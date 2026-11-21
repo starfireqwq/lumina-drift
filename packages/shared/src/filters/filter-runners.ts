@@ -8,10 +8,11 @@ import {
   applyHalftoneDot, applyNoiseGrain, applyTwirlDistortion,
   type ColorCurvesOptions, type FilterContext, type GradientStop,
 } from './pixel-filters';
-import { adjustColor, grayscalePixels, levelsLut, mapChannels, thresholdPixels } from './color-filters';
-import { changeLineWidth, despeckle, extractLines, recolorLines } from './lineart-filters';
+import { adjustColor, grayscalePixels, levelsLut, mapChannels, monoTintPixels, thresholdPixels } from './color-filters';
+import { changeLineWidth, despeckle, extractLines, recolorLines, smoothJaggies } from './lineart-filters';
 import { boxBlur, glow, mosaic, outline, radialChromatic } from './effect-filters';
 import { motionBlur, soften, spherize, unsharpMask, wave, zoomBlur } from './blur-distort-filters';
+import { focusLines, gridPattern, perlinNoise } from './render-filters';
 import { downscale, upscale } from './resample';
 
 /** A '#rrggbb' setting, or the fallback */
@@ -185,6 +186,10 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
     )),
   },
   grayscale: { colorOnly: true, run: ({ pixels }) => grayscalePixels(pixels) },
+  monoTint: {
+    colorOnly: true,
+    run: ({ pixels }, v) => monoTintPixels(pixels, filterColor(v, 'color', '#9a6b4c'), filterNumber(v, 'strength', 100), v.preserveLuma !== false),
+  },
   threshold: {
     run: ({ pixels }, v) => thresholdPixels(pixels, filterNumber(v, 'threshold', 128), filterChoice(v, 'target', ['color', 'alpha', 'both'] as const)),
   },
@@ -199,6 +204,35 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
   lineColor: {
     colorOnly: true,
     run: ({ pixels }, v) => recolorLines(pixels, v.useCurrent === false ? filterColor(v, 'color', '#000000') : currentColor(v)),
+  },
+  smoothJaggies: {
+    run: ({ pixels, width, height }, v) => smoothJaggies(pixels, width, height, filterNumber(v, 'strength', 50)),
+  },
+  perlinNoise: {
+    draft: { lengths: ['scale', 'offsetX', 'offsetY'] },
+    run: ({ width, height }, v) => perlinNoise(
+      width, height,
+      filterNumber(v, 'scale', 48), filterNumber(v, 'amplitude', 80), filterNumber(v, 'persistence', 0.5),
+      filterNumber(v, 'octaves', 4), filterNumber(v, 'offsetX', 0), filterNumber(v, 'offsetY', 0),
+    ),
+  },
+  gridPattern: {
+    run: ({ pixels, width, height }, v) => gridPattern(
+      pixels, width, height,
+      filterNumber(v, 'cell', 32), filterNumber(v, 'lineWidth', 1), filterColor(v, 'color', '#6366f1'),
+      filterNumber(v, 'opacity', 70), filterNumber(v, 'offsetX', 0), filterNumber(v, 'offsetY', 0),
+    ),
+  },
+  focusLines: {
+    draft: { points: ['center'] },
+    run: ({ pixels, width, height }, v) => {
+      const c = filterPoint(v, 'center', width, height);
+      return focusLines(
+        pixels, width, height, c.x, c.y,
+        filterNumber(v, 'density', 60), filterNumber(v, 'lineWidth', 3),
+        filterNumber(v, 'innerRadius', 28), filterNumber(v, 'jitter', 40), filterColor(v, 'color', '#111111'),
+      );
+    },
   },
   noise: { colorOnly: true, run: (ctx, v) => applyNoiseGrain(ctx, filterNumber(v, 'amount', 25) / 100, filterNumber(v, 'grain', 1)) },
   chromatic: {

@@ -758,6 +758,11 @@ export interface Translations {
       spherize: string;
       sharpen: string;
       unsharp: string;
+      monoTint: string;
+      smoothJaggies: string;
+      perlinNoise: string;
+      gridPattern: string;
+      focusLines: string;
     };
     /** Parameter names; a select's option names share this table */
     params: {
@@ -819,6 +824,13 @@ export interface Translations {
       amplitude: string;
       wavelength: string;
       squash: string;
+      preserveLuma: string;
+      scale: string;
+      persistence: string;
+      octaves: string;
+      opacity: string;
+      innerRadius: string;
+      jitter: string;
     };
   };
 

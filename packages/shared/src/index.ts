@@ -27,6 +27,7 @@ export * from './filters/color-filters';
 export * from './filters/lineart-filters';
 export * from './filters/effect-filters';
 export * from './filters/blur-distort-filters';
+export * from './filters/render-filters';
 export * from './filters/resample';
 
 // Phase 7: AI Smart Fill, Gamification Painter Level & Time Capsule
