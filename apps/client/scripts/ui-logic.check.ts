@@ -59,6 +59,8 @@ import {
   PLUGIN_STORAGE_KEY_V2,
   type PluginStorageBackend,
 } from '../src/plugins/pluginStore';
+import { executePluginV1 } from '../src/plugins/pluginSandboxCore';
+import { startPluginV2Direct } from '../src/plugins/pluginHost';
 import { verticalRuns } from '../src/engine/textLayer';
 import { deleteAnchor, isCornerAnchor, moveHandle, penPointsToAnchors, toggleCorner } from '../src/engine/vectorEditing';
 import {
@@ -2255,4 +2257,178 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
   );
   store.dispose();
 }
+
+// Plugin API v2.0 Batch 2: QuickJS async RPC sandbox, CPU interrupt, wall timeout, abort, and quotas
+await (async () => {
+  // 1. v1 synchronous execution compatibility
+  const v1Res = await executePluginV1({
+    script: 'function run(cmd, ctx) { return { kind: "brush", color: "#336699", size: Math.min(20, ctx.width) }; }',
+    command: 'set-pen',
+    context: { width: 1024, height: 768, dpi: 300 },
+  });
+  assert.deepEqual(v1Res, { kind: 'brush', color: '#336699', size: 20 });
+
+  const makeV2Manifest = (script: string, permissions: PluginManifestV2['permissions']): PluginManifestV2 =>
+    parsePlugin({
+      apiVersion: 2,
+      id: 'lumina.sandbox-test',
+      name: 'Sandbox Test',
+      version: '1.0.0',
+      author: 'Test',
+      description: 'Batch 2 test',
+      permissions,
+      commands: [{ id: 'run-it', label: 'Run' }],
+      script,
+    }) as PluginManifestV2;
+
+  // 2. v2 async RPC with binary Uint8Array roundtrip & cumulative CPU time excluding async wait
+  const writtenBuffers: Uint8Array[] = [];
+  const binaryManifest = makeV2Manifest(
+    `async function onCommand(cmdId, api) {
+      const info = await api.layers.getActive();
+      const tile = await api.pixels.read(info.id, { x: 0, y: 0, width: 2, height: 1 });
+      const out = new Uint8Array(tile.data.length);
+      for (let i = 0; i < tile.data.length; i++) out[i] = 255 - tile.data[i];
+      await api.pixels.write(info.id, { x: 0, y: 0, width: 2, height: 1, data: out });
+      return { notice: cmdId + ':' + api.canvas.tileSize + ':' + out[0] };
+    }`,
+    ['commands', 'layers:read', 'pixels:read', 'pixels:write'],
+  );
+  const binRes = await startPluginV2Direct(
+    binaryManifest,
+    { kind: 'command', commandId: 'run-it' },
+    { width: 512, height: 512, dpi: 300 },
+    async (method, _params, buffer) => {
+      // Simulate async GPU read delay > cpuLimitMs to prove idle wait is not billed to CPU budget
+      await new Promise((r) => setTimeout(r, 45));
+      if (method === 'layers.getActive') return { result: { id: 'layer-1' } };
+      if (method === 'pixels.read') {
+        const src = new Uint8Array([10, 20, 30, 255, 100, 110, 120, 255]);
+        return { result: { x: 0, y: 0, width: 2, height: 1 }, buffer: src.buffer };
+      }
+      if (method === 'pixels.write') {
+        assert.ok(buffer instanceof ArrayBuffer);
+        writtenBuffers.push(new Uint8Array(buffer));
+        return { result: null };
+      }
+      throw new Error(`Unexpected RPC: ${method}`);
+    },
+    { cpuLimitMs: 80, wallLimitMs: 3000 },
+  ).promise;
+  assert.equal(binRes.notice, 'run-it:256:245');
+  assert.equal(writtenBuffers.length, 1);
+  assert.deepEqual([...writtenBuffers[0]], [245, 235, 225, 0, 155, 145, 135, 0]);
+
+  // 3. CPU interrupt handler stops infinite loops quickly
+  const loopManifest = makeV2Manifest(
+    'async function onCommand() { while (true) {} }',
+    ['commands'],
+  );
+  await assert.rejects(
+    startPluginV2Direct(
+      loopManifest,
+      { kind: 'command', commandId: 'run-it' },
+      { width: 256, height: 256, dpi: 300 },
+      async () => ({ result: null }),
+      { cpuLimitMs: 60, wallLimitMs: 3000 },
+    ).promise,
+    /CPU|limit|interrupted|Script failed/i,
+  );
+
+  // 4. Wall timeout aborts hanging RPC
+  const slowManifest = makeV2Manifest(
+    'async function onCommand(_id, api) { await api.layers.list(); }',
+    ['commands', 'layers:read'],
+  );
+  await assert.rejects(
+    startPluginV2Direct(
+      slowManifest,
+      { kind: 'command', commandId: 'run-it' },
+      { width: 256, height: 256, dpi: 300 },
+      () => new Promise(() => {}),
+      { wallLimitMs: 80 },
+    ).promise,
+    /timed out/i,
+  );
+
+  // 5. Manual abort via AbortController
+  const ac = new AbortController();
+  const abortHandle = startPluginV2Direct(
+    slowManifest,
+    { kind: 'command', commandId: 'run-it' },
+    { width: 256, height: 256, dpi: 300 },
+    () => new Promise(() => {}),
+    { wallLimitMs: 3000, signal: ac.signal },
+  );
+  setTimeout(() => ac.abort(), 30);
+  await assert.rejects(abortHandle.promise, /aborted/i);
+
+  // 6. Permission enforcement: missing permission & respectSelection: false without selection permission
+  const noSelManifest = makeV2Manifest(
+    `async function onCommand(_id, api) {
+      await api.pixels.write('l1', { x: 0, y: 0, width: 1, height: 1, data: new Uint8Array(4), respectSelection: false });
+    }`,
+    ['commands', 'pixels:write'],
+  );
+  await assert.rejects(
+    startPluginV2Direct(
+      noSelManifest,
+      { kind: 'command', commandId: 'run-it' },
+      { width: 256, height: 256, dpi: 300 },
+      async () => ({ result: null }),
+    ).promise,
+    /selection.*permission/i,
+  );
+
+  // 7. Quotas: RPC count, pixel bytes, layer creation
+  const quotaManifest = makeV2Manifest(
+    `async function onCommand(_id, api) {
+      for (let i = 0; i < 4; i++) await api.layers.list();
+    }`,
+    ['commands', 'layers:read'],
+  );
+  await assert.rejects(
+    startPluginV2Direct(
+      quotaManifest,
+      { kind: 'command', commandId: 'run-it' },
+      { width: 256, height: 256, dpi: 300 },
+      async () => ({ result: [] }),
+      { quota: { maxRpcCalls: 3 } },
+    ).promise,
+    /RPC quota exceeded/i,
+  );
+
+  const pixelQuotaManifest = makeV2Manifest(
+    `async function onCommand(_id, api) {
+      await api.pixels.write('l1', { x: 0, y: 0, width: 4, height: 4, data: new Uint8Array(64) });
+    }`,
+    ['commands', 'pixels:write'],
+  );
+  await assert.rejects(
+    startPluginV2Direct(
+      pixelQuotaManifest,
+      { kind: 'command', commandId: 'run-it' },
+      { width: 256, height: 256, dpi: 300 },
+      async () => ({ result: null }),
+      { quota: { maxPixelBytes: 32 } },
+    ).promise,
+    /Pixel I\/O quota exceeded/i,
+  );
+
+  // 8. Never-settling promise fails fast instead of hanging until wall timeout
+  const hangPromiseManifest = makeV2Manifest(
+    'function onCommand() { return new Promise(() => {}); }',
+    ['commands'],
+  );
+  await assert.rejects(
+    startPluginV2Direct(
+      hangPromiseManifest,
+      { kind: 'command', commandId: 'run-it' },
+      { width: 256, height: 256, dpi: 300 },
+      async () => ({ result: null }),
+      { wallLimitMs: 5000 },
+    ).promise,
+    /never settled/i,
+  );
+})();
 console.log('ui-logic checks passed');
