@@ -690,6 +690,17 @@ export const enUS: Translations = {
     histogramAria: 'Tones in the layer',
     softenHint: 'Softens edges and noise slightly.',
     sharpenHint: 'Makes edges a little crisper.',
+    presetsTitle: 'Presets',
+    colorPresets: {
+      original: 'Original',
+      morningGlow: 'Morning Glow',
+      twilightMist: 'Twilight Mist',
+      softPastel: 'Soft Pastel',
+      vividPop: 'Vivid Comic',
+      retroFilm: 'Retro Film',
+      coolAqua: 'Cool Aqua',
+      dramaticNoir: 'Dramatic Noir',
+    },
     sections: {
       tone: 'Tone',
       color: 'Color',

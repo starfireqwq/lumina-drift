@@ -690,6 +690,17 @@ export const jaJP: Translations = {
     histogramAria: 'レイヤーの明暗の分布',
     softenHint: '輪郭やノイズを少しなめらかにします。',
     sharpenHint: '輪郭を少しくっきりさせます。',
+    presetsTitle: 'プリセット',
+    colorPresets: {
+      original: 'オリジナル',
+      morningGlow: '朝焼けウォーム',
+      twilightMist: '黄昏クール',
+      softPastel: 'やわらかパステル',
+      vividPop: 'くっきり鮮やか',
+      retroFilm: 'レトロフィルム',
+      coolAqua: 'クリアアクア',
+      dramaticNoir: 'クールモノトーン',
+    },
     sections: {
       tone: '明暗',
       color: '色',

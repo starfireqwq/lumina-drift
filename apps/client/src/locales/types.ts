@@ -709,6 +709,17 @@ export interface Translations {
     histogramAria: string;
     softenHint: string;
     sharpenHint: string;
+    presetsTitle: string;
+    colorPresets: {
+      original: string;
+      morningGlow: string;
+      twilightMist: string;
+      softPastel: string;
+      vividPop: string;
+      retroFilm: string;
+      coolAqua: string;
+      dramaticNoir: string;
+    };
     /** Small headings inside a filter's parameters */
     sections: {
       tone: string;

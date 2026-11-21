@@ -690,6 +690,17 @@ export const zhCN: Translations = {
     histogramAria: '图层的明暗分布',
     softenHint: '轻微柔化边缘和杂点。',
     sharpenHint: '让边缘稍微清晰一些。',
+    presetsTitle: '风格预设',
+    colorPresets: {
+      original: '原图',
+      morningGlow: '晨曦暖光',
+      twilightMist: '暮色微凉',
+      softPastel: '柔雾淡彩',
+      vividPop: '鲜明漫画',
+      retroFilm: '怀旧胶片',
+      coolAqua: '清透水色',
+      dramaticNoir: '冷峻高反差',
+    },
     sections: {
       tone: '明暗',
       color: '色彩',

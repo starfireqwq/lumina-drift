@@ -6,6 +6,7 @@ import {
   getFilter, loadFilterValues, paramShown, saveFilterValues, snapRange, type FilterDef, type FilterGroup, type FilterParam,
 } from '../utils/filterRegistry';
 import { filterPoint } from '../utils/filterPoint';
+import { COLOR_ADJUST_PRESETS, matchColorPreset } from '../utils/filterPresets';
 import { ToolWindow } from './workspace/ToolWindow';
 import { usePhoneLayout } from './workspace/dockStore';
 import { useI18n } from '../context/I18nContext';
@@ -158,6 +159,9 @@ export function LayerFilterDialog({ filterId, layerName, layerType, histogram, b
         <div aria-hidden className="atelier-filter-refine" data-on={refining && preview} />
         <div className="space-y-3" aria-busy={refining && preview}>
           {definition.hint && <p className="text-neutral-300">{t.filters[definition.hint]}</p>}
+          {definition.id === 'colorAdjust' && (
+            <ColorPresetStrip values={values} busy={busy} phone={phone} onPick={(next) => setValues((current) => ({ ...current, ...next }))} />
+          )}
           {definition.histogram && <ToneHistogram data={histogram ?? null} values={values} />}
           {definition.params.filter((param) => paramShown(param, values)).map((param, index, shown) => (
             <div key={param.key} className="space-y-1.5">
@@ -221,6 +225,53 @@ function ParamControl({ param, index, label, value, busy, onChange }: {
 }
 
 const numberOr = (value: unknown, fallback: number) => (typeof value === 'number' && Number.isFinite(value) ? value : fallback);
+
+/** Lumina Drift original preset cards shown above the six colour adjustment sliders */
+function ColorPresetStrip({ values, busy, phone, onPick }: {
+  values: FilterValues;
+  busy: boolean;
+  phone: boolean;
+  onPick: (next: FilterValues) => void;
+}) {
+  const { t } = useI18n();
+  const activeId = matchColorPreset(values);
+  return (
+    <div className="space-y-1.5" role="group" aria-label={t.filters.presetsTitle}>
+      <p className="text-[11px] font-medium text-neutral-500">{t.filters.presetsTitle}</p>
+      <div className={`grid gap-1.5 ${phone ? 'grid-cols-2' : 'grid-cols-2'}`}>
+        {COLOR_ADJUST_PRESETS.map((preset, index) => {
+          const active = activeId === preset.id;
+          const label = t.filters.colorPresets[preset.id];
+          return (
+            <button
+              key={preset.id}
+              type="button"
+              disabled={busy}
+              aria-pressed={active}
+              title={label}
+              onClick={() => onPick(preset.values)}
+              style={{ '--i': index } as CSSProperties}
+              className={`atelier-filter-card atelier-filter-item flex items-center gap-2 rounded-lg border px-2 text-left text-[11px] transition-colors ${
+                phone ? 'h-9' : 'h-7'
+              } ${
+                active
+                  ? 'border-indigo-400/70 bg-indigo-500/20 font-medium text-white'
+                  : 'border-neutral-800 bg-neutral-900/75 text-neutral-300 hover:border-neutral-700 hover:bg-neutral-800/80 hover:text-white'
+              } disabled:opacity-45`}
+            >
+              <span
+                aria-hidden
+                className="h-3.5 w-3.5 shrink-0 rounded-full border border-white/15"
+                style={{ background: `linear-gradient(135deg, ${preset.swatch[0]}, ${preset.swatch[1]} 55%, ${preset.swatch[2]})` }}
+              />
+              <span className="min-w-0 flex-1 truncate">{label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 /**
  * The layer's tones (levels window): bars on a square-root scale so thin line art still shows,

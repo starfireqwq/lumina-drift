@@ -690,6 +690,17 @@ export const zhTW: Translations = {
     histogramAria: '圖層的明暗分布',
     softenHint: '輕輕柔化邊緣與雜訊。',
     sharpenHint: '讓邊緣稍微清楚一點。',
+    presetsTitle: '風格預設',
+    colorPresets: {
+      original: '原圖',
+      morningGlow: '晨曦暖光',
+      twilightMist: '暮色微涼',
+      softPastel: '柔霧淡彩',
+      vividPop: '鮮明漫畫',
+      retroFilm: '懷舊底片',
+      coolAqua: '清透水色',
+      dramaticNoir: '冷峻高反差',
+    },
     sections: {
       tone: '明暗',
       color: '色彩',

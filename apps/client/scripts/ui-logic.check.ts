@@ -68,6 +68,7 @@ import {
   BUILTIN_FILTERS, FILTER_DRAFT, FILTER_GROUPS, defaultFilterValues, filterDraftFactor, filterFitsLayer, filterGroupsInUse, filterPointParam, getFilter,
   normalizeFilterValues, paramShown, snapRange,
 } from '../src/utils/filterRegistry';
+import { COLOR_ADJUST_PRESETS, matchColorPreset } from '../src/utils/filterPresets';
 
 const hex = (channels: string) => `#${channels.split(' ').map((n) => Number(n).toString(16).padStart(2, '0')).join('')}`;
 
@@ -1503,6 +1504,15 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
   assert.ok(hp[(8 * W + 7) * 4] < 128 && hp[(8 * W + 8) * 4] > 128, 'HighPass preserves high-frequency edge contrast');
   const hpBox = run('highPass', { radius: 1 }, box);
   assert.equal(alphaAt(hpBox, W, 0, 0), 0, 'HighPass leaves transparent pixels transparent');
+
+  // Color Adjust preset cards: all presets stay within parameter bounds and round-trip matchColorPreset
+  const colorDef = getFilter('colorAdjust')!;
+  assert.equal(matchColorPreset(defaultFilterValues(colorDef)), 'original', 'Default colorAdjust matches original preset');
+  for (const preset of COLOR_ADJUST_PRESETS) {
+    assert.deepEqual(normalizeFilterValues(colorDef, preset.values), preset.values, `Color preset ${preset.id} fits slider bounds`);
+    assert.equal(matchColorPreset(preset.values), preset.id, `matchColorPreset identifies ${preset.id}`);
+  }
+  assert.equal(matchColorPreset({ ...COLOR_ADJUST_PRESETS[1].values, brightness: 99 }), null, 'Tweaked preset becomes custom (null)');
 }
 
 // 對齊 L1: basis, whole-pixel offsets, off-canvas parts, and a pixel-level run of the move
