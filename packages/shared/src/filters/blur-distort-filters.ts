@@ -4,7 +4,7 @@
  * motion blur, repeated sparse passes for zoom blur, inverse mapping with bilinear sampling for
  * the distortions, and unsharp masking.
  */
-import { softBlur } from './effect-filters';
+import { boxBlur } from './effect-filters';
 
 export type MotionDirection = 'both' | 'forward' | 'backward';
 
@@ -201,7 +201,9 @@ export function spherize(pixels: Uint8Array | Uint8ClampedArray, width: number, 
  * where it differs by at least `threshold`. Colour never exceeds alpha (premultiplied).
  */
 export function unsharpMask(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, radius: number, amount: number, threshold: number) {
-  const blurred = softBlur(pixels, width, height, radius);
+  // Three box passes of the radius itself, so each step of the radius slider blurs a little more
+  const r = Math.max(1, Math.round(radius));
+  const blurred = boxBlur(boxBlur(boxBlur(pixels, width, height, r), width, height, r), width, height, r);
   const gain = Math.max(0, amount) / 100;
   const output = new Uint8Array(pixels.length);
   for (let i = 0; i < pixels.length; i += 4) {

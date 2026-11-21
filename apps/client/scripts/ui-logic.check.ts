@@ -1136,6 +1136,7 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
   assert.ok(crisp[(4 * W + 6) * 4] < 100 && crisp[(4 * W + 7) * 4] > 150, 'Sharpening pushes the two sides of an edge apart');
   assert.equal(crisp[(4 * W + 0) * 4], 100, 'Flat areas stay');
   assert.deepEqual(run('unsharp', { radius: 1, amount: 100, threshold: 100 }, step), step, 'Differences under the threshold are left alone');
+  assert.notDeepEqual(run('unsharp', { radius: 1, amount: 100 }, step), run('unsharp', { radius: 2, amount: 100 }, step), 'Each radius step sharpens differently');
   const fringe = run('sharpen', {}, picture(W, H, (x) => (x < 7 ? [200, 200, 200, 200] : null)));
   for (let i = 0; i < fringe.length; i += 4) {
     assert.ok(fringe[i] <= fringe[i + 3] && fringe[i + 1] <= fringe[i + 3] && fringe[i + 2] <= fringe[i + 3], 'Sharpened colour never exceeds alpha');
