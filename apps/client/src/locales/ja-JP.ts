@@ -682,6 +682,16 @@ export const jaJP: Translations = {
     needEditableLayer: '編集できる、ロックされていないレイヤーを選んでください。',
     layerChanged: '処理中にレイヤーが更新されました。もう一度適用してください。',
     failed: 'このレイヤーにはフィルターを適用できませんでした。',
+    needRaster: 'テキスト／ベクターレイヤーは、先にラスタライズしてからフィルターを適用してください。',
+    lineartNotOnMask: 'マスクレイヤーには線画の補正を使えません。',
+    dragCenter: 'フィルターの中心をドラッグ（矢印キーで微調整）',
+    recenter: '中央へ',
+    sections: {
+      tone: '明暗',
+      color: '色',
+      input: '入力',
+      output: '出力',
+    },
     groups: {
       color: 'カラー',
       library: 'ギャラリー',
@@ -717,6 +727,7 @@ export const jaJP: Translations = {
       offsetY: '縦のずれ（px）',
       density: '密度',
       dotSize: '網点の大きさ',
+      center: '中心',
     },
   },
 

@@ -682,6 +682,16 @@ export const zhTW: Translations = {
     needEditableLayer: '請先選取可編輯、未鎖定的圖層。',
     layerChanged: '處理濾鏡期間圖層有更新，請再套用一次。',
     failed: '無法處理這個圖層的濾鏡。',
+    needRaster: '文字／向量圖層請先點陣化，再套用濾鏡。',
+    lineartNotOnMask: '遮色片圖層不能用修正線稿。',
+    dragCenter: '拖曳濾鏡中心（方向鍵可微調）',
+    recenter: '置中',
+    sections: {
+      tone: '明暗',
+      color: '色彩',
+      input: '輸入',
+      output: '輸出',
+    },
     groups: {
       color: '色彩濾鏡',
       library: '濾鏡庫',
@@ -717,6 +727,7 @@ export const zhTW: Translations = {
       offsetY: '垂直位移（px）',
       density: '密度',
       dotSize: '網點大小',
+      center: '中心',
     },
   },
 

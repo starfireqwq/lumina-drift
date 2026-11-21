@@ -26,6 +26,20 @@ export function filterNumber(values: FilterValues, key: string, fallback: number
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
+/** A point setting ({ x, y } in canvas pixels), or the middle of the picture */
+export function filterPoint(values: FilterValues, key: string, width: number, height: number) {
+  const value = values[key] as { x?: unknown; y?: unknown } | null | undefined;
+  const x = typeof value?.x === 'number' && Number.isFinite(value.x) ? value.x : width / 2;
+  const y = typeof value?.y === 'number' && Number.isFinite(value.y) ? value.y : height / 2;
+  return { x, y };
+}
+
+/** A string setting that must be one of `choices`; the first choice otherwise */
+export function filterChoice<T extends string>(values: FilterValues, key: string, choices: readonly T[]): T {
+  const value = values[key];
+  return choices.includes(value as T) ? value as T : choices[0];
+}
+
 function blurBox(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, radius: number) {
   const r = Math.max(1, Math.round(radius));
   const horizontal = new Uint8Array(pixels.length);
@@ -50,10 +64,8 @@ function blurBox(pixels: Uint8Array | Uint8ClampedArray, width: number, height: 
   return output;
 }
 
-function spinBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, degrees: number) {
+function spinBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, degrees: number, cx: number, cy: number) {
   const result = new Uint8Array(pixels.length);
-  const cx = (width - 1) / 2;
-  const cy = (height - 1) / 2;
   const samples = Array.from({ length: 13 }, (_, index) => {
     const angle = radians(degrees) * (index / 12 - 0.5);
     return [Math.cos(angle), Math.sin(angle)];
@@ -80,7 +92,12 @@ function spinBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, height:
 export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> = {
   box: { run: ({ pixels, width, height }, v) => blurBox(pixels, width, height, filterNumber(v, 'radius', 4)) },
   gaussian: { run: (ctx, v) => applyGaussianBlur(ctx, filterNumber(v, 'radius', 8)) },
-  spin: { run: ({ pixels, width, height }, v) => spinBlur(pixels, width, height, filterNumber(v, 'angle', 15)) },
+  spin: {
+    run: ({ pixels, width, height }, v) => {
+      const center = filterPoint(v, 'center', width, height);
+      return spinBlur(pixels, width, height, filterNumber(v, 'angle', 15), center.x, center.y);
+    },
+  },
   posterize: {
     colorOnly: true,
     run: ({ pixels }, v) => {
@@ -109,7 +126,10 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
     run: (ctx, v) => applyHalftoneDot(ctx, filterNumber(v, 'density', 45), radians(filterNumber(v, 'angle', 45)), filterNumber(v, 'dotSize', 1)),
   },
   twirl: {
-    run: (ctx, v) => applyTwirlDistortion(ctx, ctx.width / 2, ctx.height / 2, filterNumber(v, 'radius', 300), radians(filterNumber(v, 'angle', 135))),
+    run: (ctx, v) => {
+      const center = filterPoint(v, 'center', ctx.width, ctx.height);
+      return applyTwirlDistortion(ctx, center.x, center.y, filterNumber(v, 'radius', 300), radians(filterNumber(v, 'angle', 135)));
+    },
   },
   curves: { colorOnly: true, run: (ctx, v) => applyColorCurves(ctx, (v.options ?? {}) as ColorCurvesOptions) },
   gradient: {

@@ -682,6 +682,16 @@ export const enUS: Translations = {
     needEditableLayer: 'Select an editable, unlocked layer first.',
     layerChanged: 'The layer changed while the filter was running. Apply it again.',
     failed: "Couldn't apply the filter to this layer.",
+    needRaster: 'Rasterize text and vector layers before applying a filter.',
+    lineartNotOnMask: 'Line cleanup is not available on mask layers.',
+    dragCenter: 'Drag the filter center (arrow keys nudge it)',
+    recenter: 'Center',
+    sections: {
+      tone: 'Tone',
+      color: 'Color',
+      input: 'Input',
+      output: 'Output',
+    },
     groups: {
       color: 'Color',
       library: 'Gallery',
@@ -717,6 +727,7 @@ export const enUS: Translations = {
       offsetY: 'Vertical shift (px)',
       density: 'Density',
       dotSize: 'Dot size',
+      center: 'Center',
     },
   },
 

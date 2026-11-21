@@ -1,10 +1,11 @@
-import { useEffect, useId, useMemo, useState, type CSSProperties } from 'react';
-import { ArrowLeft, ArrowUpRight, Check, ChevronDown, RotateCcw, SlidersHorizontal } from 'lucide-react';
+import { useEffect, useId, useMemo, useState, useSyncExternalStore, type CSSProperties } from 'react';
+import { ArrowLeft, ArrowUpRight, Check, ChevronDown, Crosshair, RotateCcw, SlidersHorizontal } from 'lucide-react';
 import type { FilterValues } from '@atelier/shared';
 import {
-  defaultFilterValues, filterGroupLabel, filterGroupsInUse, filterLabel, filterParamLabel, filtersInGroup,
-  getFilter, loadFilterValues, saveFilterValues, snapRange, type FilterDef, type FilterGroup, type FilterParam,
+  defaultFilterValues, filterFitsLayer, filterGroupLabel, filterGroupsInUse, filterLabel, filterParamLabel, filterPointParam, filtersInGroup,
+  getFilter, loadFilterValues, paramShown, saveFilterValues, snapRange, type FilterDef, type FilterGroup, type FilterParam,
 } from '../utils/filterRegistry';
+import { filterPoint } from '../utils/filterPoint';
 import { ToolWindow } from './workspace/ToolWindow';
 import { usePhoneLayout } from './workspace/dockStore';
 import { useI18n } from '../context/I18nContext';
@@ -12,6 +13,8 @@ import { useI18n } from '../context/I18nContext';
 interface Props {
   filterId: string | null;
   layerName: string;
+  /** The active layer's type: line-art fixes stay off masks */
+  layerType?: string;
   busy: boolean;
   onChoose: (id: string) => void;
   onBack: () => void;
@@ -31,7 +34,7 @@ const readGroup = (groups: FilterGroup[]) => {
   }
 };
 
-export function LayerFilterDialog({ filterId, layerName, busy, onChoose, onBack, onPreview, onApply, onClose }: Props) {
+export function LayerFilterDialog({ filterId, layerName, layerType, busy, onChoose, onBack, onPreview, onApply, onClose }: Props) {
   const { t } = useI18n();
   const phone = usePhoneLayout();
   const definition = getFilter(filterId);
@@ -40,24 +43,44 @@ export function LayerFilterDialog({ filterId, layerName, busy, onChoose, onBack,
   const [values, setValues] = useState<FilterValues>(() => definition ? loadFilterValues(definition) : {});
   const [preview, setPreview] = useState(true);
 
+  // The centre lives outside the settings (the canvas handle moves it too) and joins them for each run
+  const pointParam = filterPointParam(definition);
+  const point = useSyncExternalStore(filterPoint.subscribe, filterPoint.get, filterPoint.get);
+  const px = point?.x;
+  const py = point?.y;
+  const jobValues = useMemo<FilterValues>(
+    () => pointParam && px !== undefined && py !== undefined ? { ...values, [pointParam.key]: { x: px, y: py } } : values,
+    [values, pointParam, px, py],
+  );
+  const pointShown = pointParam ? paramShown(pointParam, values) : false;
+  const radius = definition?.pointRadius ? values[definition.pointRadius] : null;
+  const hasPoint = point !== null;
+  useEffect(() => {
+    if (hasPoint) filterPoint.show(pointShown, typeof radius === 'number' ? radius : null);
+  }, [hasPoint, pointShown, radius]);
+
   useEffect(() => {
     if (!definition || !preview || busy) return;
-    const timer = setTimeout(() => onPreview(values), 160);
+    const timer = setTimeout(() => onPreview(jobValues), 160);
     return () => clearTimeout(timer);
-  }, [definition, preview, values, onPreview, busy]);
+  }, [definition, preview, jobValues, onPreview, busy]);
 
   const pickGroup = (next: FilterGroup) => {
     setGroup(next);
     try { localStorage.setItem(GROUP_KEY, next); } catch { /* the first group shows next time */ }
   };
 
-  const item = (def: FilterDef, index: number) => (
-    <button type="button" key={def.id} onClick={() => onChoose(def.id)} title={def.tool ? t.filters.opensTool : undefined}
-      className="atelier-btn atelier-filter-item !h-8 justify-start text-xs" style={{ '--i': index } as CSSProperties}>
-      <span className="min-w-0 flex-1 truncate text-left">{filterLabel(def, t)}</span>
-      {def.tool && <><ArrowUpRight aria-hidden className="!h-3.5 !w-3.5 shrink-0 text-neutral-500" /><span className="sr-only">{t.filters.opensTool}</span></>}
-    </button>
-  );
+  const item = (def: FilterDef, index: number) => {
+    const fits = filterFitsLayer(def, layerType);
+    return (
+      <button type="button" key={def.id} disabled={!fits} onClick={() => onChoose(def.id)}
+        title={!fits ? t.filters.lineartNotOnMask : def.tool ? t.filters.opensTool : undefined}
+        className="atelier-btn atelier-filter-item !h-8 justify-start text-xs disabled:opacity-45" style={{ '--i': index } as CSSProperties}>
+        <span className="min-w-0 flex-1 truncate text-left">{filterLabel(def, t)}</span>
+        {def.tool && <><ArrowUpRight aria-hidden className="!h-3.5 !w-3.5 shrink-0 text-neutral-500" /><span className="sr-only">{t.filters.opensTool}</span></>}
+      </button>
+    );
+  };
 
   const menu = phone ? (
     <div role="group" aria-label={t.filters.groupsAria} className="flex flex-col gap-1">
@@ -117,7 +140,7 @@ export function LayerFilterDialog({ filterId, layerName, busy, onChoose, onBack,
           </label>
           <button type="button" onClick={onClose} className="atelier-btn atelier-btn--ghost">{t.common.cancel}</button>
           <button type="button" disabled={busy} className="atelier-btn atelier-btn--primary" onClick={async () => {
-            if (await onApply(values)) {
+            if (await onApply(jobValues)) {
               saveFilterValues(definition, values);
               onClose();
             }
@@ -129,9 +152,16 @@ export function LayerFilterDialog({ filterId, layerName, busy, onChoose, onBack,
       {!definition ? menu : (
         <div className="space-y-3">
           {definition.hint && <p className="text-neutral-300">{t.filters[definition.hint]}</p>}
-          {definition.params.map((param, index) => (
-            <ParamControl key={param.key} param={param} index={index} label={filterParamLabel(param, t)} busy={busy}
-              value={values[param.key]} onChange={(value) => setValues((current) => ({ ...current, [param.key]: value }))} />
+          {definition.params.filter((param) => paramShown(param, values)).map((param, index, shown) => (
+            <div key={param.key} className="space-y-1.5">
+              {param.section && param.section !== shown[index - 1]?.section && (
+                <p className={`atelier-filter-item text-[11px] font-medium text-neutral-500 ${index > 0 ? 'pt-1' : ''}`} style={{ '--i': index } as CSSProperties}>
+                  {t.filters.sections[param.section]}
+                </p>
+              )}
+              <ParamControl param={param} index={index} label={filterParamLabel(param, t)} busy={busy}
+                value={values[param.key]} onChange={(value) => setValues((current) => ({ ...current, [param.key]: value }))} />
+            </div>
           ))}
         </div>
       )}
@@ -178,7 +208,25 @@ function ParamControl({ param, index, label, value, busy, onChange }: {
             value={typeof value === 'string' ? value : param.initial} onChange={(event) => onChange(event.target.value)} />
         </label>
       );
+    case 'point':
+      return <PointControl label={label} busy={busy} className={row} style={style} />;
   }
+}
+
+/** Where the centre is (dragged on the canvas), and a button that puts it back on the content */
+function PointControl({ label, busy, className, style }: { label: string; busy: boolean; className: string; style: CSSProperties }) {
+  const { t } = useI18n();
+  const point = useSyncExternalStore(filterPoint.subscribe, filterPoint.get, filterPoint.get);
+  return (
+    <div className={`${className} flex items-center gap-2`} style={style}>
+      <Crosshair aria-hidden className="h-3.5 w-3.5 shrink-0 text-indigo-300" />
+      <span className="shrink-0">{label}</span>
+      <span className="min-w-0 flex-1 truncate font-mono tabular-nums text-neutral-400">{point ? `${point.x}, ${point.y}` : '—'}</span>
+      <button type="button" disabled={busy || !point} onClick={() => filterPoint.recenter()} className="atelier-btn !h-6 shrink-0 !px-2 text-[11px]">
+        {t.filters.recenter}
+      </button>
+    </div>
+  );
 }
 
 /** A slider with a number box: typing only takes effect once the number is inside the range; leaving the box snaps it in */
@@ -195,6 +243,10 @@ function RangeControl({ param, id, label, value, busy, onChange, className, styl
   const [draft, setDraft] = useState(String(value));
   useEffect(() => setDraft(String(value)), [value]);
   const step = param.step ?? 1;
+  // Settings that run both ways from 0 (brightness, a shift…) fill from the middle to the thumb
+  const bipolar = param.min < 0 && param.max === -param.min;
+  const at = ((value - param.min) / (param.max - param.min)) * 100;
+  const fill = bipolar ? { '--lo': `${Math.min(50, at)}%`, '--hi': `${Math.max(50, at)}%` } as CSSProperties : undefined;
   const commit = () => {
     const typed = Number(draft);
     const next = draft.trim() !== '' && Number.isFinite(typed) ? snapRange(param, typed) : value;
@@ -213,7 +265,8 @@ function RangeControl({ param, id, label, value, busy, onChange, className, styl
         }}
         onBlur={commit}
         onKeyDown={(event) => { if (event.key === 'Enter') commit(); }} />
-      <input id={id} disabled={busy} className="col-span-2 h-1.5 w-full cursor-pointer" type="range" min={param.min} max={param.max} step={step} value={value}
+      <input id={id} disabled={busy} className={`col-span-2 w-full cursor-pointer ${bipolar ? 'atelier-bipolar-range h-3.5' : 'h-1.5'}`} style={fill}
+        type="range" min={param.min} max={param.max} step={step} value={value}
         onChange={(event) => onChange(Number(event.target.value))} />
     </div>
   );

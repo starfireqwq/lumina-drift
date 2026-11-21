@@ -13,17 +13,25 @@ export const FILTER_GROUPS: readonly FilterGroup[] = ['color', 'library', 'linea
 type FilterTexts = Translations['filters'];
 export type FilterItemKey = keyof FilterTexts['items'];
 export type FilterParamKey = keyof FilterTexts['params'];
+export type FilterSectionKey = keyof FilterTexts['sections'];
+export type FilterHintKey = 'invertHint';
 
 interface ParamBase {
   /** Values are stored under this key, never by position */
   key: string;
   label: FilterParamKey;
+  /** A small heading above this parameter (shown where it differs from the one before) */
+  section?: FilterSectionKey;
+  /** Shown, and used, only while another parameter has one of these values */
+  when?: { key: string; is: readonly (string | boolean)[] };
 }
 export type FilterParam =
   | ParamBase & { kind: 'range'; initial: number; min: number; max: number; step?: number }
   | ParamBase & { kind: 'select'; initial: string; options: readonly { value: string; label: FilterParamKey }[] }
   | ParamBase & { kind: 'toggle'; initial: boolean }
-  | ParamBase & { kind: 'color'; initial: string };
+  | ParamBase & { kind: 'color'; initial: string }
+  /** A spot on the canvas, dragged with a handle there. Never stored: it starts on the selection or the layer's content each time. */
+  | ParamBase & { kind: 'point' };
 
 export interface FilterDef {
   id: string;
@@ -37,7 +45,11 @@ export interface FilterDef {
   /** Only opens an existing tool */
   tool?: 'liquify' | 'mesh';
   /** One line shown when the filter has no parameters */
-  hint?: 'invertHint';
+  hint?: FilterHintKey;
+  /** The range parameter drawn as the circle around the centre handle on the canvas */
+  pointRadius?: string;
+  /** Shows the layer's tone histogram above the parameters */
+  histogram?: boolean;
 }
 
 /** What the worker is asked to run */
@@ -45,6 +57,7 @@ export type FilterJob = { id: string; values: FilterValues };
 
 const range = (key: string, label: FilterParamKey, initial: number, min: number, max: number, step?: number): FilterParam =>
   ({ kind: 'range', key, label, initial, min, max, step });
+const center = (when?: ParamBase['when']): FilterParam => ({ kind: 'point', key: 'center', label: 'center', when });
 
 export const BUILTIN_FILTERS: readonly FilterDef[] = [
   { id: 'curves', group: 'color', label: 'curves', source: 'builtin', params: [], dialog: 'curves' },
@@ -57,8 +70,9 @@ export const BUILTIN_FILTERS: readonly FilterDef[] = [
   { id: 'chromatic', group: 'effect', label: 'chromatic', source: 'builtin', params: [range('offsetX', 'offsetX', 6, -32, 32), range('offsetY', 'offsetY', 0, -32, 32)] },
   { id: 'box', group: 'blur', label: 'box', source: 'builtin', params: [range('radius', 'radius', 4, 1, 32)] },
   { id: 'gaussian', group: 'blur', label: 'gaussian', source: 'builtin', params: [range('radius', 'radius', 8, 1, 32)] },
-  { id: 'spin', group: 'blur', label: 'spin', source: 'builtin', params: [range('angle', 'angle', 15, 1, 90)] },
-  { id: 'twirl', group: 'distort', label: 'twirl', source: 'builtin', params: [range('radius', 'radius', 300, 10, 2000), range('angle', 'angle', 135, -360, 360)] },
+  { id: 'spin', group: 'blur', label: 'spin', source: 'builtin', params: [range('angle', 'angle', 15, 1, 90), center()] },
+  { id: 'twirl', group: 'distort', label: 'twirl', source: 'builtin', pointRadius: 'radius',
+    params: [range('radius', 'radius', 300, 10, 2000), range('angle', 'angle', 135, -360, 360), center()] },
   { id: 'liquify', group: 'distort', label: 'liquify', source: 'builtin', params: [], tool: 'liquify' },
   { id: 'meshWarp', group: 'distort', label: 'meshWarp', source: 'builtin', params: [], tool: 'mesh' },
 ];
@@ -71,6 +85,17 @@ export const filterLabel = (def: FilterDef, t: Translations) => t.filters.items[
 export const filterParamLabel = (param: Pick<FilterParam, 'label'>, t: Translations) => t.filters.params[param.label];
 export const filterGroupLabel = (group: FilterGroup, t: Translations) => t.filters.groups[group];
 
+/** The filter's centre parameter, if it has one */
+export const filterPointParam = (def: FilterDef | null | undefined) =>
+  def?.params.find((param): param is Extract<FilterParam, { kind: 'point' }> => param.kind === 'point') ?? null;
+
+/** Whether a parameter applies with these settings (see `when`) */
+export const paramShown = (param: FilterParam, values: FilterValues) =>
+  !param.when || param.when.is.includes(values[param.when.key] as string | boolean);
+
+/** Line-art fixes read alpha as ink, so they stay off masks (whose grey is the mask itself) */
+export const filterFitsLayer = (def: FilterDef, layerType: string | undefined) => !(def.group === 'lineart' && layerType === 'mask');
+
 const decimals = (step: number) => (String(step).split('.')[1] ?? '').length;
 
 /** A range value moved onto the slider: inside min–max and on a step */
@@ -82,7 +107,7 @@ export function snapRange(param: Extract<FilterParam, { kind: 'range' }>, value:
 }
 
 export const defaultFilterValues = (def: FilterDef): FilterValues =>
-  Object.fromEntries(def.params.map((param) => [param.key, param.initial]));
+  Object.fromEntries(def.params.flatMap((param) => param.kind === 'point' ? [] : [[param.key, param.initial]]));
 
 /** Keeps the settings that still fit the filter's parameters; anything else falls back to its default */
 export function normalizeFilterValues(def: FilterDef, raw: unknown): FilterValues {
@@ -102,6 +127,8 @@ export function normalizeFilterValues(def: FilterDef, raw: unknown): FilterValue
         break;
       case 'color':
         values[param.key] = typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value) ? value.toLowerCase() : param.initial;
+        break;
+      case 'point':
         break;
     }
   }

@@ -682,6 +682,16 @@ export const zhCN: Translations = {
     needEditableLayer: '请先选择可编辑、未锁定的图层。',
     layerChanged: '处理滤镜期间图层有更新，请再应用一次。',
     failed: '无法处理这个图层的滤镜。',
+    needRaster: '文字／矢量图层请先栅格化，再应用滤镜。',
+    lineartNotOnMask: '蒙版图层不能使用修正线稿。',
+    dragCenter: '拖动滤镜中心（方向键可微调）',
+    recenter: '居中',
+    sections: {
+      tone: '明暗',
+      color: '色彩',
+      input: '输入',
+      output: '输出',
+    },
     groups: {
       color: '色彩滤镜',
       library: '滤镜库',
@@ -717,6 +727,7 @@ export const zhCN: Translations = {
       offsetY: '垂直位移（px）',
       density: '密度',
       dotSize: '网点大小',
+      center: '中心',
     },
   },
 

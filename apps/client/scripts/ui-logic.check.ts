@@ -60,7 +60,8 @@ import { apiErrorMessage, isForeignApiReply } from '../src/utils/apiErrors';
 import { translations, type Language } from '../src/locales';
 import { DEFAULT_COMMUNITY_PRESETS, MIN_BRUSH_SPACING, PIXEL_FILTER_RUNNERS, runPixelFilter, type CanvasModel } from '@atelier/shared';
 import {
-  BUILTIN_FILTERS, FILTER_GROUPS, defaultFilterValues, filterGroupsInUse, getFilter, normalizeFilterValues, snapRange,
+  BUILTIN_FILTERS, FILTER_GROUPS, defaultFilterValues, filterFitsLayer, filterGroupsInUse, filterPointParam, getFilter,
+  normalizeFilterValues, paramShown, snapRange,
 } from '../src/utils/filterRegistry';
 
 const hex = (channels: string) => `#${channels.split(' ').map((n) => Number(n).toString(16).padStart(2, '0')).join('')}`;
@@ -868,6 +869,26 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   assert.ok(dot.kind === 'range');
   assert.equal(snapRange(dot, 2.04), 2, 'Snapping never passes max');
   assert.equal(snapRange(dot, 0.05), 0.1, 'Snapping never passes min');
+
+  // The centre is dragged on the canvas each time: never a stored default, never kept from storage
+  const twirl = getFilter('twirl')!;
+  assert.ok(filterPointParam(twirl), 'Twirl has a centre');
+  assert.equal(filterPointParam(halftone), null, 'Halftone has none');
+  assert.equal('center' in defaultFilterValues(twirl), false, 'The centre is not a default value');
+  assert.equal('center' in normalizeFilterValues(twirl, { center: { x: 1, y: 2 }, radius: 50 }), false, 'A stored centre is dropped');
+  for (const def of BUILTIN_FILTERS) {
+    if (def.pointRadius) {
+      const radius = def.params.find((param) => param.key === def.pointRadius);
+      assert.ok(radius?.kind === 'range', `${def.id} draws its centre circle from a range parameter`);
+    }
+    for (const param of def.params) {
+      if (param.when) assert.ok(def.params.some((other) => other.key === param.when!.key), `${def.id}.${param.key} depends on a parameter it has`);
+    }
+  }
+  assert.equal(paramShown({ kind: 'toggle', key: 'a', label: 'center', initial: true, when: { key: 'mode', is: ['radial'] } }, { mode: 'shift' }), false,
+    'A parameter for another mode is hidden');
+  assert.equal(paramShown({ kind: 'toggle', key: 'a', label: 'center', initial: true, when: { key: 'mode', is: ['radial'] } }, { mode: 'radial' }), true);
+  assert.equal(filterFitsLayer(twirl, 'mask'), true, 'Only line-art fixes stay off masks');
 }
 
 // Filter runners: colour-only filters keep alpha and empty pixels, the mask limits the change, input is never written
@@ -895,6 +916,20 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   const blurred = runPixelFilter(PIXEL_FILTER_RUNNERS.box, source, width, height, { radius: 1 });
   assert.equal(blurred.length, source.length);
   assert.notDeepEqual(blurred, source, 'Blur changes the pixels');
+}
+
+// Filters with a centre turn round the given point, and fall back to the middle without one
+{
+  const width = 9, height = 9;
+  const source = new Uint8Array(width * height * 4);
+  for (let x = 0; x < width; x++) source.set([255, 255, 255, 255], (4 * width + x) * 4);
+  const middle = runPixelFilter(PIXEL_FILTER_RUNNERS.twirl, source, width, height, { radius: 6, angle: 90 });
+  const atMiddle = runPixelFilter(PIXEL_FILTER_RUNNERS.twirl, source, width, height, { radius: 6, angle: 90, center: { x: 4.5, y: 4.5 } });
+  const corner = runPixelFilter(PIXEL_FILTER_RUNNERS.twirl, source, width, height, { radius: 6, angle: 90, center: { x: 0, y: 0 } });
+  assert.deepEqual(middle, atMiddle, 'No centre means the middle');
+  assert.notDeepEqual(corner, middle, 'Moving the centre moves the twirl');
+  const spun = runPixelFilter(PIXEL_FILTER_RUNNERS.spin, source, width, height, { angle: 60, center: { x: 0, y: 4 } });
+  assert.notDeepEqual(spun, runPixelFilter(PIXEL_FILTER_RUNNERS.spin, source, width, height, { angle: 60 }), 'Spin blur turns round its centre');
 }
 
 // 對齊 L1: basis, whole-pixel offsets, off-canvas parts, and a pixel-level run of the move

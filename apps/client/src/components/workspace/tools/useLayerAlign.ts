@@ -25,8 +25,8 @@ type Work =
   | { kind: Exclude<AlignOutcome, 'moved'> }
   | { kind: 'moved'; dx: number; dy: number; beforeTiles: ScopedUndoOp['beforeTiles']; afterTiles: ScopedUndoOp['afterTiles'] };
 
-/** The layer's painted pixels: the tiles it occupies read in one rect, and the bounds of what has alpha */
-async function readContent(lm: LayerManager, layerId: string, canvasW: number, canvasH: number, ts: number) {
+/** The layer's painted pixels: the tiles it occupies read in one rect, and the bounds of what has alpha (also used for a filter's starting centre) */
+export async function readContent(lm: LayerManager, layerId: string, canvasW: number, canvasH: number, ts: number) {
   const occupied = lm.occupiedTiles(layerId);
   if (occupied && occupied.length === 0) return null;
   let box: AlignRect = { x: 0, y: 0, w: canvasW, h: canvasH };

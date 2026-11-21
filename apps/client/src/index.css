@@ -346,12 +346,39 @@ html.atelier-theme-vt, html.atelier-theme-vt body { transition: none !important;
   /* Align window: the streak runs along the top of the frame, then the bottom, when it opens and after each move */
   .atelier-align-frame::before { animation: atelierLightSweep .8s cubic-bezier(.3, .1, .2, 1) .06s; }
   .atelier-align-frame::after { animation: atelierLightSweep .8s cubic-bezier(.3, .1, .2, 1) .22s; }
+  /* Filter centre on the canvas: the handle pops in and a streak runs once round its circle */
+  .atelier-filter-point[data-closing='false'] { animation: atelierPointIn .26s cubic-bezier(.2, .8, .3, 1.2) both; }
+  .atelier-filter-point[data-closing='false'] .atelier-filter-point-ring .sweep { animation: atelierPointSweep 1s cubic-bezier(.3, .1, .2, 1) .08s both; }
 }
 .atelier-align-frame { position: relative; overflow: hidden; }
 .atelier-align-frame::before { top: 0; }
 .atelier-align-frame::after { bottom: 0; }
 .atelier-filter-group { position: relative; }
 .atelier-filter-group::after { bottom: 0; }
+.atelier-filter-point { transition: opacity .18s ease-out, scale .18s ease-out; }
+.atelier-filter-point[data-closing='true'] { opacity: 0; scale: .8; }
+.atelier-filter-point-ring .sweep { opacity: 0; }
+@keyframes atelierPointIn { from { opacity: 0; scale: .7; } }
+@keyframes atelierPointSweep { 0% { stroke-dashoffset: 0; opacity: 0; } 15% { opacity: 1; } 100% { stroke-dashoffset: -100; opacity: 0; } }
+/* Filter sliders that run both ways from 0: a tick in the middle, filled from there to the thumb */
+.atelier-bipolar-range { appearance: none; -webkit-appearance: none; background: transparent; }
+.atelier-bipolar-range::-webkit-slider-runnable-track {
+  height: 4px; border-radius: 9999px;
+  background: linear-gradient(90deg, transparent var(--lo), rgb(var(--a-500)) var(--lo) var(--hi), transparent var(--hi)),
+    linear-gradient(90deg, transparent calc(50% - 1px), rgb(var(--n-400)) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)),
+    rgb(var(--n-700));
+}
+.atelier-bipolar-range::-moz-range-track {
+  height: 4px; border-radius: 9999px;
+  background: linear-gradient(90deg, transparent var(--lo), rgb(var(--a-500)) var(--lo) var(--hi), transparent var(--hi)),
+    linear-gradient(90deg, transparent calc(50% - 1px), rgb(var(--n-400)) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)),
+    rgb(var(--n-700));
+}
+.atelier-bipolar-range::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5px; border-radius: 9999px;
+  background: rgb(var(--n-100)); border: 2px solid rgb(var(--a-500));
+}
+.atelier-bipolar-range::-moz-range-thumb { width: 10px; height: 10px; border-radius: 9999px; background: rgb(var(--n-100)); border: 2px solid rgb(var(--a-500)); }
 
 /* A blank frame: nothing on screen there, drawn as a faint × over a see-through hatch */
 .atelier-blank-cel {

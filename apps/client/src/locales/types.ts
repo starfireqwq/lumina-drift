@@ -700,6 +700,18 @@ export interface Translations {
     needEditableLayer: string;
     layerChanged: string;
     failed: string;
+    /** Text and vector layers are redrawn from their text or strokes, so a filter would not last */
+    needRaster: string;
+    lineartNotOnMask: string;
+    dragCenter: string;
+    recenter: string;
+    /** Small headings inside a filter's parameters */
+    sections: {
+      tone: string;
+      color: string;
+      input: string;
+      output: string;
+    };
     groups: {
       color: string;
       library: string;
@@ -736,6 +748,7 @@ export interface Translations {
       offsetY: string;
       density: string;
       dotSize: string;
+      center: string;
     };
   };
 

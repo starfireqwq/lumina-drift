@@ -90,8 +90,8 @@ import { useFillTools } from './workspace/tools/useFillTools';
 import { useVectorTools } from './workspace/tools/useVectorTools';
 import { useBrushTool } from './workspace/tools/useBrushTool';
 import { useTransformTool } from './workspace/tools/useTransformTool';
-import { useLayerAlign } from './workspace/tools/useLayerAlign';
-import { alignBlocker, type AlignBasis, type AlignX, type AlignY } from '../utils/layerAlign';
+import { readContent, useLayerAlign } from './workspace/tools/useLayerAlign';
+import { alignBlocker, selectionFrame, type AlignBasis, type AlignX, type AlignY } from '../utils/layerAlign';
 import { useCanvasPointer } from './workspace/tools/useCanvasPointer';
 import { findContentBounds } from '../utils/pixelBounds';
 import { VectorEditResult } from '../engine/VectorEngine';
@@ -108,6 +108,7 @@ import {
 import type { TransformBox } from './TransformOverlay';
 import { RulerManager } from '../engine/RulerManager';
 import { RulerOverlay } from './RulerOverlay';
+import { FilterPointOverlay } from './FilterPointOverlay';
 import { TouchRadialMenu } from './TouchRadialMenu';
 import type { DistortMode } from '../utils/distortModes';
 import { LiquifyEngine } from '../engine/LiquifyEngine';
@@ -138,7 +139,8 @@ import {
 } from '@atelier/shared';
 import { VectorOverlay } from './VectorOverlay';
 import { VectorEngine } from '../engine/VectorEngine';
-import { filterLabel, getFilter, type FilterJob } from '../utils/filterRegistry';
+import { filterFitsLayer, filterLabel, filterPointParam, getFilter, type FilterJob } from '../utils/filterRegistry';
+import { filterPoint } from '../utils/filterPoint';
 import { FilterWorkerClient } from '../engine/filterWorkerClient';
 import { AlertCircle, ImagePlus, Keyboard, Layers, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
 import { type DroppedImages, type ImageDropTarget, ImageImportError, imageEntries, isImageDrag, loadImageEntry, readDroppedImages } from '../utils/imageImport';
@@ -2208,6 +2210,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     cancelFilterWork();
     setFilterBusy(false);
     clearFilterPreview();
+    filterPoint.clear();
     setFilterMenuOpen(false);
     setIsColorCurvesOpen(false);
     setIsGradientMapOpen(false);
@@ -2222,19 +2225,50 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       else shortcutActionsRef.current.transform('mesh');
       return;
     }
+    const layer = activeLayerRef.current;
+    if (def && !filterFitsLayer(def, layer?.layerType)) {
+      setPermissionWarning(t.filters.lineartNotOnMask);
+      setTimeout(() => setPermissionWarning(null), 3000);
+      return;
+    }
     cancelFilterWork();
     setFilterBusy(false);
     clearFilterPreview();
+    if (filterPointParam(def) && layer) startFilterPoint(layer.id);
+    else filterPoint.clear();
     setLayerFilterId(def && !def.dialog ? def.id : null);
     setFilterMenuOpen(!def?.dialog);
     setIsColorCurvesOpen(def?.dialog === 'curves');
     setIsGradientMapOpen(def?.dialog === 'gradient');
   };
 
+  /** Text and vector layers are redrawn from their text or strokes, which would wipe a filter out */
+  const isRedrawnLayer = (layer: LayerModel | null | undefined) => layer?.layerType === 'text' || layer?.layerType === 'vector';
+
   const getFilterLayer = () => {
     const layer = activeLayerRef.current;
-    if (!layer || !canEditPixels(layer) || !canvas || !isEngineReady || transformLayerIdRef.current) return null;
+    if (!layer || isRedrawnLayer(layer) || !canEditPixels(layer) || !canvas || !isEngineReady || transformLayerIdRef.current) return null;
     return layerManagerRef.current?.getLayerItem(layer.id) ?? null;
+  };
+
+  /**
+   * A filter's centre starts on the selection's middle, else on the middle of what the layer has
+   * painted (read in the background; the canvas middle until it arrives, unless moved by then).
+   */
+  const startFilterPoint = (layerId: string) => {
+    if (!canvas) return;
+    const { width, height } = canvas;
+    const sel = selectionEngineRef.current;
+    const picked = sel?.hasSelection() ? (sel.getMaskData()?.bounds ?? sel.getSelection()?.bounds) : null;
+    const frame = picked ? selectionFrame(picked) : null;
+    const middle = (rect: { x: number; y: number; w: number; h: number }) => ({ x: Math.round(rect.x + rect.w / 2), y: Math.round(rect.y + rect.h / 2) });
+    const session = filterPoint.start(middle(frame ?? { x: 0, y: 0, w: width, h: height }), { width, height });
+    const lm = layerManagerRef.current;
+    const te = tileEngineRef.current;
+    if (frame || !lm || !te) return;
+    readContent(lm, layerId, width, height, te.tileSize)
+      .then((content) => { if (content) filterPoint.rehome(session, middle(content.rect)); })
+      .catch(() => { /* the canvas middle stays */ });
   };
 
   const openFilterRef = useRef<(id?: 'curves' | 'gradient') => void>(() => {});
@@ -2246,7 +2280,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         setFilterMenuOpen(true);
       }
     } else {
-      setPermissionWarning(t.filters.needEditableLayer);
+      setPermissionWarning(isRedrawnLayer(activeLayerRef.current) ? t.filters.needRaster : t.filters.needEditableLayer);
       setTimeout(() => setPermissionWarning(null), 3000);
     }
   };
@@ -5157,6 +5191,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 getViewportSnapshot={getViewportSnapshot}
               />
 
+              <FilterPointOverlay
+                canvasToScreen={(cx, cy) => viewportRef.current?.canvasToScreen(cx, cy) ?? { x: cx, y: cy }}
+                screenToCanvas={(sx, sy) => viewportRef.current?.screenToCanvas(sx, sy) ?? { x: sx, y: sy }}
+                subscribeViewport={subscribeViewport}
+                getViewportSnapshot={getViewportSnapshot}
+              />
+
               {isMeshWarpActive && (
                 <Suspense fallback={null}>
                   <MeshWarpOverlay
@@ -5449,7 +5490,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       </OverlayPresence>
       <OverlayPresence open={filterMenuOpen} kind="popover">
         <Suspense fallback={null}><LayerFilterDialog key={layerFilterId ?? 'list'} filterId={layerFilterId} busy={filterBusy}
-          layerName={activeLayer?.name ?? ''} onChoose={chooseFilter} onBack={() => chooseFilter(null)} onClose={closeFilters}
+          layerName={activeLayer?.name ?? ''} layerType={activeLayer?.layerType} onChoose={chooseFilter} onBack={() => chooseFilter(null)} onClose={closeFilters}
           onPreview={filterCallbacks.parameters}
           onApply={(values) => layerFilterId ? runLayerFilter({ id: layerFilterId, values }, false) : Promise.resolve(false)} /></Suspense>
       </OverlayPresence>
