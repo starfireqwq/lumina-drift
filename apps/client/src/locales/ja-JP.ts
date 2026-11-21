@@ -1312,6 +1312,8 @@ export const jaJP: Translations = {
     shortcutCatAssistStudio: 'ガイド・スタジオ',
     shortcutCatEdit: '編集',
     shortcutCatViewVoice: '表示・通話',
+    shortcutCatPlugins: 'プラグイン',
+    shortcutClear: 'ショートカットをクリア',
     shortcutNotSet: '未設定',
     shortcutBrowserReserved: 'ブラウザによって予約されており、Webページが受信できません',
     shortcutBrowserReservedHint: 'ブラウザに予約されています。別のキーを試してください',

@@ -1312,6 +1312,8 @@ export const zhCN: Translations = {
     shortcutCatAssistStudio: '辅助与工作室',
     shortcutCatEdit: '编辑',
     shortcutCatViewVoice: '画面与语音',
+    shortcutCatPlugins: '插件命令与面板',
+    shortcutClear: '清除快捷键',
     shortcutNotSet: '未设定',
     shortcutBrowserReserved: '浏览器占用此快捷键，网页无法捕获',
     shortcutBrowserReservedHint: '被浏览器占用，请更换按键组合',

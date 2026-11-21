@@ -1312,6 +1312,8 @@ export const enUS: Translations = {
     shortcutCatAssistStudio: 'Guides & Studio',
     shortcutCatEdit: 'Edit',
     shortcutCatViewVoice: 'View & Voice',
+    shortcutCatPlugins: 'Plugins',
+    shortcutClear: 'Clear shortcut',
     shortcutNotSet: 'Unassigned',
     shortcutBrowserReserved: 'Reserved by browser; webpage cannot intercept',
     shortcutBrowserReservedHint: 'Reserved by browser; please choose another combination',

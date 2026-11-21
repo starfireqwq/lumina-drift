@@ -40,7 +40,17 @@ import {
   normalizeTimelineLabels, parseTimecode, placeEntries, planRepeatCels, planSequentialCelRenames, playbackFrame, removeTimelineLabel, removeTransformKeyframe,
   timeOfCel, trackLength, upsertTimelineLabel, upsertTransformKeyframe,
 } from '../src/engine/AnimationEngine';
-import { ShortcutManager } from '../src/engine/ShortcutManager';
+import {
+  ShortcutManager,
+  makePluginCommandShortcutId,
+  makePluginPanelShortcutId,
+  parsePluginShortcutId,
+} from '../src/engine/ShortcutManager';
+import {
+  applyPanelPatchValues,
+  buildInitialPanelValues,
+  isPluginPanelFieldVisible,
+} from '../src/components/PluginPanelWindow';
 import { cleanLightTable, clearLightTable, emptyLightTable, lightIdsFor, toggleLightCel } from '../src/engine/lightTable';
 import { nextGroupName } from '../src/utils/canvasName';
 import {
@@ -3162,5 +3172,130 @@ await (async () => {
       /CPU limit/,
     );
   }
+})();
+
+// Plugin API v2.0 Batch 6: Plugin shortcuts (namespacing + anti-hijack) and declarative panel state helpers
+(() => {
+  const cmdKey = makePluginCommandShortcutId('lumina.edge-glow', 'outline-sel');
+  const panelKey = makePluginPanelShortcutId('lumina.edge-glow', 'glow-panel');
+  assert.deepEqual(parsePluginShortcutId(cmdKey), { kind: 'command', pluginId: 'lumina.edge-glow', commandId: 'outline-sel' });
+  assert.deepEqual(parsePluginShortcutId(panelKey), { kind: 'panel', pluginId: 'lumina.edge-glow', panelId: 'glow-panel' });
+  assert.equal(parsePluginShortcutId('tool_brush'), null);
+
+  const mgr = ShortcutManager.getInstance();
+  const pluginA = parsePlugin({
+    apiVersion: 2,
+    id: 'lumina.shortcut-a',
+    name: 'Shortcut A',
+    version: '1.0.0',
+    author: 'Lumina Drift',
+    description: 'Shortcut anti-hijack test A',
+    permissions: ['commands', 'ui:panel', 'layers:read'],
+    commands: [
+      { id: 'hijack-undo', label: 'Hijack Undo', suggestedShortcut: 'Ctrl+KeyZ' },
+      { id: 'hijack-browser', label: 'Hijack Close Tab', suggestedShortcut: 'Ctrl+KeyW' },
+      { id: 'safe-cmd', label: 'Safe Cmd', suggestedShortcut: 'Shift+Alt+KeyG' },
+    ],
+    panels: [
+      {
+        id: 'main-panel',
+        title: 'Main Panel',
+        fields: [
+          { kind: 'section', key: 'sec1', label: 'Setup' },
+          { kind: 'text', key: 'info', text: 'Ready' },
+          { kind: 'range', key: 'thickness', label: 'Thickness', initial: 4, min: 1, max: 32, step: 1, unit: 'px' },
+          { kind: 'number', key: 'seed', label: 'Seed', initial: 7, min: 0, max: 100 },
+          { kind: 'toggle', key: 'advanced', label: 'Advanced', initial: false },
+          { kind: 'select', key: 'mode', label: 'Mode', initial: 'soft', options: [{ value: 'soft', label: 'Soft' }, { value: 'hard', label: 'Hard' }] },
+          { kind: 'color', key: 'tint', label: 'Tint', initial: '#62c5df' },
+          { kind: 'layer', key: 'target', label: 'Target Layer' },
+          { kind: 'input', key: 'tag', label: 'Tag', initial: 'glow', maxLength: 10, when: { key: 'advanced', is: [true] } },
+        ],
+        actions: [{ id: 'apply', label: 'Apply', variant: 'primary' }],
+      },
+    ],
+    script: 'async function onCommand() {} async function onPanelAction() {}',
+  }) as PluginManifestV2;
+
+  const pluginB = parsePlugin({
+    apiVersion: 2,
+    id: 'lumina.shortcut-b',
+    name: 'Shortcut B',
+    version: '1.0.0',
+    author: 'Lumina Drift',
+    description: 'Shortcut anti-hijack test B',
+    permissions: ['commands'],
+    commands: [
+      { id: 'dup-cmd', label: 'Dup Cmd', suggestedShortcut: 'Alt+Shift+KeyG' },
+    ],
+    script: 'async function onCommand() {}',
+  }) as PluginManifestV2;
+
+  mgr.syncPluginShortcuts(
+    [
+      { manifest: pluginA, enabled: true, installedAt: 1 },
+      { manifest: pluginB, enabled: true, installedAt: 2 },
+    ],
+    'zh-TW',
+  );
+
+  // Built-in undo shortcut stays untouched; conflicting/reserved plugin suggestions degrade to unbound ''
+  assert.equal(mgr.getComboForAction('action_undo'), 'Control+KeyZ', 'Built-in undo shortcut must never be hijacked');
+  assert.equal(mgr.getComboForAction(makePluginCommandShortcutId('lumina.shortcut-a', 'hijack-undo')), '', 'Conflicting suggestedShortcut degrades to unbound');
+  assert.equal(mgr.getComboForAction(makePluginCommandShortcutId('lumina.shortcut-a', 'hijack-browser')), '', 'Browser-reserved suggestedShortcut degrades to unbound');
+  assert.equal(mgr.getComboForAction(makePluginCommandShortcutId('lumina.shortcut-a', 'safe-cmd')), 'Alt+Shift+KeyG', 'Non-conflicting suggestedShortcut accepted');
+  assert.equal(mgr.getComboForAction(makePluginCommandShortcutId('lumina.shortcut-b', 'dup-cmd')), '', 'Second plugin colliding with first degrades to unbound');
+
+  // User customization & explicit clear persist across disable/re-enable
+  const safeId = makePluginCommandShortcutId('lumina.shortcut-a', 'safe-cmd');
+  mgr.setShortcut(safeId, 'Alt+Shift+KeyQ');
+  assert.equal(mgr.getComboForAction(safeId), 'Alt+Shift+KeyQ');
+  mgr.syncPluginShortcuts([{ manifest: pluginA, enabled: false, installedAt: 1 }], 'zh-TW');
+  assert.equal(mgr.getPluginShortcuts().length, 0);
+  mgr.syncPluginShortcuts([{ manifest: pluginA, enabled: true, installedAt: 1 }], 'zh-TW');
+  assert.equal(mgr.getComboForAction(safeId), 'Alt+Shift+KeyQ', 'User custom plugin shortcut persists across re-enable');
+  mgr.setShortcut(safeId, '');
+  assert.equal(mgr.getComboForAction(safeId), '', 'User can clear a plugin shortcut');
+
+  // Cleanup plugin shortcuts so global singleton stays clean
+  mgr.syncPluginShortcuts([], 'zh-TW');
+
+  // Declarative panel values, layer skipping groups, when condition, and patchValues clamping
+  const panelDecl = pluginA.panels[0];
+  const sampleLayers: LayerModel[] = [
+    {
+      id: 'g1', canvasId: 'c1', ownerId: 'u1', parentId: null, name: 'Folder',
+      layerType: 'group', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+      alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+      sortOrder: 0, createdAt: 1, updatedAt: 1,
+    },
+    {
+      id: 'r1', canvasId: 'c1', ownerId: 'u1', parentId: null, name: 'Ink',
+      layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+      alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+      sortOrder: 1, createdAt: 1, updatedAt: 1,
+    },
+  ];
+  const initVals = buildInitialPanelValues(panelDecl, sampleLayers, 'g1');
+  assert.equal(initVals.target, 'r1', 'Layer field skips group layers when allowGroup is false');
+  assert.equal(initVals.thickness, 4);
+  const tagField = panelDecl.fields.find((f) => f.key === 'tag')!;
+  assert.equal(isPluginPanelFieldVisible(tagField, initVals), false, 'when condition hides field initially');
+  const patched = applyPanelPatchValues(panelDecl, initVals, {
+    thickness: 999,
+    seed: -5,
+    advanced: true,
+    mode: 'invalid_option',
+    tint: '#AABBCC',
+    tag: '0123456789ABCDEF',
+    unknownKey: 'ignored',
+  });
+  assert.equal(patched.thickness, 32, 'range patched value clamped to max');
+  assert.equal(patched.seed, 0, 'number patched value clamped to min');
+  assert.equal(patched.mode, 'soft', 'invalid select option rejected');
+  assert.equal(patched.tint, '#aabbcc', 'color normalized to lowercase');
+  assert.equal(patched.tag, '0123456789', 'input clamped to maxLength');
+  assert.equal('unknownKey' in patched, false, 'unknown patch key ignored');
+  assert.equal(isPluginPanelFieldVisible(tagField, patched), true, 'when condition reveals field after toggle');
 })();
 console.log('ui-logic checks passed');

@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { BlendMode, CanvasModel, CanvasUnit, CreateCanvasDto, LayerMeta, LayerModel, LayerType, clampDpi } from '@atelier/shared';
+import { BlendMode, CanvasMemberModel, CanvasModel, CanvasUnit, CreateCanvasDto, LayerMeta, LayerModel, LayerType, clampDpi } from '@atelier/shared';
 import { ApiService } from './services/api';
 import { OfflineSessionStore } from './services/offlineStore';
 import { LuminaProjectEngine } from './engine/LuminaProjectEngine';
@@ -14,7 +14,9 @@ import { AtelierModal } from './components/AtelierModal';
 import type { CanvasPluginAccess, CanvasProjectAccess } from './components/CanvasWorkspace';
 import { getPlugins, subscribePlugins } from './plugins/pluginStore';
 import { getPluginLabels } from './plugins/pluginLabels';
-import { resolvePluginName } from './plugins/pluginApi';
+import { resolvePluginName, type PluginManifestV2 } from './plugins/pluginApi';
+import { ShortcutManager, type ParsedPluginShortcutId } from './engine/ShortcutManager';
+import type { PluginPanelValues } from './components/PluginPanelWindow';
 import { ConnectionGateway, InitialCanvasOptions } from './components/ConnectionGateway';
 import { DeleteCanvasConfirmModal } from './components/DeleteCanvasConfirmModal';
 import { LiveChatDrawer } from './components/LiveChatDrawer';
@@ -37,6 +39,7 @@ const TimeCapsuleModal = lazy(() => import('./components/TimeCapsuleModal').then
 const AdminDashboardModal = lazy(() => import('./components/AdminDashboardModal').then((m) => ({ default: m.AdminDashboardModal })));
 const UserProfileModal = lazy(() => import('./components/UserProfileModal').then((m) => ({ default: m.UserProfileModal })));
 const PluginManager = lazy(() => import('./components/PluginManager').then((m) => ({ default: m.PluginManager })));
+const PluginPanelWindow = lazy(() => import('./components/PluginPanelWindow').then((m) => ({ default: m.PluginPanelWindow })));
 
 const EMPTY_LAYERS: LayerModel[] = [];
 
@@ -58,11 +61,34 @@ export const App: React.FC = () => {
   const { t, language } = useI18n();
   const plugins = useSyncExternalStore(subscribePlugins, getPlugins);
   const [isPluginManagerOpen, setIsPluginManagerOpen] = useState(false);
+  const [openPluginPanels, setOpenPluginPanels] = useState<string[]>([]);
+  const [slowPluginCommand, setSlowPluginCommand] = useState<string | null>(null);
+  const pluginCmdAbortRef = useRef<AbortController | null>(null);
   const pluginAccessRef = useRef<CanvasPluginAccess | null>(null);
   const registerPluginAccess = useCallback((access: CanvasPluginAccess | null) => {
     pluginAccessRef.current = access;
   }, []);
   const runningPlugin = useRef(false);
+
+  // Keep ShortcutManager synchronized with enabled plugins and current language
+  useEffect(() => {
+    ShortcutManager.getInstance().syncPluginShortcuts(plugins, language);
+  }, [plugins, language]);
+
+  // Automatically close any open plugin panels whose plugin was disabled or removed
+  useEffect(() => {
+    const validKeys = new Set<string>();
+    for (const { manifest, enabled } of plugins) {
+      if (!enabled || manifest.apiVersion !== 2 || !manifest.permissions.includes('ui:panel')) continue;
+      for (const panel of manifest.panels) {
+        validKeys.add(`${manifest.id}:${panel.id}`);
+      }
+    }
+    setOpenPluginPanels((prev) => {
+      const filtered = prev.filter((k) => validKeys.has(k));
+      return filtered.length === prev.length ? prev : filtered;
+    });
+  }, [plugins]);
   const { isGuest, user, isLoading: authLoading } = useAuth();
   const {
     activeCanvasId,
@@ -649,6 +675,14 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleTogglePluginPanel = useCallback((pluginId: string, panelId: string) => {
+    const plugin = getPlugins().find(({ manifest, enabled }) => enabled && manifest.id === pluginId)?.manifest;
+    if (!plugin || plugin.apiVersion !== 2 || !plugin.permissions.includes('ui:panel')) return;
+    if (!plugin.panels.some((p) => p.id === panelId)) return;
+    const key = `${pluginId}:${panelId}`;
+    setOpenPluginPanels((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
+  }, []);
+
   const handleRunPlugin = async (pluginId: string, commandId: string) => {
     const strings = getPluginLabels(language);
     if (runningPlugin.current) return showProjectToast(strings.working);
@@ -658,12 +692,15 @@ export const App: React.FC = () => {
     if (!currentCanvas || roomLocked || pluginAccessRef.current?.canvasId !== canvasId) return showProjectToast(strings.needed);
     runningPlugin.current = true;
     const displayName = resolvePluginName(plugin, language);
+    const controller = new AbortController();
+    pluginCmdAbortRef.current = controller;
     try {
       if (plugin.apiVersion === 2) {
         const access = pluginAccessRef.current;
         if (!access || access.canvasId !== canvasId) return;
         const result = await access.runV2Command(plugin, commandId, {
-          onSlowStart: () => showProjectToast(strings.working),
+          signal: controller.signal,
+          onSlowStart: () => setSlowPluginCommand(displayName),
         });
         if (!getPlugins().some(entry => entry.enabled && entry.manifest === plugin)) return;
         if (canvasIdRef.current !== canvasId) return;
@@ -681,11 +718,53 @@ export const App: React.FC = () => {
       if (!await access.apply(action)) return showProjectToast(strings.failed);
       showProjectToast(`${displayName} · ${strings.done}`);
     } catch (error) {
-      showProjectToast(`${strings.failed} ${error instanceof Error ? error.message : ''}`);
+      if (controller.signal.aborted) {
+        showProjectToast(strings.aborted);
+      } else {
+        showProjectToast(`${strings.failed} ${error instanceof Error ? error.message : ''}`);
+      }
     } finally {
+      if (pluginCmdAbortRef.current === controller) pluginCmdAbortRef.current = null;
+      setSlowPluginCommand(null);
       runningPlugin.current = false;
     }
   };
+
+  const handleRunPluginRef = useRef(handleRunPlugin);
+  handleRunPluginRef.current = handleRunPlugin;
+
+  useEffect(() => {
+    const onPluginShortcut = (e: Event) => {
+      const detail = (e as CustomEvent<ParsedPluginShortcutId>).detail;
+      if (!detail) return;
+      if (detail.kind === 'command') {
+        void handleRunPluginRef.current(detail.pluginId, detail.commandId);
+      } else if (detail.kind === 'panel') {
+        handleTogglePluginPanel(detail.pluginId, detail.panelId);
+      }
+    };
+    window.addEventListener('atelier:plugin-shortcut', onPluginShortcut);
+    return () => window.removeEventListener('atelier:plugin-shortcut', onPluginShortcut);
+  }, [handleTogglePluginPanel]);
+
+  const handlePluginPanelAction = useCallback(
+    async (
+      plugin: PluginManifestV2,
+      panelId: string,
+      actionId: string,
+      values: PluginPanelValues,
+      options: { onSlowStart?: () => void; signal?: AbortSignal },
+    ) => {
+      const strings = getPluginLabels(language);
+      const canvasId = currentCanvas?.id;
+      const access = pluginAccessRef.current;
+      if (!currentCanvas || roomLocked || !access || access.canvasId !== canvasId) {
+        throw new Error(strings.needed);
+      }
+      return access.runV2PanelAction(plugin, panelId, actionId, values, options);
+    },
+    [currentCanvas, roomLocked, language],
+  );
 
   const handleToggleLock = async (layer: LayerModel) => {
     if (!activeCanvasId) return;
@@ -1161,11 +1240,30 @@ export const App: React.FC = () => {
           {projectStatusMsg}
         </div>
       )}
+      {slowPluginCommand && (
+        <div
+          role="status"
+          className="atelier-plugin-sweep fixed bottom-20 left-1/2 z-[91] flex -translate-x-1/2 items-center gap-3 rounded-xl border border-cyan-500/50 bg-neutral-900/95 px-3.5 py-2 text-xs text-cyan-100 shadow-2xl"
+        >
+          <span className="truncate font-medium">
+            {slowPluginCommand} · {getPluginLabels(language).working}
+          </span>
+          <button
+            type="button"
+            onClick={() => pluginCmdAbortRef.current?.abort()}
+            className="atelier-btn !h-6 border-rose-500/50 bg-rose-600/25 !px-2 text-[11px] text-rose-200 hover:bg-rose-600/40"
+          >
+            {getPluginLabels(language).abort}
+          </button>
+        </div>
+      )}
       <TopNavbar
         currentCanvas={currentCanvas}
         plugins={plugins}
+        openPluginPanels={openPluginPanels}
         onManagePlugins={() => setIsPluginManagerOpen(true)}
         onRunPlugin={(pluginId, commandId) => void handleRunPlugin(pluginId, commandId)}
+        onTogglePluginPanel={handleTogglePluginPanel}
         onOpenCreateCanvas={() => setIsCreateModalOpen(true)}
         onOpenProject={handleOpenLuminaProject}
         onSaveProject={() => void handleSaveLuminaProject(false)}
@@ -1372,6 +1470,58 @@ export const App: React.FC = () => {
           <PluginManager plugins={plugins} onClose={() => setIsPluginManagerOpen(false)} />
         </Suspense>
       </OverlayPresence>
+
+      {currentCanvas && !roomLocked && (() => {
+        const currentMemberRaw = members.find((m) => m.userId === user?.id);
+        const roleRaw = currentMemberRaw && 'role' in currentMemberRaw ? currentMemberRaw.role : undefined;
+        const validRole: CanvasMemberModel['role'] | undefined =
+          roleRaw === 'owner' || roleRaw === 'admin' || roleRaw === 'editor' || roleRaw === 'viewer'
+            ? roleRaw
+            : undefined;
+        const currentCanvasMember: CanvasMemberModel | null = validRole && user
+          ? {
+              canvasId: currentCanvas.id,
+              userId: user.id,
+              role: validRole,
+              canCreateLayer: validRole !== 'viewer',
+              canDeleteOtherLayer: validRole === 'owner' || validRole === 'admin',
+              canExport: true,
+              canManageMembers: validRole === 'owner' || validRole === 'admin',
+              joinedAt: 0,
+            }
+          : null;
+        const panelEntries = plugins.flatMap(({ manifest, enabled }) => {
+          if (!enabled || manifest.apiVersion !== 2 || !manifest.permissions.includes('ui:panel')) return [];
+          return manifest.panels.map((panel) => ({
+            key: `${manifest.id}:${panel.id}`,
+            plugin: manifest,
+            panel,
+          }));
+        });
+        return panelEntries.map(({ key, plugin, panel }) => {
+          const openIdx = openPluginPanels.indexOf(key);
+          const isOpen = openIdx !== -1;
+          return (
+            <OverlayPresence key={key} open={isOpen}>
+              <Suspense fallback={null}>
+                <PluginPanelWindow
+                  plugin={plugin}
+                  panel={panel}
+                  layers={layers}
+                  activeLayerId={activeLayerId}
+                  user={user}
+                  isGuest={isGuest}
+                  canvasMember={currentCanvasMember}
+                  stackIndex={Math.max(0, openIdx)}
+                  onExecute={(actionId, vals, opts) => handlePluginPanelAction(plugin, panel.id, actionId, vals, opts)}
+                  onNotice={showProjectToast}
+                  onClose={() => setOpenPluginPanels((prev) => prev.filter((k) => k !== key))}
+                />
+              </Suspense>
+            </OverlayPresence>
+          );
+        });
+      })()}
       <OverlayPresence open={isSettingsModalOpen}>
         <Suspense fallback={null}>
           <SettingsModal

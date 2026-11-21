@@ -8,11 +8,13 @@ import {
   Moon,
   PenTool,
   Plus,
+  Puzzle,
   RotateCcw,
   Search,
   Server,
   Sliders,
   Sun,
+  X,
   ZoomIn,
 } from 'lucide-react';
 import { setUiScale, UI_SCALE_MAX, UI_SCALE_MIN, useUiScale } from '../theme/uiScale';
@@ -376,6 +378,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     actions: t.settings.shortcutCatEdit,
     navigation: t.settings.shortcutCatViewVoice,
     voice: t.settings.shortcutCatViewVoice,
+    plugins: t.settings.shortcutCatPlugins,
   };
   const matchingShortcuts = query.length ? shortcuts.filter((shortcut) => {
     const haystack = normalizeShortcut([
@@ -391,6 +394,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const actionShortcuts = matchingShortcuts.filter((s) => s.category === 'actions');
   const navShortcuts = matchingShortcuts.filter((s) => s.category === 'navigation');
   const voiceShortcuts = matchingShortcuts.filter((s) => s.category === 'voice');
+  const pluginShortcuts = matchingShortcuts.filter((s) => s.category === 'plugins');
 
   const tabs: Array<{ id: SettingsTab; icon: React.ReactNode; label: string }> = [
     { id: 'general', icon: <Sun className="h-4 w-4" />, label: t.settings.tabAppearance },
@@ -755,6 +759,63 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           >
                             {isRecording ? recordPreview : shortcutMgr.getDisplayLabel(s.currentCombo) || t.settings.shortcutNotSet}
                           </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Category 7: Plugin Commands & Panels */}
+              <div className={pluginShortcuts.length ? 'flex flex-col gap-2 pt-2' : 'hidden'} data-shortcut-category="plugins">
+                <span className="flex items-center gap-1.5 text-[11px] font-bold text-cyan-300 uppercase tracking-wider">
+                  <Puzzle className="h-3.5 w-3.5" aria-hidden />
+                  {t.settings.shortcutCatPlugins}
+                </span>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {pluginShortcuts.map((s) => {
+                    const isRecording = recordingActionId === s.id;
+                    const hasConflict = Boolean(s.currentCombo) && ((comboCounts.get(s.currentCombo) || 0) > 1 || ShortcutManager.isBrowserReserved(s.currentCombo));
+
+                    return (
+                      <div
+                        key={s.id}
+                        data-shortcut-id={s.id}
+                        className="flex items-center justify-between p-2.5 rounded-xl bg-neutral-900/80 border border-neutral-800/80 hover:border-neutral-700 text-xs"
+                      >
+                        <div className="min-w-0 pr-2">
+                          <span className="font-semibold text-white block truncate">{s.name}</span>
+                          <span className="text-[10px] text-neutral-500 block truncate">{s.description}</span>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {hasConflict && (
+                            <span title={ShortcutManager.isBrowserReserved(s.currentCombo) ? t.settings.shortcutBrowserReserved : t.settings.shortcutConflict} className="text-amber-400">
+                              <AlertCircle className="w-3.5 h-3.5" />
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setRecordingActionId(isRecording ? null : s.id)}
+                            className={`px-3 py-1 rounded-lg font-mono text-xs font-bold transition shadow-sm ${
+                              isRecording
+                                ? 'bg-indigo-600 text-white animate-pulse ring-2 ring-indigo-400'
+                                : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700'
+                            }`}
+                          >
+                            {isRecording ? recordPreview : shortcutMgr.getDisplayLabel(s.currentCombo) || t.settings.shortcutNotSet}
+                          </button>
+                          {s.currentCombo && !isRecording && (
+                            <button
+                              type="button"
+                              onClick={() => shortcutMgr.setShortcut(s.id, '')}
+                              title={t.settings.shortcutClear}
+                              aria-label={t.settings.shortcutClear}
+                              className="atelier-icon-btn h-6 w-6"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          )}
                         </div>
                       </div>
                     );

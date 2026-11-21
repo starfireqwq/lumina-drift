@@ -1924,6 +1924,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             zoomAtViewCenter(1 / 1.2);
           } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_toggle_mic'), ev)) {
             toggleVoiceMute();
+          } else if (!ev.repeat) {
+            const pluginHit = shortcutMgr.findPluginActionForEvent(ev);
+            if (pluginHit) {
+              ev.preventDefault();
+              window.dispatchEvent(new CustomEvent('atelier:plugin-shortcut', { detail: pluginHit }));
+            }
           }
         }
       };

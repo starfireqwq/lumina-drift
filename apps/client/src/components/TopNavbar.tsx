@@ -45,8 +45,14 @@ import { ThemePicker } from './ThemePicker';
 import { OverlayPresence } from './OverlayPresence';
 const ConnectGuideModal = React.lazy(() => import('./ConnectGuideModal'));
 import { WorkspaceCloudflareToggle } from './WorkspaceCloudflareToggle';
+import { resolvePluginName, resolvePluginText } from '../plugins/pluginApi';
 import { getPluginLabels } from '../plugins/pluginLabels';
 import type { InstalledPlugin } from '../plugins/pluginStore';
+import {
+  makePluginCommandShortcutId,
+  makePluginPanelShortcutId,
+  ShortcutManager,
+} from '../engine/ShortcutManager';
 import { getUserColor } from '../utils/userColors';
 import { dockActions, PANEL_IDS, PANEL_TITLES, PanelId, useDesktopModeAvailable, useDockLayout, usePhoneLayout } from './workspace/dockStore';
 import { useAnchoredPopover } from '../utils/popoverPosition';
@@ -86,8 +92,10 @@ interface TopNavbarProps {
   onSaveProjectAs?: () => void;
   onShowStorage?: () => void;
   plugins: InstalledPlugin[];
+  openPluginPanels?: readonly string[];
   onManagePlugins: () => void;
   onRunPlugin: (pluginId: string, commandId: string) => void;
+  onTogglePluginPanel?: (pluginId: string, panelId: string) => void;
 }
 
 type MenuItem =
@@ -193,8 +201,10 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   onSaveProjectAs,
   onShowStorage,
   plugins,
+  openPluginPanels = [],
   onManagePlugins,
   onRunPlugin,
+  onTogglePluginPanel,
 }) => {
   const { t, language } = useI18n();
   const pluginText = getPluginLabels(language);
@@ -275,17 +285,78 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
     { kind: 'item', label: `${t.settings.uiScale}…`, icon: <ZoomIn />, onSelect: () => onOpenSettings?.('general') },
   ];
 
-  const enabledPlugins = plugins.filter(plugin => plugin.enabled);
+  const shortcutMgr = ShortcutManager.getInstance();
+  const [, setShortcutTick] = useState(0);
+  useEffect(() => shortcutMgr.subscribe(() => setShortcutTick((v) => v + 1)), [shortcutMgr]);
+
+  const openPanelSet = new Set(openPluginPanels);
+  const enabledPlugins = plugins.filter((plugin) => plugin.enabled);
+  const pluginSectionItems: MenuItem[] = [];
+  for (const { manifest } of enabledPlugins) {
+    const panels =
+      manifest.apiVersion === 2 && manifest.permissions.includes('ui:panel') ? manifest.panels : [];
+    const commands =
+      manifest.apiVersion === 1 || manifest.permissions.includes('commands') ? manifest.commands : [];
+    if (!panels.length && !commands.length) continue;
+
+    if (pluginSectionItems.length > 0) pluginSectionItems.push({ kind: 'sep' });
+    pluginSectionItems.push({ kind: 'title', label: resolvePluginName(manifest, language) });
+
+    for (const panel of panels) {
+      const panelCombo = shortcutMgr.getComboForAction(makePluginPanelShortcutId(manifest.id, panel.id));
+      pluginSectionItems.push({
+        kind: 'item',
+        label: resolvePluginText(panel.title, panel.i18nTitle, language),
+        icon: <LayoutPanelLeft />,
+        checked: openPanelSet.has(`${manifest.id}:${panel.id}`),
+        hint: panelCombo ? shortcutMgr.getDisplayLabel(panelCombo) : undefined,
+        onSelect: () => onTogglePluginPanel?.(manifest.id, panel.id),
+      });
+    }
+
+    if (panels.length > 0 && commands.length > 0) {
+      pluginSectionItems.push({ kind: 'sep' });
+    }
+
+    let lastGroup: string | undefined;
+    if (manifest.apiVersion === 2) {
+      if (manifest.permissions.includes('commands')) {
+        manifest.commands.forEach((command, idx) => {
+          const group = command.group;
+          if (idx > 0 && group !== lastGroup) {
+            pluginSectionItems.push({ kind: 'sep' });
+          }
+          lastGroup = group;
+          const cmdLabel = resolvePluginText(command.label, command.i18nLabel, language);
+          const cmdCombo = shortcutMgr.getComboForAction(makePluginCommandShortcutId(manifest.id, command.id));
+          pluginSectionItems.push({
+            kind: 'item',
+            label: cmdLabel,
+            icon: <Puzzle />,
+            hint: cmdCombo ? shortcutMgr.getDisplayLabel(cmdCombo) : undefined,
+            onSelect: () => onRunPlugin(manifest.id, command.id),
+          });
+        });
+      }
+    } else {
+      manifest.commands.forEach((command) => {
+        const cmdCombo = shortcutMgr.getComboForAction(makePluginCommandShortcutId(manifest.id, command.id));
+        pluginSectionItems.push({
+          kind: 'item',
+          label: command.label,
+          icon: <Puzzle />,
+          hint: cmdCombo ? shortcutMgr.getDisplayLabel(cmdCombo) : undefined,
+          onSelect: () => onRunPlugin(manifest.id, command.id),
+        });
+      });
+    }
+  }
+
   const pluginItems: MenuItem[] = [
     { kind: 'item', label: pluginText.manage, icon: <Puzzle />, onSelect: onManagePlugins },
     { kind: 'sep' },
-    ...enabledPlugins.flatMap(({ manifest }): MenuItem[] => [
-      { kind: 'title', label: manifest.name },
-      ...manifest.commands.map((command): MenuItem => ({
-        kind: 'item', label: command.label, icon: <Puzzle />, onSelect: () => onRunPlugin(manifest.id, command.id),
-      })),
-    ]),
-    ...(!enabledPlugins.length ? [{ kind: 'title' as const, label: pluginText.noCommands }] : []),
+    ...pluginSectionItems,
+    ...(!pluginSectionItems.length ? [{ kind: 'title' as const, label: pluginText.noCommands }] : []),
   ];
   const helpItems: MenuItem[] = [
     { kind: 'item', label: t.help.centerTitle, icon: <HelpCircle />, hint: 'F1', onSelect: () => onOpenHelp?.() },

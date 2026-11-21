@@ -1327,6 +1327,8 @@ export interface Translations {
     shortcutCatAssistStudio: string;
     shortcutCatEdit: string;
     shortcutCatViewVoice: string;
+    shortcutCatPlugins: string;
+    shortcutClear: string;
     shortcutNotSet: string;
     shortcutBrowserReserved: string;
     shortcutBrowserReservedHint: string;
