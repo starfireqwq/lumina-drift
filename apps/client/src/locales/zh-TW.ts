@@ -1020,6 +1020,13 @@ export const zhTW: Translations = {
     repeatNoRoom: '已達時間軸結尾，沒有可填滿的格數。',
     renameInOrder: '依序命名',
     renameInOrderTooltip: '依時間軸出場順序改名為 1、2、3…',
+    jumpToFrame: '跳到指定格',
+    jumpToFramePlaceholder: '1+5 或 29',
+    prevKeyframe: '上一個關鍵影格',
+    nextKeyframe: '下一個關鍵影格',
+    flipbook: '手翻書',
+    flipbookTooltip: '按住來回翻看前後數張，放開回原格',
+    flipbookSpan: '翻看張數',
   },
 
   comic: {

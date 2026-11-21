@@ -1020,6 +1020,13 @@ export const zhCN: Translations = {
     repeatNoRoom: '已达时间轴结尾，没有可填满的格数。',
     renameInOrder: '依序命名',
     renameInOrderTooltip: '依时间轴出场顺序改名为 1、2、3…',
+    jumpToFrame: '跳到指定格',
+    jumpToFramePlaceholder: '1+5 或 29',
+    prevKeyframe: '上一个关键帧',
+    nextKeyframe: '下一个关键帧',
+    flipbook: '手翻书',
+    flipbookTooltip: '按住来回翻看前后数张，放开回原格',
+    flipbookSpan: '翻看张数',
   },
 
   comic: {

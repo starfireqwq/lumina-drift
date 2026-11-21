@@ -1020,6 +1020,13 @@ export const jaJP: Translations = {
     repeatNoRoom: 'タイムライン末尾のため追加できません。',
     renameInOrder: '連番リネーム',
     renameInOrderTooltip: 'タイムライン順に 1, 2, 3… へリネーム',
+    jumpToFrame: '指定フレームへ移動',
+    jumpToFramePlaceholder: '1+5 または 29',
+    prevKeyframe: '前のキーフレーム',
+    nextKeyframe: '次のキーフレーム',
+    flipbook: 'フリップ',
+    flipbookTooltip: '長押しで前後をパラパラ確認、離すと戻る',
+    flipbookSpan: 'フリップ枚数',
   },
 
   comic: {

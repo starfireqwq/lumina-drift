@@ -68,6 +68,8 @@ export const MAX_TIMELINE_FRAMES = 6000;
 /** A cel can stay on screen for the whole timeline */
 export const MAX_HOLD = MAX_TIMELINE_FRAMES;
 export const MAX_ONION = 10;
+/** Max frames to each side when flipbooking (hold-to-flip) */
+export const MAX_FLIP_SPAN = 5;
 /** Frames past the end of the longest track that the playhead can be put on (to place cels there) */
 export const TIMELINE_SLACK = 24;
 /** Layer name of a blank frame (the timeline draws it as ×) */
@@ -283,6 +285,48 @@ export function removeTransformKeyframe(
   if (!list?.length) return [];
   const target = Math.round(frame);
   return list.filter((k) => Math.round(k.frame) !== target);
+}
+
+/** Previous (-1) or next (+1) keyframe frame number strictly before/after `currentFrame`, or null */
+export function adjacentKeyframeFrame(
+  list: ReadonlyArray<TransformKeyframe> | undefined | null,
+  currentFrame: number,
+  direction: -1 | 1,
+): number | null {
+  if (!list?.length) return null;
+  const cur = Math.round(currentFrame);
+  const frames = [...new Set(list.map((k) => Math.round(k.frame)))].sort((a, b) => a - b);
+  if (direction < 0) {
+    for (let i = frames.length - 1; i >= 0; i--) {
+      if (frames[i] < cur) return frames[i];
+    }
+    return null;
+  }
+  for (let i = 0; i < frames.length; i++) {
+    if (frames[i] > cur) return frames[i];
+  }
+  return null;
+}
+
+/**
+ * Finds the previous/next keyframe frame: prefers the active layer's own keyframes,
+ * falling back to all keyed layers when the active layer has none.
+ */
+export function findAdjacentKeyframe(
+  layers: ReadonlyArray<AnimLayer>,
+  activeLayerId: string | null | undefined,
+  currentFrame: number,
+  direction: -1 | 1,
+): number | null {
+  const active = activeLayerId ? layers.find((l) => l.id === activeLayerId) : undefined;
+  if (active?.meta?.keyframes?.length) {
+    return adjacentKeyframeFrame(active.meta.keyframes, currentFrame, direction);
+  }
+  const all: TransformKeyframe[] = [];
+  for (const l of layers) {
+    if (l.meta?.keyframes?.length) all.push(...l.meta.keyframes);
+  }
+  return adjacentKeyframeFrame(all, currentFrame, direction);
 }
 
 export const isAnimationFolder = (l: AnimLayer) => l.layerType === 'group' && Boolean(l.meta?.animation);
@@ -700,6 +744,7 @@ export function exportSegments<T extends AnimLayer>(
 
 const ONION_KEY = 'atelier_onion_skin';
 const LOOP_KEY = 'atelier_anim_loop';
+const FLIP_SPAN_KEY = 'atelier_anim_flip_span';
 /** A gap between ticks longer than this (a hidden tab gets none) restarts the count instead of jumping ahead */
 const RESYNC_AFTER_MS = 500;
 const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -723,6 +768,10 @@ export class AnimationEngine {
   private rafId = 0;
   /** Playback counts frames from here: when it (re)started and the frame it was on */
   private clock = { at: 0, frame: 0, lastTick: 0, shown: 0 };
+  /** Flipbook (手翻書): frame to return to on release, span N to each side, and active timer */
+  private flipOrigin: number | null = null;
+  private flipSpan = 2;
+  private flipTimer: ReturnType<typeof setInterval> | null = null;
 
   private onionSkinConfig: OnionSkinConfig = {
     enabled: true,
@@ -743,6 +792,10 @@ export class AnimationEngine {
       const saved = JSON.parse(localStorage.getItem(ONION_KEY) || 'null');
       if (saved && typeof saved === 'object') this.onionSkinConfig = AnimationEngine.cleanOnion({ ...this.onionSkinConfig, ...saved });
       this.loop = localStorage.getItem(LOOP_KEY) !== '0';
+      const savedFlip = Number(localStorage.getItem(FLIP_SPAN_KEY));
+      if (Number.isFinite(savedFlip) && savedFlip >= 1) {
+        this.flipSpan = Math.max(1, Math.min(MAX_FLIP_SPAN, Math.round(savedFlip)));
+      }
     } catch {
       // storage blocked: defaults
     }
@@ -920,6 +973,81 @@ export class AnimationEngine {
     this.notifyFrameChange(true);
   }
 
+  /** Personal flipbook span N (1..MAX_FLIP_SPAN frames on each side of the current frame) */
+  public getFlipSpan(): number {
+    return this.flipSpan;
+  }
+
+  public setFlipSpan(span: number) {
+    const next = Math.max(1, Math.min(MAX_FLIP_SPAN, Math.round(Number(span) || 1)));
+    if (next === this.flipSpan) return;
+    this.flipSpan = next;
+    try {
+      localStorage.setItem(FLIP_SPAN_KEY, String(next));
+    } catch {
+      // storage blocked: kept for this session
+    }
+    this.notifyFrameChange(false);
+  }
+
+  public isFlipping(): boolean {
+    return this.flipOrigin !== null;
+  }
+
+  /** Peek at `origin + offset` while holding a flip key; call `endFlip()` on release to snap back */
+  public flip(offset: number) {
+    if (this.playing) this.pause();
+    if (this.flipOrigin === null) this.flipOrigin = this.time;
+    const target = Math.max(0, Math.min(this.length - 1, this.flipOrigin + Math.round(offset)));
+    if (target !== this.time) {
+      this.time = target;
+      this.notifyFrameChange(true);
+    }
+  }
+
+  /** Hold-to-flip ping-pong loop between [origin - N, origin + N]; release via `endFlip()` snaps back */
+  public startFlipLoop() {
+    if (this.flipTimer !== null) return;
+    if (this.playing) this.pause();
+    if (this.flipOrigin === null) this.flipOrigin = this.time;
+    const origin = Math.max(0, Math.min(this.length - 1, this.flipOrigin));
+    const lo = Math.max(0, origin - this.flipSpan);
+    const hi = Math.min(this.length - 1, origin + this.flipSpan);
+    if (lo >= hi) return;
+    const seq: number[] = [];
+    for (let f = lo; f <= hi; f++) seq.push(f);
+    for (let f = hi - 1; f > lo; f--) seq.push(f);
+    // Start immediately on a neighbour so holding feels instant
+    let idx = seq.indexOf(origin);
+    if (idx < 0) idx = 0;
+    const step = () => {
+      idx = (idx + 1) % seq.length;
+      const next = seq[idx];
+      if (next !== this.time) {
+        this.time = next;
+        this.notifyFrameChange(true);
+      }
+    };
+    step();
+    const intervalMs = Math.max(40, Math.round(1000 / Math.max(1, this.fps)));
+    this.flipTimer = setInterval(step, intervalMs);
+  }
+
+  /** End flipbook preview and snap playhead back to where flipping started (no undo record) */
+  public endFlip() {
+    if (this.flipTimer !== null) {
+      clearInterval(this.flipTimer);
+      this.flipTimer = null;
+    }
+    if (this.flipOrigin === null) return;
+    const origin = this.flipOrigin;
+    this.flipOrigin = null;
+    if (this.time !== origin) {
+      this.time = Math.max(0, Math.min(origin, this.length - 1 + TIMELINE_SLACK));
+      this.notifyFrameChange(true);
+    }
+  }
+
   public onFrameChange(cb: (time: number, byUser: boolean) => void) {
     this.onFrameChangeListeners.push(cb);
     return () => {
@@ -943,6 +1071,7 @@ export class AnimationEngine {
   }
 
   public destroy() {
+    this.endFlip();
     this.pause();
     this.onFrameChangeListeners = [];
     this.onPlaybackStateChangeListeners = [];

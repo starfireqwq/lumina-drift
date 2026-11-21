@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
-  AnimationEngine, AnimationTrack, MAX_HOLD, MAX_ONION, MAX_TIMELINE_FRAMES, ONION_MODES, OnionSkinConfig, TIMELINE_SLACK, celLayerOf, entryIndexAt, entryStart,
+  AnimationEngine, AnimationTrack, MAX_FLIP_SPAN, MAX_HOLD, MAX_ONION, MAX_TIMELINE_FRAMES, ONION_MODES, OnionSkinConfig, TIMELINE_SLACK, celLayerOf, entryIndexAt, entryStart,
   formatTimecode, parseTimecode, planRepeatCels, removeTimelineLabel, trackLength, upsertTimelineLabel, upsertTransformKeyframe, removeTransformKeyframe, type OnionMode, type TimecodeMode,
 } from '../engine/AnimationEngine';
 import { clearLightTable, lightTableHas, toggleLightCel, type LightTableScope, type LightTableState } from '../engine/lightTable';
@@ -104,6 +104,8 @@ interface AnimationTimelineBarProps {
   onRepeatEntries: (folderId: string, entryIds: string[], opts: { mode: 'count' | 'toEnd'; count: number }) => Promise<boolean>;
   /** Rename cels in timeline appearance order (1, 2, 3...) */
   onRenameInOrder: (folderId: string) => void;
+  /** Jump to previous (-1) or next (+1) transform keyframe */
+  onJumpKeyframe?: (direction: -1 | 1) => void;
   onToggleShared: () => void;
   onFpsChange: (fps: number) => void;
   /** A click on a track: that folder becomes the edited one, at that frame */
@@ -154,7 +156,7 @@ const AnimThumbImg: React.FC<{
 
 export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   engine, isOpen, onClose, tracks, activeFolderId, thumbnails = EMPTY_THUMBS, subscribeThumbnails, getThumbnailsSnapshot, ownerNames, can,
-  onCreateFolder, onAddFrame, onDuplicateFrame, onReuseCel, onAddBlank, onKeyframePanelChange, onDeleteFrame, onMoveFrame, onSetHold, onUpdateCelMeta, onUpdateLabels, onRepeatEntries, onRenameInOrder, onToggleShared, onFpsChange,
+  onCreateFolder, onAddFrame, onDuplicateFrame, onReuseCel, onAddBlank, onKeyframePanelChange, onDeleteFrame, onMoveFrame, onSetHold, onUpdateCelMeta, onUpdateLabels, onRepeatEntries, onRenameInOrder, onJumpKeyframe, onToggleShared, onFpsChange,
   onSelectCell, planExport, onPlaceEntries, onCopyEntries, onPasteEntries, onSetEntryHold, ripple, onToggleRipple,
   timelineLength, lengthIsSet, onSetLength, lightTable, onUpdateLightTable,
   activeLayer, canvasWidth = 1920, canvasHeight = 1080, onUpdateLayerKeyframes,
@@ -232,6 +234,9 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
     try { localStorage.setItem('atelier_anim_timecode', next); } catch { /* kept for this session */ }
   };
   const [lengthDraft, setLengthDraft] = useState<string | null>(null);
+  const [jumpDraft, setJumpDraft] = useState<string | null>(null);
+  const [flipSpan, setFlipSpan] = useState(() => engine.getFlipSpan());
+  const [flipping, setFlipping] = useState(false);
   const [lightKind, setLightKind] = useState<LightTableScope['kind']>('cel');
   const [bezierDragIdx, setBezierDragIdx] = useState<null | 1 | 2>(null);
   const [gridViewport, setGridViewport] = useState({ left: 0, width: 960 });
@@ -254,6 +259,8 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
     setIsPlaying(engine.getIsPlaying());
     const unsubFrame = engine.onFrameChange((t) => {
       setTime(t);
+      setFlipSpan(engine.getFlipSpan());
+      setFlipping(engine.isFlipping());
       const nextRange = engine.getRange();
       setRange((prev) => (prev?.start === nextRange?.start && prev?.end === nextRange?.end ? prev : nextRange));
       const nextOnion = engine.getOnionSkinConfig();
@@ -589,6 +596,20 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
     setLengthDraft(null);
     if (frame !== null) onSetLength(Math.min(MAX_TIMELINE_FRAMES, frame + 1));
   };
+  const commitJump = () => {
+    if (jumpDraft === null) return;
+    const target = parseTimecode(jumpDraft, fps);
+    setJumpDraft(null);
+    if (target !== null) engine.goTo(target);
+  };
+  const startHoldFlip = () => {
+    engine.startFlipLoop();
+    setFlipping(engine.isFlipping());
+  };
+  const stopHoldFlip = () => {
+    engine.endFlip();
+    setFlipping(false);
+  };
   const exportFrames = exportRangeOnly && range ? range.end - range.start + 1 : length;
 
   return (
@@ -616,9 +637,66 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
             <button type="button" onClick={() => engine.goToEnd()} title={t.animation.lastCel} aria-label={t.animation.lastCel} className={iconBtn}><SkipForward className="h-3.5 w-3.5" /></button>
             <button type="button" onClick={() => engine.setLoop(!loop)} aria-pressed={loop} title={t.animation.loop} aria-label={t.animation.loop}
               className={`${iconBtn} ${loop ? 'bg-amber-500/15 !text-amber-300' : ''}`}><Repeat2 className="h-3.5 w-3.5" /></button>
-            <button type="button" onClick={toggleTimecode} title={t.animation.timecodeToggle} aria-label={t.animation.currentFrame}
-              className="shrink-0 rounded px-1 font-mono text-[11px] text-neutral-400 hover:bg-neutral-800 hover:text-white">
-              {formatTimecode(time, fps, timecode)}/{formatTimecode(length - 1, fps, timecode)}
+            <span className="flex shrink-0 items-center font-mono text-[11px] text-neutral-400">
+              {jumpDraft !== null ? (
+                <input
+                  autoFocus
+                  data-jump-input
+                  aria-label={t.animation.jumpToFrame}
+                  placeholder={t.animation.jumpToFramePlaceholder}
+                  value={jumpDraft}
+                  onFocus={(e) => e.currentTarget.select()}
+                  onChange={(e) => setJumpDraft(e.target.value)}
+                  onBlur={commitJump}
+                  onKeyDown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === 'Enter') e.currentTarget.blur();
+                    if (e.key === 'Escape') {
+                      setJumpDraft(null);
+                      e.currentTarget.blur();
+                    }
+                  }}
+                  className="atelier-field h-6 w-16 px-1 text-center font-mono text-[11px] text-white"
+                />
+              ) : (
+                <button
+                  type="button"
+                  data-jump-trigger
+                  onClick={() => setJumpDraft(formatTimecode(time, fps, timecode))}
+                  title={t.animation.jumpToFrame}
+                  aria-label={t.animation.jumpToFrame}
+                  className="rounded px-1 font-mono text-[11px] text-neutral-200 hover:bg-neutral-800 hover:text-white"
+                >
+                  {formatTimecode(time, fps, timecode)}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={toggleTimecode}
+                title={t.animation.timecodeToggle}
+                aria-label={t.animation.timecodeToggle}
+                className="rounded px-0.5 font-mono text-[11px] text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+              >
+                /{formatTimecode(length - 1, fps, timecode)}
+              </button>
+            </span>
+            <button
+              type="button"
+              data-flip-btn
+              disabled={length < 2}
+              aria-pressed={flipping}
+              title={t.animation.flipbookTooltip}
+              onPointerDown={(e) => {
+                if (e.button > 0) return;
+                e.preventDefault();
+                startHoldFlip();
+              }}
+              onPointerUp={stopHoldFlip}
+              onPointerLeave={stopHoldFlip}
+              onPointerCancel={stopHoldFlip}
+              className={chip(flipping)}
+            >
+              {t.animation.flipbook} ±{flipSpan}
             </button>
             <label className="ml-1 flex shrink-0 items-center gap-1 border-l border-neutral-800 pl-2" title={t.animation.fpsTooltip}>
               <span className="text-[10px] font-bold text-neutral-500">FPS</span>
@@ -708,6 +786,11 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 <label className="flex shrink-0 items-center gap-1 text-neutral-400">{t.animation.onionSkinNext}
                   <input type="color" value={onionSkin.nextColor} onChange={(e) => updateOnion({ nextColor: e.target.value })} aria-label={t.animation.onionSkinNext} className="h-5 w-5 cursor-pointer rounded" />
                 </label>
+                <span className="mx-1 h-4 w-px shrink-0 bg-neutral-800" />
+                {stepper(t.animation.flipbookSpan, flipSpan, (n) => {
+                  engine.setFlipSpan(n);
+                  setFlipSpan(engine.getFlipSpan());
+                }, 1, MAX_FLIP_SPAN)}
                 <button type="button" onClick={() => setPanel(null)} className={`${iconBtn} ml-auto`}>{t.common.done}</button>
               </>
             )}
@@ -822,6 +905,12 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
               return (
                 <>
                   <span className="shrink-0 truncate max-w-[84px] text-[10px] font-semibold text-indigo-300">{activeLayer.name}</span>
+                  {onJumpKeyframe && (
+                    <>
+                      <button type="button" onClick={() => onJumpKeyframe(-1)} title={t.animation.prevKeyframe} aria-label={t.animation.prevKeyframe} className={iconBtn}>◀◆</button>
+                      <button type="button" onClick={() => onJumpKeyframe(1)} title={t.animation.nextKeyframe} aria-label={t.animation.nextKeyframe} className={iconBtn}>◆▶</button>
+                    </>
+                  )}
                   <button type="button" onClick={() => commitKf({})} className={chip(Boolean(exactKf))}>
                     ◆ {t.animation.keyframeAdd}
                   </button>

@@ -123,7 +123,7 @@ import type { LayerCanvasItem } from '../engine/layerComposite';
 import { LayerPanel } from './LayerPanel';
 import { getUserColor } from '../utils/userColors';
 import {
-  AnimationEngine, AnimationTrack, animationDisplay, BLANK_CEL_NAME, celEntriesOf, celInsertAt, celLayerOf, celOfLayer, entryIndexAt, entryStart, exportSegments, isAnimationFolder, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
+  AnimationEngine, AnimationTrack, animationDisplay, BLANK_CEL_NAME, celEntriesOf, celInsertAt, celLayerOf, celOfLayer, entryIndexAt, entryStart, exportSegments, findAdjacentKeyframe, isAnimationFolder, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
   normalizeTimelineLabels, placeEntries, planRepeatCels, planSequentialCelRenames, trackLength,
 } from '../engine/AnimationEngine';
 import { lightIdsFor, loadLightTable, saveLightTable, type LightTableState } from '../engine/lightTable';
@@ -927,6 +927,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     groupLayers: async (_ids: string[]) => {},
     copyLayers: (_ids: string[]) => {},
     pasteLayers: async () => {},
+    animAddCel: async () => {},
+    animAddBlank: async () => {},
+    animJumpKeyframe: (_dir: -1 | 1) => {},
     selection: { has: (): boolean => false, canPaste: (): boolean => false, invert: () => {}, copy: () => {}, cut: () => {}, clear: () => {}, paste: () => {} },
   });
   const brushCursorRef = useRef<HTMLDivElement>(null);
@@ -1268,6 +1271,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     let renderRaf = 0;
     let handleKeyDown: ((ev: KeyboardEvent) => void) | null = null;
     let handleKeyUp: ((ev: KeyboardEvent) => void) | null = null;
+    let handleWindowBlur: (() => void) | null = null;
+    let activeFlipKeyCode: string | null = null;
     let vpSyncRaf = 0;
     const invalidateContainerRect = () => { containerRectRef.current = null; };
     window.addEventListener('resize', invalidateContainerRect, { passive: true });
@@ -1843,6 +1848,30 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               engine.setOnionSkinConfig({ enabled: on });
               warn(on ? '洋蔥皮：開' : '洋蔥皮：關', 1200);
             }
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_add_cel'), ev)) {
+            ev.preventDefault();
+            if (!ev.repeat) void shortcutActionsRef.current.animAddCel();
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_add_blank'), ev)) {
+            ev.preventDefault();
+            if (!ev.repeat) void shortcutActionsRef.current.animAddBlank();
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_first_frame'), ev)) {
+            ev.preventDefault();
+            animEngineRef.current?.goToStart();
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_last_frame'), ev)) {
+            ev.preventDefault();
+            animEngineRef.current?.goToEnd();
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_prev_keyframe'), ev)) {
+            ev.preventDefault();
+            shortcutActionsRef.current.animJumpKeyframe(-1);
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_next_keyframe'), ev)) {
+            ev.preventDefault();
+            shortcutActionsRef.current.animJumpKeyframe(1);
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_flip'), ev)) {
+            ev.preventDefault();
+            if (!ev.repeat && animEngineRef.current) {
+              activeFlipKeyCode = ev.code;
+              animEngineRef.current.startFlipLoop();
+            }
           } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_reset_view'), ev)) {
             fitViewport(false);
           } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_zoom_in'), ev)) {
@@ -1864,10 +1893,22 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           pointer.isSpacePressedRef.current = false;
           if (containerRef.current) containerRef.current.style.cursor = 'crosshair';
         }
+        if (activeFlipKeyCode && ev.code === activeFlipKeyCode) {
+          activeFlipKeyCode = null;
+          animEngineRef.current?.endFlip();
+        }
+      };
+
+      handleWindowBlur = () => {
+        if (activeFlipKeyCode || animEngineRef.current?.isFlipping()) {
+          activeFlipKeyCode = null;
+          animEngineRef.current?.endFlip();
+        }
       };
 
       window.addEventListener('keydown', handleKeyDown);
       window.addEventListener('keyup', handleKeyUp);
+      window.addEventListener('blur', handleWindowBlur);
 
       // Synchronize layers and replay operations if layers are already loaded
       const currentLayers = layersRef.current;
@@ -1914,6 +1955,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       container.removeEventListener('wheel', handleWheel);
       if (handleKeyDown) window.removeEventListener('keydown', handleKeyDown);
       if (handleKeyUp) window.removeEventListener('keyup', handleKeyUp);
+      if (handleWindowBlur) window.removeEventListener('blur', handleWindowBlur);
+      activeFlipKeyCode = null;
+      animEngineRef.current?.endFlip();
       pointer.reset();
       brush.reset();
       container.style.cursor = '';
@@ -4164,6 +4208,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       warn(`已依序重新命名（略過 ${plan.skippedOthers} 張其他畫師的膠片）。`, 3200);
     }
   };
+  /** Jump to previous (-1) or next (+1) transform keyframe */
+  const jumpAdjacentKeyframe = (direction: -1 | 1) => {
+    const engine = animEngineRef.current;
+    if (!engine) return;
+    const target = findAdjacentKeyframe(layersRef.current, activeLayerRef.current?.id ?? null, engine.getTime(), direction);
+    if (target !== null) engine.goTo(target);
+  };
   /** Timeline length in frames, kept on the edited folder; null = up to the end of the longest track */
   const setAnimationLength = (frames: number | null) => {
     if (!animFolder || !canManageLayer(animFolder)) return;
@@ -4470,6 +4521,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   shortcutActionsRef.current.groupLayers = groupLayers;
   shortcutActionsRef.current.copyLayers = copyLayers;
   shortcutActionsRef.current.pasteLayers = pasteLayers;
+  shortcutActionsRef.current.animAddCel = addAnimationFrame;
+  shortcutActionsRef.current.animAddBlank = addBlankAnimationFrame;
+  shortcutActionsRef.current.animJumpKeyframe = jumpAdjacentKeyframe;
 
   // ---------- 匯入圖片 (drop on the canvas or the layer list, 檔案 → 匯入圖片) ----------
   /** aboveId / parentId for onCreateLayer; an undefined parent lets App pick it from the active layer, as 新增圖層 does */
@@ -5606,6 +5660,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 onUpdateLabels={setAnimationLabels}
                 onRepeatEntries={repeatAnimationEntries}
                 onRenameInOrder={renameAnimationCelsInOrder}
+                onJumpKeyframe={jumpAdjacentKeyframe}
                 onToggleShared={toggleAnimationShared}
                 onFpsChange={setAnimationFps}
                 onSelectCell={selectAnimationCell}

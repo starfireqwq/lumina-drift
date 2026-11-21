@@ -1020,6 +1020,13 @@ export const enUS: Translations = {
     repeatNoRoom: 'Already at timeline end.',
     renameInOrder: 'Renumber',
     renameInOrderTooltip: 'Rename cels 1, 2, 3… in timeline order',
+    jumpToFrame: 'Jump to frame',
+    jumpToFramePlaceholder: '1+5 or 29',
+    prevKeyframe: 'Previous keyframe',
+    nextKeyframe: 'Next keyframe',
+    flipbook: 'Flip',
+    flipbookTooltip: 'Hold to flip nearby frames, release to return',
+    flipbookSpan: 'Flip span',
   },
 
   comic: {

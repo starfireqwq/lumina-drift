@@ -1031,6 +1031,13 @@ export interface Translations {
     repeatNoRoom: string;
     renameInOrder: string;
     renameInOrderTooltip: string;
+    jumpToFrame: string;
+    jumpToFramePlaceholder: string;
+    prevKeyframe: string;
+    nextKeyframe: string;
+    flipbook: string;
+    flipbookTooltip: string;
+    flipbookSpan: string;
   };
 
   comic: {
