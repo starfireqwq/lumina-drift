@@ -9,6 +9,16 @@ import {
   type ColorCurvesOptions, type FilterContext, type GradientStop,
 } from './pixel-filters';
 import { adjustColor, grayscalePixels, levelsLut, mapChannels, thresholdPixels } from './color-filters';
+import { changeLineWidth, despeckle, extractLines, recolorLines } from './lineart-filters';
+
+/** A '#rrggbb' setting, or the fallback */
+function filterColor(values: FilterValues, key: string, fallback: string) {
+  const value = values[key];
+  return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+}
+
+/** The colour the user is painting with, which the workspace adds to every run as `currentColor` */
+const currentColor = (values: FilterValues) => filterColor(values, 'currentColor', '#000000');
 
 /** A filter's settings, by parameter key (never by position) */
 export type FilterValues = Record<string, unknown>;
@@ -141,6 +151,18 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
   grayscale: { colorOnly: true, run: ({ pixels }) => grayscalePixels(pixels) },
   threshold: {
     run: ({ pixels }, v) => thresholdPixels(pixels, filterNumber(v, 'threshold', 128), filterChoice(v, 'target', ['color', 'alpha', 'both'] as const)),
+  },
+  lineWidth: {
+    run: ({ pixels, width, height }, v) => changeLineWidth(pixels, width, height, Math.round(filterNumber(v, 'amount', 1)), v.keepThin !== false),
+  },
+  despeckle: {
+    run: ({ pixels, width, height }, v) => despeckle(pixels, width, height, filterNumber(v, 'size', 3),
+      filterChoice(v, 'mode', ['opaque', 'onWhite', 'fillAround', 'fillCurrent'] as const), currentColor(v)),
+  },
+  extractLines: { run: ({ pixels }, v) => extractLines(pixels, filterNumber(v, 'whiteRange', 10), v.keepColor === true) },
+  lineColor: {
+    colorOnly: true,
+    run: ({ pixels }, v) => recolorLines(pixels, v.useCurrent === false ? filterColor(v, 'color', '#000000') : currentColor(v)),
   },
   noise: { colorOnly: true, run: (ctx, v) => applyNoiseGrain(ctx, filterNumber(v, 'amount', 25) / 100, filterNumber(v, 'grain', 1)) },
   chromatic: { colorOnly: true, run: (ctx, v) => applyChromaticAberration(ctx, filterNumber(v, 'offsetX', 6), filterNumber(v, 'offsetY', 0)) },

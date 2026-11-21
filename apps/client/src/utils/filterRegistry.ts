@@ -59,6 +59,7 @@ const range = (key: string, label: FilterParamKey, initial: number, min: number,
   ({ kind: 'range', key, label, initial, min, max, step });
 const center = (when?: ParamBase['when']): FilterParam => ({ kind: 'point', key: 'center', label: 'center', when });
 const inSection = (section: FilterSectionKey, params: FilterParam[]) => params.map((param) => ({ ...param, section }));
+const toggle = (key: string, label: FilterParamKey, initial: boolean, when?: ParamBase['when']): FilterParam => ({ kind: 'toggle', key, label, initial, when });
 /** A drop-down: [stored value, name] pairs, the first is the default */
 const choice = (key: string, label: FilterParamKey, options: readonly (readonly [string, FilterParamKey])[], when?: ParamBase['when']): FilterParam =>
   ({ kind: 'select', key, label, initial: options[0][0], options: options.map(([value, name]) => ({ value, label: name })), when });
@@ -82,6 +83,18 @@ export const BUILTIN_FILTERS: readonly FilterDef[] = [
     params: [range('threshold', 'threshold', 128, 1, 255), choice('target', 'target', [['color', 'targetColor'], ['alpha', 'targetAlpha'], ['both', 'targetBoth']])] },
   { id: 'invert', group: 'color', label: 'invert', source: 'builtin', params: [], hint: 'invertHint' },
   { id: 'posterize', group: 'color', label: 'posterize', source: 'builtin', params: [range('levels', 'levels', 6, 2, 32)] },
+  { id: 'lineWidth', group: 'lineart', label: 'lineWidth', source: 'builtin',
+    params: [range('amount', 'lineAmount', 1, -10, 10), toggle('keepThin', 'keepThin', true)] },
+  { id: 'despeckle', group: 'lineart', label: 'despeckle', source: 'builtin', params: [
+    range('size', 'speckSize', 3, 1, 50),
+    choice('mode', 'mode', [['opaque', 'modeOpaque'], ['onWhite', 'modeOnWhite'], ['fillAround', 'modeFillAround'], ['fillCurrent', 'modeFillCurrent']]),
+  ] },
+  { id: 'extractLines', group: 'lineart', label: 'extractLines', source: 'builtin',
+    params: [range('whiteRange', 'whiteRange', 10, 0, 50), toggle('keepColor', 'keepColor', false)] },
+  { id: 'lineColor', group: 'lineart', label: 'lineColor', source: 'builtin', params: [
+    toggle('useCurrent', 'useCurrent', true),
+    { kind: 'color', key: 'color', label: 'inkColor', initial: '#000000', when: { key: 'useCurrent', is: [false] } },
+  ] },
   { id: 'noise', group: 'effect', label: 'noise', source: 'builtin', params: [range('amount', 'amount', 25, 0, 100), range('grain', 'grain', 1, 1, 16)] },
   { id: 'halftone', group: 'effect', label: 'halftone', source: 'builtin',
     params: [range('density', 'density', 45, 4, 128), range('angle', 'angle', 45, 0, 180), range('dotSize', 'dotSize', 1, 0.1, 2, 0.1)] },

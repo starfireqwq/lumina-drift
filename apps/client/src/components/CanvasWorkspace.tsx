@@ -2315,7 +2315,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       if (request !== filterRequestRef.current) return false;
       const client = filterWorkerRef.current ??= new FilterWorkerClient();
       const wantHistogram = previewOnly && Boolean(getFilter(filter.id)?.histogram) && !filterHistogramRef.current;
-      const result = await client.run(filter.id, new Uint8Array(source), width, height, filter.values, mask, { histogram: wantHistogram });
+      // Line colour and gap filling can use the colour being painted with
+      const values = { ...filter.values, currentColor: brushProps.color };
+      const result = await client.run(filter.id, new Uint8Array(source), width, height, values, mask, { histogram: wantHistogram });
       const pixels = result?.output ?? null;
       if (result?.histogram && request === filterRequestRef.current) {
         filterHistogramRef.current = result.histogram;

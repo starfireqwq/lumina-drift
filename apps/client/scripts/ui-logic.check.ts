@@ -58,7 +58,10 @@ import { buildCanvasGroupEntries, toggleCollapsedCanvasGroup } from '../src/util
 import { buildRoomShareUrl } from '../src/utils/serverLinks';
 import { apiErrorMessage, isForeignApiReply } from '../src/utils/apiErrors';
 import { translations, type Language } from '../src/locales';
-import { DEFAULT_COMMUNITY_PRESETS, MIN_BRUSH_SPACING, PIXEL_FILTER_RUNNERS, runPixelFilter, toneHistogram, type CanvasModel, type FilterValues } from '@atelier/shared';
+import {
+  DEFAULT_COMMUNITY_PRESETS, MIN_BRUSH_SPACING, PIXEL_FILTER_RUNNERS, distanceField, runPixelFilter, toneHistogram,
+  type CanvasModel, type FilterValues,
+} from '@atelier/shared';
 import {
   BUILTIN_FILTERS, FILTER_GROUPS, defaultFilterValues, filterFitsLayer, filterGroupsInUse, filterPointParam, getFilter,
   normalizeFilterValues, paramShown, snapRange,
@@ -856,7 +859,9 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
       if (param.kind === 'range') assert.ok(param.min <= param.initial && param.initial <= param.max, `${def.id}.${param.key} default is in range`);
     }
   }
-  assert.deepEqual(filterGroupsInUse(), ['color', 'effect', 'blur', 'distort'], 'Groups with no filters yet stay out of the menu');
+  assert.deepEqual(filterGroupsInUse(), ['color', 'lineart', 'effect', 'blur', 'distort'], 'Groups with no filters yet stay out of the menu');
+  assert.equal(filterFitsLayer(getFilter('despeckle')!, 'mask'), false, 'Line-art fixes stay off masks');
+  assert.equal(filterFitsLayer(getFilter('despeckle')!, 'raster'), true);
 
   const halftone = getFilter('halftone')!;
   assert.deepEqual(normalizeFilterValues(halftone, null), defaultFilterValues(halftone), 'Nothing stored: defaults');
@@ -974,6 +979,72 @@ const filterPixel = (id: string, values: FilterValues, pixel: number[]) =>
   assert.equal(bins[64], 1, 'Half-clear grey counted by its straight tone');
   assert.equal(bins.reduce((sum, n) => sum + n, 0), 2, 'Clear pixels are not counted');
   assert.equal(toneHistogram(new Uint8Array([255, 255, 255, 255, 0, 0, 0, 255]), 2, 1, new Uint8Array([0, 255]))[255], 0, 'Only inside the selection');
+}
+
+/** A width × height picture filled by `paint(x, y)` (premultiplied RGBA, or null for clear) */
+const picture = (width: number, height: number, paint: (x: number, y: number) => number[] | null) => {
+  const pixels = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const color = paint(x, y);
+    if (color) pixels.set(color, (y * width + x) * 4);
+  }
+  return pixels;
+};
+const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pixels[(y * width + x) * 4 + 3];
+
+// 修正線稿: exact distances, growing and thinning lines, specks and gaps, line extraction and colour
+{
+  const marked = new Uint8Array(7 * 5);
+  marked[2 * 7 + 3] = 1;
+  const field = distanceField(marked, 7, 5);
+  assert.equal(field.dist2[2 * 7 + 3], 0, 'A marked pixel is at distance 0');
+  assert.equal(field.dist2[0], 13, 'Corner to (3,2) is √13 away');
+  assert.equal(field.nearest[0], 2 * 7 + 3, 'And that is its nearest mark');
+  assert.equal(distanceField(new Uint8Array(4), 2, 2).nearest[0], -1, 'Nothing marked: no nearest');
+
+  const W = 9, H = 9;
+  const run = (id: string, values: FilterValues, pixels: Uint8Array) => runPixelFilter(PIXEL_FILTER_RUNNERS[id], pixels, W, H, values);
+  const line = (from: number, to: number) => picture(W, H, (x) => (x >= from && x <= to ? [0, 0, 0, 255] : null));
+
+  const grown = run('lineWidth', { amount: 2 }, line(4, 4));
+  assert.equal(alphaAt(grown, W, 5, 4), 255, 'One pixel out is fully inked');
+  assert.ok(alphaAt(grown, W, 6, 4) > 100 && alphaAt(grown, W, 6, 4) < 160, 'The new edge is soft');
+  assert.equal(alphaAt(grown, W, 7, 4), 0, 'Three pixels out stays clear');
+  assert.deepEqual([...grown.slice((4 * W + 5) * 4, (4 * W + 5) * 4 + 3)], [0, 0, 0], 'Grown ink takes the line colour');
+
+  const thinned = run('lineWidth', { amount: -2, keepThin: false }, line(3, 5));
+  assert.equal(alphaAt(thinned, W, 3, 4), 0, 'Thinning clears the edges');
+  assert.ok(alphaAt(thinned, W, 4, 4) > 0 && alphaAt(thinned, W, 4, 4) < 255, 'The middle fades');
+  assert.equal(alphaAt(run('lineWidth', { amount: -2, keepThin: true }, line(3, 5)), W, 4, 4), 255, 'Keeping thin lines keeps the middle');
+  assert.equal(alphaAt(run('lineWidth', { amount: -3, keepThin: true }, line(4, 4)), W, 4, 4), 255, 'A 1 px line survives');
+  assert.equal(alphaAt(run('lineWidth', { amount: -3, keepThin: false }, line(4, 4)), W, 4, 4), 0, 'Unless asked not to keep it');
+
+  const S = 20;
+  const specks = picture(S, S, (x, y) => ((x >= 3 && x <= 4 && y >= 3 && y <= 4) || (x >= 10 && x <= 15 && y >= 10 && y <= 15) ? [0, 0, 0, 255] : null));
+  const cleaned = runPixelFilter(PIXEL_FILTER_RUNNERS.despeckle, specks, S, S, { size: 3, mode: 'opaque' });
+  assert.equal(alphaAt(cleaned, S, 3, 3), 0, 'A 2 × 2 speck is removed');
+  assert.equal(alphaAt(cleaned, S, 12, 12), 255, 'A 6 × 6 block stays');
+
+  const red = [255, 0, 0, 255];
+  const holed = (hx: number, hy: number) => picture(W, H, (x, y) => (x === hx && y === hy ? null : red));
+  const filled = run('despeckle', { size: 2, mode: 'fillAround' }, holed(4, 4));
+  assert.deepEqual([...filled.slice((4 * W + 4) * 4, (4 * W + 4) * 4 + 4)], red, 'A small hole takes the colour around it');
+  assert.equal(alphaAt(run('despeckle', { size: 2, mode: 'fillAround' }, holed(0, 4)), W, 0, 4), 0, 'A hole on the edge is left open');
+  const painted = run('despeckle', { size: 2, mode: 'fillCurrent', currentColor: '#00ff00' }, holed(4, 4));
+  assert.deepEqual([...painted.slice((4 * W + 4) * 4, (4 * W + 4) * 4 + 4)], [0, 255, 0, 255], 'Or the current colour');
+  const page = run('despeckle', { size: 2, mode: 'onWhite' }, picture(W, H, (x, y) => (x === 4 && y === 4 ? [0, 0, 0, 255] : [255, 255, 255, 255])));
+  assert.deepEqual([...page.slice((4 * W + 4) * 4, (4 * W + 4) * 4 + 4)], [255, 255, 255, 255], 'A dark dot on white paper turns white');
+
+  assert.deepEqual(filterPixel('extractLines', { whiteRange: 0 }, [255, 255, 255, 255]), [0, 0, 0, 0], 'White paper turns clear');
+  assert.deepEqual(filterPixel('extractLines', { whiteRange: 0 }, [0, 0, 0, 255]), [0, 0, 0, 255], 'Black ink stays');
+  assert.deepEqual(filterPixel('extractLines', { whiteRange: 0 }, [128, 128, 128, 255]), [0, 0, 0, 127], 'Grey becomes half-clear black');
+  assert.deepEqual(filterPixel('extractLines', { whiteRange: 20 }, [230, 230, 230, 255]), [0, 0, 0, 0], 'Near-white within the range is paper');
+  assert.deepEqual(filterPixel('extractLines', { whiteRange: 0, keepColor: true }, [255, 128, 128, 255]), [127, 0, 0, 127],
+    'Kept colour is unmixed from the paper');
+
+  assert.deepEqual(filterPixel('lineColor', { currentColor: '#ff0000' }, [0, 0, 0, 128]), [128, 0, 0, 128], 'Lines take the current colour, alpha kept');
+  assert.deepEqual(filterPixel('lineColor', { useCurrent: false, color: '#0000ff', currentColor: '#ff0000' }, [0, 0, 0, 255]), [0, 0, 255, 255],
+    'Or a chosen colour');
 }
 
 // 對齊 L1: basis, whole-pixel offsets, off-canvas parts, and a pixel-level run of the move

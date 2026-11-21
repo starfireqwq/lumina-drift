@@ -742,6 +742,10 @@ export interface Translations {
       levels: string;
       grayscale: string;
       threshold: string;
+      lineWidth: string;
+      despeckle: string;
+      extractLines: string;
+      lineColor: string;
     };
     /** Parameter names; a select's option names share this table */
     params: {
@@ -769,6 +773,18 @@ export interface Translations {
       targetColor: string;
       targetAlpha: string;
       targetBoth: string;
+      lineAmount: string;
+      keepThin: string;
+      speckSize: string;
+      mode: string;
+      modeOpaque: string;
+      modeOnWhite: string;
+      modeFillAround: string;
+      modeFillCurrent: string;
+      whiteRange: string;
+      keepColor: string;
+      useCurrent: string;
+      inkColor: string;
     };
   };
 

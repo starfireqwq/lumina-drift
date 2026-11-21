@@ -191,7 +191,7 @@ function ParamControl({ param, index, label, value, busy, onChange }: {
       return (
         <label className={`${row} flex items-center justify-between gap-2`} style={style}>
           <span>{label}</span>
-          <select disabled={busy} className="atelier-field h-7 px-2 text-xs" value={String(value ?? param.initial)} onChange={(event) => onChange(event.target.value)}>
+          <select disabled={busy} className="atelier-field h-7 min-w-0 max-w-[62%] truncate px-2 text-xs" value={String(value ?? param.initial)} onChange={(event) => onChange(event.target.value)}>
             {param.options.map((option) => <option key={option.value} value={option.value}>{filterParamLabel(option, t)}</option>)}
           </select>
         </label>
