@@ -364,21 +364,22 @@ html.atelier-theme-vt, html.atelier-theme-vt body { transition: none !important;
 .atelier-bipolar-range { appearance: none; -webkit-appearance: none; background: transparent; }
 .atelier-bipolar-range::-webkit-slider-runnable-track {
   height: 4px; border-radius: 9999px;
+  /* Same light track and solid accent thumb as the browser's own sliders beside it, in every theme */
   background: linear-gradient(90deg, transparent var(--lo), rgb(var(--a-500)) var(--lo) var(--hi), transparent var(--hi)),
-    linear-gradient(90deg, transparent calc(50% - 1px), rgb(var(--n-400)) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)),
-    rgb(var(--n-700));
+    linear-gradient(90deg, transparent calc(50% - 1px), rgb(150 150 158) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)),
+    rgb(236 236 240);
 }
 .atelier-bipolar-range::-moz-range-track {
   height: 4px; border-radius: 9999px;
   background: linear-gradient(90deg, transparent var(--lo), rgb(var(--a-500)) var(--lo) var(--hi), transparent var(--hi)),
-    linear-gradient(90deg, transparent calc(50% - 1px), rgb(var(--n-400)) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)),
-    rgb(var(--n-700));
+    linear-gradient(90deg, transparent calc(50% - 1px), rgb(150 150 158) calc(50% - 1px) calc(50% + 1px), transparent calc(50% + 1px)),
+    rgb(236 236 240);
 }
 .atelier-bipolar-range::-webkit-slider-thumb {
-  -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5px; border-radius: 9999px;
-  background: rgb(var(--n-100)); border: 2px solid rgb(var(--a-500));
+  -webkit-appearance: none; width: 16px; height: 16px; margin-top: -6px; border-radius: 9999px;
+  background: rgb(var(--a-500)); border: 2px solid rgb(255 255 255 / .9);
 }
-.atelier-bipolar-range::-moz-range-thumb { width: 10px; height: 10px; border-radius: 9999px; background: rgb(var(--n-100)); border: 2px solid rgb(var(--a-500)); }
+.atelier-bipolar-range::-moz-range-thumb { width: 12px; height: 12px; border-radius: 9999px; background: rgb(var(--a-500)); border: 2px solid rgb(255 255 255 / .9); }
 
 /* A blank frame: nothing on screen there, drawn as a faint × over a see-through hatch */
 .atelier-blank-cel {
