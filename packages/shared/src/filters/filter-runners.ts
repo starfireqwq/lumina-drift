@@ -12,6 +12,7 @@ import { adjustColor, grayscalePixels, levelsLut, mapChannels, thresholdPixels }
 import { changeLineWidth, despeckle, extractLines, recolorLines } from './lineart-filters';
 import { boxBlur, glow, mosaic, outline, radialChromatic } from './effect-filters';
 import { motionBlur, soften, spherize, unsharpMask, wave, zoomBlur } from './blur-distort-filters';
+import { downscale, upscale } from './resample';
 
 /** A '#rrggbb' setting, or the fallback */
 function filterColor(values: FilterValues, key: string, fallback: string) {
@@ -28,6 +29,11 @@ export type FilterValues = Record<string, unknown>;
 export interface PixelFilterRunner {
   /** Changes colour only: it sees straight (un-premultiplied) colour, re-premultiplied afterwards */
   colorOnly?: boolean;
+  /**
+   * Slow on a big layer and still readable from a smaller copy, so a preview may show a draft first
+   * (runDraftFilter). Lists the settings measured in pixels, which shrink with the copy.
+   */
+  draft?: { lengths?: readonly string[]; points?: readonly string[] };
   run: (ctx: FilterContext, values: FilterValues) => Uint8Array;
 }
 
@@ -103,10 +109,12 @@ function spinBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, height:
 export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> = {
   box: { run: ({ pixels, width, height }, v) => boxBlur(pixels, width, height, filterNumber(v, 'radius', 4)) },
   motionBlur: {
+    draft: { lengths: ['distance'] },
     run: ({ pixels, width, height }, v) => motionBlur(pixels, width, height, filterNumber(v, 'distance', 20), filterNumber(v, 'angle', 0),
       filterChoice(v, 'direction', ['both', 'forward', 'backward'] as const)),
   },
   radialBlur: {
+    draft: { points: ['center'] },
     run: ({ pixels, width, height }, v) => {
       const center = filterPoint(v, 'center', width, height);
       return zoomBlur(pixels, width, height, center.x, center.y, filterNumber(v, 'strength', 30), filterChoice(v, 'direction', ['both', 'in', 'out'] as const));
@@ -114,6 +122,7 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
   },
   soften: { run: ({ pixels, width, height }) => soften(pixels, width, height) },
   wave: {
+    draft: { lengths: ['amplitude', 'wavelength'] },
     run: ({ pixels, width, height }, v) => wave(pixels, width, height, filterChoice(v, 'direction', ['horizontal', 'vertical', 'both'] as const),
       filterNumber(v, 'amplitude', 10), filterNumber(v, 'wavelength', 120)),
   },
@@ -128,8 +137,9 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
     run: ({ pixels, width, height }, v) =>
       unsharpMask(pixels, width, height, filterNumber(v, 'radius', 2), filterNumber(v, 'amount', 100), filterNumber(v, 'threshold', 0)),
   },
-  gaussian: { run: (ctx, v) => applyGaussianBlur(ctx, filterNumber(v, 'radius', 8)) },
+  gaussian: { draft: { lengths: ['radius'] }, run: (ctx, v) => applyGaussianBlur(ctx, filterNumber(v, 'radius', 8)) },
   spin: {
+    draft: { points: ['center'] },
     run: ({ pixels, width, height }, v) => {
       const center = filterPoint(v, 'center', width, height);
       return spinBlur(pixels, width, height, filterNumber(v, 'angle', 15), center.x, center.y);
@@ -203,10 +213,12 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
   },
   mosaic: { run: ({ pixels, width, height }, v) => mosaic(pixels, width, height, filterNumber(v, 'cell', 12)) },
   glow: {
+    draft: { lengths: ['radius'] },
     run: ({ pixels, width, height }, v) =>
       glow(pixels, width, height, filterNumber(v, 'radius', 16), filterNumber(v, 'strength', 80), filterNumber(v, 'threshold', 160)),
   },
   outline: {
+    draft: { lengths: ['size'] },
     run: ({ pixels, width, height }, v) => outline(pixels, width, height, filterNumber(v, 'size', 3), filterColor(v, 'color', '#ffffff'),
       filterChoice(v, 'position', ['outside', 'inside', 'center'] as const)),
   },
@@ -286,3 +298,61 @@ export function blendFiltered(pixels: ArrayLike<number>, output: Uint8Array, mas
   }
 }
 
+/**
+ * A quick draft of a slow filter on a big layer: worked out on a copy shrunk by a whole `factor`
+ * (with the runner's pixel-sized settings and points shrunk too) and stretched back. Where the
+ * shrunk copy came out unchanged, the layer's own pixels stay, so untouched parts keep their
+ * sharpness; the selection mask is applied at full size. Filters without `draft` run in full.
+ */
+export function runDraftFilter(
+  runner: PixelFilterRunner,
+  pixels: Uint8Array,
+  width: number,
+  height: number,
+  values: FilterValues,
+  mask: Uint8Array | null | undefined,
+  factor: number,
+): Uint8Array {
+  const f = Math.floor(factor);
+  if (!runner.draft || f < 2 || width < f * 2 || height < f * 2) return runPixelFilter(runner, pixels, width, height, values, mask);
+  const small = downscale(pixels, width, height, f);
+  const scaled: FilterValues = { ...values };
+  for (const key of runner.draft.lengths ?? []) {
+    const value = values[key];
+    if (typeof value === 'number' && Number.isFinite(value)) scaled[key] = value / f;
+  }
+  for (const key of runner.draft.points ?? []) {
+    const point = values[key] as { x?: unknown; y?: unknown } | null | undefined;
+    if (typeof point?.x === 'number' && typeof point.y === 'number') scaled[key] = { x: (point.x + 0.5) / f - 0.5, y: (point.y + 0.5) / f - 0.5 };
+  }
+  const { width: sw, height: sh } = small;
+  const filtered = runPixelFilter(runner, small.pixels, sw, sh, scaled, null);
+  // Small pixels the filter changed, grown by one: the stretch reads each output pixel from its block and the next
+  const changed = new Uint8Array(sw * sh);
+  for (let p = 0, i = 0; p < changed.length; p++, i += 4) {
+    const s = small.pixels;
+    if (filtered[i] !== s[i] || filtered[i + 1] !== s[i + 1] || filtered[i + 2] !== s[i + 2] || filtered[i + 3] !== s[i + 3]) changed[p] = 1;
+  }
+  const output = upscale(filtered, sw, sh, width, height, f, { original: pixels, near: growByOne(changed, sw, sh) });
+  blendFiltered(pixels, output, mask, false);
+  return output;
+}
+
+/** 1 wherever `marks` has a 1 within one pixel (3 × 3) */
+function growByOne(marks: Uint8Array, width: number, height: number) {
+  const across = new Uint8Array(marks.length);
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      across[row + x] = marks[row + x] | (x > 0 ? marks[row + x - 1] : 0) | (x + 1 < width ? marks[row + x + 1] : 0);
+    }
+  }
+  const grown = new Uint8Array(marks.length);
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      grown[row + x] = across[row + x] | (y > 0 ? across[row - width + x] : 0) | (y + 1 < height ? across[row + width + x] : 0);
+    }
+  }
+  return grown;
+}

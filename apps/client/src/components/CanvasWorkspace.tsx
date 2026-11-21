@@ -139,7 +139,7 @@ import {
 } from '@atelier/shared';
 import { VectorOverlay } from './VectorOverlay';
 import { VectorEngine } from '../engine/VectorEngine';
-import { filterFitsLayer, filterLabel, filterPointParam, getFilter, type FilterJob } from '../utils/filterRegistry';
+import { filterDraftFactor, filterFitsLayer, filterLabel, filterPointParam, getFilter, type FilterJob } from '../utils/filterRegistry';
 import { filterPoint } from '../utils/filterPoint';
 import { FilterWorkerClient } from '../engine/filterWorkerClient';
 import { AlertCircle, ImagePlus, Keyboard, Layers, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
@@ -215,6 +215,12 @@ type DeletedLayers = { deleted: string[]; lifted: string[] };
 let layerClipboard: LayerClipboard | null = null;
 /** While an animation plays, the cels of this many upcoming frames are decoded ahead (in workers) */
 const ANIM_PREFETCH_FRAMES = 6;
+/** A filter preview still working after this long shows the filter window's light sweep */
+const FILTER_REFINING_DELAY_MS = 200;
+/** After a draft preview shows, the full one starts if the settings stay put this long */
+const FILTER_DRAFT_SETTLE_MS = 100;
+/** Touch screens (phones, tablets) are slower: their draft previews start on smaller layers */
+const coarsePointer = () => typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
 /**
  * Tools that draw, erase, fill, warp or pick on the active layer where the pointer is. With one of
  * them on a layer moved by keyframes, that layer is shown where it is drawn (keyframes paused).
@@ -713,10 +719,18 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const filterWorkerRef = useRef<FilterWorkerClient | null>(null);
   const filterRequestRef = useRef(0);
   const [filterBusy, setFilterBusy] = useState(false);
+  /** A preview is still being worked out (a draft is shown, or it is slow): the filter window shows a light sweep */
+  const [filterRefining, setFilterRefining] = useState(false);
+  const filterRefineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** The layer's tone counts for the levels window (counted by the filter worker on the first preview) */
   const [filterHistogram, setFilterHistogram] = useState<Uint32Array | null>(null);
   const filterHistogramRef = useRef<Uint32Array | null>(null);
   const filterPreviewRef = useRef<{ item: NonNullable<ReturnType<LayerManager['getLayerItem']>>; texture: RenderTexture } | null>(null);
+  /**
+   * The layer's pixels as read for the last preview, kept while its version shows nothing has
+   * changed them since: the next preview skips reading the whole layer back from the GPU again.
+   */
+  const filterSourceRef = useRef<{ item: NonNullable<ReturnType<LayerManager['getLayerItem']>>; version: number; width: number; height: number; pixels: Uint8Array } | null>(null);
 
   // Tools & Properties State
   const [currentTool, setCurrentTool] = useState<ToolType>('brush');
@@ -1843,6 +1857,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       destroyed = true;
       timeline.pause();
       cancelFilterWork();
+      showFilterRefining(false);
       clearFilterPreview();
       setIsEngineReady(false);
       lastReplayedCanvasIdRef.current = null;
@@ -2196,6 +2211,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
 
   const clearFilterPreview = () => {
+    filterSourceRef.current = null;
     const preview = filterPreviewRef.current;
     if (!preview) return;
     if (!preview.item.sprite.destroyed) preview.item.sprite.texture = preview.item.renderTexture;
@@ -2209,6 +2225,23 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     filterWorkerRef.current?.cancel();
   };
 
+  /**
+   * Turns the filter window's light sweep on (after a short wait, so a quick preview never flashes
+   * it; already on, it stays on into the next preview) or off.
+   */
+  const showFilterRefining = (on: boolean) => {
+    if (filterRefineTimerRef.current) clearTimeout(filterRefineTimerRef.current);
+    filterRefineTimerRef.current = null;
+    if (!on) {
+      setFilterRefining(false);
+      return;
+    }
+    filterRefineTimerRef.current = setTimeout(() => {
+      filterRefineTimerRef.current = null;
+      setFilterRefining(true);
+    }, FILTER_REFINING_DELAY_MS);
+  };
+
   const forgetFilterHistogram = () => {
     filterHistogramRef.current = null;
     setFilterHistogram(null);
@@ -2216,6 +2249,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   const closeFilters = () => {
     cancelFilterWork();
+    showFilterRefining(false);
     setFilterBusy(false);
     clearFilterPreview();
     filterPoint.clear();
@@ -2241,6 +2275,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       return;
     }
     cancelFilterWork();
+    showFilterRefining(false);
     setFilterBusy(false);
     clearFilterPreview();
     forgetFilterHistogram();
@@ -2298,40 +2333,77 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   const runLayerFilter = async (filter: FilterJob | null, previewOnly: boolean): Promise<boolean> => {
     cancelFilterWork();
-    if (!filter) { clearFilterPreview(); return true; }
+    if (!filter) { clearFilterPreview(); showFilterRefining(false); return true; }
     const request = filterRequestRef.current;
     const item = getFilterLayer();
     const engine = tileEngineRef.current;
     if (!item || !engine || !canvas) return false;
-    if (!previewOnly) setFilterBusy(true);
+    if (!previewOnly) {
+      setFilterBusy(true);
+      showFilterRefining(false);
+    } else {
+      showFilterRefining(true);
+    }
 
     try {
       const lm = layerManagerRef.current;
       if (!lm) return false;
       const { width, height } = canvas;
       const mask = selectionEngineRef.current?.getMaskArray();
-      // Read without stalling the page (and without making a sparse layer one big texture)
-      const [source] = await lm.readAsync(item.model.id, [{ x: 0, y: 0, w: width, h: height }]);
+      // Read without stalling the page (and without making a sparse layer one big texture). A preview
+      // reuses the last preview's read while the layer's version shows nothing has changed it.
+      const cached = filterSourceRef.current;
+      let sourceVersion: number | null = item.version;
+      const source = previewOnly && cached && cached.item === item && cached.version === item.version && cached.width === width && cached.height === height
+        ? cached.pixels
+        : (await lm.readAsync(item.model.id, [{ x: 0, y: 0, w: width, h: height }]))[0];
       if (request !== filterRequestRef.current) return false;
       const client = filterWorkerRef.current ??= new FilterWorkerClient();
-      const wantHistogram = previewOnly && Boolean(getFilter(filter.id)?.histogram) && !filterHistogramRef.current;
+      const def = getFilter(filter.id);
+      let wantHistogram = previewOnly && Boolean(def?.histogram) && !filterHistogramRef.current;
       // Line colour and gap filling can use the colour being painted with
       const values = { ...filter.values, currentColor: brushProps.color };
-      const result = await client.run(filter.id, new Uint8Array(source), width, height, values, mask, { histogram: wantHistogram });
-      const pixels = result?.output ?? null;
-      if (result?.histogram && request === filterRequestRef.current) {
-        filterHistogramRef.current = result.histogram;
-        setFilterHistogram(result.histogram);
-      }
-      if (!pixels || request !== filterRequestRef.current || tileEngineRef.current !== engine || activeLayerRef.current?.id !== item.model.id || getFilterLayer() !== item) return false;
-      if (previewOnly) {
+      const stale = () => request !== filterRequestRef.current || tileEngineRef.current !== engine ||
+        activeLayerRef.current?.id !== item.model.id || getFilterLayer() !== item;
+      const compute = async (draft: number) => {
+        const result = await client.run(filter.id, new Uint8Array(source), width, height, values, mask, { histogram: wantHistogram, draft });
+        if (result?.histogram && request === filterRequestRef.current) {
+          wantHistogram = false;
+          filterHistogramRef.current = result.histogram;
+          setFilterHistogram(result.histogram);
+        }
+        return result?.output ?? null;
+      };
+      const showPreview = (filtered: Uint8Array) => {
         if (filterPreviewRef.current?.item !== item) clearFilterPreview();
         const texture = filterPreviewRef.current?.texture ?? RenderTexture.create({ width, height, resolution: 1 });
         filterPreviewRef.current = { item, texture };
-        engine.writeRegion(texture, 0, 0, width, height, pixels);
+        engine.writeRegion(texture, 0, 0, width, height, filtered);
+        // Unchanged since the read: the read stays good for the next preview (taking the texture
+        // below counts as a possible change, so the version after it is the one kept)
+        const unchanged = sourceVersion !== null && item.version === sourceVersion;
         void item.renderTexture; // resident while previewing: its one sprite shows the preview texture
         item.sprite.texture = texture;
+        // Once something else changed the layer, the read is never kept again
+        sourceVersion = unchanged ? item.version : null;
+        filterSourceRef.current = unchanged ? { item, version: item.version, width, height, pixels: source } : null;
         requestRenderRef.current();
+      };
+
+      // A slow filter on a big layer: a draft from a shrunk copy first, then (unless the settings
+      // change again meanwhile) the full preview, which also is what Apply computes
+      const draft = previewOnly ? filterDraftFactor(def, width, height, coarsePointer()) : 0;
+      if (draft) {
+        const quick = await compute(draft);
+        if (!quick || stale()) return false;
+        showPreview(quick);
+        await new Promise((resolve) => setTimeout(resolve, FILTER_DRAFT_SETTLE_MS));
+        if (stale()) return false;
+      }
+      const pixels = await compute(0);
+      if (!pixels || stale()) return false;
+      if (previewOnly) {
+        showPreview(pixels);
         return true;
       }
 
@@ -2362,7 +2434,6 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         return false;
       }
       lm.writeRegion(item.model.id, 0, 0, width, height, pixels);
-      const def = getFilter(filter.id);
       const label = def ? filterLabel(def, t) : filter.id;
       scopedUndoRef.current.push({
         opId: `op_filter_${Date.now()}_${Math.random().toString(36).slice(2)}`,
@@ -2384,7 +2455,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       setPermissionWarning(t.filters.failed);
       return false;
     } finally {
-      if (request === filterRequestRef.current && !previewOnly) setFilterBusy(false);
+      if (request === filterRequestRef.current) {
+        if (previewOnly) showFilterRefining(false);
+        else setFilterBusy(false);
+      }
     }
   };
 
@@ -5507,7 +5581,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           hasSelection={hasSelectionState} onAlign={runAlign} onClose={() => setAlignOpen(false)} /></Suspense>
       </OverlayPresence>
       <OverlayPresence open={filterMenuOpen} kind="popover">
-        <Suspense fallback={null}><LayerFilterDialog key={layerFilterId ?? 'list'} filterId={layerFilterId} busy={filterBusy}
+        <Suspense fallback={null}><LayerFilterDialog key={layerFilterId ?? 'list'} filterId={layerFilterId} busy={filterBusy} refining={filterRefining}
           layerName={activeLayer?.name ?? ''} layerType={activeLayer?.layerType} histogram={filterHistogram} onChoose={chooseFilter} onBack={() => chooseFilter(null)} onClose={closeFilters}
           onPreview={filterCallbacks.parameters}
           onApply={(values) => layerFilterId ? runLayerFilter({ id: layerFilterId, values }, false) : Promise.resolve(false)} /></Suspense>

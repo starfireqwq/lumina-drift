@@ -355,6 +355,20 @@ html.atelier-theme-vt, html.atelier-theme-vt body { transition: none !important;
 .atelier-align-frame::after { bottom: 0; }
 .atelier-filter-group { position: relative; }
 .atelier-filter-group::after { bottom: 0; }
+/* Filter window: while a preview is still being worked out (a quick draft shows meanwhile on a big
+   layer), a streak of light keeps running along the top of the settings, just under the header.
+   Sticky at the top of the scrolling body, taking no room (the body's padding is 12px). */
+.atelier-filter-refine {
+  position: sticky; top: 0; z-index: 30; height: 1px; margin: -12px -12px 11px; pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgb(var(--a-400) / .9) 40%, rgb(251 113 133 / .9) 60%, transparent) no-repeat;
+  background-size: 40% 100%; background-position: -60% 0; opacity: 0;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .atelier-filter-refine[data-on='true'] { animation: atelierLightSweep 1.1s cubic-bezier(.3, .1, .2, 1) infinite; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .atelier-filter-refine[data-on='true'] { opacity: .8; background-position: 50% 0; }
+}
 .atelier-filter-point { transition: opacity .18s ease-out, scale .18s ease-out; }
 .atelier-filter-point[data-closing='true'] { opacity: 0; scale: .8; }
 .atelier-filter-point-ring .sweep { opacity: 0; }

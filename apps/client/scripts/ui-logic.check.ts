@@ -59,11 +59,11 @@ import { buildRoomShareUrl } from '../src/utils/serverLinks';
 import { apiErrorMessage, isForeignApiReply } from '../src/utils/apiErrors';
 import { translations, type Language } from '../src/locales';
 import {
-  DEFAULT_COMMUNITY_PRESETS, MIN_BRUSH_SPACING, PIXEL_FILTER_RUNNERS, distanceField, runPixelFilter, toneHistogram,
+  DEFAULT_COMMUNITY_PRESETS, MIN_BRUSH_SPACING, PIXEL_FILTER_RUNNERS, distanceField, downscale, runDraftFilter, runPixelFilter, toneHistogram, upscale,
   type CanvasModel, type FilterValues,
 } from '@atelier/shared';
 import {
-  BUILTIN_FILTERS, FILTER_GROUPS, defaultFilterValues, filterFitsLayer, filterGroupsInUse, filterPointParam, getFilter,
+  BUILTIN_FILTERS, FILTER_DRAFT, FILTER_GROUPS, defaultFilterValues, filterDraftFactor, filterFitsLayer, filterGroupsInUse, filterPointParam, getFilter,
   normalizeFilterValues, paramShown, snapRange,
 } from '../src/utils/filterRegistry';
 
@@ -921,6 +921,51 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   const blurred = runPixelFilter(PIXEL_FILTER_RUNNERS.box, source, width, height, { radius: 1 });
   assert.equal(blurred.length, source.length);
   assert.notDeepEqual(blurred, source, 'Blur changes the pixels');
+}
+
+// Draft previews: the registry and the runners agree, big layers only, a draft keeps what it leaves alone
+{
+  for (const def of BUILTIN_FILTERS) {
+    const draft = PIXEL_FILTER_RUNNERS[def.id]?.draft;
+    assert.equal(Boolean(def.draft), Boolean(draft), `${def.id}: the registry and the runner agree on a draft`);
+    for (const key of draft?.lengths ?? []) {
+      assert.ok(def.params.some((param) => param.key === key && param.kind === 'range'), `${def.id}.${key} (scaled in a draft) is a range parameter`);
+    }
+    for (const key of draft?.points ?? []) {
+      assert.ok(def.params.some((param) => param.key === key && param.kind === 'point'), `${def.id}.${key} (scaled in a draft) is a point`);
+    }
+  }
+  const glowDef = getFilter('glow')!;
+  assert.equal(filterDraftFactor(glowDef, 2000, 2000, false), 0, 'A layer up to the desktop limit previews in full');
+  assert.equal(filterDraftFactor(glowDef, 4000, 3000, false), 3, '4000 × 3000 on a desktop: a draft a third the size');
+  assert.equal(filterDraftFactor(glowDef, 2000, 1000, true), 2, 'Touch screens draft smaller layers');
+  assert.equal(filterDraftFactor(getFilter('unsharp')!, 8000, 8000, false), 0, 'Sharpening never drafts (it is all fine detail)');
+  assert.ok(FILTER_DRAFT.touch.above < FILTER_DRAFT.desktop.above);
+
+  // Shrink and stretch: a flat colour comes back the same, sizes round up
+  const flat = new Uint8Array(5 * 3 * 4).fill(200);
+  const small = downscale(flat, 5, 3, 2);
+  assert.deepEqual([small.width, small.height], [3, 2], 'Shrunk sizes round up');
+  assert.ok(small.pixels.every((value) => value === 200), 'A flat colour shrinks to itself');
+  assert.ok(upscale(small.pixels, 3, 2, 5, 3, 2).every((value) => value === 200), 'And stretches back to itself');
+
+  // A blot in one corner of a 64 × 48 layer, a selection over its left half
+  const width = 64, height = 48;
+  const source = new Uint8Array(width * height * 4);
+  for (let y = 4; y < 14; y++) for (let x = 4; x < 14; x++) source.set([240, 240, 240, 255], (y * width + x) * 4);
+  const mask = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) mask.fill(255, y * width, y * width + 32);
+  const drafted = runDraftFilter(PIXEL_FILTER_RUNNERS.gaussian, source, width, height, { radius: 4 }, mask, 2);
+  const full = runPixelFilter(PIXEL_FILTER_RUNNERS.gaussian, source, width, height, { radius: 4 }, mask);
+  assert.equal(drafted.length, source.length, 'A draft has the layer\'s size');
+  for (let p = 0; p < width * height; p++) {
+    const x = p % width, y = Math.floor(p / width);
+    if (x > 30 || y > 30) assert.deepEqual([...drafted.slice(p * 4, p * 4 + 4)], [...source.slice(p * 4, p * 4 + 4)], 'Outside the selection and far from the blot: untouched');
+  }
+  const at = (pixels: Uint8Array, x: number, y: number) => pixels[(y * width + x) * 4 + 3];
+  assert.ok(at(drafted, 16, 9) > 0 && Math.abs(at(drafted, 16, 9) - at(full, 16, 9)) < 48, 'Next to the blot the draft blurs about as far as the full filter');
+  assert.deepEqual(runDraftFilter(PIXEL_FILTER_RUNNERS.unsharp, source, width, height, { radius: 2 }, null, 3),
+    runPixelFilter(PIXEL_FILTER_RUNNERS.unsharp, source, width, height, { radius: 2 }), 'A filter without a draft runs in full');
 }
 
 // Filters with a centre turn round the given point, and fall back to the middle without one

@@ -27,15 +27,16 @@ export class FilterWorkerClient {
   /**
    * Runs a registered filter. `pixels` is handed over to the worker (its buffer is transferred).
    * With `histogram`, the reply also counts the layer's tones before filtering (the levels window).
+   * With `draft` (2 or more), a filter that allows it is worked out on a copy shrunk that many times.
    */
   run(id: string, pixels: Uint8Array<ArrayBuffer>, width: number, height: number, values: FilterValues, mask?: Uint8Array | null,
-    options?: { histogram?: boolean }) {
+    options?: { histogram?: boolean; draft?: number }) {
     this.clearIdle();
     const worker = this.ensure();
     const request = ++this.seq;
     return new Promise<FilterResult | null>((resolve, reject) => {
       this.pending.set(request, { resolve, reject, postedAt: performance.now() });
-      worker.postMessage({ request, id, pixels, width, height, values, mask, histogram: options?.histogram }, [pixels.buffer]);
+      worker.postMessage({ request, id, pixels, width, height, values, mask, histogram: options?.histogram, draft: options?.draft }, [pixels.buffer]);
     });
   }
 

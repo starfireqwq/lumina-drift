@@ -50,6 +50,8 @@ export interface FilterDef {
   pointRadius?: string;
   /** Shows the layer's tone histogram above the parameters */
   histogram?: boolean;
+  /** On a big layer the preview shows a quick draft first (matches the runner's `draft` in @atelier/shared) */
+  draft?: boolean;
 }
 
 /** What the worker is asked to run */
@@ -106,29 +108,29 @@ export const BUILTIN_FILTERS: readonly FilterDef[] = [
     center({ key: 'mode', is: ['radial'] }),
   ] },
   { id: 'mosaic', group: 'effect', label: 'mosaic', source: 'builtin', params: [range('cell', 'cellSize', 12, 2, 200)] },
-  { id: 'glow', group: 'effect', label: 'glow', source: 'builtin',
+  { id: 'glow', group: 'effect', label: 'glow', source: 'builtin', draft: true,
     params: [range('radius', 'radius', 16, 1, 64), range('strength', 'amount', 80, 0, 200), range('threshold', 'threshold', 160, 0, 254)] },
-  { id: 'outline', group: 'effect', label: 'outline', source: 'builtin', params: [
+  { id: 'outline', group: 'effect', label: 'outline', source: 'builtin', draft: true, params: [
     range('size', 'outlineWidth', 3, 1, 50),
     { kind: 'color', key: 'color', label: 'inkColor', initial: '#ffffff' },
     choice('position', 'position', [['outside', 'positionOutside'], ['inside', 'positionInside'], ['center', 'positionCenter']]),
   ] },
   { id: 'box', group: 'blur', label: 'box', source: 'builtin', params: [range('radius', 'radius', 4, 1, 32)] },
-  { id: 'gaussian', group: 'blur', label: 'gaussian', source: 'builtin', params: [range('radius', 'radius', 8, 1, 32)] },
-  { id: 'motionBlur', group: 'blur', label: 'motionBlur', source: 'builtin', params: [
+  { id: 'gaussian', group: 'blur', label: 'gaussian', source: 'builtin', draft: true, params: [range('radius', 'radius', 8, 1, 32)] },
+  { id: 'motionBlur', group: 'blur', label: 'motionBlur', source: 'builtin', draft: true, params: [
     range('distance', 'distance', 20, 1, 200), range('angle', 'angle', 0, -180, 180),
     choice('direction', 'direction', [['both', 'dirBoth'], ['forward', 'dirForward'], ['backward', 'dirBackward']]),
   ] },
-  { id: 'radialBlur', group: 'blur', label: 'radialBlur', source: 'builtin', params: [
+  { id: 'radialBlur', group: 'blur', label: 'radialBlur', source: 'builtin', draft: true, params: [
     range('strength', 'amount', 30, 1, 100),
     choice('direction', 'direction', [['both', 'dirBoth'], ['in', 'dirIn'], ['out', 'dirOut']]),
     center(),
   ] },
-  { id: 'spin', group: 'blur', label: 'spin', source: 'builtin', params: [range('angle', 'angle', 15, 1, 90), center()] },
+  { id: 'spin', group: 'blur', label: 'spin', source: 'builtin', draft: true, params: [range('angle', 'angle', 15, 1, 90), center()] },
   { id: 'soften', group: 'blur', label: 'soften', source: 'builtin', params: [], hint: 'softenHint' },
   { id: 'twirl', group: 'distort', label: 'twirl', source: 'builtin', pointRadius: 'radius',
     params: [range('radius', 'radius', 300, 10, 2000), range('angle', 'angle', 135, -360, 360), center()] },
-  { id: 'wave', group: 'distort', label: 'wave', source: 'builtin', params: [
+  { id: 'wave', group: 'distort', label: 'wave', source: 'builtin', draft: true, params: [
     choice('direction', 'direction', [['horizontal', 'waveHorizontal'], ['vertical', 'waveVertical'], ['both', 'waveBoth']]),
     range('amplitude', 'amplitude', 10, 1, 200), range('wavelength', 'wavelength', 120, 4, 2000),
   ] },
@@ -157,6 +159,23 @@ export const filterPointParam = (def: FilterDef | null | undefined) =>
 /** Whether a parameter applies with these settings (see `when`) */
 export const paramShown = (param: FilterParam, values: FilterValues) =>
   !param.when || param.when.is.includes(values[param.when.key] as string | boolean);
+
+/**
+ * Draft previews: a layer above `above` pixels previews a draft filter on a copy shrunk to about
+ * `target` pixels first, then in full. Touch devices (slower) start sooner.
+ */
+export const FILTER_DRAFT = {
+  desktop: { above: 4_000_000, target: 1_500_000 },
+  touch: { above: 1_500_000, target: 600_000 },
+} as const;
+
+/** How many times smaller the draft preview is worked out: 0 for none (the filter or the layer is too small to need one) */
+export function filterDraftFactor(def: FilterDef | null | undefined, width: number, height: number, touch: boolean) {
+  if (!def?.draft) return 0;
+  const { above, target } = touch ? FILTER_DRAFT.touch : FILTER_DRAFT.desktop;
+  const area = width * height;
+  return area > above ? Math.max(2, Math.ceil(Math.sqrt(area / target))) : 0;
+}
 
 /** Line-art fixes read alpha as ink, so they stay off masks (whose grey is the mask itself) */
 export const filterFitsLayer = (def: FilterDef, layerType: string | undefined) => !(def.group === 'lineart' && layerType === 'mask');

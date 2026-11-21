@@ -205,9 +205,11 @@ export const HELP_TOPICS: HelpTopic[] = [
       '球面化：強度正值往外凸、負值往內縮；「扁平」可以把圓壓成橢圓。',
       '外框線可以畫在外側、內側，或跨在邊上；發光會讓比門檻亮的部分向外暈開。',
       '進階銳化的「門檻」越高，越只處理明顯的邊緣，平滑的區域就不會變粗糙。',
+      '畫布很大時（手機和平板的門檻較低），發光、外框線、高斯模糊、動態模糊、放射模糊、旋轉模糊和波浪會先顯示較粗的草稿，參數停下來後再換成完整結果。標題下方有流光在跑，表示預覽還在計算；套用時一律以完整解析度計算。',
     ],
     keywords: ['效果', '馬賽克', '發光', '光暈', '外框線', '描邊', '色差', '放射狀', '動態模糊', '放射模糊', '柔化', '波浪', '球面化', '魚眼', '銳化', 'USM', '中心點',
-      'mosaic', 'glow', 'outline', 'stroke', 'motion blur', 'zoom blur', 'radial blur', 'soften', 'wave', 'spherize', 'fisheye', 'sharpen', 'unsharp mask'],
+      '草稿預覽', '預覽很慢', '大畫布',
+      'mosaic', 'glow', 'outline', 'stroke', 'motion blur', 'zoom blur', 'radial blur', 'soften', 'wave', 'spherize', 'fisheye', 'sharpen', 'unsharp mask', 'draft preview'],
   },
 
   // ---- 選取與變形

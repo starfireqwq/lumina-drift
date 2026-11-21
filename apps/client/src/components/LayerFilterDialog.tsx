@@ -18,6 +18,8 @@ interface Props {
   /** The layer's tone counts (levels), once the first preview has counted them */
   histogram?: Uint32Array | null;
   busy: boolean;
+  /** The preview is still being worked out (a quick draft shows meanwhile on a big layer) */
+  refining?: boolean;
   onChoose: (id: string) => void;
   onBack: () => void;
   onPreview: (values: FilterValues | null) => void;
@@ -36,7 +38,7 @@ const readGroup = (groups: FilterGroup[]) => {
   }
 };
 
-export function LayerFilterDialog({ filterId, layerName, layerType, histogram, busy, onChoose, onBack, onPreview, onApply, onClose }: Props) {
+export function LayerFilterDialog({ filterId, layerName, layerType, histogram, busy, refining = false, onChoose, onBack, onPreview, onApply, onClose }: Props) {
   const { t } = useI18n();
   const phone = usePhoneLayout();
   const definition = getFilter(filterId);
@@ -151,8 +153,10 @@ export function LayerFilterDialog({ filterId, layerName, layerType, histogram, b
           </button>
         </>
       ) : undefined}>
-      {!definition ? menu : (
-        <div className="space-y-3">
+      {!definition ? menu : (<>
+        {/* A streak of light keeps running under the header while the preview is being worked out */}
+        <div aria-hidden className="atelier-filter-refine" data-on={refining && preview} />
+        <div className="space-y-3" aria-busy={refining && preview}>
           {definition.hint && <p className="text-neutral-300">{t.filters[definition.hint]}</p>}
           {definition.histogram && <ToneHistogram data={histogram ?? null} values={values} />}
           {definition.params.filter((param) => paramShown(param, values)).map((param, index, shown) => (
@@ -167,7 +171,7 @@ export function LayerFilterDialog({ filterId, layerName, layerType, histogram, b
             </div>
           ))}
         </div>
-      )}
+      </>)}
     </ToolWindow>
   );
 }
