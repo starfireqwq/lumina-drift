@@ -2,6 +2,7 @@ import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo
 import type { PluginAction, PluginManifestV2 } from '../plugins/pluginApi';
 import type { PluginV2Result } from '../plugins/pluginRpc';
 import { PluginCanvasTransaction, type PluginCanvasHostAdapter } from '../plugins/pluginCanvasBridge';
+import { createSelectionEngineBridge } from '../plugins/pluginSelectionBridge';
 import { Application, Container, type Filter, Graphics, MaskFilter, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
 
 function parseWorkspaceBgColor(cssColor: string, fallback = 0x0d0e12): number {
@@ -3166,6 +3167,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const undoNow = async () => {
     const effectiveUserId = userRef.current?.id || user?.id || 'guest';
     const ops = scopedUndoRef.current.undoGroup(effectiveUserId, (layerId, candidate) => {
+      if (
+        candidate?.selectionBefore !== undefined &&
+        !candidate.beforeTiles.length &&
+        !candidate.afterTiles.length &&
+        !candidate.layerCreated &&
+        !candidate.layerRemoved
+      ) {
+        return true;
+      }
       const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model;
       return Boolean(target && (target.ownerId === effectiveUserId || canEditPixels(target)));
     });
@@ -3259,6 +3269,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const effectiveUserId = userRef.current?.id || user?.id || 'guest';
     const ops = scopedUndoRef.current.redoGroup(effectiveUserId, (layerId, candidate) => {
       if (undoneLayerIdsRef.current.has(layerId)) return true; // a layer undo took away
+      if (
+        candidate?.selectionAfter !== undefined &&
+        !candidate.beforeTiles.length &&
+        !candidate.afterTiles.length &&
+        !candidate.layerCreated &&
+        !candidate.layerRemoved
+      ) {
+        return true;
+      }
       const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model;
       return Boolean(target && (target.ownerId === effectiveUserId || canEditPixels(target)));
     });
@@ -5034,6 +5053,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         updateUndoRedoState();
         requestRenderRef.current();
       },
+      selection: selectionEngineRef.current
+        ? createSelectionEngineBridge(selectionEngineRef.current, () => selection.refreshSelection())
+        : undefined,
     };
 
     const tx = new PluginCanvasTransaction(adapter);

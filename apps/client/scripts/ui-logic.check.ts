@@ -67,6 +67,7 @@ import {
   straightToPremultiplied,
   type PluginCanvasHostAdapter,
 } from '../src/plugins/pluginCanvasBridge';
+import { createHeadlessSelectionBridge } from '../src/plugins/pluginSelectionBridge';
 import type { LayerModel } from '@atelier/shared';
 import { verticalRuns } from '../src/engine/textLayer';
 import { deleteAnchor, isCornerAnchor, moveHandle, penPointsToAnchors, toggleCorner } from '../src/engine/vectorEditing';
@@ -2750,6 +2751,231 @@ await (async () => {
     const viewerTx = new PluginCanvasTransaction(viewerMock.adapter);
     await assert.rejects(viewerTx.createRpcHandler()('layers.create', { name: 'Viewer Layer' }), /Viewers/);
     await viewerTx.rollback();
+  }
+})();
+
+// Plugin API v2.0 Batch 4: Selection API (geometry, mask tiles, expand/contract/feather/invert/clear) & respectSelection
+await (async () => {
+  const W = 64;
+  const H = 64;
+  const TS = 64;
+  const makeSelMock = () => {
+    const selection = createHeadlessSelectionBridge(W, H);
+    const layer: LayerModel = {
+      id: 'l1', canvasId: 'c1', ownerId: 'u1', parentId: null, name: 'Paint',
+      layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+      alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+      sortOrder: 10, createdAt: 1, updatedAt: 1,
+    };
+    let tile = new Uint8Array(TS * TS * 4);
+    const undo = new ScopedUndoManager();
+
+    const adapter: PluginCanvasHostAdapter = {
+      canvasWidth: W,
+      canvasHeight: H,
+      tileSize: TS,
+      acl: {
+        user: { id: 'u1', username: 'alice', displayName: 'Alice', serverRole: 'user' },
+        isGuest: false,
+        canvasMember: null,
+      },
+      getLayers: () => [layer],
+      getActiveLayerId: () => 'l1',
+      setActiveLayer: () => {},
+      createLayer: async () => null,
+      updateLayerProps: async () => {},
+      reorderLayers: async () => {},
+      deleteLayer: async () => false,
+      restoreDeletedLayer: async () => null,
+      getOccupiedTiles: () => [{ col: 0, row: 0 }],
+      readLayerTile: async () => tile.slice(),
+      readLayerRect: async (_id, rect) => {
+        const out = new Uint8Array(rect.width * rect.height * 4);
+        for (let y = 0; y < rect.height; y++) {
+          const src = ((rect.y + y) * TS + rect.x) * 4;
+          out.set(tile.subarray(src, src + rect.width * 4), y * rect.width * 4);
+        }
+        return out;
+      },
+      readCompositeRect: async (rect) => new Uint8Array(rect.width * rect.height * 4),
+      applyLayerTiles: (_id, tiles) => {
+        if (tiles[0]) tile = (tiles[0].data as Uint8Array).slice();
+      },
+      commitTilePatch: () => {},
+      pushUndoOp: (op) => undo.push(op),
+      selection,
+    };
+    return { adapter, selection, getTile: () => tile, undo };
+  };
+
+  const makeManifest = (script: string, permissions: PluginManifestV2['permissions']): PluginManifestV2 =>
+    parsePlugin({
+      apiVersion: 2,
+      id: 'lumina.b4-test',
+      name: 'B4 Test',
+      version: '1.0.0',
+      author: 'Tester',
+      description: 'Batch 4 selection tests',
+      permissions,
+      commands: [{ id: 'sel', label: 'Sel' }],
+      script,
+    }) as PluginManifestV2;
+
+  // 1. Geometry selections (rect, ellipse, polygon), tiled writeMask/readMask, expand/contract/feather/invert/clear
+  {
+    const mock = makeSelMock();
+    const tx = new PluginCanvasTransaction(mock.adapter);
+    const manifest = makeManifest(
+      `async function onCommand(_id, api) {
+        const init = await api.selection.getInfo();
+        if (init.hasSelection !== false || init.bounds !== null) throw new Error('Expected empty selection');
+
+        await api.selection.selectRect({ x: 10, y: 10, width: 10, height: 10 }, 'replace');
+        const info1 = await api.selection.getInfo();
+        if (!info1.hasSelection || info1.bounds.x !== 10 || info1.bounds.width !== 10) {
+          throw new Error('selectRect bounds mismatch');
+        }
+
+        // Subtract inner 4x4 hole
+        await api.selection.selectRect({ x: 13, y: 13, width: 4, height: 4 }, 'subtract');
+        const hole = await api.selection.readMask({ x: 13, y: 13, width: 1, height: 1 });
+        const rim = await api.selection.readMask({ x: 10, y: 10, width: 1, height: 1 });
+        if (hole.data[0] !== 0 || rim.data[0] !== 255) throw new Error('subtract failed');
+
+        // Expand & contract
+        await api.selection.selectRect({ x: 20, y: 20, width: 10, height: 10 }, 'replace');
+        await api.selection.expand(2);
+        const expInfo = await api.selection.getInfo();
+        if (expInfo.bounds.x !== 18 || expInfo.bounds.width !== 14) throw new Error('expand failed');
+        await api.selection.contract(2);
+        const conInfo = await api.selection.getInfo();
+        if (conInfo.bounds.x !== 20 || conInfo.bounds.width !== 10) throw new Error('contract failed');
+
+        // Ellipse & Polygon
+        await api.selection.selectEllipse({ x: 4, y: 4, width: 12, height: 12 }, 'replace');
+        const center = await api.selection.readMask({ x: 10, y: 10, width: 1, height: 1 });
+        const corner = await api.selection.readMask({ x: 4, y: 4, width: 1, height: 1 });
+        if (center.data[0] !== 255 || corner.data[0] !== 0) throw new Error('ellipse mask mismatch');
+
+        await api.selection.selectPolygon([{ x: 10, y: 10 }, { x: 20, y: 10 }, { x: 15, y: 20 }], 'replace');
+        const triCenter = await api.selection.readMask({ x: 15, y: 13, width: 1, height: 1 });
+        if (triCenter.data[0] !== 255) throw new Error('polygon mask mismatch');
+
+        // Invert & Clear
+        await api.selection.invert();
+        const invCorner = await api.selection.readMask({ x: 0, y: 0, width: 1, height: 1 });
+        if (invCorner.data[0] !== 255) throw new Error('invert failed');
+        await api.selection.clear();
+        if ((await api.selection.getInfo()).hasSelection) throw new Error('clear failed');
+
+        // Tiled writeMask + feather
+        await api.selection.writeMask({ x: 2, y: 2, width: 4, height: 4, data: new Uint8Array(16).fill(255) }, 'replace');
+        await api.selection.writeMask({ x: 6, y: 2, width: 4, height: 4, data: new Uint8Array(16).fill(128) }, 'replace');
+        const stitched = await api.selection.readMask({ x: 2, y: 2, width: 8, height: 1 });
+        if (stitched.data[0] !== 255 || stitched.data[4] !== 128) throw new Error('tiled writeMask failed');
+        await api.selection.feather(2);
+        const edge = await api.selection.readMask({ x: 1, y: 3, width: 1, height: 1 });
+        if (edge.data[0] <= 0 || edge.data[0] >= 255) throw new Error('feather did not soften edge: ' + edge.data[0]);
+
+        return { notice: 'sel-ok' };
+      }`,
+      ['commands', 'selection'],
+    );
+    const res = await startPluginV2Direct(
+      manifest,
+      { kind: 'command', commandId: 'sel' },
+      { width: W, height: H, dpi: 300 },
+      tx.createRpcHandler(),
+    ).promise;
+    assert.equal(res.notice, 'sel-ok');
+    tx.commit('Plugin: B4 Test');
+    const ops = mock.undo.undoGroup('u1');
+    assert.equal(ops.length, 1);
+    assert.equal(ops[0].opType, 'PLUGIN_SELECTION');
+    assert.equal(ops[0].selectionBefore, null);
+    assert.ok(ops[0].selectionAfter && ops[0].selectionAfter.activePixelCount > 0);
+  }
+
+  // 2. pixels.write respectSelection default (true) vs explicit false (requires selection permission) & feathered blend
+  {
+    const mock = makeSelMock();
+    // Create a 2x1 mask at (0,0): x=0 is 255, x=1 is 128; x=2 is outside selection (0)
+    mock.selection.writeMaskRect({ x: 0, y: 0, width: 2, height: 1 }, new Uint8Array([255, 128]), 'replace');
+
+    // Run A: pixels:write only (default respectSelection = true)
+    const txA = new PluginCanvasTransaction(mock.adapter);
+    const manifestA = makeManifest(
+      `async function onCommand(_id, api) {
+        const red = new Uint8Array([255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255]);
+        await api.pixels.write('l1', { x: 0, y: 0, width: 3, height: 1, data: red });
+      }`,
+      ['commands', 'pixels:write'],
+    );
+    await startPluginV2Direct(
+      manifestA,
+      { kind: 'command', commandId: 'sel' },
+      { width: W, height: H, dpi: 300 },
+      txA.createRpcHandler(),
+    ).promise;
+    txA.commit('Plugin: Respect Selection');
+    const tA = mock.getTile();
+    assert.deepEqual([...tA.subarray(0, 4)], [255, 0, 0, 255], 'Selected pixel (255) written fully');
+    assert.equal(tA[4], 128, 'Feathered selection pixel (128) blended half strength');
+    assert.equal(tA[7], 128, 'Feathered selection alpha blended half strength');
+    assert.deepEqual([...tA.subarray(8, 12)], [0, 0, 0, 0], 'Unselected pixel (0) left untouched');
+
+    // Run B: pixels:write + selection permission with explicit respectSelection: false overwrites x=2
+    const txB = new PluginCanvasTransaction(mock.adapter);
+    const manifestB = makeManifest(
+      `async function onCommand(_id, api) {
+        const blue = new Uint8Array([0, 0, 255, 255]);
+        await api.pixels.write('l1', { x: 2, y: 0, width: 1, height: 1, data: blue, respectSelection: false });
+      }`,
+      ['commands', 'pixels:write', 'selection'],
+    );
+    await startPluginV2Direct(
+      manifestB,
+      { kind: 'command', commandId: 'sel' },
+      { width: W, height: H, dpi: 300 },
+      txB.createRpcHandler(),
+    ).promise;
+    txB.commit('Plugin: Ignore Selection');
+    assert.deepEqual([...mock.getTile().subarray(8, 12)], [0, 0, 255, 255], 'Explicit respectSelection:false writes outside selection');
+  }
+
+  // 3. Rollback restores original selection snapshot on plugin failure & rejects invalid radius/polygon
+  {
+    const mock = makeSelMock();
+    mock.selection.selectRect({ x: 5, y: 5, width: 6, height: 6 }, 'replace');
+    const tx = new PluginCanvasTransaction(mock.adapter);
+    const failManifest = makeManifest(
+      `async function onCommand(_id, api) {
+        await api.selection.clear();
+        throw new Error('Abort after clearing selection');
+      }`,
+      ['commands', 'selection'],
+    );
+    await assert.rejects(
+      startPluginV2Direct(
+        failManifest,
+        { kind: 'command', commandId: 'sel' },
+        { width: W, height: H, dpi: 300 },
+        tx.createRpcHandler(),
+      ).promise,
+      /Abort after clearing selection/,
+    );
+    await tx.rollback();
+    const restored = mock.selection.getInfo();
+    assert.equal(restored.hasSelection, true, 'Rollback restores pre-existing selection');
+    assert.deepEqual(restored.bounds, { x: 5, y: 5, width: 6, height: 6 });
+
+    // Validation bounds: radius 0 or 129 rejected, polygon < 3 or > 4096 rejected
+    const tx2 = new PluginCanvasTransaction(mock.adapter);
+    const rpc = tx2.createRpcHandler();
+    await assert.rejects(rpc('selection.expand', { radius: 0 }), /1 and 128/);
+    await assert.rejects(rpc('selection.feather', { radius: 129 }), /1 and 128/);
+    await assert.rejects(rpc('selection.selectPolygon', { points: [{ x: 0, y: 0 }, { x: 1, y: 1 }] }), /between 3 and 4096/);
+    await tx2.rollback();
   }
 })();
 console.log('ui-logic checks passed');
