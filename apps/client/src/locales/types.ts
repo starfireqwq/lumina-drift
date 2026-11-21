@@ -746,6 +746,9 @@ export interface Translations {
       despeckle: string;
       extractLines: string;
       lineColor: string;
+      mosaic: string;
+      glow: string;
+      outline: string;
     };
     /** Parameter names; a select's option names share this table */
     params: {
@@ -785,6 +788,15 @@ export interface Translations {
       keepColor: string;
       useCurrent: string;
       inkColor: string;
+      chromaShift: string;
+      chromaRadial: string;
+      spread: string;
+      cellSize: string;
+      outlineWidth: string;
+      position: string;
+      positionOutside: string;
+      positionInside: string;
+      positionCenter: string;
     };
   };
 

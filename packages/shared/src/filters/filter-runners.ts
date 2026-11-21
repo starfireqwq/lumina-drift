@@ -10,6 +10,7 @@ import {
 } from './pixel-filters';
 import { adjustColor, grayscalePixels, levelsLut, mapChannels, thresholdPixels } from './color-filters';
 import { changeLineWidth, despeckle, extractLines, recolorLines } from './lineart-filters';
+import { boxBlur, glow, mosaic, outline, radialChromatic } from './effect-filters';
 
 /** A '#rrggbb' setting, or the fallback */
 function filterColor(values: FilterValues, key: string, fallback: string) {
@@ -51,30 +52,6 @@ export function filterChoice<T extends string>(values: FilterValues, key: string
   return choices.includes(value as T) ? value as T : choices[0];
 }
 
-function blurBox(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, radius: number) {
-  const r = Math.max(1, Math.round(radius));
-  const horizontal = new Uint8Array(pixels.length);
-  const output = new Uint8Array(pixels.length);
-  const span = r * 2 + 1;
-  const pass = (source: ArrayLike<number>, target: Uint8Array, length: number, lines: number, stride: number, lineStride: number) => {
-    for (let line = 0; line < lines; line++) {
-      const base = line * lineStride;
-      for (let channel = 0; channel < 4; channel++) {
-        let sum = 0;
-        for (let k = -r; k <= r; k++) sum += source[base + Math.min(length - 1, Math.max(0, k)) * stride + channel];
-        for (let at = 0; at < length; at++) {
-          target[base + at * stride + channel] = Math.round(sum / span);
-          sum -= source[base + Math.max(0, at - r) * stride + channel];
-          sum += source[base + Math.min(length - 1, at + r + 1) * stride + channel];
-        }
-      }
-    }
-  };
-  pass(pixels, horizontal, width, height, 4, width * 4);
-  pass(horizontal, output, height, width, width * 4, 4);
-  return output;
-}
-
 function spinBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, degrees: number, cx: number, cy: number) {
   const result = new Uint8Array(pixels.length);
   const samples = Array.from({ length: 13 }, (_, index) => {
@@ -101,7 +78,7 @@ function spinBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, height:
 
 /** Built-in filters. Each id matches an entry of the client's filter registry. */
 export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> = {
-  box: { run: ({ pixels, width, height }, v) => blurBox(pixels, width, height, filterNumber(v, 'radius', 4)) },
+  box: { run: ({ pixels, width, height }, v) => boxBlur(pixels, width, height, filterNumber(v, 'radius', 4)) },
   gaussian: { run: (ctx, v) => applyGaussianBlur(ctx, filterNumber(v, 'radius', 8)) },
   spin: {
     run: ({ pixels, width, height }, v) => {
@@ -165,7 +142,25 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
     run: ({ pixels }, v) => recolorLines(pixels, v.useCurrent === false ? filterColor(v, 'color', '#000000') : currentColor(v)),
   },
   noise: { colorOnly: true, run: (ctx, v) => applyNoiseGrain(ctx, filterNumber(v, 'amount', 25) / 100, filterNumber(v, 'grain', 1)) },
-  chromatic: { colorOnly: true, run: (ctx, v) => applyChromaticAberration(ctx, filterNumber(v, 'offsetX', 6), filterNumber(v, 'offsetY', 0)) },
+  chromatic: {
+    colorOnly: true,
+    run: (ctx, v) => {
+      if (filterChoice(v, 'mode', ['shift', 'radial'] as const) === 'shift') {
+        return applyChromaticAberration(ctx, filterNumber(v, 'offsetX', 6), filterNumber(v, 'offsetY', 0));
+      }
+      const center = filterPoint(v, 'center', ctx.width, ctx.height);
+      return radialChromatic(ctx.pixels, ctx.width, ctx.height, center.x, center.y, filterNumber(v, 'spread', 8));
+    },
+  },
+  mosaic: { run: ({ pixels, width, height }, v) => mosaic(pixels, width, height, filterNumber(v, 'cell', 12)) },
+  glow: {
+    run: ({ pixels, width, height }, v) =>
+      glow(pixels, width, height, filterNumber(v, 'radius', 16), filterNumber(v, 'strength', 80), filterNumber(v, 'threshold', 160)),
+  },
+  outline: {
+    run: ({ pixels, width, height }, v) => outline(pixels, width, height, filterNumber(v, 'size', 3), filterColor(v, 'color', '#ffffff'),
+      filterChoice(v, 'position', ['outside', 'inside', 'center'] as const)),
+  },
   halftone: {
     colorOnly: true,
     run: (ctx, v) => applyHalftoneDot(ctx, filterNumber(v, 'density', 45), radians(filterNumber(v, 'angle', 45)), filterNumber(v, 'dotSize', 1)),

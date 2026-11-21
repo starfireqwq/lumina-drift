@@ -1051,6 +1051,43 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
     'Or a chosen colour');
 }
 
+// 效果: radial colour split, mosaic, glow and outline
+{
+  const W = 9, H = 9;
+  const run = (id: string, values: FilterValues, pixels: Uint8Array) => runPixelFilter(PIXEL_FILTER_RUNNERS[id], pixels, W, H, values);
+  const pixelAt = (pixels: Uint8Array, x: number, y: number) => [...pixels.slice((y * W + x) * 4, (y * W + x) * 4 + 4)];
+
+  const ramp = picture(W, H, (x) => [x * 28, 0, 255 - x * 28, 255]);
+  const split = run('chromatic', { mode: 'radial', spread: 6, center: { x: 0, y: 4 } }, ramp);
+  assert.ok(pixelAt(split, 8, 4)[0] < pixelAt(ramp, 8, 4)[0], 'Far from the centre, red comes from nearer it');
+  assert.deepEqual(pixelAt(split, 0, 4), pixelAt(ramp, 0, 4), 'The centre itself does not move');
+  assert.deepEqual(run('chromatic', { offsetX: 2 }, ramp), run('chromatic', { mode: 'shift', offsetX: 2 }, ramp), 'Settings stored before the mode existed still shift');
+
+  const checker = picture(4, 4, (x, y) => ((x + y) % 2 ? [255, 255, 255, 255] : [0, 0, 0, 255]));
+  const tiles = runPixelFilter(PIXEL_FILTER_RUNNERS.mosaic, checker, 4, 4, { cell: 2 });
+  for (let p = 0; p < 16; p++) assert.deepEqual([...tiles.slice(p * 4, p * 4 + 4)], [128, 128, 128, 255], 'Each cell is the average of what it covers');
+
+  const spark = picture(W, H, (x, y) => (x === 4 && y === 4 ? [255, 255, 255, 255] : null));
+  const glowed = run('glow', { radius: 4, strength: 100, threshold: 0 }, spark);
+  assert.ok(alphaAt(glowed, W, 5, 4) > 0, 'The halo spills onto clear pixels');
+  assert.deepEqual(pixelAt(glowed, 4, 4), [255, 255, 255, 255], 'The bright pixel stays');
+  const ember = picture(W, H, (x, y) => (x === 4 && y === 4 ? [40, 40, 40, 255] : null));
+  assert.deepEqual(run('glow', { radius: 4, strength: 100, threshold: 200 }, ember), ember, 'Nothing above the threshold: no glow');
+
+  const block = picture(W, H, (x, y) => (x >= 3 && x <= 5 && y >= 3 && y <= 5 ? [0, 0, 0, 255] : null));
+  const outside = run('outline', { size: 1, color: '#ff0000', position: 'outside' }, block);
+  assert.deepEqual(pixelAt(outside, 6, 4), [255, 0, 0, 255], 'Outside: the pixel next to the shape is stroked');
+  assert.equal(alphaAt(outside, W, 7, 4), 0, 'Two pixels out stays clear');
+  assert.deepEqual(pixelAt(outside, 5, 4), [0, 0, 0, 255], 'The shape itself is untouched');
+  const inside = run('outline', { size: 1, color: '#ff0000', position: 'inside' }, block);
+  assert.deepEqual(pixelAt(inside, 5, 4), [255, 0, 0, 255], 'Inside: the shape edge is stroked');
+  assert.deepEqual(pixelAt(inside, 4, 4), [0, 0, 0, 255], 'Its middle is not');
+  assert.equal(alphaAt(inside, W, 6, 4), 0, 'Nothing outside');
+  const straddle = run('outline', { size: 2, color: '#ff0000', position: 'center' }, block);
+  assert.deepEqual(pixelAt(straddle, 6, 4), [255, 0, 0, 255], 'On the edge: half outside');
+  assert.deepEqual(pixelAt(straddle, 5, 4), [255, 0, 0, 255], 'and half inside');
+}
+
 // 對齊 L1: basis, whole-pixel offsets, off-canvas parts, and a pixel-level run of the move
 {
   assert.equal(resolveAlignBasis('auto', false), 'canvas', 'Auto without a selection uses the canvas');
