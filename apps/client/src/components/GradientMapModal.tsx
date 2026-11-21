@@ -6,11 +6,13 @@ import {
 } from '@atelier/shared';
 import { Blend, Check, Eye, Plus, Trash2 } from 'lucide-react';
 import { ToolWindow } from './workspace/ToolWindow';
+import { FilterTargetBar, type FilterTargetOptions } from './FilterTargetBar';
 import { useI18n } from '../context/I18nContext';
 
 interface GradientMapModalProps {
   isOpen: boolean;
   busy: boolean;
+  target?: FilterTargetOptions;
   onClose: () => void;
   onApply: (stops: GradientStop[], opacity: number) => Promise<boolean>;
   onPreview?: (stops: GradientStop[] | null, opacity: number) => void;
@@ -19,6 +21,7 @@ interface GradientMapModalProps {
 export const GradientMapModal: React.FC<GradientMapModalProps> = ({
   isOpen,
   busy,
+  target,
   onClose,
   onApply,
   onPreview,
@@ -52,7 +55,7 @@ export const GradientMapModal: React.FC<GradientMapModalProps> = ({
     } else if (onPreview) {
       onPreview(null, opacity);
     }
-  }, [isOpen, busy, livePreview, stops, opacity, onPreview]);
+  }, [isOpen, busy, livePreview, stops, opacity, onPreview, target?.applyToNewLayer, target?.includeBackground]);
 
   if (!isOpen) return null;
 
@@ -205,6 +208,7 @@ export const GradientMapModal: React.FC<GradientMapModalProps> = ({
             <input type="checkbox" checked={livePreview} onChange={(e) => setLivePreview(e.target.checked)} />
             <Eye className="h-3.5 w-3.5 text-neutral-400" />{t.common.preview}
           </label>
+          <FilterTargetBar target={target} busy={busy} />
         </div>
     </ToolWindow>
   );

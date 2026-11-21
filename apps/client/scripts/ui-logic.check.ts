@@ -69,6 +69,7 @@ import {
   normalizeFilterValues, paramShown, snapRange,
 } from '../src/utils/filterRegistry';
 import { COLOR_ADJUST_PRESETS, matchColorPreset } from '../src/utils/filterPresets';
+import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../src/utils/filterMemoryGuard';
 
 const hex = (channels: string) => `#${channels.split(' ').map((n) => Number(n).toString(16).padStart(2, '0')).join('')}`;
 
@@ -1513,6 +1514,38 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
     assert.equal(matchColorPreset(preset.values), preset.id, `matchColorPreset identifies ${preset.id}`);
   }
   assert.equal(matchColorPreset({ ...COLOR_ADJUST_PRESETS[1].values, brightness: 99 }), null, 'Tweaked preset becomes custom (null)');
+
+  // Apply-to-new-layer memory guard, sparse tile pruning, and above-active placement
+  assert.equal(assessFilterCompositeMemory(2000, 2000, false).tier, 'ok', '2000×2000 desktop composite is ok');
+  assert.equal(assessFilterCompositeMemory(5000, 4000, false).tier, 'warn', '20M px desktop composite warns & forces draft');
+  assert.equal(assessFilterCompositeMemory(10000, 8000, false).tier, 'confirm', '80M px desktop composite asks confirmation');
+  assert.equal(assessFilterCompositeMemory(2000, 2000, true).tier, 'ok', '4M px touch composite is ok');
+  assert.equal(assessFilterCompositeMemory(3000, 2000, true).tier, 'warn', '6M px touch composite warns');
+  assert.equal(assessFilterCompositeMemory(4000, 3500, true).tier, 'confirm', '14M px touch composite asks confirmation');
+  assert.equal(assessFilterCompositeMemory(5000, 4000, true).tier, 'block', '20M px touch composite is blocked to prevent OOM');
+
+  const sparse = new Uint8Array(512 * 256 * 4);
+  sparse[(10 * 512 + 300) * 4 + 3] = 200; // only tile (col=1, row=0) has alpha > 0
+  const pruned = filterNonEmptyTileCoords(sparse, 512, 256, 256, [{ col: 0, row: 0 }, { col: 1, row: 0 }]);
+  assert.deepEqual(pruned, [{ col: 1, row: 0 }], 'Empty tiles are pruned when writing to a new filtered layer');
+
+  const sampleLayers = [
+    { id: 'bg', layerType: 'raster', parentId: null, sortOrder: 1 },
+    { id: 'grp', layerType: 'group', parentId: null, sortOrder: 2 },
+    { id: 'child', layerType: 'raster', parentId: 'grp', sortOrder: 3 },
+    { id: 'msk', layerType: 'mask', parentId: 'child', sortOrder: 4 },
+    { id: 'top', layerType: 'raster', parentId: null, sortOrder: 5 },
+  ];
+  const pRaster = filterNewLayerPlacement(sampleLayers[0], sampleLayers);
+  assert.equal(pRaster.afterLayerId, 'bg', 'New layer inserts directly above active raster layer');
+  assert.equal(pRaster.overlayZIndex, 1.5, 'Preview overlay sits directly above active layer');
+  const pMask = filterNewLayerPlacement(sampleLayers[3], sampleLayers);
+  assert.equal(pMask.afterLayerId, 'child', 'Active mask places new layer above its host layer');
+  assert.equal(pMask.parentId, 'grp', 'and keeps host layer parent');
+  const pGroup = filterNewLayerPlacement(sampleLayers[1], sampleLayers);
+  assert.equal(pGroup.afterLayerId, 'grp', 'Active group places new layer above the group');
+  assert.equal(pGroup.parentId, null, 'as a sibling of the group');
+  assert.equal(pGroup.overlayZIndex, 4.5, 'and preview sits above all group descendants');
 }
 
 // 對齊 L1: basis, whole-pixel offsets, off-canvas parts, and a pixel-level run of the move

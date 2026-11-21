@@ -147,6 +147,9 @@ import { VectorEngine } from '../engine/VectorEngine';
 import { filterDraftFactor, filterFitsLayer, filterLabel, filterPointParam, getFilter, type FilterJob } from '../utils/filterRegistry';
 import { filterPoint } from '../utils/filterPoint';
 import { FilterWorkerClient } from '../engine/filterWorkerClient';
+import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../utils/filterMemoryGuard';
+import type { FilterTargetOptions } from './FilterTargetBar';
+import { AtelierModal, modalButton } from './AtelierModal';
 import { AlertCircle, ImagePlus, Keyboard, Layers, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
 import { type DroppedImages, type ImageDropTarget, ImageImportError, imageEntries, isImageDrag, loadImageEntry, readDroppedImages } from '../utils/imageImport';
 
@@ -760,12 +763,29 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   /** The layer's tone counts for the levels window (counted by the filter worker on the first preview) */
   const [filterHistogram, setFilterHistogram] = useState<Uint32Array | null>(null);
   const filterHistogramRef = useRef<Uint32Array | null>(null);
-  const filterPreviewRef = useRef<{ item: NonNullable<ReturnType<LayerManager['getLayerItem']>>; texture: RenderTexture } | null>(null);
+  /** Apply filter onto a new composited raster layer directly above the active layer */
+  const [filterApplyNewLayer, setFilterApplyNewLayer] = useState(false);
+  const filterApplyNewLayerRef = useRef(false);
+  filterApplyNewLayerRef.current = filterApplyNewLayer;
+  const [filterIncludeBg, setFilterIncludeBg] = useState(false);
+  const filterIncludeBgRef = useRef(false);
+  filterIncludeBgRef.current = filterIncludeBg;
+  const [filterMemoryConfirm, setFilterMemoryConfirm] = useState<{ openTo?: 'menu' | 'curves' | 'gradient' } | null>(null);
+  const filterMemoryConfirmedRef = useRef<string | null>(null);
+  const filterPreviewRef = useRef<
+    | { kind: 'layer'; item: NonNullable<ReturnType<LayerManager['getLayerItem']>>; texture: RenderTexture }
+    | { kind: 'overlay'; texture: RenderTexture }
+    | null
+  >(null);
   /**
-   * The layer's pixels as read for the last preview, kept while its version shows nothing has
-   * changed them since: the next preview skips reading the whole layer back from the GPU again.
+   * The layer's (or visible composite's) pixels as read for the last preview, kept while its
+   * version shows nothing has changed since: the next preview skips reading back from the GPU.
    */
-  const filterSourceRef = useRef<{ item: NonNullable<ReturnType<LayerManager['getLayerItem']>>; version: number; width: number; height: number; pixels: Uint8Array } | null>(null);
+  const filterSourceRef = useRef<
+    | { kind: 'layer'; item: NonNullable<ReturnType<LayerManager['getLayerItem']>>; version: number; width: number; height: number; pixels: Uint8Array }
+    | { kind: 'composite'; version: string; includeBg: boolean; width: number; height: number; pixels: Uint8Array }
+    | null
+  >(null);
 
   // Tools & Properties State
   const [currentTool, setCurrentTool] = useState<ToolType>('brush');
@@ -2298,7 +2318,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     filterSourceRef.current = null;
     const preview = filterPreviewRef.current;
     if (!preview) return;
-    if (!preview.item.sprite.destroyed) preview.item.sprite.texture = preview.item.renderTexture;
+    if (preview.kind === 'layer') {
+      if (!preview.item.sprite.destroyed) preview.item.sprite.texture = preview.item.renderTexture;
+    } else {
+      layerManagerRef.current?.setFilterOverlay(null);
+    }
     preview.texture.destroy(true);
     filterPreviewRef.current = null;
     requestRenderRef.current();
@@ -2353,7 +2377,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       return;
     }
     const layer = activeLayerRef.current;
-    if (def && !filterFitsLayer(def, layer?.layerType)) {
+    if (def && !filterApplyNewLayerRef.current && !filterFitsLayer(def, layer?.layerType)) {
       setPermissionWarning(t.filters.lineartNotOnMask);
       setTimeout(() => setPermissionWarning(null), 3000);
       return;
@@ -2363,7 +2387,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     setFilterBusy(false);
     clearFilterPreview();
     forgetFilterHistogram();
-    if (filterPointParam(def) && layer) startFilterPoint(layer.id);
+    if (filterPointParam(def)) startFilterPoint(filterApplyNewLayerRef.current ? null : (layer?.id ?? null));
     else filterPoint.clear();
     setLayerFilterId(def && !def.dialog ? def.id : null);
     setFilterMenuOpen(!def?.dialog);
@@ -2384,7 +2408,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
    * A filter's centre starts on the selection's middle, else on the middle of what the layer has
    * painted (read in the background; the canvas middle until it arrives, unless moved by then).
    */
-  const startFilterPoint = (layerId: string) => {
+  const startFilterPoint = (layerId: string | null) => {
     if (!canvas) return;
     const { width, height } = canvas;
     const sel = selectionEngineRef.current;
@@ -2394,34 +2418,105 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const session = filterPoint.start(middle(frame ?? { x: 0, y: 0, w: width, h: height }), { width, height });
     const lm = layerManagerRef.current;
     const te = tileEngineRef.current;
-    if (frame || !lm || !te) return;
+    if (frame || !layerId || !lm || !te) return;
     readContent(lm, layerId, width, height, te.tileSize)
       .then((content) => { if (content) filterPoint.rehome(session, middle(content.rect)); })
       .catch(() => { /* the canvas middle stays */ });
   };
 
+  const canCreateFilterLayer = Boolean(onCreateLayer && !isGuest && canvas && isEngineReady && !transformLayerIdRef.current);
+  const filterCanvasSizeKey = canvas ? `${canvas.id}:${canvas.width}x${canvas.height}` : '';
+  const filterMemoryPlan = useMemo(
+    () => canvas
+      ? assessFilterCompositeMemory(canvas.width, canvas.height, coarsePointer())
+      : assessFilterCompositeMemory(0, 0, false),
+    [canvas?.width, canvas?.height],
+  );
+
+  const openFilterUI = (id?: 'curves' | 'gradient') => {
+    if (id) chooseFilter(id);
+    else if (!filterMenuOpen) {
+      setLayerFilterId(null);
+      setFilterMenuOpen(true);
+    }
+  };
+
   const openFilterRef = useRef<(id?: 'curves' | 'gradient') => void>(() => {});
   openFilterRef.current = (id) => {
     if (getFilterLayer()) {
-      if (id) chooseFilter(id);
-      else if (!filterMenuOpen) {
-        setLayerFilterId(null);
-        setFilterMenuOpen(true);
-      }
-    } else {
-      setPermissionWarning(isRedrawnLayer(activeLayerRef.current) ? t.filters.needRaster : t.filters.needEditableLayer);
-      setTimeout(() => setPermissionWarning(null), 3000);
+      setFilterApplyNewLayer(false);
+      openFilterUI(id);
+      return;
     }
+    if (canCreateFilterLayer) {
+      if (filterMemoryPlan.tier === 'block') {
+        setPermissionWarning(t.filters.newLayerBlocked);
+        setTimeout(() => setPermissionWarning(null), 3500);
+        return;
+      }
+      if (filterMemoryPlan.tier === 'confirm' && filterMemoryConfirmedRef.current !== filterCanvasSizeKey) {
+        setFilterMemoryConfirm({ openTo: id ?? 'menu' });
+        return;
+      }
+      setFilterApplyNewLayer(true);
+      openFilterUI(id);
+      return;
+    }
+    setPermissionWarning(isRedrawnLayer(activeLayerRef.current) ? t.filters.needRaster : t.filters.needEditableLayer);
+    setTimeout(() => setPermissionWarning(null), 3000);
   };
   function openFilterFromShortcut(id: 'curves' | 'gradient') { openFilterRef.current(id); }
+
+  const handleToggleFilterNewLayer = (next: boolean) => {
+    if (!next) {
+      clearFilterPreview();
+      forgetFilterHistogram();
+      setFilterApplyNewLayer(false);
+      return;
+    }
+    if (!canCreateFilterLayer || filterMemoryPlan.tier === 'block') {
+      setPermissionWarning(t.filters.newLayerBlocked);
+      setTimeout(() => setPermissionWarning(null), 3500);
+      return;
+    }
+    if (filterMemoryPlan.tier === 'confirm' && filterMemoryConfirmedRef.current !== filterCanvasSizeKey) {
+      setFilterMemoryConfirm({});
+      return;
+    }
+    clearFilterPreview();
+    forgetFilterHistogram();
+    setFilterApplyNewLayer(true);
+  };
+
+  const handleToggleFilterIncludeBg = (next: boolean) => {
+    clearFilterPreview();
+    forgetFilterHistogram();
+    setFilterIncludeBg(next);
+  };
+
+  const filterTargetOptions: FilterTargetOptions = {
+    applyToNewLayer: filterApplyNewLayer,
+    canApplyCurrent: Boolean(getFilterLayer()),
+    canCreateNewLayer: canCreateFilterLayer,
+    includeBackground: filterIncludeBg,
+    memoryPlan: filterMemoryPlan,
+    onToggleNewLayer: handleToggleFilterNewLayer,
+    onToggleBackground: handleToggleFilterIncludeBg,
+  };
 
   const runLayerFilter = async (filter: FilterJob | null, previewOnly: boolean): Promise<boolean> => {
     cancelFilterWork();
     if (!filter) { clearFilterPreview(); showFilterRefining(false); return true; }
     const request = filterRequestRef.current;
-    const item = getFilterLayer();
+    const toNewLayer = filterApplyNewLayerRef.current;
+    const includeBg = filterIncludeBgRef.current;
+    const item = toNewLayer ? null : getFilterLayer();
     const engine = tileEngineRef.current;
-    if (!item || !engine || !canvas) return false;
+    if ((!toNewLayer && !item) || !engine || !canvas) return false;
+    if (toNewLayer && (!onCreateLayer || isGuest || !isEngineReady || transformLayerIdRef.current)) return false;
+    const { width, height } = canvas;
+    const memoryPlan = toNewLayer ? assessFilterCompositeMemory(width, height, coarsePointer()) : null;
+    if (toNewLayer && memoryPlan?.tier === 'block') return false;
     if (!previewOnly) {
       setFilterBusy(true);
       showFilterRefining(false);
@@ -2432,15 +2527,25 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     try {
       const lm = layerManagerRef.current;
       if (!lm) return false;
-      const { width, height } = canvas;
       const mask = selectionEngineRef.current?.getMaskArray();
-      // Read without stalling the page (and without making a sparse layer one big texture). A preview
-      // reuses the last preview's read while the layer's version shows nothing has changed it.
       const cached = filterSourceRef.current;
-      let sourceVersion: number | null = item.version;
-      const source = previewOnly && cached && cached.item === item && cached.version === item.version && cached.width === width && cached.height === height
-        ? cached.pixels
-        : (await lm.readAsync(item.model.id, [{ x: 0, y: 0, w: width, h: height }]))[0];
+      let sourceVersion: number | null = item ? item.version : null;
+      let compVersion = '';
+      let source: Uint8Array;
+      if (toNewLayer) {
+        compVersion = lm.getVisibleCompositeVersion();
+        source = previewOnly && cached?.kind === 'composite' && cached.version === compVersion &&
+          cached.includeBg === includeBg && cached.width === width && cached.height === height
+          ? cached.pixels
+          : await lm.readVisibleCompositeAsync(includeBg, Boolean(memoryPlan?.releaseCompositeAfterRead));
+      } else {
+        // Read without stalling the page (and without making a sparse layer one big texture). A preview
+        // reuses the last preview's read while the layer's version shows nothing has changed it.
+        source = previewOnly && cached?.kind === 'layer' && cached.item === item && cached.version === item!.version &&
+          cached.width === width && cached.height === height
+          ? cached.pixels
+          : (await lm.readAsync(item!.model.id, [{ x: 0, y: 0, w: width, h: height }]))[0];
+      }
       if (request !== filterRequestRef.current) return false;
       const client = filterWorkerRef.current ??= new FilterWorkerClient();
       const def = getFilter(filter.id);
@@ -2448,7 +2553,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       // Line colour and gap filling can use the colour being painted with
       const values = { ...filter.values, currentColor: brushProps.color };
       const stale = () => request !== filterRequestRef.current || tileEngineRef.current !== engine ||
-        activeLayerRef.current?.id !== item.model.id || getFilterLayer() !== item;
+        filterApplyNewLayerRef.current !== toNewLayer ||
+        (toNewLayer ? filterIncludeBgRef.current !== includeBg : (activeLayerRef.current?.id !== item!.model.id || getFilterLayer() !== item));
       const compute = async (draft: number) => {
         const result = await client.run(filter.id, new Uint8Array(source), width, height, values, mask, { histogram: wantHistogram, draft });
         if (result?.histogram && request === filterRequestRef.current) {
@@ -2459,24 +2565,38 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         return result?.output ?? null;
       };
       const showPreview = (filtered: Uint8Array) => {
-        if (filterPreviewRef.current?.item !== item) clearFilterPreview();
+        if (toNewLayer) {
+          if (filterPreviewRef.current?.kind !== 'overlay') clearFilterPreview();
+          const texture = filterPreviewRef.current?.texture ?? RenderTexture.create({ width, height, resolution: 1 });
+          filterPreviewRef.current = { kind: 'overlay', texture };
+          engine.writeRegion(texture, 0, 0, width, height, filtered);
+          const placement = filterNewLayerPlacement(activeLayerRef.current, layersRef.current);
+          lm.setFilterOverlay(texture, placement.overlayZIndex);
+          filterSourceRef.current = { kind: 'composite', version: compVersion, includeBg, width, height, pixels: source };
+          requestRenderRef.current();
+          return;
+        }
+        if (filterPreviewRef.current?.kind !== 'layer' || filterPreviewRef.current.item !== item) clearFilterPreview();
         const texture = filterPreviewRef.current?.texture ?? RenderTexture.create({ width, height, resolution: 1 });
-        filterPreviewRef.current = { item, texture };
+        filterPreviewRef.current = { kind: 'layer', item: item!, texture };
         engine.writeRegion(texture, 0, 0, width, height, filtered);
         // Unchanged since the read: the read stays good for the next preview (taking the texture
         // below counts as a possible change, so the version after it is the one kept)
-        const unchanged = sourceVersion !== null && item.version === sourceVersion;
-        void item.renderTexture; // resident while previewing: its one sprite shows the preview texture
-        item.sprite.texture = texture;
+        const unchanged = sourceVersion !== null && item!.version === sourceVersion;
+        void item!.renderTexture; // resident while previewing: its one sprite shows the preview texture
+        item!.sprite.texture = texture;
         // Once something else changed the layer, the read is never kept again
-        sourceVersion = unchanged ? item.version : null;
-        filterSourceRef.current = unchanged ? { item, version: item.version, width, height, pixels: source } : null;
+        sourceVersion = unchanged ? item!.version : null;
+        filterSourceRef.current = unchanged ? { kind: 'layer', item: item!, version: item!.version, width, height, pixels: source } : null;
         requestRenderRef.current();
       };
 
       // A slow filter on a big layer: a draft from a shrunk copy first, then (unless the settings
       // change again meanwhile) the full preview, which also is what Apply computes
-      const draft = previewOnly ? filterDraftFactor(def, width, height, coarsePointer()) : 0;
+      let draft = previewOnly ? filterDraftFactor(def, width, height, coarsePointer()) : 0;
+      if (previewOnly && toNewLayer && memoryPlan?.forceDraft && !draft && def?.draft) {
+        draft = Math.max(2, Math.ceil(Math.sqrt((width * height) / 1_500_000)));
+      }
       if (draft) {
         const quick = await compute(draft);
         if (!quick || stale()) return false;
@@ -2492,18 +2612,39 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       }
 
       clearFilterPreview();
-      const version = item.version;
-      const [latest] = await lm.readAsync(item.model.id, [{ x: 0, y: 0, w: width, h: height }]);
+      if (mask !== selectionEngineRef.current?.getMaskArray()) return false;
+      const bounds = selectionEngineRef.current?.getSelection()?.bounds;
+      const coords = bounds && selectionEngineRef.current?.hasSelection()
+        ? engine.getDirtyTilesForBounds(bounds.minX, bounds.minY, bounds.maxX + 1, bounds.maxY + 1)
+        : engine.getAllTileCoords();
+      const label = def ? filterLabel(def, t) : filter.id;
+
+      if (toNewLayer) {
+        const nonEmptyCoords = filterNonEmptyTileCoords(pixels, width, height, engine.tileSize, coords);
+        const afterTiles = nonEmptyCoords.length
+          ? await compressTiles(engine.extractMultipleTilesFromBuffer(pixels, nonEmptyCoords, 'raw'))
+          : [];
+        if (request !== filterRequestRef.current || layerManagerRef.current !== lm ||
+          mask !== selectionEngineRef.current?.getMaskArray()) return false;
+        const placement = filterNewLayerPlacement(activeLayerRef.current, layersRef.current);
+        const baseName = activeLayerRef.current?.name;
+        const newName = baseName ? `${baseName} · ${label}` : label;
+        const created = await onCreateLayer!(newName, 'normal', 'raster', placement.afterLayerId, placement.parentId);
+        if (!created || !(await waitForLayerItem(created.id))) return false;
+        if (nonEmptyCoords.length) lm.writeRegion(created.id, 0, 0, width, height, pixels);
+        recordLayerCreation(created, afterTiles, { desc: `${label} (${t.filters.newLayerBadge})` });
+        if (afterTiles.length) commitTilePatch(created.id, afterTiles, false, label);
+        return true;
+      }
+
+      const version = item!.version;
+      const [latest] = await lm.readAsync(item!.model.id, [{ x: 0, y: 0, w: width, h: height }]);
       if (latest.some((value, index) => value !== source[index])) {
         setPermissionWarning(t.filters.layerChanged);
         setTimeout(() => setPermissionWarning(null), 3500);
         return false;
       }
       if (mask !== selectionEngineRef.current?.getMaskArray()) return false;
-      const bounds = selectionEngineRef.current?.getSelection()?.bounds;
-      const coords = bounds && selectionEngineRef.current?.hasSelection()
-        ? engine.getDirtyTilesForBounds(bounds.minX, bounds.minY, bounds.maxX + 1, bounds.maxY + 1)
-        : engine.getAllTileCoords();
       if (!coords.length || !source.some((value, index) => value !== pixels[index])) return true;
       // Tiles cut from the buffers here, LZ4 in the workers (a whole 10000×8000 layer took seconds on this thread)
       const [beforeTiles, afterTiles] = await Promise.all([
@@ -2512,17 +2653,16 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       ]);
       if (request !== filterRequestRef.current || layerManagerRef.current !== lm || getFilterLayer() !== item ||
         mask !== selectionEngineRef.current?.getMaskArray()) return false;
-      if (item.version !== version) {
+      if (item!.version !== version) {
         setPermissionWarning(t.filters.layerChanged);
         setTimeout(() => setPermissionWarning(null), 3500);
         return false;
       }
-      lm.writeRegion(item.model.id, 0, 0, width, height, pixels);
-      const label = def ? filterLabel(def, t) : filter.id;
+      lm.writeRegion(item!.model.id, 0, 0, width, height, pixels);
       scopedUndoRef.current.push({
         opId: `op_filter_${Date.now()}_${Math.random().toString(36).slice(2)}`,
         userId: userRef.current?.id || user?.id || 'guest',
-        layerId: item.model.id,
+        layerId: item!.model.id,
         opType: 'FILTER',
         beforeTiles,
         afterTiles,
@@ -2530,7 +2670,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         desc: label,
       });
       updateUndoRedoState();
-      commitTilePatch(item.model.id, afterTiles, false, label);
+      commitTilePatch(item!.model.id, afterTiles, false, label);
       return true;
     } catch (error) {
       if (request !== filterRequestRef.current) return false;
@@ -5828,13 +5968,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       </OverlayPresence>
       <OverlayPresence open={filterMenuOpen} kind="popover">
         <Suspense fallback={null}><LayerFilterDialog key={layerFilterId ?? 'list'} filterId={layerFilterId} busy={filterBusy} refining={filterRefining}
-          layerName={activeLayer?.name ?? ''} layerType={activeLayer?.layerType} histogram={filterHistogram} onChoose={chooseFilter} onBack={() => chooseFilter(null)} onClose={closeFilters}
+          layerName={activeLayer?.name ?? ''} layerType={activeLayer?.layerType} histogram={filterHistogram} target={filterTargetOptions}
+          onChoose={chooseFilter} onBack={() => chooseFilter(null)} onClose={closeFilters}
           onPreview={filterCallbacks.parameters}
           onApply={(values) => layerFilterId ? runLayerFilter({ id: layerFilterId, values }, false) : Promise.resolve(false)} /></Suspense>
       </OverlayPresence>
       {isColorCurvesOpen && <Suspense fallback={null}><ColorCurvesModal
         isOpen={isColorCurvesOpen}
         busy={filterBusy}
+        target={filterTargetOptions}
         onClose={closeFilters}
         onPreview={filterCallbacks.curves}
         onApply={(options) => runLayerFilter({ id: 'curves', values: { options } }, false)}
@@ -5843,10 +5985,47 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       {isGradientMapOpen && <Suspense fallback={null}><GradientMapModal
         isOpen={isGradientMapOpen}
         busy={filterBusy}
+        target={filterTargetOptions}
         onClose={closeFilters}
         onPreview={filterCallbacks.gradient}
         onApply={(stops, opacity) => runLayerFilter({ id: 'gradient', values: { stops, opacity } }, false)}
       /></Suspense>}
+
+      <OverlayPresence open={Boolean(filterMemoryConfirm)} kind="dialog">
+        <AtelierModal
+          title={t.filters.newLayerConfirmTitle}
+          icon={<AlertCircle />}
+          width="sm"
+          onClose={() => setFilterMemoryConfirm(null)}
+          footer={(
+            <>
+              <button type="button" className={modalButton.secondary} onClick={() => setFilterMemoryConfirm(null)}>
+                {filterTargetOptions.canApplyCurrent ? t.filters.stayCurrentLayer : t.common.cancel}
+              </button>
+              <button type="button" className={modalButton.primary} onClick={() => {
+                const pending = filterMemoryConfirm;
+                filterMemoryConfirmedRef.current = filterCanvasSizeKey;
+                setFilterMemoryConfirm(null);
+                clearFilterPreview();
+                forgetFilterHistogram();
+                setFilterApplyNewLayer(true);
+                if (pending?.openTo === 'curves') openFilterUI('curves');
+                else if (pending?.openTo === 'gradient') openFilterUI('gradient');
+                else if (pending?.openTo === 'menu') openFilterUI();
+              }}>
+                {t.filters.continueNewLayer}
+              </button>
+            </>
+          )}
+        >
+          <p className="leading-relaxed text-neutral-300">
+            {t.filters.newLayerConfirmBody
+              .replace('{w}', String(canvas?.width ?? 0))
+              .replace('{h}', String(canvas?.height ?? 0))
+              .replace('{mb}', String(filterMemoryPlan.estimatedMB))}
+          </p>
+        </AtelierModal>
+      </OverlayPresence>
     </div>
   );
 };

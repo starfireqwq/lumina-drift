@@ -7,6 +7,7 @@ import {
 } from '../utils/filterRegistry';
 import { filterPoint } from '../utils/filterPoint';
 import { COLOR_ADJUST_PRESETS, matchColorPreset } from '../utils/filterPresets';
+import { FilterTargetBar, type FilterTargetOptions } from './FilterTargetBar';
 import { ToolWindow } from './workspace/ToolWindow';
 import { usePhoneLayout } from './workspace/dockStore';
 import { useI18n } from '../context/I18nContext';
@@ -21,6 +22,8 @@ interface Props {
   busy: boolean;
   /** The preview is still being worked out (a quick draft shows meanwhile on a big layer) */
   refining?: boolean;
+  /** Options for applying the filter onto a new composited layer above the active layer */
+  target?: FilterTargetOptions;
   onChoose: (id: string) => void;
   onBack: () => void;
   onPreview: (values: FilterValues | null) => void;
@@ -39,7 +42,7 @@ const readGroup = (groups: FilterGroup[]) => {
   }
 };
 
-export function LayerFilterDialog({ filterId, layerName, layerType, histogram, busy, refining = false, onChoose, onBack, onPreview, onApply, onClose }: Props) {
+export function LayerFilterDialog({ filterId, layerName, layerType, histogram, busy, refining = false, target, onChoose, onBack, onPreview, onApply, onClose }: Props) {
   const { t } = useI18n();
   const phone = usePhoneLayout();
   const definition = getFilter(filterId);
@@ -68,7 +71,7 @@ export function LayerFilterDialog({ filterId, layerName, layerType, histogram, b
     if (!definition || !preview || busy) return;
     const timer = setTimeout(() => onPreview(jobValues), 160);
     return () => clearTimeout(timer);
-  }, [definition, preview, jobValues, onPreview, busy]);
+  }, [definition, preview, jobValues, onPreview, busy, target?.applyToNewLayer, target?.includeBackground]);
 
   const pickGroup = (next: FilterGroup) => {
     setGroup(next);
@@ -76,7 +79,7 @@ export function LayerFilterDialog({ filterId, layerName, layerType, histogram, b
   };
 
   const item = (def: FilterDef, index: number) => {
-    const fits = filterFitsLayer(def, layerType);
+    const fits = Boolean(target?.applyToNewLayer) || filterFitsLayer(def, layerType);
     return (
       <button type="button" key={def.id} disabled={!fits} onClick={() => onChoose(def.id)}
         title={!fits ? t.filters.lineartNotOnMask : def.tool ? t.filters.opensTool : undefined}
@@ -174,6 +177,7 @@ export function LayerFilterDialog({ filterId, layerName, layerType, histogram, b
                 value={values[param.key]} onChange={(value) => setValues((current) => ({ ...current, [param.key]: value }))} />
             </div>
           ))}
+          <FilterTargetBar target={target} busy={busy} />
         </div>
       </>)}
     </ToolWindow>

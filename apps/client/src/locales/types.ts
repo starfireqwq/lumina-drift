@@ -710,6 +710,16 @@ export interface Translations {
     softenHint: string;
     sharpenHint: string;
     presetsTitle: string;
+    applyToNewLayer: string;
+    includeBackground: string;
+    newLayerBadge: string;
+    newLayerForcedHint: string;
+    newLayerMemoryHint: string;
+    newLayerBlocked: string;
+    newLayerConfirmTitle: string;
+    newLayerConfirmBody: string;
+    stayCurrentLayer: string;
+    continueNewLayer: string;
     colorPresets: {
       original: string;
       morningGlow: string;
