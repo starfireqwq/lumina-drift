@@ -150,6 +150,7 @@ import { getUserColor } from '../utils/userColors';
 import {
   AnimationEngine, AnimationTrack, animationDisplay, BLANK_CEL_NAME, celEntriesOf, celInsertAt, celLayerOf, celOfLayer, entryIndexAt, entryStart, exportSegments, findAdjacentKeyframe, isAnimationFolder, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
   normalizeTimelineLabels, placeEntries, planRepeatCels, planSequentialCelRenames, trackLength, upsertTransformKeyframe,
+  type LightTableDisplayItem,
 } from '../engine/AnimationEngine';
 import {
   buildKeyframeFromEval,
@@ -157,7 +158,22 @@ import {
   sampleKeyframeMotionPath,
   type KeyframeBaseRect,
 } from '../utils/keyframeTransform';
-import { lightIdsFor, loadLightTable, saveLightTable, type LightTableState } from '../engine/lightTable';
+import {
+  externalRefsFor,
+  getLightTableTransform,
+  lightIdsFor,
+  lightTableTransformToAffine,
+  loadLightTable,
+  saveLightTable,
+  type LightTableState,
+} from '../engine/lightTable';
+import { renderCameraFrameCanvas } from '../engine/animationExport';
+import {
+  AudioTrackPlayer,
+  loadAudioAssetSummaries,
+  subscribeAudioAssets,
+  type AudioAssetSummary,
+} from '../engine/AudioTrackEngine';
 import { DEFAULT_TEXT, renderText, textBounds } from '../engine/textLayer';
 import { nextGroupName } from '../utils/canvasName';
 import type {
@@ -167,13 +183,22 @@ import type {
   AnimationExportPlanRequest,
 } from './AnimationTimelineBar';
 import {
+  type AudioTrackMeta,
   BlendMode,
+  type CameraFrameMeta,
   ColorCurvesOptions,
+  computeCameraCanvasToOutputMatrix,
+  computeCameraPreviewViewport,
+  evaluateCameraFrame,
   type FilterValues,
+  findCameraLayer,
   getCanvasRoleCapabilities,
   GradientPresetName,
   GradientStop,
+  isAudioLayer,
   LayerType,
+  normalizeAudioTrackMeta,
+  normalizeCameraMeta,
   RemovedLayer,
   VectorEraserMode,
   VectorStroke,
@@ -244,6 +269,11 @@ const MeshWarpOverlay = lazy(() => import('./MeshWarpOverlay').then((m) => ({ de
 const TextCanvasEditor = lazy(() => import('./TextCanvasEditor').then((m) => ({ default: m.TextCanvasEditor })));
 const ComicStudioOverlay = lazy(() => import('./ComicStudioOverlay').then((m) => ({ default: m.ComicStudioOverlay })));
 const AnimationTimelineBar = lazy(() => import('./AnimationTimelineBar').then((m) => ({ default: m.AnimationTimelineBar })));
+const CameraFrameOverlay = lazy(() => import('./CameraFrameOverlay').then((m) => ({ default: m.CameraFrameOverlay })));
+const CameraToolWindow = lazy(() => import('./CameraToolWindow').then((m) => ({ default: m.CameraToolWindow })));
+const LightTableWindow = lazy(() => import('./LightTableWindow').then((m) => ({ default: m.LightTableWindow })));
+const LightTableOverlay = lazy(() => import('./LightTableOverlay').then((m) => ({ default: m.LightTableOverlay })));
+const AudioTrackWindow = lazy(() => import('./AudioTrackWindow').then((m) => ({ default: m.AudioTrackWindow })));
 const LayerFilterDialog = lazy(() => import('./LayerFilterDialog').then((m) => ({ default: m.LayerFilterDialog })));
 const LayerAlignWindow = lazy(() => import('./LayerAlignWindow'));
 const ColorCurvesModal = lazy(() => import('./ColorCurvesModal').then((m) => ({ default: m.ColorCurvesModal })));
@@ -585,15 +615,138 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     saveLightTable(canvas?.id, next);
     setLightTable(next);
   };
-  /** The light table under the cel on screen in the edited track */
+  /** The light table under the cel on screen in the edited track (Phase E2 per-reference transforms & tint) */
   const lightViewFor = (ls: LayerModel[], time: number) => {
     const state = lightTableRef.current;
     const folderId = animFolderIdRef.current;
     if (!state.enabled || !folderId) return null;
     const entries = celEntriesOf(ls, folderId);
     const ids = lightIdsFor(state, folderId, celLayerOf(entries[entryIndexAt(entries, time)]));
-    return ids.size ? { opacity: state.opacity, ids } : null;
+    if (!ids.size) return null;
+    const cw = canvas?.width ?? 0;
+    const ch = canvas?.height ?? 0;
+    const items = new Map<string, LightTableDisplayItem>();
+    for (const id of ids) {
+      const tr = getLightTableTransform(state, id);
+      const affine = lightTableTransformToAffine(tr, cw, ch);
+      const tintNum =
+        tr.tintMode !== 'original' && tr.tint
+          ? parseInt(tr.tint.replace('#', ''), 16) || undefined
+          : undefined;
+      items.set(id, {
+        opacity: tr.opacity,
+        ...(affine.isIdentity ? {} : { transform: affine }),
+        ...(tintNum !== undefined ? { tint: tintNum } : {}),
+        ...(tr.tintMode === 'shade' ? { tintMode: 'shade' as const } : {}),
+      });
+    }
+    return { opacity: state.opacity, ids, items };
   };
+  // Phase E1/E2/E3 state: 2D Camera, Light Table v2 ToolWindow, and Local Audio Tracks
+  const [cameraWindowOpen, setCameraWindowOpen] = useState(false);
+  const [cameraPreviewActive, setCameraPreviewActive] = useState(false);
+  const cameraPreviewActiveRef = useRef(false);
+  cameraPreviewActiveRef.current = cameraPreviewActive;
+  const [cameraPreviewRect, setCameraPreviewRect] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const savedViewportBeforeCamRef = useRef<ViewportState | null>(null);
+  const [lightWindowOpen, setLightWindowOpen] = useState(false);
+  const [selectedLightRefId, setSelectedLightRefId] = useState<string | null>(null);
+  const [lightCanvasDragMode, setLightCanvasDragMode] = useState(false);
+  const [audioWindowOpen, setAudioWindowOpen] = useState(false);
+  const [audioScrubEnabled, setAudioScrubEnabled] = useState(true);
+  const audioScrubEnabledRef = useRef(true);
+  audioScrubEnabledRef.current = audioScrubEnabled;
+  const [audioAssetSummaries, setAudioAssetSummaries] = useState<Record<string, AudioAssetSummary>>({});
+  const audioPlayerRef = useRef<AudioTrackPlayer | null>(null);
+  if (!audioPlayerRef.current) audioPlayerRef.current = new AudioTrackPlayer();
+  useEffect(() => () => { audioPlayerRef.current?.destroy(); }, []);
+
+  const cameraLayer = useMemo(() => findCameraLayer(layers), [layers]);
+  const cameraLayerRef = useRef<LayerModel | null>(cameraLayer);
+  cameraLayerRef.current = cameraLayer;
+  const audioLayers = useMemo(() => layers.filter(isAudioLayer), [layers]);
+  const audioLayersRef = useRef<LayerModel[]>(audioLayers);
+  audioLayersRef.current = audioLayers;
+
+  const canvasMetaRef = useRef(canvas);
+  canvasMetaRef.current = canvas;
+  const syncCameraPreviewViewport = useCallback((frame: number) => {
+    const cam = cameraLayerRef.current;
+    const vp = viewportRef.current;
+    const c = canvasMetaRef.current;
+    if (!cameraPreviewActiveRef.current || !cam || !cam.isVisible || !cam.meta?.camera || !vp || !c) return;
+    const rect = containerRef.current?.getBoundingClientRect();
+    const viewW = rect?.width || pixiAppRef.current?.screen.width || window.innerWidth;
+    const viewH = rect?.height || pixiAppRef.current?.screen.height || window.innerHeight;
+    const ev = evaluateCameraFrame(cam.meta.camera, cam.meta.keyframes, frame, c.width, c.height);
+    const pv = computeCameraPreviewViewport(ev, c.width, c.height, viewW, viewH);
+    vp.setState({ zoom: pv.zoom, panX: pv.panX, panY: pv.panY, rotation: pv.rotation, mirrorX: false });
+    setCameraPreviewRect(pv.frameRect);
+  }, []);
+  const syncCameraPreviewViewportRef = useRef(syncCameraPreviewViewport);
+  syncCameraPreviewViewportRef.current = syncCameraPreviewViewport;
+
+  const setCameraPreviewMode = useCallback((next: boolean) => {
+    const vp = viewportRef.current;
+    if (next) {
+      const cam = cameraLayerRef.current;
+      if (!cam || !cam.isVisible || !cam.meta?.camera || !vp) return;
+      if (!cameraPreviewActiveRef.current) {
+        savedViewportBeforeCamRef.current = vp.getState();
+      }
+      cameraPreviewActiveRef.current = true;
+      setCameraPreviewActive(true);
+      syncCameraPreviewViewportRef.current(animEngineRef.current?.getTime() ?? 0);
+    } else {
+      cameraPreviewActiveRef.current = false;
+      setCameraPreviewActive(false);
+      setCameraPreviewRect(null);
+      if (savedViewportBeforeCamRef.current && vp) {
+        vp.setState(savedViewportBeforeCamRef.current);
+        savedViewportBeforeCamRef.current = null;
+      }
+    }
+  }, []);
+
+  // Refresh local IndexedDB waveform summaries whenever audio layers or local audio storage change
+  const audioAssetIdKey = audioLayers.map((l) => l.meta?.audio?.localAssetId ?? '').join('|');
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () => {
+      const ids = audioLayersRef.current.map((l) => l.meta?.audio?.localAssetId ?? '').filter(Boolean);
+      if (ids.length === 0) {
+        if (!cancelled) setAudioAssetSummaries({});
+        return;
+      }
+      void loadAudioAssetSummaries(ids).then((map) => {
+        if (!cancelled) setAudioAssetSummaries(map);
+      });
+    };
+    refresh();
+    const unsub = subscribeAudioAssets(refresh);
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, [audioAssetIdKey]);
+
+  // Keep camera preview aligned when camera layer/keyframes change or exit preview if camera is removed/hidden
+  useEffect(() => {
+    if (!cameraPreviewActive) return;
+    if (!cameraLayer || !cameraLayer.isVisible || !cameraLayer.meta?.camera) {
+      setCameraPreviewMode(false);
+      return;
+    }
+    syncCameraPreviewViewport(animEngineRef.current?.getTime() ?? 0);
+  }, [cameraPreviewActive, cameraLayer, syncCameraPreviewViewport, setCameraPreviewMode]);
+
+  // Keep camera preview aligned on window resize
+  useEffect(() => {
+    if (!cameraPreviewActive) return;
+    const onResize = () => syncCameraPreviewViewportRef.current(animEngineRef.current?.getTime() ?? 0);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [cameraPreviewActive]);
   /**
    * What this viewer's screen shows: the personal eyes, and in every animation folder the cel at
    * the current frame (the edited folder plus onion skin). `time` renders one frame for export;
@@ -4106,18 +4259,47 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       if (active.id === shown || celOfLayer(layersRef.current, active.id)?.celId === shown) return; // already on it (or inside its cel folder)
       onSelectLayer?.(shown);
     };
+    let prevPlayFrame = engine.getTime();
+    const playableAudioItems = () =>
+      audioLayersRef.current
+        .filter((l) => l.isVisible && l.meta?.audio)
+        .map((l) => ({ layerId: l.id, meta: normalizeAudioTrackMeta(l.meta!.audio) }));
     const unsubFrame = engine.onFrameChange((t, byUser) => {
       show();
-      if (!engine.getIsPlaying()) setAnimFrame(t);
-      if (byUser && !engine.getIsPlaying()) selectShown();
+      if (cameraPreviewActiveRef.current) syncCameraPreviewViewportRef.current(t);
+      if (engine.getIsPlaying()) {
+        // Re-sync local audio on loop wrap or user seek during playback
+        if (t < prevPlayFrame || byUser) {
+          void audioPlayerRef.current?.startPlayback(playableAudioItems(), t, engine.getFps(), engine.getRange()?.end);
+        }
+        prevPlayFrame = t;
+      } else {
+        setAnimFrame(t);
+        if (byUser) {
+          selectShown();
+          if (audioScrubEnabledRef.current) {
+            void audioPlayerRef.current?.scrubFrame(playableAudioItems(), t, engine.getFps());
+          }
+        }
+      }
     });
     const unsubPlay = engine.onPlaybackStateChange((playing) => {
       layerManagerRef.current?.setThumbnailsPaused(playing);
-      if (!playing) {
+      prevPlayFrame = engine.getTime();
+      if (playing) {
+        void audioPlayerRef.current?.startPlayback(
+          playableAudioItems(),
+          engine.getTime(),
+          engine.getFps(),
+          engine.getRange()?.end
+        );
+      } else {
+        audioPlayerRef.current?.stopPlayback();
         lastSyncSig = '';
         setAnimFrame(engine.getTime());
       }
       show();
+      if (cameraPreviewActiveRef.current) syncCameraPreviewViewportRef.current(engine.getTime());
       if (!playing) selectShown();
     });
     return () => {
@@ -4671,7 +4853,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     onSelectLayer?.(celLayerOf(entry) ?? folderId);
   };
   /** GIF / video / sequence frames: one segment per distinct picture (held cels become one longer frame, keyframed moves get every step) */
-  const planAnimationExport = ({ scope, useRange, range: explicitRange, transparent }: AnimationExportPlanRequest): AnimationExportPlan | null => {
+  const planAnimationExport = ({ scope, useRange, range: explicitRange, transparent, useCamera }: AnimationExportPlanRequest): AnimationExportPlan | null => {
     const lm = layerManagerRef.current;
     const engine = animationEngine;
     if (!lm || !engine || !canvas || !animFolder) return null;
@@ -4680,22 +4862,103 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const start = Math.max(0, Math.min(maxFrame, range?.start ?? 0));
     const end = Math.max(start, Math.min(maxFrame, range?.end ?? maxFrame));
     const only = scope === 'folder' ? new Set([animFolder.id]) : scope === 'folders' ? new Set(animFolders.map((f) => f.id)) : null;
+    const activeCam = useCamera ? findCameraLayer(layersRef.current, { visibleOnly: true }) : null;
+    const camMeta = activeCam?.meta?.camera
+      ? normalizeCameraMeta(activeCam.meta.camera, canvas.width, canvas.height)
+      : null;
     const segments = exportSegments(layersRef.current, start, end, only, canvas.width, canvas.height);
+    const bgColor = canvas.bgColor || '#FFFFFF';
     return {
-      width: canvas.width,
-      height: canvas.height,
-      bgColor: canvas.bgColor || '#FFFFFF',
+      width: camMeta ? camMeta.width : canvas.width,
+      height: camMeta ? camMeta.height : canvas.height,
+      bgColor,
       segments,
       render: (time) => {
         // Personal eyes and onion skin never go into a file
         lm.syncLayers(displayLayersFor(layersRef.current, { personal: false, time, only }));
-        return lm.renderCompositeCanvas({ transparent: Boolean(transparent) });
+        const fullCanvas = lm.renderCompositeCanvas({ transparent: Boolean(transparent) });
+        if (!camMeta || !activeCam) return fullCanvas;
+        const evCam = evaluateCameraFrame(
+          camMeta,
+          activeCam.meta?.keyframes,
+          time,
+          canvas.width,
+          canvas.height
+        );
+        const camMatrix = computeCameraCanvasToOutputMatrix(
+          evCam,
+          canvas.width,
+          canvas.height,
+          camMeta.width,
+          camMeta.height
+        );
+        const framed = renderCameraFrameCanvas(
+          fullCanvas,
+          camMatrix,
+          camMeta.width,
+          camMeta.height,
+          transparent ? null : bgColor
+        );
+        fullCanvas.width = 0;
+        fullCanvas.height = 0;
+        return framed;
       },
       done: () => {
         lm.syncLayers(displayLayersFor(layersRef.current));
         requestRenderRef.current();
       },
     };
+  };
+
+  // Phase E1/E3 CRUD helpers (reuse existing layer sync, scoped undo, and room ACL)
+  const createCameraLayer = async (meta: CameraFrameMeta) => {
+    if (!canvas || isGuest || isCanvasViewer) return;
+    const norm = normalizeCameraMeta(meta, canvas.width, canvas.height);
+    await createLayerWithUndo(t.animation.camera, 'normal', 'group', null, null, {
+      meta: { camera: norm },
+      select: false,
+    });
+  };
+  const updateCameraMeta = (meta: CameraFrameMeta) => {
+    if (!canvas || !cameraLayer || !canManageLayer(cameraLayer)) return;
+    const norm = normalizeCameraMeta(meta, canvas.width, canvas.height);
+    onUpdateLayerProps?.(cameraLayer.id, {
+      meta: { ...(cameraLayer.meta ?? {}), camera: norm },
+    });
+  };
+  const deleteCameraLayer = async () => {
+    if (!cameraLayer || !canManageLayer(cameraLayer)) return;
+    if (cameraPreviewActive) setCameraPreviewMode(false);
+    await deleteLayerWithUndo(cameraLayer.id);
+  };
+  const createAudioTrack = async (name: string, meta: AudioTrackMeta) => {
+    if (isGuest || isCanvasViewer) return;
+    const norm = normalizeAudioTrackMeta(meta);
+    await createLayerWithUndo(name || t.animation.audioTrack, 'normal', 'group', null, null, {
+      meta: { audio: norm },
+      select: false,
+    });
+  };
+  const updateAudioTrack = (layerId: string, patch: { name?: string; meta: AudioTrackMeta }) => {
+    const target = layersRef.current.find((l) => l.id === layerId);
+    if (!target || !canManageLayer(target)) return;
+    onUpdateLayerProps?.(layerId, {
+      ...(patch.name !== undefined ? { name: patch.name } : {}),
+      meta: { ...(target.meta ?? {}), audio: normalizeAudioTrackMeta(patch.meta) },
+    });
+  };
+  const toggleAudioTrackMute = (layerId: string) => {
+    const target = layersRef.current.find((l) => l.id === layerId);
+    if (!target || !target.meta?.audio || !canManageLayer(target)) return;
+    const norm = normalizeAudioTrackMeta(target.meta.audio);
+    onUpdateLayerProps?.(layerId, {
+      meta: { ...(target.meta ?? {}), audio: { ...norm, muted: !norm.muted } },
+    });
+  };
+  const deleteAudioTrack = async (layerId: string) => {
+    const target = layersRef.current.find((l) => l.id === layerId);
+    if (!target || !canManageLayer(target)) return;
+    await deleteLayerWithUndo(layerId);
   };
 
   /** D4 per-cel export: lists each unique drawn cel (excluding blanks and timeline repeats) and renders it isolated in drawn coordinates */
@@ -6509,7 +6772,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               />
 
               <ConditionalViewportConsumer
-                active={Boolean(textEdit || (isTransformActive && distortMode === 'transform') || isResizeModalOpen || keyframeHandlesActive || activeMotionPath)}
+                active={Boolean(
+                  textEdit ||
+                  (isTransformActive && distortMode === 'transform') ||
+                  isResizeModalOpen ||
+                  keyframeHandlesActive ||
+                  activeMotionPath ||
+                  (isAnimationTimelineOpen && cameraLayer?.isVisible && cameraLayer.meta?.camera) ||
+                  (isAnimationTimelineOpen && !animPlaying && lightTable.enabled && (lightCanvasDragMode || lightTable.externalRefs.length > 0))
+                )}
                 subscribe={subscribeViewport}
                 getSnapshot={getViewportSnapshot}
               >
@@ -6596,6 +6867,61 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                             const nextKf = buildKeyframeFromEval(kfs, animFrame, nextEval);
                             updateLayerKeyframes(activeLayer.id, upsertTransformKeyframe(kfs, nextKf));
                           }}
+                        />
+                      </Suspense>
+                    )}
+
+                    {/* Phase E2: Light Table local external reference images & interactive reference drag */}
+                    {isAnimationTimelineOpen && !animPlaying && lightTable.enabled && (
+                      lightCanvasDragMode ||
+                      externalRefsFor(
+                        lightTable,
+                        animFolder?.id ?? null,
+                        celLayerOf(animEntries[entryIndexAt(animEntries, animFrame)]),
+                        { visibleOnly: true }
+                      ).length > 0
+                    ) && (
+                      <Suspense fallback={null}>
+                        <LightTableOverlay
+                          lightTable={lightTable}
+                          activeFolderId={animFolder?.id ?? null}
+                          currentCelId={celLayerOf(animEntries[entryIndexAt(animEntries, animFrame)])}
+                          canvasWidth={canvas.width}
+                          canvasHeight={canvas.height}
+                          dragMode={lightCanvasDragMode}
+                          selectedRefId={selectedLightRefId}
+                          canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
+                          screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
+                          onUpdateLightTable={updateLightTable}
+                        />
+                      </Suspense>
+                    )}
+
+                    {/* Phase E1: 2D Camera framing box overlay & Look Through Camera preview matte */}
+                    {isAnimationTimelineOpen && cameraLayer && cameraLayer.isVisible && cameraLayer.meta?.camera && (
+                      <Suspense fallback={null}>
+                        <CameraFrameOverlay
+                          cameraMeta={cameraLayer.meta.camera}
+                          keyframes={cameraLayer.meta.keyframes}
+                          currentFrame={animFrame}
+                          canvasWidth={canvas.width}
+                          canvasHeight={canvas.height}
+                          interactive={Boolean((cameraWindowOpen || activeLayer?.id === cameraLayer.id) && canManageLayer(cameraLayer) && !animPlaying)}
+                          previewActive={cameraPreviewActive}
+                          previewFrameRect={cameraPreviewRect}
+                          canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
+                          screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
+                          onExitPreview={() => setCameraPreviewMode(false)}
+                          onSelectFrame={(frame) => {
+                            skipSelectShownRef.current = true;
+                            animationEngine?.goTo(frame);
+                            skipSelectShownRef.current = false;
+                          }}
+                          onCommitKeyframes={
+                            canManageLayer(cameraLayer)
+                              ? (nextKfs) => updateLayerKeyframes(cameraLayer.id, nextKfs)
+                              : undefined
+                          }
                         />
                       </Suspense>
                     )}
@@ -6717,7 +7043,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 key={canvas.id}
                 engine={animationEngine}
                 isOpen={isAnimationTimelineOpen}
-                onClose={() => setIsAnimationTimelineOpen(false)}
+                onClose={() => {
+                  if (cameraPreviewActive) setCameraPreviewMode(false);
+                  setCameraWindowOpen(false);
+                  setLightWindowOpen(false);
+                  setAudioWindowOpen(false);
+                  setLightCanvasDragMode(false);
+                  setIsAnimationTimelineOpen(false);
+                }}
                 tracks={animTracks}
                 activeFolderId={animFolder?.id ?? null}
                 subscribeThumbnails={subscribeThumbnails}
@@ -6772,6 +7105,85 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 onSelectCell={selectAnimationCell}
                 planExport={planAnimationExport}
                 planCelExport={planCelExport}
+                cameraLayer={cameraLayer}
+                cameraWindowOpen={cameraWindowOpen}
+                onToggleCameraWindow={() => setCameraWindowOpen((v) => !v)}
+                cameraPreviewActive={cameraPreviewActive}
+                onToggleCameraPreview={() => setCameraPreviewMode(!cameraPreviewActive)}
+                lightWindowOpen={lightWindowOpen}
+                onToggleLightWindow={() => setLightWindowOpen((v) => !v)}
+                audioLayers={audioLayers}
+                audioAssetSummaries={audioAssetSummaries}
+                audioWindowOpen={audioWindowOpen}
+                onToggleAudioWindow={() => setAudioWindowOpen((v) => !v)}
+                audioScrubEnabled={audioScrubEnabled}
+                onToggleAudioScrub={() => setAudioScrubEnabled((v) => !v)}
+                onToggleAudioMute={toggleAudioTrackMute}
+              />
+            </Suspense>
+          )}
+          {isAnimationTimelineOpen && cameraWindowOpen && (
+            <Suspense fallback={null}>
+              <CameraToolWindow
+                open={cameraWindowOpen}
+                onClose={() => setCameraWindowOpen(false)}
+                cameraLayer={cameraLayer}
+                canEdit={Boolean(!isGuest && !isCanvasViewer && (!cameraLayer || canManageLayer(cameraLayer)))}
+                currentFrame={animFrame}
+                canvasWidth={canvas.width}
+                canvasHeight={canvas.height}
+                previewActive={cameraPreviewActive}
+                onTogglePreview={() => setCameraPreviewMode(!cameraPreviewActive)}
+                onCreateCamera={(meta) => void createCameraLayer(meta)}
+                onUpdateCameraMeta={updateCameraMeta}
+                onUpdateCameraKeyframes={(kfs) => {
+                  if (cameraLayer) updateLayerKeyframes(cameraLayer.id, kfs);
+                }}
+                onDeleteCamera={() => void deleteCameraLayer()}
+                onGoToFrame={(f) => animationEngine?.goTo(f)}
+              />
+            </Suspense>
+          )}
+          {isAnimationTimelineOpen && lightWindowOpen && (
+            <Suspense fallback={null}>
+              <LightTableWindow
+                open={lightWindowOpen}
+                onClose={() => {
+                  setLightWindowOpen(false);
+                  setLightCanvasDragMode(false);
+                }}
+                lightTable={lightTable}
+                activeFolderId={animFolder?.id ?? null}
+                currentCelId={celLayerOf(animEntries[entryIndexAt(animEntries, animFrame)])}
+                celOptions={animTracks.flatMap((tr) =>
+                  tr.entries
+                    .filter((e) => e.ref === undefined)
+                    .map((e) => ({ id: e.id, label: e.label, folderId: tr.folderId, folderName: tr.name }))
+                )}
+                selectedRefId={selectedLightRefId}
+                onSelectRefId={setSelectedLightRefId}
+                canvasDragMode={lightCanvasDragMode}
+                onToggleCanvasDragMode={() => setLightCanvasDragMode((v) => !v)}
+                onUpdateLightTable={updateLightTable}
+              />
+            </Suspense>
+          )}
+          {isAnimationTimelineOpen && audioWindowOpen && (
+            <Suspense fallback={null}>
+              <AudioTrackWindow
+                open={audioWindowOpen}
+                onClose={() => setAudioWindowOpen(false)}
+                audioLayers={audioLayers}
+                assetSummaries={audioAssetSummaries}
+                fps={animationEngine?.getFps() ?? 12}
+                currentFrame={animFrame}
+                canCreate={!isGuest && !isCanvasViewer && Boolean(onCreateLayer)}
+                canEditLayer={canManageLayer}
+                scrubEnabled={audioScrubEnabled}
+                onToggleScrub={() => setAudioScrubEnabled((v) => !v)}
+                onCreateAudioTrack={(name, meta) => void createAudioTrack(name, meta)}
+                onUpdateAudioTrack={updateAudioTrack}
+                onDeleteAudioTrack={(id) => void deleteAudioTrack(id)}
               />
             </Suspense>
           )}

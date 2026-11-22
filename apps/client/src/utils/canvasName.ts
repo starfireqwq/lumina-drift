@@ -38,9 +38,9 @@ export function getNextCanvasTitle(lastTitle?: string): string {
  * Next "圖層組 N": counts plain groups only (not animation folders, cel folders or reused cels)
  * and skips numbers already in use.
  */
-export function nextGroupName(layers: Array<{ id: string; name: string; layerType: string; parentId?: string | null; meta?: { animation?: unknown; cel?: { ref?: string } } | null }>): string {
+export function nextGroupName(layers: Array<{ id: string; name: string; layerType: string; parentId?: string | null; meta?: { animation?: unknown; camera?: unknown; audio?: unknown; cel?: { ref?: string } } | null }>): string {
   const animationFolders = new Set(layers.filter((l) => l.layerType === 'group' && l.meta?.animation).map((l) => l.id));
-  const plain = layers.filter((l) => l.layerType === 'group' && !l.meta?.animation && !(l.parentId && animationFolders.has(l.parentId)));
+  const plain = layers.filter((l) => l.layerType === 'group' && !l.meta?.animation && !l.meta?.camera && !l.meta?.audio && !(l.parentId && animationFolders.has(l.parentId)));
   const used = new Set(layers.map((l) => l.name));
   let n = plain.length + 1;
   while (used.has(`圖層組 ${n}`)) n++;

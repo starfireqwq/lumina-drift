@@ -35,6 +35,8 @@ import {
   UserPlus,
   X,
   Film,
+  Camera,
+  Music,
   Repeat,
   Type as TypeIcon,
 } from 'lucide-react';
@@ -1274,6 +1276,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
               layer.layerType === 'vector' ? t.layers.vectorLayer : null,
               layer.layerType === 'text' ? t.layers.textLayer : null,
               layer.meta?.animation ? `${t.animation.timeline} ${layer.meta.animation.fps}fps` : null,
+              layer.meta?.camera ? `${t.animation.camera} ${layer.meta.camera.width}×${layer.meta.camera.height}` : null,
+              layer.meta?.audio ? t.animation.audioTrack : null,
             ].filter(Boolean);
 
             return (
@@ -1372,7 +1376,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                       }} aria-label={t.layers.groupLayer}
                         className="flex h-7 w-9 items-center justify-center gap-0.5 rounded border border-amber-700/50 bg-amber-950/40 text-amber-400">
                         {isCollapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-                        {layer.meta?.animation ? <Film className="h-3.5 w-3.5" /> : layer.meta?.cel?.ref === '' ? <span aria-hidden className="text-sm leading-none">×</span> : layer.meta?.cel?.ref !== undefined ? <Repeat className="h-3.5 w-3.5" /> : <Folder className="h-3.5 w-3.5" />}
+                        {layer.meta?.animation ? <Film className="h-3.5 w-3.5" /> : layer.meta?.camera ? <Camera className="h-3.5 w-3.5 text-sky-400" /> : layer.meta?.audio ? <Music className="h-3.5 w-3.5 text-emerald-400" /> : layer.meta?.cel?.ref === '' ? <span aria-hidden className="text-sm leading-none">×</span> : layer.meta?.cel?.ref !== undefined ? <Repeat className="h-3.5 w-3.5" /> : <Folder className="h-3.5 w-3.5" />}
                       </button>
                     ) : (
                       <button type="button"
