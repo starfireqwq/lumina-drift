@@ -302,7 +302,7 @@ const registryListeners = new Set<() => void>();
 export function syncPluginFilters(installedPlugins: readonly InstalledPlugin[]): readonly FilterDef[] {
   const next: FilterDef[] = [];
   for (const item of installedPlugins) {
-    if (!item.enabled || item.manifest.apiVersion !== 2) continue;
+    if (!item.enabled || (item.manifest.apiVersion !== 2 && item.manifest.apiVersion !== 3)) continue;
     if (!item.manifest.permissions.includes('filters')) continue;
     for (const decl of item.manifest.filters) {
       next.push(mapPluginFilter(item, decl));

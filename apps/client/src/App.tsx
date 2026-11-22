@@ -14,7 +14,15 @@ import { AtelierModal } from './components/AtelierModal';
 import type { CanvasPluginAccess, CanvasProjectAccess } from './components/CanvasWorkspace';
 import { getPlugins, subscribePlugins } from './plugins/pluginStore';
 import { getPluginLabels } from './plugins/pluginLabels';
-import { resolvePluginName, type PluginManifestV2 } from './plugins/pluginApi';
+import { isModernPluginManifest, resolvePluginName, type PluginManifestModern } from './plugins/pluginApi';
+import {
+  getV3ActivitySnapshot,
+  killAllPluginV3Bridges,
+  setV3ConsentRequester,
+  subscribeV3Activity,
+  type V3ConsentDecision,
+  type V3ConsentRequest,
+} from './plugins/pluginV3Client';
 import { ShortcutManager, type ParsedPluginShortcutId } from './engine/ShortcutManager';
 import type { PluginPanelValues } from './components/PluginPanelWindow';
 import { ConnectionGateway, InitialCanvasOptions } from './components/ConnectionGateway';
@@ -40,6 +48,8 @@ const AdminDashboardModal = lazy(() => import('./components/AdminDashboardModal'
 const UserProfileModal = lazy(() => import('./components/UserProfileModal').then((m) => ({ default: m.UserProfileModal })));
 const PluginManager = lazy(() => import('./components/PluginManager').then((m) => ({ default: m.PluginManager })));
 const PluginPanelWindow = lazy(() => import('./components/PluginPanelWindow').then((m) => ({ default: m.PluginPanelWindow })));
+const PluginV3BridgeModal = lazy(() => import('./components/PluginV3BridgeModal').then((m) => ({ default: m.PluginV3BridgeModal })));
+const PluginV3ConsentModal = lazy(() => import('./components/PluginV3ConsentModal').then((m) => ({ default: m.PluginV3ConsentModal })));
 
 const EMPTY_LAYERS: LayerModel[] = [];
 
@@ -61,6 +71,27 @@ export const App: React.FC = () => {
   const { t, language } = useI18n();
   const plugins = useSyncExternalStore(subscribePlugins, getPlugins);
   const [isPluginManagerOpen, setIsPluginManagerOpen] = useState(false);
+  const [isPluginV3ConsoleOpen, setIsPluginV3ConsoleOpen] = useState(false);
+  const [v3ConsentQueue, setV3ConsentQueue] = useState<
+    Array<{ request: V3ConsentRequest; resolve: (decision: V3ConsentDecision) => void }>
+  >([]);
+  const [v3Activity, setV3Activity] = useState(() => getV3ActivitySnapshot());
+
+  useEffect(() => {
+    setV3ConsentRequester(
+      (request) =>
+        new Promise<V3ConsentDecision>((resolve) => {
+          setV3ConsentQueue((prev) => [...prev, { request, resolve }]);
+        }),
+    );
+    const unsubActivity = subscribeV3Activity(() => {
+      setV3Activity(getV3ActivitySnapshot());
+    });
+    return () => {
+      setV3ConsentRequester(null);
+      unsubActivity();
+    };
+  }, []);
   const [openPluginPanels, setOpenPluginPanels] = useState<string[]>([]);
   const [activePluginToolKey, setActivePluginToolKey] = useState<string | null>(null);
   const [slowPluginCommand, setSlowPluginCommand] = useState<string | null>(null);
@@ -80,7 +111,7 @@ export const App: React.FC = () => {
   useEffect(() => {
     const validKeys = new Set<string>();
     for (const { manifest, enabled } of plugins) {
-      if (!enabled || manifest.apiVersion !== 2 || !manifest.permissions.includes('ui:panel')) continue;
+      if (!enabled || !isModernPluginManifest(manifest) || !manifest.permissions.includes('ui:panel')) continue;
       for (const panel of manifest.panels) {
         validKeys.add(`${manifest.id}:${panel.id}`);
       }
@@ -678,7 +709,7 @@ export const App: React.FC = () => {
 
   const handleTogglePluginPanel = useCallback((pluginId: string, panelId: string) => {
     const plugin = getPlugins().find(({ manifest, enabled }) => enabled && manifest.id === pluginId)?.manifest;
-    if (!plugin || plugin.apiVersion !== 2 || !plugin.permissions.includes('ui:panel')) return;
+    if (!plugin || !isModernPluginManifest(plugin) || !plugin.permissions.includes('ui:panel')) return;
     if (!plugin.panels.some((p) => p.id === panelId)) return;
     const key = `${pluginId}:${panelId}`;
     setOpenPluginPanels((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
@@ -696,7 +727,7 @@ export const App: React.FC = () => {
     const controller = new AbortController();
     pluginCmdAbortRef.current = controller;
     try {
-      if (plugin.apiVersion === 2) {
+      if (isModernPluginManifest(plugin)) {
         const access = pluginAccessRef.current;
         if (!access || access.canvasId !== canvasId) return;
         const result = await access.runV2Command(plugin, commandId, {
@@ -756,7 +787,7 @@ export const App: React.FC = () => {
 
   const handlePluginPanelAction = useCallback(
     async (
-      plugin: PluginManifestV2,
+      plugin: PluginManifestModern,
       panelId: string,
       actionId: string,
       values: PluginPanelValues,
@@ -1247,6 +1278,29 @@ export const App: React.FC = () => {
           {projectStatusMsg}
         </div>
       )}
+      {(v3Activity.activeBridgeRuns > 0 || v3Activity.mcpServerRunning) && (
+        <div
+          role="status"
+          data-plugin-v3-active-banner="true"
+          className="atelier-plugin-sweep fixed bottom-28 left-1/2 z-[91] flex max-w-[calc(100vw-24px)] -translate-x-1/2 items-center gap-2.5 rounded-xl border border-amber-500/50 bg-neutral-900/95 px-3 py-1.5 text-xs text-amber-100 shadow-2xl"
+        >
+          <span className="truncate font-medium">
+            {getPluginLabels(language).v3ActiveBanner}
+            {v3Activity.mcpServerRunning ? ' · MCP' : ''}
+            {v3Activity.activeBridgeRuns > 0 ? ` (${v3Activity.activeBridgeRuns})` : ''}
+          </span>
+          <button
+            type="button"
+            data-plugin-v3-banner-kill="true"
+            onClick={() => {
+              void killAllPluginV3Bridges().then(() => showProjectToast(getPluginLabels(language).v3KillAllDone));
+            }}
+            className="atelier-btn !h-6 shrink-0 border-rose-500/50 bg-rose-600/25 !px-2 text-[11px] text-rose-200 hover:bg-rose-600/40"
+          >
+            {getPluginLabels(language).v3KillAll}
+          </button>
+        </div>
+      )}
       {slowPluginCommand && (
         <div
           role="status"
@@ -1477,7 +1531,40 @@ export const App: React.FC = () => {
 
       <OverlayPresence open={isPluginManagerOpen}>
         <Suspense fallback={null}>
-          <PluginManager plugins={plugins} onClose={() => setIsPluginManagerOpen(false)} />
+          <PluginManager
+            plugins={plugins}
+            isCollaborativeRoom={Boolean(currentCanvas?.id && !OfflineSessionStore.isOfflineCanvas(currentCanvas.id))}
+            onOpenV3Console={() => {
+              setIsPluginManagerOpen(false);
+              setIsPluginV3ConsoleOpen(true);
+            }}
+            onClose={() => setIsPluginManagerOpen(false)}
+          />
+        </Suspense>
+      </OverlayPresence>
+
+      <OverlayPresence open={isPluginV3ConsoleOpen}>
+        <Suspense fallback={null}>
+          <PluginV3BridgeModal
+            isCollaborativeRoom={Boolean(currentCanvas?.id && !OfflineSessionStore.isOfflineCanvas(currentCanvas.id))}
+            onNotice={(msg) => showProjectToast(msg)}
+            onClose={() => setIsPluginV3ConsoleOpen(false)}
+          />
+        </Suspense>
+      </OverlayPresence>
+
+      <OverlayPresence open={v3ConsentQueue.length > 0}>
+        <Suspense fallback={null}>
+          {v3ConsentQueue[0] && (
+            <PluginV3ConsentModal
+              request={v3ConsentQueue[0].request}
+              onResolve={(decision) => {
+                const current = v3ConsentQueue[0];
+                setV3ConsentQueue((prev) => prev.slice(1));
+                current?.resolve(decision);
+              }}
+            />
+          )}
         </Suspense>
       </OverlayPresence>
 
@@ -1504,7 +1591,7 @@ export const App: React.FC = () => {
             }
           : null;
         const panelEntries = plugins.flatMap(({ manifest, enabled }) => {
-          if (!enabled || manifest.apiVersion !== 2 || !manifest.permissions.includes('ui:panel')) return [];
+          if (!enabled || !isModernPluginManifest(manifest) || !manifest.permissions.includes('ui:panel')) return [];
           return manifest.panels.map((panel) => ({
             key: `${manifest.id}:${panel.id}`,
             plugin: manifest,

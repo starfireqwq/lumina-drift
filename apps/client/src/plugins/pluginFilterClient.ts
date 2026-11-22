@@ -55,7 +55,7 @@ export class PluginFilterWorkerClient {
       return Promise.reject(new Error(`Not a plugin filter: ${def.id}`));
     }
     const installed = getPlugins().find((item) => item.manifest.id === def.pluginId);
-    if (!installed || !installed.enabled || installed.manifest.apiVersion !== 2) {
+    if (!installed || !installed.enabled || (installed.manifest.apiVersion !== 2 && installed.manifest.apiVersion !== 3)) {
       return Promise.reject(new Error(`Plugin "${def.pluginId}" is disabled or unavailable.`));
     }
     if (!installed.manifest.permissions.includes('filters')) {

@@ -2,6 +2,7 @@ import type { BlendMode } from '@atelier/shared';
 
 export const PLUGIN_API_VERSION_V1 = 1 as const;
 export const PLUGIN_API_VERSION_V2 = 2 as const;
+export const PLUGIN_API_VERSION_V3 = 3 as const;
 export const PLUGIN_API_VERSION = PLUGIN_API_VERSION_V1;
 
 /**
@@ -48,6 +49,17 @@ export const PLUGIN_LIMITS = {
   memoryLimitDesktopBytes: 32 * 1024 * 1024,
   memoryLimitMobileBytes: 24 * 1024 * 1024,
   maxStackSizeBytes: 512 * 1024,
+  // v3.0 desktop bridge & local MCP hard caps
+  maxBridgeToolsPerPlugin: 8,
+  maxBridgeArgsPerTool: 12,
+  maxBridgeInputBytes: 16 * 1024 * 1024,
+  maxBridgeOutputBytes: 16 * 1024 * 1024,
+  maxBridgeStdoutBytes: 2 * 1024 * 1024,
+  maxBridgeWallMs: 60000,
+  defaultBridgeWallMs: 15000,
+  maxMcpClientServersPerPlugin: 4,
+  maxMcpHttpBodyBytes: 4 * 1024 * 1024,
+  maxMcpConcurrentCalls: 4,
 } as const;
 
 export const MAX_PLUGIN_BYTES_V1 = PLUGIN_LIMITS.maxPackageBytesV1;
@@ -80,7 +92,25 @@ export const PLUGIN_PERMISSIONS_V2_CORE = [
 
 export const PLUGIN_PERMISSIONS_V2 = [...PLUGIN_PERMISSIONS_V2_CORE, 'brush'] as const;
 export type PluginPermissionV2 = (typeof PLUGIN_PERMISSIONS_V2)[number];
-export type PluginPermission = PluginPermissionV1 | PluginPermissionV2;
+
+export const PLUGIN_PERMISSIONS_V3_HIGH_RISK = [
+  'bridge:local',
+  'mcp:server',
+  'mcp:client',
+] as const;
+export type PluginPermissionV3HighRisk = (typeof PLUGIN_PERMISSIONS_V3_HIGH_RISK)[number];
+
+export const PLUGIN_PERMISSIONS_V3 = [...PLUGIN_PERMISSIONS_V2, ...PLUGIN_PERMISSIONS_V3_HIGH_RISK] as const;
+export type PluginPermissionV3 = (typeof PLUGIN_PERMISSIONS_V3)[number];
+export type PluginPermission = PluginPermissionV1 | PluginPermissionV2 | PluginPermissionV3;
+
+export function isV3HighRiskPermission(permission: string): permission is PluginPermissionV3HighRisk {
+  return (PLUGIN_PERMISSIONS_V3_HIGH_RISK as readonly string[]).includes(permission);
+}
+
+export function hasV3Permissions(manifest: PluginManifest): boolean {
+  return manifest.permissions.some((p) => isV3HighRiskPermission(p));
+}
 
 export const PLUGIN_TOOL_ICONS = [
   'wand',
@@ -362,6 +392,36 @@ export interface PluginManifestV1 {
   script: string;
 }
 
+export interface PluginBridgeArgSpec {
+  key: string;
+  label: string;
+  i18nLabel?: PluginLocaleMap;
+  kind: 'string' | 'number' | 'boolean' | 'enum';
+  required?: boolean;
+  options?: string[];
+  min?: number;
+  max?: number;
+  maxLength?: number;
+}
+
+export interface PluginBridgeToolDeclaration {
+  id: string;
+  label: string;
+  i18nLabel?: PluginLocaleMap;
+  description?: string;
+  i18nDescription?: PluginLocaleMap;
+  args?: PluginBridgeArgSpec[];
+  expectsOutputFile?: boolean;
+}
+
+export interface PluginMcpClientDeclaration {
+  id: string;
+  label: string;
+  i18nLabel?: PluginLocaleMap;
+  description?: string;
+  i18nDescription?: PluginLocaleMap;
+}
+
 export interface PluginManifestV2 {
   apiVersion: 2;
   id: string;
@@ -378,7 +438,30 @@ export interface PluginManifestV2 {
   script: string;
 }
 
-export type PluginManifest = PluginManifestV1 | PluginManifestV2;
+export interface PluginManifestV3 {
+  apiVersion: 3;
+  id: string;
+  name: string;
+  version: string;
+  author: string;
+  description: string;
+  i18n?: PluginI18nMetadata;
+  permissions: PluginPermissionV3[];
+  commands: PluginCommandV2[];
+  filters: PluginFilterDeclaration[];
+  panels: PluginPanelDeclaration[];
+  tools?: PluginToolDeclaration[];
+  bridgeTools?: PluginBridgeToolDeclaration[];
+  mcpClients?: PluginMcpClientDeclaration[];
+  script: string;
+}
+
+export type PluginManifestModern = PluginManifestV2 | PluginManifestV3;
+export type PluginManifest = PluginManifestV1 | PluginManifestV2 | PluginManifestV3;
+
+export function isModernPluginManifest(manifest: PluginManifest): manifest is PluginManifestModern {
+  return manifest.apiVersion === 2 || manifest.apiVersion === 3;
+}
 
 export interface PluginContext {
   width: number;
@@ -1023,11 +1106,236 @@ function parsePluginV2(item: Record<string, unknown>): PluginManifestV2 {
   };
 }
 
+function parseBridgeArgSpec(entry: unknown): PluginBridgeArgSpec {
+  const obj = record(entry);
+  const key = identifier(obj.key);
+  const kind = obj.kind;
+  if (kind !== 'string' && kind !== 'number' && kind !== 'boolean' && kind !== 'enum') {
+    throw new Error(`Invalid bridge arg kind for "${key}".`);
+  }
+  const argLabel = label(obj.label, 60);
+  const i18nLabel = parseLocaleMap(obj.i18nLabel, 60);
+  const required = obj.required === true;
+  if (kind === 'enum') {
+    if (
+      !Array.isArray(obj.options) ||
+      obj.options.length === 0 ||
+      obj.options.length > PLUGIN_LIMITS.maxSelectOptions
+    ) {
+      throw new Error(`Bridge enum arg "${key}" must provide 1..${PLUGIN_LIMITS.maxSelectOptions} options.`);
+    }
+    const options = obj.options.map((opt) => label(opt, 64));
+    if (new Set(options).size !== options.length) {
+      throw new Error(`Duplicate option in bridge enum arg "${key}".`);
+    }
+    return { key, label: argLabel, ...(i18nLabel ? { i18nLabel } : {}), kind, ...(required ? { required } : {}), options };
+  }
+  if (kind === 'number') {
+    const parseOptNum = (val: unknown, field: string): number | undefined => {
+      if (val === undefined) return undefined;
+      if (typeof val !== 'number' || !Number.isFinite(val)) {
+        throw new Error(`Invalid ${field}.`);
+      }
+      return val;
+    };
+    const min = parseOptNum(obj.min, `bridge arg "${key}" min`);
+    const max = parseOptNum(obj.max, `bridge arg "${key}" max`);
+    if (min !== undefined && max !== undefined && min > max) {
+      throw new Error(`Bridge arg "${key}" min must be <= max.`);
+    }
+    return {
+      key,
+      label: argLabel,
+      ...(i18nLabel ? { i18nLabel } : {}),
+      kind,
+      ...(required ? { required } : {}),
+      ...(min !== undefined ? { min } : {}),
+      ...(max !== undefined ? { max } : {}),
+    };
+  }
+  if (kind === 'string') {
+    const maxLength = obj.maxLength !== undefined ? obj.maxLength : 120;
+    if (typeof maxLength !== 'number' || !Number.isInteger(maxLength) || maxLength < 1 || maxLength > 256) {
+      throw new Error(`Bridge string arg "${key}" maxLength must be an integer 1..256.`);
+    }
+    return {
+      key,
+      label: argLabel,
+      ...(i18nLabel ? { i18nLabel } : {}),
+      kind,
+      ...(required ? { required } : {}),
+      maxLength,
+    };
+  }
+  return { key, label: argLabel, ...(i18nLabel ? { i18nLabel } : {}), kind, ...(required ? { required } : {}) };
+}
+
+function parseBridgeTools(value: unknown): PluginBridgeToolDeclaration[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > PLUGIN_LIMITS.maxBridgeToolsPerPlugin) {
+    throw new Error(`Declare at most ${PLUGIN_LIMITS.maxBridgeToolsPerPlugin} bridge tools.`);
+  }
+  const out: PluginBridgeToolDeclaration[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    const obj = record(entry);
+    // Reject any attempt by a plugin manifest to embed raw executable paths or shell commands
+    if ('command' in obj || 'executable' in obj || 'exePath' in obj || 'shell' in obj || 'argv' in obj) {
+      throw new Error('Bridge tool declarations cannot embed executable paths or shell commands.');
+    }
+    const id = identifier(obj.id);
+    if (seen.has(id)) throw new Error(`Duplicate bridge tool ID: ${id}`);
+    seen.add(id);
+    const i18nLabel = parseLocaleMap(obj.i18nLabel, 60);
+    const description = optionalLabel(obj.description, 200);
+    const i18nDescription = parseLocaleMap(obj.i18nDescription, 200);
+    const rawArgs = obj.args === undefined ? [] : obj.args;
+    if (!Array.isArray(rawArgs) || rawArgs.length > PLUGIN_LIMITS.maxBridgeArgsPerTool) {
+      throw new Error(`Bridge tool "${id}" can declare at most ${PLUGIN_LIMITS.maxBridgeArgsPerTool} args.`);
+    }
+    const args = rawArgs.map(parseBridgeArgSpec);
+    if (new Set(args.map((a) => a.key)).size !== args.length) {
+      throw new Error(`Duplicate arg key in bridge tool "${id}".`);
+    }
+    out.push({
+      id,
+      label: label(obj.label, 60),
+      ...(i18nLabel ? { i18nLabel } : {}),
+      ...(description ? { description } : {}),
+      ...(i18nDescription ? { i18nDescription } : {}),
+      ...(args.length > 0 ? { args } : {}),
+      ...(obj.expectsOutputFile === true ? { expectsOutputFile: true } : {}),
+    });
+  }
+  return out;
+}
+
+function parseMcpClients(value: unknown): PluginMcpClientDeclaration[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > PLUGIN_LIMITS.maxMcpClientServersPerPlugin) {
+    throw new Error(`Declare at most ${PLUGIN_LIMITS.maxMcpClientServersPerPlugin} MCP client servers.`);
+  }
+  const out: PluginMcpClientDeclaration[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    const obj = record(entry);
+    if ('url' in obj || 'endpoint' in obj || 'command' in obj || 'executable' in obj) {
+      throw new Error('MCP client declarations cannot embed raw URLs or executable paths.');
+    }
+    const id = identifier(obj.id);
+    if (seen.has(id)) throw new Error(`Duplicate MCP client ID: ${id}`);
+    seen.add(id);
+    const i18nLabel = parseLocaleMap(obj.i18nLabel, 60);
+    const description = optionalLabel(obj.description, 200);
+    const i18nDescription = parseLocaleMap(obj.i18nDescription, 200);
+    out.push({
+      id,
+      label: label(obj.label, 60),
+      ...(i18nLabel ? { i18nLabel } : {}),
+      ...(description ? { description } : {}),
+      ...(i18nDescription ? { i18nDescription } : {}),
+    });
+  }
+  return out;
+}
+
+function parsePluginV3(item: Record<string, unknown>): PluginManifestV3 {
+  if (
+    !Array.isArray(item.permissions) ||
+    item.permissions.length > PLUGIN_PERMISSIONS_V3.length ||
+    !item.permissions.every((permission) => (PLUGIN_PERMISSIONS_V3 as readonly unknown[]).includes(permission)) ||
+    new Set(item.permissions).size !== item.permissions.length
+  ) {
+    throw new Error('Invalid permissions.');
+  }
+  const perms = [...(item.permissions as PluginPermissionV3[])];
+  const permSet = new Set<PluginPermissionV3>(perms);
+
+  const rawCommands = item.commands === undefined ? [] : item.commands;
+  if (!Array.isArray(rawCommands) || rawCommands.length > PLUGIN_LIMITS.maxCommandsPerPluginV2) {
+    throw new Error(`Declare at most ${PLUGIN_LIMITS.maxCommandsPerPluginV2} commands.`);
+  }
+  const commands: PluginCommandV2[] = rawCommands.map((entry) => {
+    const command = record(entry);
+    const i18nLabel = parseLocaleMap(command.i18nLabel, 60);
+    const group = optionalLabel(command.group, 40);
+    const suggestedShortcut = parseShortcut(command.suggestedShortcut);
+    return {
+      id: identifier(command.id),
+      label: label(command.label, 60),
+      ...(i18nLabel ? { i18nLabel } : {}),
+      ...(group ? { group } : {}),
+      ...(suggestedShortcut ? { suggestedShortcut } : {}),
+    };
+  });
+  if (new Set(commands.map((c) => c.id)).size !== commands.length) throw new Error('Duplicate command ID.');
+
+  const filters = parseFilters(item.filters);
+  const panels = parsePanels(item.panels);
+  const tools = parseTools(item.tools);
+  const bridgeTools = parseBridgeTools(item.bridgeTools);
+  const mcpClients = parseMcpClients(item.mcpClients);
+
+  if (commands.length === 0 && filters.length === 0 && panels.length === 0 && tools.length === 0) {
+    throw new Error('Plugin v3 must declare at least one command, filter, panel, or tool.');
+  }
+  if (commands.length > 0 && !permSet.has('commands')) {
+    throw new Error('Declaring commands requires the "commands" permission.');
+  }
+  if (filters.length > 0 && !permSet.has('filters')) {
+    throw new Error('Declaring filters requires the "filters" permission.');
+  }
+  if (panels.length > 0 && !permSet.has('ui:panel')) {
+    throw new Error('Declaring panels requires the "ui:panel" permission.');
+  }
+  if (tools.length > 0 && !permSet.has('tools')) {
+    throw new Error('Declaring tools requires the "tools" permission.');
+  }
+  if (bridgeTools.length > 0 && !permSet.has('bridge:local')) {
+    throw new Error('Declaring bridgeTools requires the "bridge:local" permission.');
+  }
+  if (mcpClients.length > 0 && !permSet.has('mcp:client')) {
+    throw new Error('Declaring mcpClients requires the "mcp:client" permission.');
+  }
+  if (panels.some((p) => p.fields.some((f) => f.kind === 'layer')) && !permSet.has('layers:read')) {
+    throw new Error('Panel "layer" field requires the "layers:read" permission.');
+  }
+
+  if (
+    typeof item.script !== 'string' ||
+    !item.script.trim() ||
+    new TextEncoder().encode(item.script).length > PLUGIN_LIMITS.maxPackageBytesV2
+  ) {
+    throw new Error('Invalid or oversized script.');
+  }
+
+  const i18n = parseI18nMetadata(item.i18n);
+
+  return {
+    apiVersion: PLUGIN_API_VERSION_V3,
+    id: identifier(item.id),
+    name: label(item.name, 60),
+    version: label(item.version, 30),
+    author: label(item.author, 60),
+    description: item.description === '' || item.description === undefined ? '' : label(item.description, 240),
+    ...(i18n ? { i18n } : {}),
+    permissions: perms,
+    commands,
+    filters,
+    panels,
+    ...(tools.length > 0 ? { tools } : {}),
+    ...(bridgeTools.length > 0 ? { bridgeTools } : {}),
+    ...(mcpClients.length > 0 ? { mcpClients } : {}),
+    script: item.script,
+  };
+}
+
 export function parsePlugin(value: unknown): PluginManifest {
   const item = record(value);
   if (item.apiVersion === PLUGIN_API_VERSION_V1) return parsePluginV1(item);
   if (item.apiVersion === PLUGIN_API_VERSION_V2) return parsePluginV2(item);
-  throw new Error('Plugin API version 1 or 2 is required.');
+  if (item.apiVersion === PLUGIN_API_VERSION_V3) return parsePluginV3(item);
+  throw new Error('Plugin API version 1, 2, or 3 is required.');
 }
 
 export function resolvePluginText(
@@ -1039,14 +1347,14 @@ export function resolvePluginText(
 }
 
 export function resolvePluginName(manifest: PluginManifest, language: PluginLocaleCode): string {
-  if (manifest.apiVersion === 2) {
+  if (isModernPluginManifest(manifest)) {
     return manifest.i18n?.[language]?.name ?? manifest.i18n?.['en-US']?.name ?? manifest.name;
   }
   return manifest.name;
 }
 
 export function resolvePluginDescription(manifest: PluginManifest, language: PluginLocaleCode): string {
-  if (manifest.apiVersion === 2) {
+  if (isModernPluginManifest(manifest)) {
     return manifest.i18n?.[language]?.description ?? manifest.i18n?.['en-US']?.description ?? manifest.description;
   }
   return manifest.description;

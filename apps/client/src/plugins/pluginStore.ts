@@ -1,4 +1,5 @@
 import { PLUGIN_LIMITS, parsePlugin, type PluginManifest } from './pluginApi';
+import { revokePluginV3Consent } from './pluginV3Client';
 
 export interface InstalledPlugin {
   manifest: PluginManifest;
@@ -148,13 +149,17 @@ export function createPluginStore(
       if (plugins.length >= maxPlugins) {
         throw new Error(`At most ${maxPlugins} plugins can be installed.`);
       }
-      // Security rule: new installs and same-id replacements always start disabled.
+      // Security rule: new installs and same-id replacements always start disabled
+      // and revoke any prior in-memory v3 session consents for this plugin ID.
+      revokePluginV3Consent(manifest.id);
       save([...plugins, { manifest, enabled: false }]);
     },
     setPluginEnabled: (id: string, enabled: boolean) => {
+      if (!enabled) revokePluginV3Consent(id);
       save(readPlugins().map((plugin) => (plugin.manifest.id === id ? { ...plugin, enabled } : plugin)));
     },
     removePlugin: (id: string) => {
+      revokePluginV3Consent(id);
       save(readPlugins().filter((plugin) => plugin.manifest.id !== id));
     },
     reload: () => {

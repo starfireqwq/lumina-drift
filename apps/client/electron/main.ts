@@ -18,6 +18,8 @@ if (process.platform === 'win32') {
   }
 }
 import { connectWinTab } from './winTab';
+import { PluginV3BridgeManager, type BridgeInvokeRequest } from './pluginV3Bridge';
+import { LocalMcpServer } from './mcpServer';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -723,6 +725,180 @@ ipcMain.handle('atelier:export-close-directory', (event, dirId: unknown): boolea
   return exportDirectories.delete(dirId);
 });
 
+// Plugin API v3.0: Isolated desktop bridge & local loopback MCP server/client
+const pluginV3Bridge = new PluginV3BridgeManager();
+const pendingMcpCanvasCalls = new Map<
+  string,
+  { resolve: (value: unknown) => void; reject: (err: Error) => void; timer: ReturnType<typeof setTimeout> }
+>();
+
+const localMcpServer = new LocalMcpServer(async (toolName, args, allowWrite) => {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    throw new Error('Lumina Drift window is unavailable.');
+  }
+  const requestId = crypto.randomUUID();
+  return await new Promise<unknown>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingMcpCanvasCalls.delete(requestId);
+      reject(new Error('MCP canvas execution timed out.'));
+    }, 15000);
+    pendingMcpCanvasCalls.set(requestId, { resolve, reject, timer });
+    mainWindow!.webContents.send('lumina:mcp-canvas-request', {
+      requestId,
+      toolName,
+      args,
+      allowWrite,
+    });
+  });
+});
+
+ipcMain.on(
+  'lumina:mcp-canvas-response',
+  (event, payload: { requestId?: unknown; ok?: unknown; result?: unknown; error?: unknown }) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== event.sender.mainFrame) {
+      return;
+    }
+    if (typeof payload?.requestId !== 'string') return;
+    const pending = pendingMcpCanvasCalls.get(payload.requestId);
+    if (!pending) return;
+    pendingMcpCanvasCalls.delete(payload.requestId);
+    clearTimeout(pending.timer);
+    if (payload.ok === true) {
+      pending.resolve(payload.result);
+    } else {
+      pending.reject(new Error(typeof payload.error === 'string' ? payload.error : 'MCP canvas call failed.'));
+    }
+  },
+);
+
+ipcMain.handle('atelier:plugin-v3-list-profiles', (event) => {
+  if (!isAuthorizedMainSender(event)) return { tools: [], mcpClients: [] };
+  return pluginV3Bridge.listProfiles();
+});
+
+ipcMain.handle('atelier:plugin-v3-pick-exe', async (event) => {
+  if (!isAuthorizedMainSender(event) || !mainWindow || mainWindow.isDestroyed()) {
+    return { canceled: true };
+  }
+  return pluginV3Bridge.pickExecutable(mainWindow);
+});
+
+ipcMain.handle(
+  'atelier:plugin-v3-save-tool',
+  (
+    event,
+    input: {
+      id: string;
+      label: string;
+      executablePath: string;
+      argTemplate?: string[];
+      expectsOutputFile?: boolean;
+      timeoutMs?: number;
+    },
+  ) => {
+    if (!isAuthorizedMainSender(event)) throw new Error('Unauthorized IPC sender.');
+    return pluginV3Bridge.saveToolProfile(input);
+  },
+);
+
+ipcMain.handle('atelier:plugin-v3-remove-tool', (event, id: unknown) => {
+  if (!isAuthorizedMainSender(event) || typeof id !== 'string') return false;
+  return pluginV3Bridge.removeToolProfile(id);
+});
+
+ipcMain.handle(
+  'atelier:plugin-v3-invoke-tool',
+  async (event, req: BridgeInvokeRequest) => {
+    if (!isAuthorizedMainSender(event)) {
+      return { ok: false, runId: '', durationMs: 0, error: 'Unauthorized IPC sender.' };
+    }
+    return pluginV3Bridge.invokeLocalTool(req);
+  },
+);
+
+ipcMain.handle('atelier:plugin-v3-abort-run', (event, runId: unknown) => {
+  if (!isAuthorizedMainSender(event) || typeof runId !== 'string') return false;
+  return pluginV3Bridge.abortRun(runId);
+});
+
+ipcMain.handle('atelier:plugin-v3-kill-all', async (event) => {
+  if (!isAuthorizedMainSender(event)) return { stoppedRuns: 0, mcpStopped: false };
+  const stoppedRuns = pluginV3Bridge.killAll();
+  const wasRunning = localMcpServer.getStatus().running;
+  await localMcpServer.stop();
+  for (const [id, pending] of pendingMcpCanvasCalls.entries()) {
+    clearTimeout(pending.timer);
+    pending.reject(new Error('Stopped by emergency kill switch.'));
+    pendingMcpCanvasCalls.delete(id);
+  }
+  return { stoppedRuns, mcpStopped: wasRunning };
+});
+
+ipcMain.handle('atelier:plugin-v3-mcp-server-status', (event) => {
+  if (!isAuthorizedMainSender(event)) return null;
+  return localMcpServer.getStatus();
+});
+
+ipcMain.handle(
+  'atelier:plugin-v3-mcp-server-start',
+  async (event, options?: { port?: number; allowWrite?: boolean }) => {
+    if (!isAuthorizedMainSender(event)) throw new Error('Unauthorized IPC sender.');
+    return localMcpServer.start(options);
+  },
+);
+
+ipcMain.handle('atelier:plugin-v3-mcp-server-stop', async (event) => {
+  if (!isAuthorizedMainSender(event)) return null;
+  return localMcpServer.stop();
+});
+
+ipcMain.handle('atelier:plugin-v3-mcp-server-set-write', (event, allowWrite: unknown) => {
+  if (!isAuthorizedMainSender(event)) return null;
+  return localMcpServer.setAllowWrite(allowWrite === true);
+});
+
+ipcMain.handle('atelier:plugin-v3-mcp-server-rotate-token', (event) => {
+  if (!isAuthorizedMainSender(event)) return null;
+  return localMcpServer.rotateToken();
+});
+
+ipcMain.handle(
+  'atelier:plugin-v3-save-mcp-client',
+  (
+    event,
+    input: { id: string; label: string; endpointUrl: string; bearerToken?: string },
+  ) => {
+    if (!isAuthorizedMainSender(event)) throw new Error('Unauthorized IPC sender.');
+    return pluginV3Bridge.saveMcpClientProfile(input);
+  },
+);
+
+ipcMain.handle('atelier:plugin-v3-remove-mcp-client', (event, id: unknown) => {
+  if (!isAuthorizedMainSender(event) || typeof id !== 'string') return false;
+  return pluginV3Bridge.removeMcpClientProfile(id);
+});
+
+ipcMain.handle(
+  'atelier:plugin-v3-mcp-client-call',
+  async (
+    event,
+    payload: { serverId: string; method: string; params?: unknown; timeoutMs?: number },
+  ) => {
+    if (!isAuthorizedMainSender(event)) {
+      return { ok: false, error: 'Unauthorized IPC sender.' };
+    }
+    if (typeof payload?.serverId !== 'string' || typeof payload?.method !== 'string') {
+      return { ok: false, error: 'Invalid MCP client call payload.' };
+    }
+    return pluginV3Bridge.callLocalMcpJsonRpc(
+      payload.serverId,
+      payload.method,
+      payload.params,
+      payload.timeoutMs,
+    );
+  },
+);
+
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
   createWindow();
@@ -740,6 +916,8 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
+  pluginV3Bridge.killAll('Application closing.');
+  void localMcpServer.stop();
   stopCloudflareTunnel();
   stopLocalServer();
   if (process.platform !== 'darwin') {

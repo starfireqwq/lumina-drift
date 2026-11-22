@@ -6,7 +6,7 @@ import {
   type PluginAction,
   type PluginContext,
   type PluginManifest,
-  type PluginManifestV2,
+  type PluginManifestModern,
   type PluginPointerEvent,
   type PluginPointerPhase,
 } from './pluginApi';
@@ -57,7 +57,7 @@ export function runPlugin(plugin: PluginManifest, command: string, context: Plug
 }
 
 function startPluginV2Worker(
-  manifest: PluginManifestV2,
+  manifest: PluginManifestModern,
   entry: RunV2Entry,
   context: PluginContext,
   handler: PluginRpcHandler,
@@ -173,7 +173,7 @@ function startPluginV2Worker(
 }
 
 export function startPluginCommandV2(
-  manifest: PluginManifestV2,
+  manifest: PluginManifestModern,
   commandId: string,
   context: PluginContext,
   handler: PluginRpcHandler,
@@ -183,7 +183,7 @@ export function startPluginCommandV2(
 }
 
 export function startPluginPanelActionV2(
-  manifest: PluginManifestV2,
+  manifest: PluginManifestModern,
   panelId: string,
   actionId: string,
   values: Record<string, unknown>,
@@ -199,7 +199,7 @@ export function startPluginPanelActionV2(
  * timeouts and hard `worker.terminate()` isolation.
  */
 export function startPluginToolSessionInWorker(
-  manifest: PluginManifestV2,
+  manifest: PluginManifestModern,
   toolId: string,
   context: PluginContext,
   handler: PluginRpcHandler,

@@ -1,0 +1,134 @@
+{
+  "apiVersion": 3,
+  "id": "lumina.v3-bridge-demo",
+  "name": "Lumina v3 Desktop Bridge Demo",
+  "version": "1.0.0",
+  "author": "Lumina Drift",
+  "description": "Demonstrates API v3.0 trusted local tool bridge, local loopback MCP status, and safe degradation on Web/mobile/collab rooms.",
+  "i18n": {
+    "zh-TW": {
+      "name": "流光 v3 桌面橋接示範",
+      "description": "示範 API v3.0 受信任本機工具橋接、本機 MCP 狀態查詢，以及於 Web、手機與多人房的安全降級。"
+    },
+    "zh-CN": {
+      "name": "流光 v3 桌面桥接示例",
+      "description": "演示 API v3.0 受信任本地工具桥接、本地 MCP 状态查询，以及在 Web、手机与多人房的安全降级。"
+    },
+    "ja-JP": {
+      "name": "流光 v3 デスクトップブリッジデモ",
+      "description": "API v3.0 の信頼済みローカルツール連携、ローカル MCP 状態確認、Web・モバイル・共同部屋での安全な降格を実演します。"
+    }
+  },
+  "permissions": [
+    "layers:read",
+    "commands",
+    "ui:panel",
+    "bridge:local",
+    "mcp:server",
+    "mcp:client"
+  ],
+  "commands": [
+    {
+      "id": "check-v3-status",
+      "label": "Check Desktop Bridge & MCP Status",
+      "i18nLabel": {
+        "zh-TW": "檢查桌面橋接與 MCP 狀態",
+        "zh-CN": "检查桌面桥接与 MCP 状态",
+        "ja-JP": "デスクトップブリッジと MCP 状態を確認"
+      },
+      "group": "Desktop v3"
+    },
+    {
+      "id": "run-echo-tool",
+      "label": "Invoke Bound Local Tool (echo-helper)",
+      "i18nLabel": {
+        "zh-TW": "呼叫已綁定本機工具（echo-helper）",
+        "zh-CN": "调用已绑定本地工具（echo-helper）",
+        "ja-JP": "登録済みローカルツールを実行（echo-helper）"
+      },
+      "group": "Desktop v3"
+    }
+  ],
+  "filters": [],
+  "panels": [
+    {
+      "id": "v3-bridge-panel",
+      "title": "Desktop Bridge Demo",
+      "i18nTitle": {
+        "zh-TW": "桌面橋接示範面板",
+        "zh-CN": "桌面桥接示例面板",
+        "ja-JP": "デスクトップブリッジデモ"
+      },
+      "icon": "sparkles",
+      "fields": [
+        {
+          "kind": "input",
+          "key": "message",
+          "label": "Message",
+          "i18nLabel": {
+            "zh-TW": "傳遞訊息",
+            "zh-CN": "传递消息",
+            "ja-JP": "メッセージ"
+          },
+          "initial": "hello-lumina",
+          "maxLength": 80
+        }
+      ],
+      "actions": [
+        {
+          "id": "check-status",
+          "label": "Inspect Status",
+          "i18nLabel": {
+            "zh-TW": "檢查狀態",
+            "zh-CN": "检查状态",
+            "ja-JP": "状態を確認"
+          },
+          "primary": false
+        },
+        {
+          "id": "invoke-echo",
+          "label": "Run Local Tool",
+          "i18nLabel": {
+            "zh-TW": "執行本機工具",
+            "zh-CN": "运行本地工具",
+            "ja-JP": "ローカルツールを実行"
+          },
+          "primary": true
+        }
+      ]
+    }
+  ],
+  "bridgeTools": [
+    {
+      "id": "echo-helper",
+      "label": "Echo Helper",
+      "i18nLabel": {
+        "zh-TW": "本機回聲工具",
+        "zh-CN": "本地回声工具",
+        "ja-JP": "ローカルエコーツール"
+      },
+      "description": "User-bound local helper accepting a safe text token.",
+      "args": [
+        {
+          "key": "message",
+          "label": "Message",
+          "kind": "string",
+          "required": true,
+          "maxLength": 80
+        }
+      ]
+    }
+  ],
+  "mcpClients": [
+    {
+      "id": "local-helper",
+      "label": "Local Loopback MCP",
+      "i18nLabel": {
+        "zh-TW": "本機迴路 MCP",
+        "zh-CN": "本地回环 MCP",
+        "ja-JP": "ローカルループバック MCP"
+      }
+    }
+  ],
+  "script": "async function onCommand(commandId, api) {\n  if (commandId === 'check-v3-status') {\n    const layers = await api.layers.list();\n    try {\n      const [tools, status] = await Promise.all([api.bridge.listTools(), api.mcp.serverStatus()]);\n      return { notice: `v3 OK · Layers: ${layers.length} · Bound tools: ${tools.length} · MCP: ${status.running ? 'ON' : 'OFF'}` };\n    } catch (err) {\n      return { notice: `Safe fallback (${layers.length} layers): ${err && err.message ? err.message : String(err)}` };\n    }\n  }\n  if (commandId === 'run-echo-tool') {\n    const res = await api.bridge.invoke('echo-helper', { args: { message: 'hello-lumina' } });\n    return { notice: `Local tool exit=${res.exitCode}: ${(res.stdout || '').trim().slice(0, 80)}` };\n  }\n  return { notice: 'Unknown command' };\n}\n\nasync function onPanelAction(panelId, actionId, values, api) {\n  if (actionId === 'check-status') {\n    const layers = await api.layers.list();\n    try {\n      const [tools, status] = await Promise.all([api.bridge.listTools(), api.mcp.serverStatus()]);\n      return { statusText: `Layers ${layers.length} | Tools ${tools.length} | MCP ${status.running ? 'ON' : 'OFF'}` };\n    } catch (err) {\n      return { statusText: `Degraded: ${err && err.message ? err.message : String(err)}` };\n    }\n  }\n  if (actionId === 'invoke-echo') {\n    const msg = String(values.message || 'hello-lumina').slice(0, 80);\n    const res = await api.bridge.invoke('echo-helper', { args: { message: msg } });\n    return { statusText: `OK (${res.durationMs} ms): ${(res.stdout || '').trim().slice(0, 120)}` };\n  }\n  return {};\n}\n"
+}

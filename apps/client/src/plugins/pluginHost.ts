@@ -1,7 +1,7 @@
 import {
   PLUGIN_LIMITS,
   type PluginContext,
-  type PluginManifestV2,
+  type PluginManifestModern,
   type PluginPointerEvent,
   type PluginPointerPhase,
 } from './pluginApi';
@@ -50,7 +50,7 @@ export function detectPluginMemoryLimitBytes(): number {
  * before delegating to the canvas/selection/layer bridge.
  */
 export function createGuardedRpcDispatcher(
-  manifest: PluginManifestV2,
+  manifest: PluginManifestModern,
   handler: PluginRpcHandler,
   quotaConfig?: PluginQuotaConfig,
 ) {
@@ -97,7 +97,7 @@ export function createGuardedRpcDispatcher(
  * Browser runtime uses `startPluginV2InWorker` in `runPlugin.ts` for hard `worker.terminate()` isolation.
  */
 export function startPluginV2Direct(
-  manifest: PluginManifestV2,
+  manifest: PluginManifestModern,
   entry: RunV2Entry,
   context: PluginContext,
   handler: PluginRpcHandler,
@@ -207,7 +207,7 @@ export interface PluginToolSessionHandle {
   dispose: () => void;
 }
 
-export function assertPluginToolAllowed(manifest: PluginManifestV2, toolId: string): void {
+export function assertPluginToolAllowed(manifest: PluginManifestModern, toolId: string): void {
   if (!manifest.permissions.includes('tools')) {
     throw new Error('Missing permission: tools');
   }
@@ -224,7 +224,7 @@ export function assertPluginToolAllowed(manifest: PluginManifestV2, toolId: stri
  * Browser runtime uses `startPluginToolSessionInWorker` in `runPlugin.ts` for hard `worker.terminate()`.
  */
 export function startPluginToolDirect(
-  manifest: PluginManifestV2,
+  manifest: PluginManifestModern,
   toolId: string,
   context: PluginContext,
   handler: PluginRpcHandler,

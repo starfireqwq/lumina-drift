@@ -142,7 +142,7 @@ export function syncPluginEasings(installedPlugins: readonly InstalledPlugin[]):
       .filter(
         (p) =>
           p.enabled &&
-          p.manifest.apiVersion === 2 &&
+          (p.manifest.apiVersion === 2 || p.manifest.apiVersion === 3) &&
           p.manifest.permissions.includes('timeline:write'),
       )
       .map((p) => p.manifest.id),

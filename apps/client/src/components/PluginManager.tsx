@@ -1,9 +1,24 @@
 import { useRef, useState } from 'react';
-import { Download, LayoutPanelLeft, Puzzle, ShieldCheck, SlidersHorizontal, Sparkles, Terminal, Upload } from 'lucide-react';
+import {
+  Download,
+  LayoutPanelLeft,
+  Puzzle,
+  Server,
+  ShieldAlert,
+  ShieldCheck,
+  SlidersHorizontal,
+  Sparkles,
+  Terminal,
+  Upload,
+  Wrench,
+} from 'lucide-react';
 import { useI18n } from '../context/I18nContext';
 import {
   MAX_PLUGIN_BYTES,
   PLUGIN_LIMITS,
+  hasV3Permissions,
+  isModernPluginManifest,
+  isV3HighRiskPermission,
   parsePlugin,
   resolvePluginDescription,
   resolvePluginName,
@@ -12,11 +27,23 @@ import {
 } from '../plugins/pluginApi';
 import { getPluginLabels, getPluginPermissionLabel } from '../plugins/pluginLabels';
 import { installPlugin, removePlugin, setPluginEnabled, type InstalledPlugin } from '../plugins/pluginStore';
+import { checkV3RuntimePolicy } from '../plugins/pluginV3Client';
 import { AtelierModal, modalButton } from './AtelierModal';
 
-export function PluginManager({ plugins, onClose }: { plugins: InstalledPlugin[]; onClose: () => void }) {
+export function PluginManager({
+  plugins,
+  isCollaborativeRoom = false,
+  onOpenV3Console,
+  onClose,
+}: {
+  plugins: InstalledPlugin[];
+  isCollaborativeRoom?: boolean;
+  onOpenV3Console?: () => void;
+  onClose: () => void;
+}) {
   const { language } = useI18n();
   const strings = getPluginLabels(language);
+  const v3Policy = checkV3RuntimePolicy(isCollaborativeRoom, true);
   const input = useRef<HTMLInputElement>(null);
   const [pending, setPending] = useState<PluginManifest | null>(null);
   const [error, setError] = useState('');
@@ -57,14 +84,24 @@ export function PluginManager({ plugins, onClose }: { plugins: InstalledPlugin[]
         <div className="flex flex-wrap gap-1.5">
           {manifest.permissions.map((permission) => {
             const detail = getPluginPermissionLabel(language, permission);
+            const highRisk = isV3HighRiskPermission(permission);
             return (
               <span
                 key={permission}
                 title={detail}
-                className="inline-flex max-w-full items-center gap-1 rounded-md border border-neutral-700/80 bg-neutral-900/80 px-2 py-0.5 text-[11px] text-neutral-200"
+                data-plugin-perm={permission}
+                data-plugin-high-risk={highRisk ? 'true' : undefined}
+                className={`inline-flex max-w-full items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] ${
+                  highRisk
+                    ? 'border-amber-500/50 bg-amber-950/35 text-amber-100'
+                    : 'border-neutral-700/80 bg-neutral-900/80 text-neutral-200'
+                }`}
               >
-                <code className="font-mono text-[10px] text-cyan-300">{permission}</code>
-                <span className="truncate text-neutral-400">· {detail}</span>
+                {highRisk && <ShieldAlert className="h-3 w-3 shrink-0 text-amber-300" aria-hidden />}
+                <code className={`font-mono text-[10px] ${highRisk ? 'text-amber-300' : 'text-cyan-300'}`}>
+                  {permission}
+                </code>
+                <span className={`truncate ${highRisk ? 'text-amber-200/80' : 'text-neutral-400'}`}>· {detail}</span>
               </span>
             );
           })}
@@ -77,17 +114,30 @@ export function PluginManager({ plugins, onClose }: { plugins: InstalledPlugin[]
     const commandNames = manifest.commands.map((c) =>
       'i18nLabel' in c ? resolvePluginText(c.label, c.i18nLabel, language) : c.label,
     );
-    const filterNames = manifest.apiVersion === 2
+    const filterNames = isModernPluginManifest(manifest)
       ? manifest.filters.map((f) => resolvePluginText(f.label, f.i18nLabel, language))
       : [];
-    const panelNames = manifest.apiVersion === 2
+    const panelNames = isModernPluginManifest(manifest)
       ? manifest.panels.map((p) => resolvePluginText(p.title, p.i18nTitle, language))
       : [];
-    const toolNames = manifest.apiVersion === 2
+    const toolNames = isModernPluginManifest(manifest)
       ? (manifest.tools ?? []).map((t) => resolvePluginText(t.label, t.i18nLabel, language))
       : [];
+    const bridgeNames = manifest.apiVersion === 3
+      ? (manifest.bridgeTools ?? []).map((b) => resolvePluginText(b.label, b.i18nLabel, language))
+      : [];
+    const mcpNames = manifest.apiVersion === 3
+      ? (manifest.mcpClients ?? []).map((m) => resolvePluginText(m.label, m.i18nLabel, language))
+      : [];
 
-    if (!commandNames.length && !filterNames.length && !panelNames.length && !toolNames.length) return null;
+    if (
+      !commandNames.length &&
+      !filterNames.length &&
+      !panelNames.length &&
+      !toolNames.length &&
+      !bridgeNames.length &&
+      !mcpNames.length
+    ) return null;
 
     return (
       <div className="flex flex-wrap items-center gap-1.5 pt-0.5 text-[11px]">
@@ -128,6 +178,24 @@ export function PluginManager({ plugins, onClose }: { plugins: InstalledPlugin[]
             <span>{strings.toolsBadge} {toolNames.length}</span>
           </span>
         )}
+        {bridgeNames.length > 0 && (
+          <span
+            title={bridgeNames.join(', ')}
+            className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-200"
+          >
+            <Wrench className="h-3 w-3 shrink-0" aria-hidden />
+            <span>{strings.v3BridgeBadge} {bridgeNames.length}</span>
+          </span>
+        )}
+        {mcpNames.length > 0 && (
+          <span
+            title={mcpNames.join(', ')}
+            className="inline-flex items-center gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-amber-200"
+          >
+            <Server className="h-3 w-3 shrink-0" aria-hidden />
+            <span>{strings.v3McpBadge} {mcpNames.length}</span>
+          </span>
+        )}
       </div>
     );
   };
@@ -145,13 +213,25 @@ export function PluginManager({ plugins, onClose }: { plugins: InstalledPlugin[]
           <span
             data-plugin-api-version={manifest.apiVersion}
             className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
-              manifest.apiVersion === 2
-                ? 'border border-cyan-500/40 bg-cyan-500/15 text-cyan-200'
-                : 'border border-neutral-700 bg-neutral-800 text-neutral-300'
+              manifest.apiVersion === 3
+                ? 'border border-amber-500/50 bg-amber-500/15 text-amber-200'
+                : manifest.apiVersion === 2
+                  ? 'border border-cyan-500/40 bg-cyan-500/15 text-cyan-200'
+                  : 'border border-neutral-700 bg-neutral-800 text-neutral-300'
             }`}
           >
             {strings.apiVersionBadge}{manifest.apiVersion}
           </span>
+          {hasV3Permissions(manifest) && (
+            <span
+              data-plugin-v3-risk-tag="true"
+              className="rounded border border-amber-500/45 bg-amber-950/40 px-1.5 py-0.5 text-[10px] font-medium text-amber-200"
+            >
+              {!v3Policy.allowed
+                ? (v3Policy.reason === 'BLOCKED_COLLAB_ROOM' ? strings.v3CollabLocked : strings.v3DesktopOnly)
+                : strings.v3HighRiskBadge}
+            </span>
+          )}
         </div>
         <p className="mt-0.5 break-words text-[11px] text-neutral-400">
           {manifest.author} · <code className="font-mono text-[10px] text-neutral-500">{manifest.id}</code>
@@ -204,6 +284,23 @@ export function PluginManager({ plugins, onClose }: { plugins: InstalledPlugin[]
           <button type="button" className={modalButton.primary} onClick={() => input.current?.click()}>
             <Upload />{strings.import}
           </button>
+          {onOpenV3Console && (
+            <button
+              type="button"
+              data-plugin-open-v3-console="true"
+              className={modalButton.secondary}
+              onClick={onOpenV3Console}
+            >
+              <Wrench />{strings.v3OpenConsole}
+            </button>
+          )}
+          <a
+            href={`${import.meta.env.BASE_URL}plugins/lumina-v3-bridge-demo.lumina-plugin`}
+            download
+            className={modalButton.secondary}
+          >
+            <Download />{strings.sampleV3}
+          </a>
           <a
             href={`${import.meta.env.BASE_URL}plugins/lumina-motion-atelier.lumina-plugin`}
             download

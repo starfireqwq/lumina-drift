@@ -2420,8 +2420,9 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
   assert.equal(parsePlugin({ ...v2Raw, script: v2LargeScript }).apiVersion, 2);
   assert.throws(() => parsePlugin({ ...v2Raw, script: 'x'.repeat(PLUGIN_LIMITS.maxPackageBytesV2 + 1) }));
 
-  // v2 strict validation edge cases
-  assert.throws(() => parsePlugin({ ...v2Raw, apiVersion: 3 }));
+  // v2/v3 strict validation edge cases
+  assert.equal(parsePlugin({ ...v2Raw, apiVersion: 3 }).apiVersion, 3);
+  assert.throws(() => parsePlugin({ ...v2Raw, apiVersion: 4 }));
   assert.throws(() => parsePlugin({ ...v2Raw, permissions: ['layers'] }), 'v2 must reject legacy layers permission');
   assert.throws(() => parsePlugin({ ...v2Raw, permissions: ['artwork'] }), 'v2 must reject legacy artwork permission');
   assert.throws(() => parsePlugin({ ...v2Raw, commands: [], filters: [], panels: [] }), 'v2 requires at least one contribution');

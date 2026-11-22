@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { PluginAction, PluginManifestV2 } from '../plugins/pluginApi';
+import type { PluginAction, PluginManifestModern } from '../plugins/pluginApi';
 import type { PluginV2Result } from '../plugins/pluginRpc';
 import {
   PluginCanvasTransaction,
@@ -11,6 +11,12 @@ import {
 import { createSelectionEngineBridge } from '../plugins/pluginSelectionBridge';
 import { getPluginLabels } from '../plugins/pluginLabels';
 import { getPlugins, subscribePlugins } from '../plugins/pluginStore';
+import {
+  createPluginV3RpcHandler,
+  executeMcpCanvasTool,
+  getDesktopPluginV3,
+  killAllPluginV3Bridges,
+} from '../plugins/pluginV3Client';
 import {
   buildInitialToolOptions,
   collectEnabledPluginTools,
@@ -356,12 +362,12 @@ export interface CanvasPluginAccess {
   canvasId: string;
   apply(action: Exclude<PluginAction, { kind: 'message' }>): Promise<boolean>;
   runV2Command(
-    plugin: PluginManifestV2,
+    plugin: PluginManifestModern,
     commandId: string,
     options?: { onSlowStart?: () => void; signal?: AbortSignal },
   ): Promise<PluginV2Result>;
   runV2PanelAction(
-    plugin: PluginManifestV2,
+    plugin: PluginManifestModern,
     panelId: string,
     actionId: string,
     values: Record<string, unknown>,
@@ -5697,7 +5703,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
 
   const runPluginV2 = async (
-    plugin: PluginManifestV2,
+    plugin: PluginManifestModern,
     invocation:
       | { kind: 'command'; commandId: string }
       | { kind: 'panel'; panelId: string; actionId: string; values: Record<string, unknown> },
@@ -5714,9 +5720,17 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       tileSize: DEFAULT_TILE_SIZE,
     };
 
+    const isCollaborativeRoom = !OfflineSessionStore.isOfflineCanvas(canvas?.id);
+    const v3Handler = createPluginV3RpcHandler({
+      manifest: plugin,
+      isCollaborativeRoom,
+      signal: options?.signal,
+    });
+    const rpcHandler = tx.createRpcHandler(v3Handler);
+
     const handle = invocation.kind === 'command'
-      ? startPluginCommandV2(plugin, invocation.commandId, ctx, tx.createRpcHandler(), options)
-      : startPluginPanelActionV2(plugin, invocation.panelId, invocation.actionId, invocation.values, ctx, tx.createRpcHandler(), options);
+      ? startPluginCommandV2(plugin, invocation.commandId, ctx, rpcHandler, options)
+      : startPluginPanelActionV2(plugin, invocation.panelId, invocation.actionId, invocation.values, ctx, rpcHandler, options);
 
     try {
       const result = await handle.promise;
@@ -5733,10 +5747,82 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
   const runPluginV2Ref = useRef(runPluginV2);
   runPluginV2Ref.current = runPluginV2;
+  const createPluginHostAdapterRef = useRef(createPluginHostAdapter);
+  createPluginHostAdapterRef.current = createPluginHostAdapter;
   const selectPluginToolRef = useRef(selectPluginTool);
   selectPluginToolRef.current = selectPluginTool;
   const clearPluginToolRef = useRef(clearPluginTool);
   clearPluginToolRef.current = clearPluginTool;
+
+  // Plugin API v3.0: auto-stop any active bridge/MCP when entering a collaborative room,
+  // and handle authorized local MCP Server canvas tool calls through PluginCanvasTransaction.
+  useEffect(() => {
+    const isCollaborativeRoom = !OfflineSessionStore.isOfflineCanvas(canvas?.id);
+    if (canvas?.id && isCollaborativeRoom) {
+      void killAllPluginV3Bridges();
+    }
+    const desktopV3 = getDesktopPluginV3();
+    if (!desktopV3) return;
+    return desktopV3.mcpServer.onCanvasRequest((req) => {
+      void (async () => {
+        if (!canvas?.id || !isEngineReady || !layerManagerRef.current) {
+          desktopV3.mcpServer.sendCanvasResponse({
+            requestId: req.requestId,
+            ok: false,
+            error: 'No active local canvas.',
+          });
+          return;
+        }
+        const collabNow = !OfflineSessionStore.isOfflineCanvas(canvas.id);
+        if (collabNow) {
+          desktopV3.mcpServer.sendCanvasResponse({
+            requestId: req.requestId,
+            ok: false,
+            error: 'Local MCP is disabled in collaborative rooms.',
+          });
+          return;
+        }
+        const { adapter, manager } = createPluginHostAdapterRef.current();
+        const tx = new PluginCanvasTransaction(adapter, { pluginId: 'local-mcp-server' });
+        try {
+          const { result, mutated } = await executeMcpCanvasTool({
+            tx,
+            canvasInfo: {
+              width: canvas.width,
+              height: canvas.height,
+              dpi: clampDpi(canvas.dpi ?? 300),
+              tileSize: DEFAULT_TILE_SIZE,
+            },
+            toolName: req.toolName,
+            args: req.args,
+            allowWrite: req.allowWrite,
+            isCollaborativeRoom: collabNow,
+          });
+          if (layerManagerRef.current !== manager) {
+            await tx.rollback();
+            throw new Error('Canvas changed during MCP execution.');
+          }
+          if (mutated) {
+            tx.commit(`MCP: ${req.toolName}`);
+          } else {
+            await tx.rollback();
+          }
+          desktopV3.mcpServer.sendCanvasResponse({
+            requestId: req.requestId,
+            ok: true,
+            result,
+          });
+        } catch (err) {
+          await tx.rollback();
+          desktopV3.mcpServer.sendCanvasResponse({
+            requestId: req.requestId,
+            ok: false,
+            error: err instanceof Error ? err.message : 'MCP canvas tool failed.',
+          });
+        }
+      })();
+    });
+  }, [canvas?.id, canvas?.width, canvas?.height, canvas?.dpi, isEngineReady]);
 
   useLayoutEffect(() => {
     if (!canvas?.id || !isCanvasPresented || !isEngineReady || !onRegisterPluginAccess) return;

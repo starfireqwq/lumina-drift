@@ -301,9 +301,9 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   const pluginSectionItems: MenuItem[] = [];
   for (const { manifest } of enabledPlugins) {
     const panels =
-      manifest.apiVersion === 2 && manifest.permissions.includes('ui:panel') ? manifest.panels : [];
+      (manifest.apiVersion === 2 || manifest.apiVersion === 3) && manifest.permissions.includes('ui:panel') ? manifest.panels : [];
     const tools =
-      manifest.apiVersion === 2 && manifest.permissions.includes('tools') ? (manifest.tools ?? []) : [];
+      (manifest.apiVersion === 2 || manifest.apiVersion === 3) && manifest.permissions.includes('tools') ? (manifest.tools ?? []) : [];
     const commands =
       manifest.apiVersion === 1 || manifest.permissions.includes('commands') ? manifest.commands : [];
     if (!panels.length && !tools.length && !commands.length) continue;
@@ -346,7 +346,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
     }
 
     let lastGroup: string | undefined;
-    if (manifest.apiVersion === 2) {
+    if (manifest.apiVersion === 2 || manifest.apiVersion === 3) {
       if (manifest.permissions.includes('commands')) {
         manifest.commands.forEach((command, idx) => {
           const group = command.group;
