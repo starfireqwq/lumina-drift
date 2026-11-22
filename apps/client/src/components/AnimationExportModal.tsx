@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Download,
   Film,
@@ -480,7 +481,7 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
   const inputCls =
     'w-full min-w-0 rounded-lg border border-neutral-700 bg-neutral-900 px-2 py-1 text-xs text-neutral-100 outline-none focus:border-indigo-500 disabled:opacity-50';
 
-  return (
+  const modalNode = (
     <OverlayPresence open={open}>
       <AtelierModal
         width="lg"
@@ -531,8 +532,8 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
           </div>
         }
       >
-        <div className="space-y-3" data-testid="anim-export-modal">
-          <div className="atelier-filter-refine" data-on={busy ? 'true' : 'false'} />
+        <div className="space-y-3 overflow-x-hidden" data-testid="anim-export-modal">
+          <div className="atelier-filter-refine !mx-0 !mt-0 !mb-1" data-on={busy ? 'true' : 'false'} />
 
           {/* 4-mode selector with Lumina Drift light-sweep */}
           <div
@@ -1169,4 +1170,6 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
       </AtelierModal>
     </OverlayPresence>
   );
+
+  return typeof document !== 'undefined' ? createPortal(modalNode, document.body) : modalNode;
 };
