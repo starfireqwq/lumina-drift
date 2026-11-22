@@ -203,7 +203,28 @@ const __buildApi = (canvasCtx) => {
     unregister: (id) => __callRpc('easing.unregister', { id }),
     evaluate: (t, opts) => __callRpc('easing.evaluate', { t, ...(opts ?? {}) }),
   });
-  return Object.freeze({ canvas, brush, layers, pixels, selection, timeline, keyframes, easing });
+  const bridge = Object.freeze({
+    listTools: () => __callRpc('bridge.listTools'),
+    invoke: (toolId, payload) => {
+      const opts = payload && typeof payload === 'object' ? payload : {};
+      let buf;
+      let rest = opts;
+      if (opts.inputBytes !== undefined) {
+        buf = __toArrayBuffer(opts.inputBytes);
+        const { inputBytes: _ignored, ...other } = opts;
+        rest = other;
+      }
+      return __callRpc('bridge.invoke', { toolId, ...rest }, buf);
+    },
+  });
+  const mcp = Object.freeze({
+    serverStatus: () => __callRpc('mcp.serverStatus'),
+    listServers: () => __callRpc('mcp.listServers'),
+    listTools: (serverId) => __callRpc('mcp.listTools', { serverId }),
+    callTool: (serverId, name, args) =>
+      __callRpc('mcp.callTool', { serverId, name, arguments: args ?? {} }),
+  });
+  return Object.freeze({ canvas, brush, layers, pixels, selection, timeline, keyframes, easing, bridge, mcp });
 };
 `;
 
