@@ -21,6 +21,11 @@ export const PLUGIN_LIMITS = {
   maxPanelsPerPlugin: 4,
   maxPanelFieldsPerPanel: 24,
   maxPanelActionsPerPanel: 8,
+  maxToolsPerPlugin: 8,
+  maxToolOptionsPerTool: 12,
+  maxCustomEasingsPerPlugin: 16,
+  maxKeyframesPerLayer: 500,
+  maxTimelineLabels: 200,
   maxSelectOptions: 32,
   maxRpcCallsPerRun: 256,
   maxPixelBytesPerRun: 64 * 1024 * 1024,
@@ -33,6 +38,13 @@ export const PLUGIN_LIMITS = {
   filterTileCpuLimitMs: 500,
   filterPreviewTotalCpuMs: 3000,
   filterApplyTotalCpuMs: 15000,
+  toolEventCpuLimitMs: 500,
+  toolEventWallLimitMs: 1500,
+  toolStrokeCpuLimitMs: 4000,
+  toolStrokeWallLimitMs: 30000,
+  toolDefaultThrottleMs: 24,
+  toolMinThrottleMs: 16,
+  toolMaxThrottleMs: 200,
   memoryLimitDesktopBytes: 32 * 1024 * 1024,
   memoryLimitMobileBytes: 24 * 1024 * 1024,
   maxStackSizeBytes: 512 * 1024,
@@ -60,11 +72,39 @@ export const PLUGIN_PERMISSIONS_V2_CORE = [
   'filters',
   'commands',
   'ui:panel',
+  'timeline:read',
+  'timeline:write',
+  'tools',
+  'input',
 ] as const;
 
 export const PLUGIN_PERMISSIONS_V2 = [...PLUGIN_PERMISSIONS_V2_CORE, 'brush'] as const;
 export type PluginPermissionV2 = (typeof PLUGIN_PERMISSIONS_V2)[number];
 export type PluginPermission = PluginPermissionV1 | PluginPermissionV2;
+
+export const PLUGIN_TOOL_ICONS = [
+  'wand',
+  'brush',
+  'pen',
+  'sparkles',
+  'stamp',
+  'shapes',
+  'ruler',
+  'crosshair',
+  'layers',
+  'film',
+] as const;
+export type PluginToolIcon = (typeof PLUGIN_TOOL_ICONS)[number];
+
+export const PLUGIN_TOOL_CURSORS = [
+  'crosshair',
+  'pointer',
+  'grab',
+  'move',
+  'cell',
+  'default',
+] as const;
+export type PluginToolCursor = (typeof PLUGIN_TOOL_CURSORS)[number];
 
 export const PLUGIN_FILTER_GROUPS = [
   'plugin',
@@ -232,6 +272,84 @@ export interface PluginPanelDeclaration {
   actions: PluginPanelAction[];
 }
 
+export interface PluginToolDeclaration {
+  id: string;
+  label: string;
+  i18nLabel?: PluginLocaleMap;
+  hint?: string;
+  i18nHint?: PluginLocaleMap;
+  icon?: PluginToolIcon;
+  cursor?: PluginToolCursor;
+  suggestedShortcut?: string;
+  options?: PluginFilterParam[];
+  throttleMs?: number;
+}
+
+export type PluginPointerPhase = 'down' | 'move' | 'up' | 'cancel';
+
+export interface PluginPointerEvent {
+  phase: PluginPointerPhase;
+  x: number;
+  y: number;
+  startX: number;
+  startY: number;
+  deltaX: number;
+  deltaY: number;
+  pressure: number;
+  tiltX: number;
+  tiltY: number;
+  pointerType: 'mouse' | 'pen' | 'touch';
+  buttons: number;
+  shiftKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+  timestamp: number;
+  options: Record<string, string | number | boolean>;
+}
+
+export interface PluginTimelineCelInfo {
+  id: string;
+  label: string;
+  startFrame: number;
+  hold: number;
+  ref?: string;
+  blank?: boolean;
+  mark?: 'key' | 'inbetween';
+  note?: string;
+  ownerId: string | null;
+  isGroup: boolean;
+  canManage: boolean;
+}
+
+export interface PluginTimelineTrackInfo {
+  folderId: string;
+  name: string;
+  ownerId: string | null;
+  shared: boolean;
+  canManage: boolean;
+  labels: Array<{ frame: number; text: string }>;
+  entries: PluginTimelineCelInfo[];
+}
+
+export interface PluginTimelineState {
+  fps: number;
+  length: number;
+  currentFrame: number;
+  isPlaying: boolean;
+  loop: boolean;
+  range: { start: number; end: number } | null;
+  tracks: PluginTimelineTrackInfo[];
+}
+
+export interface PluginEasingPresetInfo {
+  id: string;
+  label: string;
+  bezier: [number, number, number, number];
+  source: 'builtin' | 'plugin';
+  pluginId?: string;
+}
+
 export interface PluginManifestV1 {
   apiVersion: 1;
   id: string;
@@ -256,6 +374,7 @@ export interface PluginManifestV2 {
   commands: PluginCommandV2[];
   filters: PluginFilterDeclaration[];
   panels: PluginPanelDeclaration[];
+  tools?: PluginToolDeclaration[];
   script: string;
 }
 
@@ -731,6 +850,61 @@ function parsePanels(value: unknown): PluginPanelDeclaration[] {
   return panels;
 }
 
+function parseTools(value: unknown): PluginToolDeclaration[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > PLUGIN_LIMITS.maxToolsPerPlugin) {
+    throw new Error(`Declare at most ${PLUGIN_LIMITS.maxToolsPerPlugin} tools.`);
+  }
+  const tools = value.map((entry): PluginToolDeclaration => {
+    const raw = record(entry);
+    const id = identifier(raw.id);
+    const lbl = label(raw.label, 60);
+    const i18nLabel = parseLocaleMap(raw.i18nLabel, 60);
+    const hint = optionalLabel(raw.hint, 160);
+    const i18nHint = parseLocaleMap(raw.i18nHint, 160);
+    const icon = raw.icon === undefined ? undefined : label(raw.icon, 32);
+    if (icon && !(PLUGIN_TOOL_ICONS as readonly string[]).includes(icon)) {
+      throw new Error(`Unsupported tool icon: ${icon}`);
+    }
+    const cursor = raw.cursor === undefined ? undefined : label(raw.cursor, 32);
+    if (cursor && !(PLUGIN_TOOL_CURSORS as readonly string[]).includes(cursor)) {
+      throw new Error(`Unsupported tool cursor: ${cursor}`);
+    }
+    const suggestedShortcut = parseShortcut(raw.suggestedShortcut);
+    const throttleMs =
+      raw.throttleMs === undefined
+        ? undefined
+        : number(raw.throttleMs, PLUGIN_LIMITS.toolMinThrottleMs, PLUGIN_LIMITS.toolMaxThrottleMs);
+    if (throttleMs !== undefined && !Number.isInteger(throttleMs)) {
+      throw new Error('Tool throttleMs must be an integer.');
+    }
+    const rawOptions = raw.options === undefined ? [] : raw.options;
+    if (!Array.isArray(rawOptions) || rawOptions.length > PLUGIN_LIMITS.maxToolOptionsPerTool) {
+      throw new Error(`A tool can declare at most ${PLUGIN_LIMITS.maxToolOptionsPerTool} options.`);
+    }
+    const options = rawOptions.map(parseFilterParam);
+    const keySet = new Set(options.map((p) => p.key));
+    if (keySet.size !== options.length) throw new Error('Duplicate tool option key.');
+    for (const p of options) {
+      if (p.when && !keySet.has(p.when.key)) throw new Error(`Tool option condition references unknown key: ${p.when.key}`);
+    }
+    return {
+      id,
+      label: lbl,
+      ...(i18nLabel ? { i18nLabel } : {}),
+      ...(hint ? { hint } : {}),
+      ...(i18nHint ? { i18nHint } : {}),
+      ...(icon ? { icon: icon as PluginToolIcon } : {}),
+      ...(cursor ? { cursor: cursor as PluginToolCursor } : {}),
+      ...(suggestedShortcut ? { suggestedShortcut } : {}),
+      ...(options.length > 0 ? { options } : {}),
+      ...(throttleMs !== undefined ? { throttleMs } : {}),
+    };
+  });
+  if (new Set(tools.map((t) => t.id)).size !== tools.length) throw new Error('Duplicate tool ID.');
+  return tools;
+}
+
 function parsePluginV1(item: Record<string, unknown>): PluginManifestV1 {
   if (
     !Array.isArray(item.permissions) ||
@@ -801,9 +975,10 @@ function parsePluginV2(item: Record<string, unknown>): PluginManifestV2 {
 
   const filters = parseFilters(item.filters);
   const panels = parsePanels(item.panels);
+  const tools = parseTools(item.tools);
 
-  if (commands.length === 0 && filters.length === 0 && panels.length === 0) {
-    throw new Error('Plugin v2 must declare at least one command, filter, or panel.');
+  if (commands.length === 0 && filters.length === 0 && panels.length === 0 && tools.length === 0) {
+    throw new Error('Plugin v2 must declare at least one command, filter, panel, or tool.');
   }
   if (commands.length > 0 && !permSet.has('commands')) {
     throw new Error('Declaring commands requires the "commands" permission.');
@@ -813,6 +988,9 @@ function parsePluginV2(item: Record<string, unknown>): PluginManifestV2 {
   }
   if (panels.length > 0 && !permSet.has('ui:panel')) {
     throw new Error('Declaring panels requires the "ui:panel" permission.');
+  }
+  if (tools.length > 0 && !permSet.has('tools')) {
+    throw new Error('Declaring tools requires the "tools" permission.');
   }
   if (panels.some((p) => p.fields.some((f) => f.kind === 'layer')) && !permSet.has('layers:read')) {
     throw new Error('Panel "layer" field requires the "layers:read" permission.');
@@ -840,6 +1018,7 @@ function parsePluginV2(item: Record<string, unknown>): PluginManifestV2 {
     commands,
     filters,
     panels,
+    ...(tools.length > 0 ? { tools } : {}),
     script: item.script,
   };
 }
