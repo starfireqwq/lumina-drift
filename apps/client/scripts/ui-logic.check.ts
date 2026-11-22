@@ -11,10 +11,15 @@ import { contrastRatio, resolveTheme, THEME_PRESETS, DEFAULT_CUSTOM_THEME } from
 import { nextSizeStep } from '../src/components/workspace/toolCatalog';
 import { findContentBounds } from '../src/utils/pixelBounds';
 import {
-  alignCrops, alignDestination, alignManyOffsets, alignOffset, alignTargetsBlocker, copyRgbaRect,
-  distributeOffsets, rectMinus, resolveAlignBasis, resolveAlignTargets, selectionFrame, unionRect,
+  alignCrops, alignDestination, alignManyOffsets, alignOffset, alignTargetsBlocker,
+  computeVectorLayerAlignRect, computeVectorStrokeAlignRect, copyRgbaRect,
+  distributeOffsets, guideAlignManyOffsets, guideAlignOffset, guideAxisAvailability,
+  guideDistributeFrame, rectMinus, resolveAlignBasis, resolveAlignTargets,
+  selectionFrame, summarizeGuides, unionRect,
   type AlignLayerLike, type AlignRect, type DistributeMode,
 } from '../src/utils/layerAlign';
+import { RulerManager } from '../src/engine/RulerManager';
+import { shiftVectorStroke } from '../src/services/offlineStore';
 import { applyColorOutline } from '../src/engine/colorOutline';
 import { addRecentVisit, lastVisitOn, normalizeServer, parseRecentVisits, removeRecentVisit, RECENT_VISITS_LIMIT, type RecentVisit } from '../src/utils/recentVisits';
 import { healUnderMask } from '../src/engine/VectorEngine';
@@ -4793,4 +4798,148 @@ await (async () => {
 
   resetPluginEasingsForTests();
 })();
+
+// --- Align L3: Guide basis, vector stroke bounds/shift, and RulerManager guides ---
+{
+  // resolveAlignBasis priority: selection > guide > objects (>=2) > canvas
+  assert.equal(resolveAlignBasis('auto', true, 3, true), 'selection');
+  assert.equal(resolveAlignBasis('auto', false, 3, true), 'guide');
+  assert.equal(resolveAlignBasis('auto', false, 3, false), 'objects');
+  assert.equal(resolveAlignBasis('auto', false, 1, false), 'canvas');
+  assert.equal(resolveAlignBasis('guide', false, 1, false), null);
+  assert.equal(resolveAlignBasis('guide', false, 1, true), 'guide');
+
+  // summarizeGuides & guideAxisAvailability
+  const guides = [
+    { id: 'gx1', axis: 'x' as const, position: 100 },
+    { id: 'gx2', axis: 'x' as const, position: 500 },
+    { id: 'gxDup', axis: 'x' as const, position: 100 },
+    { id: 'gy1', axis: 'y' as const, position: 240 },
+  ];
+  const allSummary = summarizeGuides(guides);
+  assert.deepEqual(allSummary.xs, [100, 500]);
+  assert.deepEqual(allSummary.ys, [240]);
+  assert.equal(allSummary.usingSelection, false);
+  assert.equal(allSummary.totalCount, 4);
+  assert.deepEqual(guideAxisAvailability(allSummary), {
+    canAlignX: true,
+    canAlignY: true,
+    canDistributeX: true,
+    canDistributeY: false,
+  });
+
+  // Single vertical guide selected: only horizontal align enabled, no vertical align or distribute
+  const singleVSummary = summarizeGuides(guides, ['gx1']);
+  assert.deepEqual(singleVSummary.xs, [100]);
+  assert.deepEqual(singleVSummary.ys, []);
+  assert.equal(singleVSummary.usingSelection, true);
+  assert.deepEqual(guideAxisAvailability(singleVSummary), {
+    canAlignX: true,
+    canAlignY: false,
+    canDistributeX: false,
+    canDistributeY: false,
+  });
+
+  // guideAlignOffset: single vertical line aligns left/center/right to line, leaves Y untouched
+  const box: AlignRect = { x: 20, y: 50, w: 40, h: 30 };
+  assert.deepEqual(guideAlignOffset(box, singleVSummary, 'left', 'top', 'range'), { dx: 80, dy: 0 });
+  assert.deepEqual(guideAlignOffset(box, singleVSummary, 'center', null, 'range'), { dx: 60, dy: 0 });
+  assert.deepEqual(guideAlignOffset(box, singleVSummary, 'right', null, 'range'), { dx: 40, dy: 0 });
+
+  // Multi-guide span ('range') vs 'nearest'
+  const nearLeft: AlignRect = { x: 120, y: 10, w: 20, h: 20 };
+  const nearRight: AlignRect = { x: 460, y: 10, w: 20, h: 20 };
+  assert.deepEqual(guideAlignManyOffsets([nearLeft, nearRight], allSummary, 'left', null, 'range'), [
+    { dx: -20, dy: 0 },
+    { dx: -360, dy: 0 },
+  ]);
+  assert.deepEqual(guideAlignManyOffsets([nearLeft, nearRight], allSummary, 'left', null, 'nearest'), [
+    { dx: -20, dy: 0 },
+    { dx: 40, dy: 0 },
+  ]);
+  assert.deepEqual(guideAlignOffset(nearLeft, allSummary, 'center', 'center', 'range'), {
+    dx: 100 + Math.floor((400 - 20) / 2) - 120,
+    dy: 240 + Math.floor((0 - 20) / 2) - 10,
+  });
+
+  // guideDistributeFrame + distributeOffsets along two vertical guides [100, 500]
+  assert.equal(guideDistributeFrame(singleVSummary, 'hgap'), null);
+  assert.equal(guideDistributeFrame(allSummary, 'vgap'), null);
+  const hFrame = guideDistributeFrame(allSummary, 'hgap');
+  assert.deepEqual(hFrame, { x: 100, y: 0, w: 400, h: 1 });
+  const items3: AlignRect[] = [
+    { x: 150, y: 20, w: 40, h: 20 },
+    { x: 250, y: 20, w: 40, h: 20 },
+    { x: 320, y: 20, w: 40, h: 20 },
+  ];
+  const distShifts = distributeOffsets(items3, 'hgap', 'guide', hFrame!);
+  const movedX = items3.map((r, i) => r.x + distShifts[i].dx);
+  assert.equal(movedX[0], 100, 'Leftmost item snaps to first vertical guide');
+  assert.equal(movedX[2] + items3[2].w, 500, 'Rightmost item snaps to last vertical guide');
+  const gap1 = movedX[1] - (movedX[0] + items3[0].w);
+  const gap2 = movedX[2] - (movedX[1] + items3[1].w);
+  assert.ok(Math.abs(gap1 - gap2) <= 1, `Equal gaps between guides: ${gap1} vs ${gap2}`);
+
+  // RulerManager guide CRUD, selection toggle, and initDimensions clamp
+  const rm = RulerManager.getInstance();
+  rm.clearGuides();
+  const g1 = rm.addGuide('x', 200);
+  const g2 = rm.addGuide('x', 900);
+  const g3 = rm.addGuide('y', 150);
+  assert.equal(rm.getActiveGuides().length, 3);
+  rm.toggleGuideSelected(g1.id, false);
+  assert.deepEqual(rm.state.guides.selectedIds, [g1.id]);
+  rm.toggleGuideSelected(g2.id, true);
+  assert.deepEqual(rm.state.guides.selectedIds, [g1.id, g2.id]);
+  rm.setGuidesVisible(false);
+  assert.equal(rm.getActiveGuides().length, 0);
+  rm.setGuidesVisible(true);
+  rm.initDimensions(600, 400);
+  assert.equal(rm.state.guides.items.find((g) => g.id === g2.id)?.position, 600);
+  rm.removeGuide(g3.id);
+  assert.equal(rm.state.guides.items.length, 2);
+  rm.clearGuides();
+  assert.equal(rm.state.guides.items.length, 0);
+
+  // computeVectorStrokeAlignRect: centerline ('path') vs ink width ('stroke') & Bézier bow
+  const curvedStroke = {
+    id: 'vs1',
+    layerId: 'vec1',
+    color: '#000000',
+    opacity: 1,
+    baseWidth: 20,
+    anchors: [
+      { x: 100, y: 100, cp2x: 150, cp2y: 20, pressure: 1, width: 20 },
+      { x: 200, y: 100, cp1x: 150, cp1y: 20, pressure: 1, width: 20 },
+    ],
+    bounds: { minX: 88, minY: 8, maxX: 212, maxY: 112 },
+    createdAt: 1,
+  };
+  const pathRect = computeVectorStrokeAlignRect(curvedStroke, 'path')!;
+  const strokeRect = computeVectorStrokeAlignRect(curvedStroke, 'stroke')!;
+  assert.equal(pathRect.x, 100);
+  assert.equal(pathRect.x + pathRect.w, 200);
+  assert.ok(pathRect.y < 100 && pathRect.y >= 35 && pathRect.y <= 45, `Bézier apex near y=40, got ${pathRect.y}`);
+  assert.equal(strokeRect.x, 90, 'Stroke mode expands left by half width (10px)');
+  assert.equal(strokeRect.x + strokeRect.w, 210, 'Stroke mode expands right by half width (10px)');
+  assert.equal(strokeRect.y, pathRect.y - 10, 'Stroke mode expands top by half width');
+  assert.equal(strokeRect.y + strokeRect.h, pathRect.y + pathRect.h + 10, 'Stroke mode expands bottom by half width');
+
+  // shiftVectorStroke preserves exact anchor + Bézier handle offsets
+  const shifted = shiftVectorStroke(curvedStroke, 35, -15);
+  assert.equal(shifted.anchors[0].x, 135);
+  assert.equal(shifted.anchors[0].y, 85);
+  assert.equal(shifted.anchors[0].cp2x, 185);
+  assert.equal(shifted.anchors[0].cp2y, 5);
+  assert.equal(shifted.anchors[1].x, 235);
+  assert.equal(shifted.anchors[1].y, 85);
+  assert.equal(shifted.anchors[1].cp1x, 185);
+  assert.equal(shifted.anchors[1].cp1y, 5);
+  assert.equal(shifted.bounds.minX, curvedStroke.bounds.minX + 35);
+  assert.equal(shifted.bounds.minY, curvedStroke.bounds.minY - 15);
+
+  const layerUnion = computeVectorLayerAlignRect([curvedStroke, shifted], 'path')!;
+  assert.equal(layerUnion.x, 100);
+  assert.equal(layerUnion.x + layerUnion.w, 235);
+}
 console.log('ui-logic checks passed');
