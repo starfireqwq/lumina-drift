@@ -7,12 +7,17 @@ import {
   type PluginContext,
   type PluginManifest,
   type PluginManifestV2,
+  type PluginPointerEvent,
+  type PluginPointerPhase,
 } from './pluginApi';
 import {
+  assertPluginToolAllowed,
   createGuardedRpcDispatcher,
   detectPluginMemoryLimitBytes,
   type PluginExecutionHandle,
   type PluginHostRunOptions,
+  type PluginToolSessionHandle,
+  type PluginToolSessionOptions,
 } from './pluginHost';
 import { parsePluginV2Result, type PluginRpcHandler, type PluginRpcMethod, type PluginV2Result } from './pluginRpc';
 import type { RunV2Entry } from './pluginSandboxCore';
@@ -187,4 +192,178 @@ export function startPluginPanelActionV2(
   options?: PluginHostRunOptions,
 ): PluginExecutionHandle<PluginV2Result> {
   return startPluginV2Worker(manifest, { kind: 'panel', panelId, actionId, values }, context, handler, options);
+}
+
+/**
+ * Starts a dedicated Web Worker custom-tool pointer session with per-event and stroke-wide
+ * timeouts and hard `worker.terminate()` isolation.
+ */
+export function startPluginToolSessionInWorker(
+  manifest: PluginManifestV2,
+  toolId: string,
+  context: PluginContext,
+  handler: PluginRpcHandler,
+  options?: PluginToolSessionOptions,
+): PluginToolSessionHandle {
+  assertPluginToolAllowed(manifest, toolId);
+
+  const eventWallLimitMs = options?.eventWallLimitMs ?? PLUGIN_LIMITS.toolEventWallLimitMs;
+  const eventCpuLimitMs = options?.eventCpuLimitMs ?? PLUGIN_LIMITS.toolEventCpuLimitMs;
+  const strokeWallLimitMs = options?.strokeWallLimitMs ?? PLUGIN_LIMITS.toolStrokeWallLimitMs;
+  const strokeCpuLimitMs = options?.strokeCpuLimitMs ?? PLUGIN_LIMITS.toolStrokeCpuLimitMs;
+  const memoryLimitBytes = options?.memoryLimitBytes ?? detectPluginMemoryLimitBytes();
+  const maxStackSizeBytes = options?.maxStackSizeBytes ?? PLUGIN_LIMITS.maxStackSizeBytes;
+
+  const { dispatch } = createGuardedRpcDispatcher(manifest, handler, options?.quota);
+  const worker = new PluginWorker();
+  let closed = false;
+  let nextEventId = 1;
+
+  let resolveReady!: () => void;
+  let rejectReady!: (err: Error) => void;
+  const readyPromise = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+
+  const pendingEvents = new Map<
+    number,
+    {
+      resolve: (val: PluginV2Result) => void;
+      reject: (err: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+
+  const rejectAllPending = (reason: string) => {
+    const err = new Error(reason);
+    rejectReady(err);
+    for (const entry of pendingEvents.values()) {
+      clearTimeout(entry.timer);
+      entry.reject(err);
+    }
+    pendingEvents.clear();
+  };
+
+  const cleanup = () => {
+    clearTimeout(strokeTimer);
+    clearTimeout(readyTimer);
+    worker.terminate();
+  };
+
+  const abort = (reason = 'Plugin tool aborted.') => {
+    if (closed) return;
+    closed = true;
+    try {
+      worker.postMessage({ type: 'abort', reason } satisfies PluginWorkerInbound);
+    } catch {
+      // ignore if worker already terminated
+    }
+    cleanup();
+    rejectAllPending(reason);
+  };
+
+  const dispose = () => {
+    if (closed) return;
+    closed = true;
+    try {
+      worker.postMessage({ type: 'tool-end' } satisfies PluginWorkerInbound);
+    } catch {
+      // ignore
+    }
+    cleanup();
+    rejectAllPending('Plugin tool session disposed.');
+  };
+
+  const readyTimer = setTimeout(() => {
+    abort('Plugin tool initialization timed out.');
+  }, eventWallLimitMs);
+
+  const strokeTimer = setTimeout(() => {
+    abort('Plugin tool stroke timed out.');
+  }, strokeWallLimitMs);
+
+  worker.onmessage = (event: MessageEvent<PluginWorkerOutbound>) => {
+    if (closed) return;
+    const data = event.data;
+    if (!data) return;
+
+    if (data.type === 'rpc-req') {
+      void dispatch({
+        id: data.id,
+        method: data.method as PluginRpcMethod,
+        params: data.params,
+        ...(data.buffer ? { buffer: data.buffer } : {}),
+      }).then((response) => {
+        if (closed) return;
+        const transfer: Transferable[] = response.ok && response.buffer ? [response.buffer] : [];
+        worker.postMessage({ type: 'rpc-res', response } satisfies PluginWorkerInbound, transfer);
+      });
+      return;
+    }
+
+    if (data.type === 'tool-ready') {
+      clearTimeout(readyTimer);
+      if (data.ok) resolveReady();
+      else abort(data.error || 'Plugin tool failed to initialize.');
+      return;
+    }
+
+    if (data.type === 'tool-event-res') {
+      const pending = pendingEvents.get(data.eventId);
+      if (!pending) return;
+      pendingEvents.delete(data.eventId);
+      clearTimeout(pending.timer);
+      if (!data.ok) {
+        pending.reject(new Error(data.error || 'Plugin tool event failed.'));
+        return;
+      }
+      try {
+        pending.resolve(parsePluginV2Result(data.value));
+      } catch (err) {
+        pending.reject(err instanceof Error ? err : new Error('Invalid plugin tool result.'));
+      }
+    }
+  };
+
+  worker.onerror = () => {
+    abort('Plugin tool worker crashed.');
+  };
+
+  worker.postMessage({
+    type: 'tool-start',
+    script: manifest.script,
+    toolId,
+    context: { ...context, tileSize: context.tileSize ?? 256 },
+    memoryLimitBytes,
+    maxStackSizeBytes,
+    eventCpuLimitMs,
+    strokeCpuLimitMs,
+  } satisfies PluginWorkerInbound);
+
+  const dispatchEvent = async (
+    phase: PluginPointerPhase,
+    pointerEvent: PluginPointerEvent,
+  ): Promise<PluginV2Result> => {
+    await readyPromise;
+    if (closed) throw new Error('Plugin tool session is closed.');
+    const eventId = nextEventId++;
+    return new Promise<PluginV2Result>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingEvents.delete(eventId);
+        const reason = 'Plugin tool event timed out.';
+        abort(reason);
+        reject(new Error(reason));
+      }, eventWallLimitMs);
+      pendingEvents.set(eventId, { resolve, reject, timer });
+      worker.postMessage({
+        type: 'tool-event',
+        eventId,
+        phase,
+        event: pointerEvent,
+      } satisfies PluginWorkerInbound);
+    });
+  };
+
+  return { dispatchEvent, abort, dispose };
 }

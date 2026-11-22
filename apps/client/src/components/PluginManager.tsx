@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { Download, LayoutPanelLeft, Puzzle, ShieldCheck, SlidersHorizontal, Terminal, Upload } from 'lucide-react';
+import { Download, LayoutPanelLeft, Puzzle, ShieldCheck, SlidersHorizontal, Sparkles, Terminal, Upload } from 'lucide-react';
 import { useI18n } from '../context/I18nContext';
 import {
   MAX_PLUGIN_BYTES,
@@ -83,8 +83,11 @@ export function PluginManager({ plugins, onClose }: { plugins: InstalledPlugin[]
     const panelNames = manifest.apiVersion === 2
       ? manifest.panels.map((p) => resolvePluginText(p.title, p.i18nTitle, language))
       : [];
+    const toolNames = manifest.apiVersion === 2
+      ? (manifest.tools ?? []).map((t) => resolvePluginText(t.label, t.i18nLabel, language))
+      : [];
 
-    if (!commandNames.length && !filterNames.length && !panelNames.length) return null;
+    if (!commandNames.length && !filterNames.length && !panelNames.length && !toolNames.length) return null;
 
     return (
       <div className="flex flex-wrap items-center gap-1.5 pt-0.5 text-[11px]">
@@ -114,6 +117,15 @@ export function PluginManager({ plugins, onClose }: { plugins: InstalledPlugin[]
           >
             <LayoutPanelLeft className="h-3 w-3 shrink-0" aria-hidden />
             <span>{strings.panelsBadge} {panelNames.length}</span>
+          </span>
+        )}
+        {toolNames.length > 0 && (
+          <span
+            title={toolNames.join(', ')}
+            className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-emerald-200"
+          >
+            <Sparkles className="h-3 w-3 shrink-0" aria-hidden />
+            <span>{strings.toolsBadge} {toolNames.length}</span>
           </span>
         )}
       </div>
@@ -192,6 +204,13 @@ export function PluginManager({ plugins, onClose }: { plugins: InstalledPlugin[]
           <button type="button" className={modalButton.primary} onClick={() => input.current?.click()}>
             <Upload />{strings.import}
           </button>
+          <a
+            href={`${import.meta.env.BASE_URL}plugins/lumina-motion-atelier.lumina-plugin`}
+            download
+            className={modalButton.secondary}
+          >
+            <Download />{strings.sampleV25}
+          </a>
           <a
             href={`${import.meta.env.BASE_URL}plugins/lumina-drift-studio-kit.lumina-plugin`}
             download

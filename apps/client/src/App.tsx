@@ -62,6 +62,7 @@ export const App: React.FC = () => {
   const plugins = useSyncExternalStore(subscribePlugins, getPlugins);
   const [isPluginManagerOpen, setIsPluginManagerOpen] = useState(false);
   const [openPluginPanels, setOpenPluginPanels] = useState<string[]>([]);
+  const [activePluginToolKey, setActivePluginToolKey] = useState<string | null>(null);
   const [slowPluginCommand, setSlowPluginCommand] = useState<string | null>(null);
   const pluginCmdAbortRef = useRef<AbortController | null>(null);
   const pluginAccessRef = useRef<CanvasPluginAccess | null>(null);
@@ -733,6 +734,10 @@ export const App: React.FC = () => {
   const handleRunPluginRef = useRef(handleRunPlugin);
   handleRunPluginRef.current = handleRunPlugin;
 
+  const handleSelectPluginTool = useCallback((pluginId: string, toolId: string) => {
+    pluginAccessRef.current?.selectPluginTool(pluginId, toolId);
+  }, []);
+
   useEffect(() => {
     const onPluginShortcut = (e: Event) => {
       const detail = (e as CustomEvent<ParsedPluginShortcutId>).detail;
@@ -741,11 +746,13 @@ export const App: React.FC = () => {
         void handleRunPluginRef.current(detail.pluginId, detail.commandId);
       } else if (detail.kind === 'panel') {
         handleTogglePluginPanel(detail.pluginId, detail.panelId);
+      } else if (detail.kind === 'tool') {
+        handleSelectPluginTool(detail.pluginId, detail.toolId);
       }
     };
     window.addEventListener('atelier:plugin-shortcut', onPluginShortcut);
     return () => window.removeEventListener('atelier:plugin-shortcut', onPluginShortcut);
-  }, [handleTogglePluginPanel]);
+  }, [handleTogglePluginPanel, handleSelectPluginTool]);
 
   const handlePluginPanelAction = useCallback(
     async (
@@ -1261,9 +1268,11 @@ export const App: React.FC = () => {
         currentCanvas={currentCanvas}
         plugins={plugins}
         openPluginPanels={openPluginPanels}
+        activePluginToolKey={activePluginToolKey}
         onManagePlugins={() => setIsPluginManagerOpen(true)}
         onRunPlugin={(pluginId, commandId) => void handleRunPlugin(pluginId, commandId)}
         onTogglePluginPanel={handleTogglePluginPanel}
+        onSelectPluginTool={handleSelectPluginTool}
         onOpenCreateCanvas={() => setIsCreateModalOpen(true)}
         onOpenProject={handleOpenLuminaProject}
         onSaveProject={() => void handleSaveLuminaProject(false)}
@@ -1354,6 +1363,7 @@ export const App: React.FC = () => {
               onQuickCreateCanvas={() => setIsCreateModalOpen(true)}
               onRegisterGetLayerCanvases={registerProjectAccess}
               onRegisterPluginAccess={registerPluginAccess}
+              onActivePluginToolChange={setActivePluginToolKey}
               onRegisterBakeScreentone={(fn) => {
                 bakeScreentoneRef.current = fn;
               }}

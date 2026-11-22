@@ -72,6 +72,14 @@ interface PointerDeps {
   onRequestCreateMyLayer?: () => void;
   /** Text tool click: edit the text layer under the point, or start a new one there */
   onTextTool?: (local: Point) => void;
+  /** Optional v2.5 custom plugin tool pointer hook */
+  pluginTool?: {
+    isActive: () => boolean;
+    onDown: (e: PointerEvent, local: Point) => boolean;
+    onMove: (e: PointerEvent, local: Point) => boolean;
+    onUp: (e: PointerEvent, local: Point | null, cancelled: boolean) => boolean;
+    onCancel: () => void;
+  };
 }
 
 /**
@@ -87,7 +95,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
   } = ctx;
   const {
     containerRef, filterModalOpenRef, radialMenuOpenRef, resizeModalOpenRef, updateBrushCursor, hideBrushCursor, openRadialMenu, emitCursor,
-    setEraserHover, undo, redo, setCurrentTool, onSelectLayer, onRequestCreateMyLayer, onTextTool,
+    setEraserHover, undo, redo, setCurrentTool, onSelectLayer, onRequestCreateMyLayer, onTextTool, pluginTool,
   } = deps;
   const isLassoErase = () => currentTool === 'eraser' && selection.lassoErase;
   const isTransformActive = transform.isTransformActive;
@@ -133,6 +141,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
   const blurRef = useRef(() => {});
   blurRef.current = () => {
     if (tailRef.current) finishTail(tailRef.current.id);
+    pluginTool?.onCancel();
     for (const id of activePointersRef.current.keys()) brush.interrupt(id);
     setEraserHover(false);
     hideBrushCursor();
@@ -214,6 +223,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
         if (layer && (drawn || liquify.isActive())) layerManagerRef.current?.revertToPingPong(layer.id);
       }
       if (touchSessionRef.current?.toolStarted) {
+        pluginTool?.onCancel();
         RulerManager.getInstance().onStrokeEnd();
         selectionEngineRef.current?.clearDraft();
         shapeGraphicRef.current?.clear();
@@ -270,6 +280,12 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
   const startCanvasTool = (e: PointerEvent, eraserTail = false) => {
     const currentTool = eraserTail ? 'eraser' : ctx.currentTool;
     if (e.pointerType === 'touch' && touchSessionRef.current) touchSessionRef.current.toolStarted = true;
+    // Active v2.5 custom plugin tool intercepts single-pointer canvas strokes
+    if (!eraserTail && pluginTool?.isActive()) {
+      const at = viewportRef.current?.screenToCanvas(e.clientX, e.clientY);
+      if (at) pluginTool.onDown(e, at);
+      return;
+    }
     // The text tool makes or edits a text layer of its own, whatever layer is active
     if (currentTool === 'text') {
       const at = viewportRef.current?.screenToCanvas(e.clientX, e.clientY);
@@ -541,6 +557,10 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
         );
       }
 
+      if (pluginTool?.isActive() && pluginTool.onMove(e.nativeEvent, local)) {
+        return;
+      }
+
       if (currentTool === 'vector_bezier') {
         vector.penPointerMove(local);
         return;
@@ -658,6 +678,9 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       return;
     }
 
+    const pluginUpLocal = viewportRef.current?.screenToCanvas(e.clientX, e.clientY) ?? null;
+    if (pluginTool?.onUp(e.nativeEvent, pluginUpLocal, cancelled)) return;
+
     // Lasso outline tools: fill the shape (bucket lasso / smart fill) or make the selection
     if (currentTool === 'smart_fill') {
       fill.executeSmartFill();
@@ -692,6 +715,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
   /** Canvas switch / engine rebuild: forget every pointer, gesture and pan in progress */
   const reset = () => {
     if (radialLongPressTimerRef.current) clearTimeout(radialLongPressTimerRef.current);
+    pluginTool?.onCancel();
     activePointersRef.current.clear();
     tailRef.current = null;
     setEraserHover(false);

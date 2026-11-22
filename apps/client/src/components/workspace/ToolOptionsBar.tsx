@@ -28,6 +28,10 @@ import { ColorWheelStudio } from '../ColorWheelStudio';
 import { CommandBar } from './QuickActions';
 import { CORNER_RADIUS_SHAPES, ShapeSubtype } from './tools/useShapeTools';
 import { useWheelStep } from '../../hooks/useWheelStep';
+import { resolvePluginText } from '../../plugins/pluginApi';
+import { getPluginLabels } from '../../plugins/pluginLabels';
+import { isPluginToolOptionVisible, type RegisteredPluginTool } from '../../plugins/pluginTools';
+import { getPluginToolIcon } from './pluginToolIcons';
 import { getUiScale } from '../../theme/uiScale';
 import { useI18n } from '../../context/I18nContext';
 import { useAnchoredPopover } from '../../utils/popoverPosition';
@@ -317,10 +321,16 @@ export interface ToolOptionsBarProps {
   onEraserMode: (mode: 'hard' | 'soft') => void;
   /** 筆刷詳細設定 dialog (brush / pencil / eraser) */
   onOpenBrushSettings?: () => void;
+  /** Active v2.5 custom plugin tool, if any */
+  activePluginTool?: RegisteredPluginTool | null;
+  pluginToolOptions?: Record<string, string | number | boolean>;
+  onPluginToolOptionChange?: (key: string, value: string | number | boolean) => void;
+  onExitPluginTool?: () => void;
 }
 
 export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
-  const { t: tr } = useI18n();
+  const { t: tr, language } = useI18n();
+  const pluginStrings = getPluginLabels(language);
   const rawTool = findTool(p.currentTool);
   const locTool = getLocalizedTool(p.currentTool, tr);
   const tool = rawTool ? { ...rawTool, label: locTool.label, hint: locTool.hint } : undefined;
@@ -333,6 +343,142 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
   const barRef = useRef<HTMLDivElement>(null);
   const { viewportWidth } = useEffectiveWidth(barRef);
   const isNarrowMobile = viewportWidth < 600;
+
+  if (p.activePluginTool) {
+    const activeTool = p.activePluginTool;
+    const PluginIcon = getPluginToolIcon(activeTool.tool.icon);
+    const toolLabel = resolvePluginText(activeTool.tool.label, activeTool.tool.i18nLabel, language);
+    const toolHint = activeTool.tool.hint
+      ? resolvePluginText(activeTool.tool.hint, activeTool.tool.i18nHint, language)
+      : undefined;
+    const vals = p.pluginToolOptions ?? {};
+    const visibleParams = (activeTool.tool.options ?? []).filter((param) =>
+      isPluginToolOptionVisible(param, vals),
+    );
+    return (
+      <div
+        ref={barRef}
+        role="toolbar"
+        aria-label={tr.navbar.tools}
+        data-workspace-entry="options"
+        data-plugin-tool-options={activeTool.key}
+        className={`atelier-chrome flex shrink-0 items-center gap-1.5 border-b px-2 text-xs ${
+          isNarrowMobile ? 'h-11 overflow-x-auto no-scrollbar touch-pan-x' : 'min-h-11 flex-wrap py-1 content-center'
+        }`}
+      >
+        <button type="button" onClick={p.onUndo} disabled={!p.canUndo} title={`${tr.common.undo} (${shortcut('action_undo')})`} aria-label={tr.common.undo} className="atelier-icon-btn h-8 w-8 shrink-0">
+          <Undo2 className="h-4 w-4" />
+        </button>
+        <button type="button" onClick={p.onRedo} disabled={!p.canRedo} title={`${tr.common.redo} (${shortcut('action_redo')})`} aria-label={tr.common.redo} className="atelier-icon-btn h-8 w-8 shrink-0">
+          <Redo2 className="h-4 w-4" />
+        </button>
+        <Sep />
+        <div className="flex shrink-0 items-center gap-1.5 pr-1" title={toolHint}>
+          <span className="flex h-7 w-7 items-center justify-center rounded-md border border-cyan-500/40 bg-cyan-500/15 text-cyan-200">
+            <PluginIcon className="h-4 w-4" />
+          </span>
+          <span className="font-semibold text-cyan-100">{toolLabel}</span>
+          <span className="rounded border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-0.5 text-[10px] text-cyan-300">
+            {pluginStrings.customToolTag}
+          </span>
+        </div>
+        {visibleParams.map((param) => {
+          const paramLabel = resolvePluginText(param.label, param.i18nLabel, language);
+          const cur = vals[param.key] ?? param.initial;
+          if (param.kind === 'range') {
+            const num = typeof cur === 'number' ? cur : param.initial;
+            return (
+              <React.Fragment key={param.key}>
+                <Sep />
+                <SliderField
+                  label={paramLabel}
+                  value={num}
+                  min={param.min}
+                  max={param.max}
+                  step={param.step ?? 1}
+                  suffix={param.unit ?? ''}
+                  onChange={(v) => p.onPluginToolOptionChange?.(param.key, v)}
+                />
+              </React.Fragment>
+            );
+          }
+          if (param.kind === 'select') {
+            const str = typeof cur === 'string' ? cur : param.initial;
+            return (
+              <React.Fragment key={param.key}>
+                <Sep />
+                <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-neutral-300">
+                  <span className="text-neutral-400">{paramLabel}</span>
+                  <select
+                    value={str}
+                    onChange={(e) => p.onPluginToolOptionChange?.(param.key, e.target.value)}
+                    className="rounded-md border border-neutral-700 bg-neutral-900 px-1.5 py-0.5 text-[11px] text-neutral-100"
+                  >
+                    {param.options.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {resolvePluginText(opt.label, opt.i18nLabel, language)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </React.Fragment>
+            );
+          }
+          if (param.kind === 'toggle') {
+            const checked = typeof cur === 'boolean' ? cur : param.initial;
+            return (
+              <React.Fragment key={param.key}>
+                <Sep />
+                <label className="flex shrink-0 items-center gap-1 text-[11px] text-neutral-300">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={(e) => p.onPluginToolOptionChange?.(param.key, e.target.checked)}
+                  />
+                  <span>{paramLabel}</span>
+                </label>
+              </React.Fragment>
+            );
+          }
+          if (param.kind === 'color') {
+            const hexVal = typeof cur === 'string' ? cur : param.initial;
+            return (
+              <React.Fragment key={param.key}>
+                <Sep />
+                <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-neutral-300">
+                  <span className="text-neutral-400">{paramLabel}</span>
+                  <input
+                    type="color"
+                    value={hexVal}
+                    onChange={(e) => p.onPluginToolOptionChange?.(param.key, e.target.value)}
+                    className="h-6 w-7 cursor-pointer rounded border border-neutral-700 bg-transparent p-0"
+                  />
+                </label>
+              </React.Fragment>
+            );
+          }
+          return null;
+        })}
+        {p.onExitPluginTool && (
+          <>
+            <Sep />
+            <button
+              type="button"
+              onClick={p.onExitPluginTool}
+              className="flex shrink-0 items-center gap-1 rounded-md border border-neutral-700 px-2 py-1 text-[11px] text-neutral-200 hover:bg-neutral-800"
+            >
+              <X className="h-3.5 w-3.5" />
+              {pluginStrings.toolBackToBrush}
+            </button>
+          </>
+        )}
+        <div className={`ml-auto flex items-center border-l border-neutral-800 pl-1 ${isNarrowMobile ? 'shrink-0' : 'max-w-full flex-wrap'}`}>
+          <CommandBar wrap={!isNarrowMobile} />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div ref={barRef} role="toolbar" aria-label={tr.navbar.tools} data-workspace-entry="options"
       className={`atelier-chrome flex shrink-0 items-center gap-1.5 border-b px-2 text-xs ${

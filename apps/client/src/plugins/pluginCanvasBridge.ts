@@ -2,22 +2,54 @@ import {
   canUserCreateLayer,
   canUserPerformLayerAction,
   DEFAULT_TILE_SIZE,
+  evaluateEasing,
+  evaluateTransformKeyframes,
+  normalizeBrushDynamics,
   type BlendMode,
+  type BrushDynamicsConfig,
+  type BrushMixMode,
+  type BrushTextureBlendMode,
   type CanvasMemberModel,
+  type CelMark,
+  type DualBrushBlendMode,
+  type KeyframeEasing,
+  type LayerMeta,
   type LayerModel,
   type LayerPermissionModel,
   type ScopedUndoOp,
   type SelectionSnapshot,
   type TileCoord,
   type TileData,
+  type TimelineLabel,
+  type TransformKeyframe,
   type UserModel,
   type UserPayload,
 } from '@atelier/shared';
 import {
+  MAX_HOLD,
+  MAX_TIMELINE_FRAMES,
+  celEntriesOf,
+  normalizeTimelineLabels,
+  removeTimelineLabel,
+  removeTransformKeyframe,
+  upsertTimelineLabel,
+  upsertTransformKeyframe,
+} from '../engine/AnimationEngine';
+import {
   PLUGIN_LIMITS,
   type PluginLayerInfo,
   type PluginRect,
+  type PluginTimelineState,
+  type PluginTimelineTrackInfo,
 } from './pluginApi';
+import {
+  getPluginEasing,
+  listAllEasingPresets,
+  registerPluginEasing,
+  resolveEasingBezierById,
+  unregisterPluginEasing,
+  validateBezierTuple,
+} from './pluginEasingRegistry';
 import type { PluginRpcHandler, PluginRpcMethod } from './pluginRpc';
 
 const VALID_BLEND_MODES = new Set<string>([
@@ -124,7 +156,51 @@ export interface PluginAclContext {
 
 export interface PluginBrushState {
   color: string;
+  secondaryColor?: string;
   size: number;
+  minSize?: number;
+  opacity?: number;
+  flow?: number;
+  hardness?: number;
+  spacing?: number;
+  scatter?: number;
+  roundness?: number;
+  tipAngle?: number;
+  angleMode?: 'direction' | 'pen' | 'fixed';
+  tiltSize?: number;
+  isEraser?: boolean;
+  mixMode?: BrushMixMode;
+  colorMixing?: number;
+  paintAmount?: number;
+  colorStretch?: number;
+  fgBgMix?: number;
+  wetEdges?: boolean;
+  hueJitter?: number;
+  satJitter?: number;
+  valJitter?: number;
+  textureDensity?: number;
+  textureScale?: number;
+  textureInvert?: boolean;
+  textureBlendMode?: BrushTextureBlendMode;
+  dualBrush?: boolean;
+  dualSize?: number;
+  dualScatter?: number;
+  dualBlendMode?: DualBrushBlendMode;
+  dynamics?: BrushDynamicsConfig;
+}
+
+export type PluginBrushPatch = Partial<Omit<PluginBrushState, 'isEraser'>>;
+
+export interface PluginTimelineBridge {
+  getFps(): number;
+  getLength(): number;
+  getCurrentFrame(): number;
+  getIsPlaying(): boolean;
+  getLoop(): boolean;
+  getRange(): { start: number; end: number } | null;
+  setCurrentFrame(frame: number): void;
+  setLoop(loop: boolean): void;
+  setRange(range: { start: number; end: number } | null): void;
 }
 
 export interface PluginSelectionBridge {
@@ -152,7 +228,7 @@ export interface PluginCanvasHostAdapter {
   getActiveLayerId(): string | null;
   setActiveLayer(layerId: string): void;
   getBrush?(): PluginBrushState;
-  setBrush?(patch: { color?: string; size?: number }): void;
+  setBrush?(patch: PluginBrushPatch): void;
   createLayer(opts: {
     name: string;
     layerType: 'raster' | 'group';
@@ -175,6 +251,7 @@ export interface PluginCanvasHostAdapter {
   pushUndoOp(op: ScopedUndoOp): void;
   onTransactionCommitted?(): void;
   selection?: PluginSelectionBridge;
+  timeline?: PluginTimelineBridge;
 }
 
 export function parsePluginRect(
@@ -286,6 +363,16 @@ export function canPluginCreateLayer(acl: PluginAclContext): { allowed: boolean;
   return { allowed: true };
 }
 
+export function canPluginWriteTimeline(acl: PluginAclContext): { allowed: boolean; reason?: string } {
+  if (acl.isGuest || !acl.user) {
+    return { allowed: false, reason: 'Guests cannot modify timeline or keyframes.' };
+  }
+  if (acl.canvasMember?.role === 'viewer' || !canUserCreateLayer(acl.user, acl.canvasMember)) {
+    return { allowed: false, reason: 'Viewers cannot modify timeline or keyframes.' };
+  }
+  return { allowed: true };
+}
+
 export function toPluginLayerInfo(
   layer: LayerModel,
   layers: LayerModel[],
@@ -365,27 +452,149 @@ function checkNoParentCycle(layers: LayerModel[], layerId: string, newParentId: 
   }
 }
 
+export interface PluginTransactionOptions {
+  pluginId?: string;
+  groupId?: string;
+}
+
 export class PluginCanvasTransaction {
   readonly groupId: string;
+  private readonly pluginId: string;
   private readonly tileSize: number;
   private readonly cols: number;
   private readonly rows: number;
 
   private readonly stagedTiles = new Map<string, Map<string, StagedTile>>();
+  private readonly previewAppliedLayers = new Set<string>();
   private readonly createdLayers = new Map<string, LayerModel>();
   private readonly createdOrder: string[] = [];
   private readonly updatedOriginals = new Map<string, Partial<LayerModel>>();
+  private readonly metaUndoRecords = new Map<string, { before: LayerMeta | null; after: LayerMeta | null }>();
   private initialSortOrder: string[] | null = null;
   private readonly deletedLayers: DeletedLayerRecord[] = [];
   private selectionBeforeSnapshot: SelectionSnapshot | null | undefined = undefined;
   private selectionModified = false;
+  private timelineBefore: {
+    currentFrame?: number;
+    loop?: boolean;
+    range?: { start: number; end: number } | null;
+  } = {};
+  private readonly easingUndoLog: Array<{
+    id: string;
+    prev: { pluginId: string; label: string; bezier: [number, number, number, number] } | null;
+  }> = [];
   private closed = false;
 
-  constructor(private readonly adapter: PluginCanvasHostAdapter) {
-    this.groupId = `plugin_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  constructor(private readonly adapter: PluginCanvasHostAdapter, options?: PluginTransactionOptions) {
+    this.pluginId = options?.pluginId || 'plugin';
+    this.groupId = options?.groupId || `plugin_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     this.tileSize = adapter.tileSize ?? DEFAULT_TILE_SIZE;
     this.cols = Math.ceil(adapter.canvasWidth / this.tileSize);
     this.rows = Math.ceil(adapter.canvasHeight / this.tileSize);
+  }
+
+  /**
+   * Pushes currently staged pixel edits to the canvas for live preview during custom-tool dragging
+   * without committing undo entries or broadcasting network patches yet.
+   * Any previewed tiles are reverted to `tile.before` if `rollback()` is called.
+   */
+  flushPreview(): void {
+    if (this.closed) return;
+    for (const [layerId, layerMap] of this.stagedTiles.entries()) {
+      const tiles: TileData[] = [];
+      for (const tile of layerMap.values()) {
+        let changed = false;
+        for (let i = 0; i < tile.staged.length; i++) {
+          if (tile.staged[i] !== tile.before[i]) {
+            changed = true;
+            break;
+          }
+        }
+        if (!changed) continue;
+        tiles.push({
+          col: tile.col,
+          row: tile.row,
+          width: tile.width,
+          height: tile.height,
+          compression: 'raw',
+          data: tile.staged,
+          byteLength: tile.staged.byteLength,
+        });
+      }
+      if (tiles.length > 0) {
+        this.previewAppliedLayers.add(layerId);
+        this.adapter.applyLayerTiles(layerId, tiles);
+      }
+    }
+  }
+
+  private async updateLayerMetaTransactional(layer: LayerModel, nextMeta: LayerMeta): Promise<void> {
+    const existing = this.metaUndoRecords.get(layer.id);
+    if (!existing) {
+      const beforeClone = layer.meta ? structuredClone(layer.meta) : null;
+      this.metaUndoRecords.set(layer.id, { before: beforeClone, after: structuredClone(nextMeta) });
+    } else {
+      existing.after = structuredClone(nextMeta);
+    }
+    await this.adapter.updateLayerProps(layer.id, { meta: nextMeta });
+  }
+
+  private getAnimationFolders(): LayerModel[] {
+    return this.getSortedLayers().filter(
+      (l) => (l.layerType === 'group' || l.layerType === 'folder') && Boolean(l.meta?.animation),
+    );
+  }
+
+  private resolveTargetAnimationFolder(folderId: unknown): LayerModel {
+    const folders = this.getAnimationFolders();
+    if (typeof folderId === 'string' && folderId.trim()) {
+      const found = folders.find((f) => f.id === folderId.trim());
+      if (!found) throw new Error(`Animation folder not found: ${folderId}`);
+      return found;
+    }
+    if (folders.length === 0) {
+      throw new Error('No animation folder found on this canvas.');
+    }
+    return folders[0];
+  }
+
+  private buildTimelineTracks(): PluginTimelineTrackInfo[] {
+    const layers = this.getSortedLayers();
+    const folders = this.getAnimationFolders();
+    return folders.map((folder) => {
+      const entries = celEntriesOf(layers, folder.id);
+      let cursor = 0;
+      const mapped = entries.map((entry) => {
+        const startFrame = cursor;
+        cursor += entry.hold;
+        const entryLayer = layers.find((l) => l.id === entry.id);
+        const canManage = entryLayer
+          ? canPluginManageLayerAction(entryLayer, 'modify_props', this.adapter.acl).allowed
+          : false;
+        return {
+          id: entry.id,
+          label: entry.label,
+          startFrame,
+          hold: entry.hold,
+          ...(entry.ref !== undefined ? { ref: entry.ref } : {}),
+          ...(entry.blank ? { blank: true } : {}),
+          ...(entry.mark ? { mark: entry.mark } : {}),
+          ...(entry.note ? { note: entry.note } : {}),
+          ownerId: entry.ownerId,
+          isGroup: entry.isGroup,
+          canManage,
+        };
+      });
+      return {
+        folderId: folder.id,
+        name: folder.name,
+        ownerId: folder.ownerId ?? null,
+        shared: Boolean(folder.meta?.animation?.shared),
+        canManage: canPluginManageLayerAction(folder, 'modify_props', this.adapter.acl).allowed,
+        labels: normalizeTimelineLabels(folder.meta?.animation?.labels),
+        entries: mapped,
+      };
+    });
   }
 
   private tileDimensions(col: number, row: number): { width: number; height: number } {
@@ -449,18 +658,8 @@ export class PluginCanvasTransaction {
 
         case 'brush.set': {
           if (!this.adapter.setBrush) throw new Error('Brush control is unavailable.');
-          const color = obj.color === undefined ? undefined : String(obj.color);
-          if (color !== undefined && !/^#[0-9a-f]{6}$/i.test(color)) {
-            throw new Error('Expected a #RRGGBB color.');
-          }
-          const size = obj.size === undefined ? undefined : Number(obj.size);
-          if (size !== undefined && (!Number.isFinite(size) || size < 1 || size > 1000)) {
-            throw new Error('Brush size must be between 1 and 1000.');
-          }
-          if (color === undefined && size === undefined) {
-            throw new Error('Provide color or size to brush.set.');
-          }
-          this.adapter.setBrush({ ...(color !== undefined ? { color } : {}), ...(size !== undefined ? { size } : {}) });
+          const patch = parsePluginBrushPatch(obj);
+          this.adapter.setBrush(patch);
           return { result: null };
         }
 
@@ -1026,6 +1225,453 @@ export class PluginCanvasTransaction {
           this.adapter.selection.feather(radius);
           return { result: null };
         }
+
+        // ---------- v2.5 Timeline RPCs ----------
+        case 'timeline.getState': {
+          const tl = this.adapter.timeline;
+          const tracks = this.buildTimelineTracks();
+          const primaryFolder = this.getAnimationFolders()[0];
+          const longestTrack = tracks.reduce(
+            (max, track) => Math.max(max, track.entries.reduce((sum, e) => sum + e.hold, 0)),
+            0,
+          );
+          const state: PluginTimelineState = {
+            fps: tl ? tl.getFps() : (primaryFolder?.meta?.animation?.fps ?? 12),
+            length: tl ? tl.getLength() : (primaryFolder?.meta?.animation?.length ?? Math.max(24, longestTrack)),
+            currentFrame: tl ? tl.getCurrentFrame() : 0,
+            isPlaying: tl ? tl.getIsPlaying() : false,
+            loop: tl ? tl.getLoop() : true,
+            range: tl ? tl.getRange() : null,
+            tracks,
+          };
+          return { result: state };
+        }
+
+        case 'timeline.setFrame': {
+          const check = canPluginWriteTimeline(this.adapter.acl);
+          if (!check.allowed) throw new Error(check.reason || 'Not allowed to modify timeline.');
+          if (!this.adapter.timeline) throw new Error('Timeline engine is unavailable.');
+          const frame = Number(obj.frame);
+          if (!Number.isInteger(frame) || frame < 0 || frame >= MAX_TIMELINE_FRAMES) {
+            throw new Error(`Frame must be an integer between 0 and ${MAX_TIMELINE_FRAMES - 1}.`);
+          }
+          if (this.timelineBefore.currentFrame === undefined) {
+            this.timelineBefore.currentFrame = this.adapter.timeline.getCurrentFrame();
+          }
+          this.adapter.timeline.setCurrentFrame(frame);
+          return { result: { currentFrame: frame } };
+        }
+
+        case 'timeline.setFps': {
+          const check = canPluginWriteTimeline(this.adapter.acl);
+          if (!check.allowed) throw new Error(check.reason || 'Not allowed to modify timeline.');
+          const fps = Number(obj.fps);
+          if (!Number.isInteger(fps) || fps < 1 || fps > 60) {
+            throw new Error('FPS must be an integer between 1 and 60.');
+          }
+          const folder = this.resolveTargetAnimationFolder(obj.folderId);
+          const perm = canPluginManageLayerAction(folder, 'modify_props', this.adapter.acl);
+          if (!perm.allowed) throw new Error(perm.reason || 'Not allowed to modify this animation folder.');
+          const nextAnimation: NonNullable<LayerMeta['animation']> = {
+            ...(folder.meta?.animation ?? {}),
+            fps,
+          };
+          await this.updateLayerMetaTransactional(folder, { ...(folder.meta ?? {}), animation: nextAnimation });
+          return { result: { folderId: folder.id, fps } };
+        }
+
+        case 'timeline.setLength': {
+          const check = canPluginWriteTimeline(this.adapter.acl);
+          if (!check.allowed) throw new Error(check.reason || 'Not allowed to modify timeline.');
+          const rawLen = obj.length;
+          let length: number | null;
+          if (rawLen === null) {
+            length = null;
+          } else {
+            const n = Number(rawLen);
+            if (!Number.isInteger(n) || n < 1 || n > MAX_TIMELINE_FRAMES) {
+              throw new Error(`Timeline length must be null or an integer between 1 and ${MAX_TIMELINE_FRAMES}.`);
+            }
+            length = n;
+          }
+          const folder = this.resolveTargetAnimationFolder(obj.folderId);
+          const perm = canPluginManageLayerAction(folder, 'modify_props', this.adapter.acl);
+          if (!perm.allowed) throw new Error(perm.reason || 'Not allowed to modify this animation folder.');
+          const nextAnimation: NonNullable<LayerMeta['animation']> = {
+            fps: 12,
+            ...(folder.meta?.animation ?? {}),
+          };
+          if (length !== null) nextAnimation.length = length;
+          else delete nextAnimation.length;
+          await this.updateLayerMetaTransactional(folder, { ...(folder.meta ?? {}), animation: nextAnimation });
+          return { result: { folderId: folder.id, length } };
+        }
+
+        case 'timeline.setRange': {
+          const check = canPluginWriteTimeline(this.adapter.acl);
+          if (!check.allowed) throw new Error(check.reason || 'Not allowed to modify timeline.');
+          if (!this.adapter.timeline) throw new Error('Timeline engine is unavailable.');
+          let range: { start: number; end: number } | null;
+          if (obj.range === null) {
+            range = null;
+          } else if (obj.range && typeof obj.range === 'object' && !Array.isArray(obj.range)) {
+            const r = obj.range as { start?: unknown; end?: unknown };
+            const start = Number(r.start);
+            const end = Number(r.end);
+            if (
+              !Number.isInteger(start) ||
+              !Number.isInteger(end) ||
+              start < 0 ||
+              end < start ||
+              end >= MAX_TIMELINE_FRAMES
+            ) {
+              throw new Error(`Invalid playback range (0 <= start <= end < ${MAX_TIMELINE_FRAMES}).`);
+            }
+            range = { start, end };
+          } else {
+            throw new Error('Expected range { start, end } or null.');
+          }
+          if (this.timelineBefore.range === undefined) {
+            this.timelineBefore.range = this.adapter.timeline.getRange();
+          }
+          this.adapter.timeline.setRange(range);
+          return { result: { range } };
+        }
+
+        case 'timeline.setLoop': {
+          const check = canPluginWriteTimeline(this.adapter.acl);
+          if (!check.allowed) throw new Error(check.reason || 'Not allowed to modify timeline.');
+          if (!this.adapter.timeline) throw new Error('Timeline engine is unavailable.');
+          if (typeof obj.loop !== 'boolean') throw new Error('loop must be boolean.');
+          if (this.timelineBefore.loop === undefined) {
+            this.timelineBefore.loop = this.adapter.timeline.getLoop();
+          }
+          this.adapter.timeline.setLoop(obj.loop);
+          return { result: { loop: obj.loop } };
+        }
+
+        case 'timeline.listLabels': {
+          const folders = this.getAnimationFolders();
+          if (folders.length === 0) return { result: [] };
+          const folder = obj.folderId !== undefined ? this.resolveTargetAnimationFolder(obj.folderId) : folders[0];
+          return { result: normalizeTimelineLabels(folder.meta?.animation?.labels) };
+        }
+
+        case 'timeline.setLabel': {
+          const check = canPluginWriteTimeline(this.adapter.acl);
+          if (!check.allowed) throw new Error(check.reason || 'Not allowed to modify timeline.');
+          const frame = Number(obj.frame);
+          if (!Number.isInteger(frame) || frame < 0 || frame >= MAX_TIMELINE_FRAMES) {
+            throw new Error(`Frame must be an integer between 0 and ${MAX_TIMELINE_FRAMES - 1}.`);
+          }
+          if (typeof obj.text !== 'string' || /[\u0000-\u001f\u007f]/.test(obj.text)) {
+            throw new Error('Label text must be a valid string.');
+          }
+          const folder = this.resolveTargetAnimationFolder(obj.folderId);
+          const perm = canPluginManageLayerAction(folder, 'modify_props', this.adapter.acl);
+          if (!perm.allowed) throw new Error(perm.reason || 'Not allowed to modify this animation folder.');
+          const nextLabels = upsertTimelineLabel(folder.meta?.animation?.labels, frame, obj.text);
+          if (nextLabels.length > PLUGIN_LIMITS.maxTimelineLabels) {
+            throw new Error(`At most ${PLUGIN_LIMITS.maxTimelineLabels} timeline labels are allowed.`);
+          }
+          const nextAnimation: NonNullable<LayerMeta['animation']> = {
+            fps: 12,
+            ...(folder.meta?.animation ?? {}),
+          };
+          if (nextLabels.length > 0) nextAnimation.labels = nextLabels;
+          else delete nextAnimation.labels;
+          await this.updateLayerMetaTransactional(folder, { ...(folder.meta ?? {}), animation: nextAnimation });
+          return { result: nextLabels };
+        }
+
+        case 'timeline.removeLabel': {
+          const check = canPluginWriteTimeline(this.adapter.acl);
+          if (!check.allowed) throw new Error(check.reason || 'Not allowed to modify timeline.');
+          const frame = Number(obj.frame);
+          if (!Number.isInteger(frame) || frame < 0 || frame >= MAX_TIMELINE_FRAMES) {
+            throw new Error(`Frame must be an integer between 0 and ${MAX_TIMELINE_FRAMES - 1}.`);
+          }
+          const folder = this.resolveTargetAnimationFolder(obj.folderId);
+          const perm = canPluginManageLayerAction(folder, 'modify_props', this.adapter.acl);
+          if (!perm.allowed) throw new Error(perm.reason || 'Not allowed to modify this animation folder.');
+          const nextLabels = removeTimelineLabel(folder.meta?.animation?.labels, frame);
+          const nextAnimation: NonNullable<LayerMeta['animation']> = {
+            fps: 12,
+            ...(folder.meta?.animation ?? {}),
+          };
+          if (nextLabels.length > 0) nextAnimation.labels = nextLabels;
+          else delete nextAnimation.labels;
+          await this.updateLayerMetaTransactional(folder, { ...(folder.meta ?? {}), animation: nextAnimation });
+          return { result: nextLabels };
+        }
+
+        case 'timeline.updateCel': {
+          const check = canPluginWriteTimeline(this.adapter.acl);
+          if (!check.allowed) throw new Error(check.reason || 'Not allowed to modify timeline.');
+          const layer = this.requireLayer(obj.entryId);
+          const parent = layer.parentId ? this.adapter.getLayers().find((l) => l.id === layer.parentId) : null;
+          if (!parent || !parent.meta?.animation) {
+            throw new Error('Target layer is not an animation cel entry.');
+          }
+          const perm = canPluginManageLayerAction(layer, 'modify_props', this.adapter.acl);
+          if (!perm.allowed) throw new Error(perm.reason || 'Not allowed to modify this cel.');
+          const cel: NonNullable<LayerMeta['cel']> = { ...(layer.meta?.cel ?? {}) };
+          let touched = false;
+          if (obj.hold !== undefined) {
+            const hold = Number(obj.hold);
+            if (!Number.isInteger(hold) || hold < 1 || hold > MAX_HOLD) {
+              throw new Error(`Cel hold must be an integer between 1 and ${MAX_HOLD}.`);
+            }
+            if (hold > 1) cel.hold = hold;
+            else delete cel.hold;
+            touched = true;
+          }
+          if (obj.mark !== undefined) {
+            if (obj.mark === null || obj.mark === '') delete cel.mark;
+            else if (obj.mark === 'key' || obj.mark === 'inbetween') cel.mark = obj.mark as CelMark;
+            else throw new Error('Cel mark must be "key", "inbetween", or null.');
+            touched = true;
+          }
+          if (obj.note !== undefined) {
+            if (obj.note === null || obj.note === '') {
+              delete cel.note;
+            } else if (typeof obj.note === 'string' && !/[\u0000-\u001f\u007f]/.test(obj.note)) {
+              const cleaned = obj.note.trim().slice(0, 120);
+              if (cleaned) cel.note = cleaned;
+              else delete cel.note;
+            } else {
+              throw new Error('Cel note must be a string or null.');
+            }
+            touched = true;
+          }
+          if (!touched) throw new Error('Provide hold, mark, or note to timeline.updateCel.');
+          const nextMeta: LayerMeta = { ...(layer.meta ?? {}) };
+          if (Object.keys(cel).length > 0) nextMeta.cel = cel;
+          else delete nextMeta.cel;
+          await this.updateLayerMetaTransactional(layer, nextMeta);
+          return { result: { entryId: layer.id, cel: nextMeta.cel ?? {} } };
+        }
+
+        // ---------- v2.5 Keyframes RPCs ----------
+        case 'keyframes.list': {
+          const layer = this.requireLayer(obj.layerId);
+          const list = [...(layer.meta?.keyframes ?? [])].sort((a, b) => a.frame - b.frame);
+          return { result: list };
+        }
+
+        case 'keyframes.evaluate': {
+          const layer = this.requireLayer(obj.layerId);
+          const frame =
+            obj.frame === undefined
+              ? (this.adapter.timeline?.getCurrentFrame() ?? 0)
+              : Number(obj.frame);
+          if (!Number.isFinite(frame) || frame < 0 || frame >= MAX_TIMELINE_FRAMES) {
+            throw new Error(`Frame must be between 0 and ${MAX_TIMELINE_FRAMES - 1}.`);
+          }
+          const evaluated = evaluateTransformKeyframes(
+            layer.meta?.keyframes,
+            frame,
+            this.adapter.canvasWidth / 2,
+            this.adapter.canvasHeight / 2,
+          );
+          return { result: evaluated };
+        }
+
+        case 'keyframes.set': {
+          const check = canPluginWriteTimeline(this.adapter.acl);
+          if (!check.allowed) throw new Error(check.reason || 'Not allowed to modify keyframes.');
+          const layer = this.requireLayer(obj.layerId);
+          const perm = canPluginManageLayerAction(layer, 'modify_props', this.adapter.acl);
+          if (!perm.allowed) throw new Error(perm.reason || 'Not allowed to modify keyframes on this layer.');
+          const existing = layer.meta?.keyframes ?? [];
+          const parsedKf = parsePluginKeyframe(
+            obj.keyframe,
+            existing,
+            this.adapter.canvasWidth / 2,
+            this.adapter.canvasHeight / 2,
+          );
+          const nextList = upsertTransformKeyframe(existing, parsedKf);
+          if (nextList.length > PLUGIN_LIMITS.maxKeyframesPerLayer) {
+            throw new Error(`At most ${PLUGIN_LIMITS.maxKeyframesPerLayer} keyframes per layer are allowed.`);
+          }
+          await this.updateLayerMetaTransactional(layer, { ...(layer.meta ?? {}), keyframes: nextList });
+          return { result: nextList };
+        }
+
+        case 'keyframes.setBatch': {
+          const check = canPluginWriteTimeline(this.adapter.acl);
+          if (!check.allowed) throw new Error(check.reason || 'Not allowed to modify keyframes.');
+          // Normalize either { items: [{ layerId, keyframes, replace? }] } or { layerId, keyframes, replace? }
+          const rawItems = Array.isArray(obj.items)
+            ? obj.items
+            : obj.layerId !== undefined
+              ? [{ layerId: obj.layerId, keyframes: obj.keyframes, replace: obj.replace }]
+              : null;
+          if (!rawItems || rawItems.length === 0) {
+            throw new Error('keyframes.setBatch requires a non-empty items array or { layerId, keyframes }.');
+          }
+          if (rawItems.length > 64) {
+            throw new Error('keyframes.setBatch accepts at most 64 layer entries per call.');
+          }
+
+          // Atomic pre-validation phase: verify EVERY layer ACL and keyframe payload BEFORE any mutation.
+          const planned: Array<{ layer: LayerModel; nextKeyframes: TransformKeyframe[] }> = [];
+          const plannedByLayer = new Map<string, TransformKeyframe[]>();
+          for (const rawEntry of rawItems) {
+            if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) {
+              throw new Error('Each batch entry must be an object { layerId, keyframes }.');
+            }
+            const entry = rawEntry as { layerId?: unknown; keyframes?: unknown; replace?: unknown };
+            const layer = this.requireLayer(entry.layerId);
+            const perm = canPluginManageLayerAction(layer, 'modify_props', this.adapter.acl);
+            if (!perm.allowed) {
+              throw new Error(perm.reason || `Not allowed to modify keyframes on layer ${layer.id}; batch rejected.`);
+            }
+            if (!Array.isArray(entry.keyframes)) {
+              throw new Error('Batch entry keyframes must be an array.');
+            }
+            const replace = entry.replace === true;
+            let working = replace ? [] : [...(plannedByLayer.get(layer.id) ?? layer.meta?.keyframes ?? [])];
+            for (const rawKf of entry.keyframes) {
+              const parsed = parsePluginKeyframe(
+                rawKf,
+                working,
+                this.adapter.canvasWidth / 2,
+                this.adapter.canvasHeight / 2,
+              );
+              working = upsertTransformKeyframe(working, parsed);
+            }
+            if (working.length > PLUGIN_LIMITS.maxKeyframesPerLayer) {
+              throw new Error(`At most ${PLUGIN_LIMITS.maxKeyframesPerLayer} keyframes per layer are allowed.`);
+            }
+            plannedByLayer.set(layer.id, working);
+            planned.push({ layer, nextKeyframes: working });
+          }
+
+          // Apply phase: all ACL checks succeeded, commit every layer's keyframes
+          const summary: Array<{ layerId: string; count: number }> = [];
+          const seen = new Set<string>();
+          for (let i = planned.length - 1; i >= 0; i--) {
+            const { layer } = planned[i];
+            if (seen.has(layer.id)) continue;
+            seen.add(layer.id);
+          }
+          for (const [layerId, nextKeyframes] of plannedByLayer.entries()) {
+            const latestLayer = this.requireLayer(layerId);
+            await this.updateLayerMetaTransactional(latestLayer, {
+              ...(latestLayer.meta ?? {}),
+              keyframes: nextKeyframes,
+            });
+            summary.push({ layerId, count: nextKeyframes.length });
+          }
+          return { result: { updated: summary } };
+        }
+
+        case 'keyframes.remove': {
+          const check = canPluginWriteTimeline(this.adapter.acl);
+          if (!check.allowed) throw new Error(check.reason || 'Not allowed to modify keyframes.');
+          const layer = this.requireLayer(obj.layerId);
+          const perm = canPluginManageLayerAction(layer, 'modify_props', this.adapter.acl);
+          if (!perm.allowed) throw new Error(perm.reason || 'Not allowed to modify keyframes on this layer.');
+          const frame = Number(obj.frame);
+          if (!Number.isInteger(frame) || frame < 0 || frame >= MAX_TIMELINE_FRAMES) {
+            throw new Error(`Frame must be an integer between 0 and ${MAX_TIMELINE_FRAMES - 1}.`);
+          }
+          const nextList = removeTransformKeyframe(layer.meta?.keyframes ?? [], frame);
+          const nextMeta: LayerMeta = { ...(layer.meta ?? {}) };
+          if (nextList.length > 0) nextMeta.keyframes = nextList;
+          else delete nextMeta.keyframes;
+          await this.updateLayerMetaTransactional(layer, nextMeta);
+          return { result: nextList };
+        }
+
+        case 'keyframes.clear': {
+          const check = canPluginWriteTimeline(this.adapter.acl);
+          if (!check.allowed) throw new Error(check.reason || 'Not allowed to modify keyframes.');
+          const layer = this.requireLayer(obj.layerId);
+          const perm = canPluginManageLayerAction(layer, 'modify_props', this.adapter.acl);
+          if (!perm.allowed) throw new Error(perm.reason || 'Not allowed to modify keyframes on this layer.');
+          const nextMeta: LayerMeta = { ...(layer.meta ?? {}) };
+          delete nextMeta.keyframes;
+          await this.updateLayerMetaTransactional(layer, nextMeta);
+          return { result: [] };
+        }
+
+        // ---------- v2.5 Easing RPCs ----------
+        case 'easing.listPresets': {
+          return { result: listAllEasingPresets() };
+        }
+
+        case 'easing.register': {
+          const check = canPluginWriteTimeline(this.adapter.acl);
+          if (!check.allowed) throw new Error(check.reason || 'Not allowed to register custom easing.');
+          if (typeof obj.id !== 'string' || !obj.id.trim()) {
+            throw new Error('easing.register requires a valid string id.');
+          }
+          const bezier = validateBezierTuple(obj.bezier);
+          const label = typeof obj.label === 'string' ? obj.label : obj.id;
+          const prevEntry = getPluginEasing(obj.id.trim());
+          const registered = registerPluginEasing(
+            this.pluginId,
+            obj.id,
+            label,
+            bezier,
+            PLUGIN_LIMITS.maxCustomEasingsPerPlugin,
+          );
+          this.easingUndoLog.push({
+            id: registered.id,
+            prev: prevEntry ? { ...prevEntry, bezier: [...prevEntry.bezier] as [number, number, number, number] } : null,
+          });
+          return {
+            result: {
+              id: registered.id,
+              label: registered.label,
+              bezier: [...registered.bezier],
+              source: 'plugin',
+              pluginId: registered.pluginId,
+            },
+          };
+        }
+
+        case 'easing.unregister': {
+          const check = canPluginWriteTimeline(this.adapter.acl);
+          if (!check.allowed) throw new Error(check.reason || 'Not allowed to unregister custom easing.');
+          if (typeof obj.id !== 'string' || !obj.id.trim()) {
+            throw new Error('easing.unregister requires a valid string id.');
+          }
+          const cleanId = obj.id.trim();
+          const prevEntry = getPluginEasing(cleanId);
+          const removed = unregisterPluginEasing(this.pluginId, cleanId);
+          if (removed && prevEntry) {
+            this.easingUndoLog.push({
+              id: cleanId,
+              prev: { ...prevEntry, bezier: [...prevEntry.bezier] as [number, number, number, number] },
+            });
+          }
+          return { result: { removed } };
+        }
+
+        case 'easing.evaluate': {
+          const t = Number(obj.t);
+          if (!Number.isFinite(t)) throw new Error('t must be a finite number.');
+          let easingKind: KeyframeEasing = 'linear';
+          let bezier: [number, number, number, number] | undefined;
+          if (typeof obj.presetId === 'string' && obj.presetId.trim()) {
+            const resolved = resolveEasingBezierById(obj.presetId.trim());
+            if (!resolved) throw new Error(`Unknown easing preset: ${obj.presetId}`);
+            easingKind = 'cubicBezier';
+            bezier = resolved;
+          } else {
+            if (obj.easing !== undefined) {
+              easingKind = parseEasingKind(obj.easing);
+            }
+            if (obj.bezier !== undefined) {
+              bezier = validateBezierTuple(obj.bezier);
+              if (obj.easing === undefined) easingKind = 'cubicBezier';
+            }
+          }
+          return { result: { value: evaluateEasing(t, easingKind, bezier) } };
+        }
       }
     };
   }
@@ -1184,19 +1830,119 @@ export class PluginCanvasTransaction {
       });
     }
 
+    // 5. Layer metadata edits (timeline settings, frame labels, cels, keyframes)
+    for (const [layerId, rec] of this.metaUndoRecords.entries()) {
+      if (this.createdLayers.has(layerId)) continue;
+      if (this.deletedLayers.some((d) => d.model.id === layerId)) continue;
+      this.adapter.pushUndoOp({
+        opId: nextOpId(),
+        userId,
+        layerId,
+        opType: 'PLUGIN_TIMELINE',
+        groupId: this.groupId,
+        beforeTiles: [],
+        afterTiles: [],
+        metaBefore: rec.before,
+        metaAfter: rec.after,
+        timestamp: now,
+        desc,
+      });
+    }
+
     this.stagedTiles.clear();
+    this.previewAppliedLayers.clear();
+    this.metaUndoRecords.clear();
+    this.easingUndoLog.length = 0;
     this.adapter.onTransactionCommitted?.();
   }
 
   /**
-   * Rolls back all uncommitted pixel staging, created/updated/reordered/deleted layers, and selection changes.
+   * Rolls back all uncommitted pixel staging (including live tool previews),
+   * created/updated/reordered/deleted layers, metadata/timeline edits, custom easings,
+   * and selection changes.
    */
   async rollback(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
 
-    // Discard all staged pixel writes (never applied to canvas)
+    // Revert any tiles that were rendered for live preview during custom-tool dragging
+    for (const layerId of this.previewAppliedLayers) {
+      if (this.createdLayers.has(layerId)) continue;
+      const layerMap = this.stagedTiles.get(layerId);
+      if (!layerMap) continue;
+      const restoreTiles: TileData[] = [];
+      for (const tile of layerMap.values()) {
+        restoreTiles.push({
+          col: tile.col,
+          row: tile.row,
+          width: tile.width,
+          height: tile.height,
+          compression: 'raw',
+          data: tile.before,
+          byteLength: tile.before.byteLength,
+        });
+      }
+      if (restoreTiles.length > 0) {
+        try {
+          this.adapter.applyLayerTiles(layerId, restoreTiles);
+        } catch {
+          // Best-effort revert
+        }
+      }
+    }
+    this.previewAppliedLayers.clear();
+    // Discard all staged pixel writes
     this.stagedTiles.clear();
+
+    // Restore timeline/keyframe metadata edits
+    for (const [layerId, rec] of this.metaUndoRecords.entries()) {
+      if (this.createdLayers.has(layerId)) continue;
+      try {
+        await this.adapter.updateLayerProps(layerId, { meta: rec.before });
+      } catch {
+        // Best-effort restore
+      }
+    }
+    this.metaUndoRecords.clear();
+
+    // Restore transient timeline state (playhead, loop, playback range)
+    if (this.adapter.timeline) {
+      try {
+        if (this.timelineBefore.currentFrame !== undefined) {
+          this.adapter.timeline.setCurrentFrame(this.timelineBefore.currentFrame);
+        }
+        if (this.timelineBefore.loop !== undefined) {
+          this.adapter.timeline.setLoop(this.timelineBefore.loop);
+        }
+        if (this.timelineBefore.range !== undefined) {
+          this.adapter.timeline.setRange(this.timelineBefore.range);
+        }
+      } catch {
+        // Best-effort restore
+      }
+    }
+    this.timelineBefore = {};
+
+    // Restore custom easing registrations in reverse order
+    for (let i = this.easingUndoLog.length - 1; i >= 0; i--) {
+      const entry = this.easingUndoLog[i];
+      try {
+        if (entry.prev) {
+          registerPluginEasing(
+            entry.prev.pluginId,
+            entry.id,
+            entry.prev.label,
+            entry.prev.bezier,
+            PLUGIN_LIMITS.maxCustomEasingsPerPlugin,
+          );
+        } else {
+          unregisterPluginEasing(this.pluginId, entry.id);
+        }
+      } catch {
+        // Best-effort restore
+      }
+    }
+    this.easingUndoLog.length = 0;
 
     // Remove newly created layers in reverse order
     for (let i = this.createdOrder.length - 1; i >= 0; i--) {
@@ -1265,4 +2011,199 @@ function parseSelectionRadius(radius: unknown): number {
     throw new Error(`Selection radius must be an integer between 1 and ${PLUGIN_LIMITS.maxSelectionRadius}.`);
   }
   return radius;
+}
+
+const VALID_EASING_KINDS = new Set<KeyframeEasing>([
+  'linear',
+  'easeIn',
+  'easeOut',
+  'easeInOut',
+  'step',
+  'cubicBezier',
+]);
+
+function parseEasingKind(raw: unknown): KeyframeEasing {
+  if (typeof raw === 'string' && VALID_EASING_KINDS.has(raw as KeyframeEasing)) {
+    return raw as KeyframeEasing;
+  }
+  throw new Error('Easing must be "linear", "easeIn", "easeOut", "easeInOut", "step", or "cubicBezier".');
+}
+
+function parsePluginKeyframe(
+  raw: unknown,
+  existing: ReadonlyArray<TransformKeyframe>,
+  defaultPivotX: number,
+  defaultPivotY: number,
+): TransformKeyframe {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('Keyframe must be an object with an integer frame.');
+  }
+  const obj = raw as Record<string, unknown>;
+  const frame = Number(obj.frame);
+  if (!Number.isInteger(frame) || frame < 0 || frame >= MAX_TIMELINE_FRAMES) {
+    throw new Error(`Keyframe frame must be an integer between 0 and ${MAX_TIMELINE_FRAMES - 1}.`);
+  }
+
+  const prev = existing.find((k) => k.frame === frame);
+  const fallback = prev ?? evaluateTransformKeyframes(existing, frame, defaultPivotX, defaultPivotY);
+
+  const readNum = (key: string, fallbackVal: number, min: number, max: number): number => {
+    if (obj[key] === undefined) return fallbackVal;
+    const v = Number(obj[key]);
+    if (!Number.isFinite(v) || v < min || v > max) {
+      throw new Error(`Keyframe ${key} must be between ${min} and ${max}.`);
+    }
+    return v;
+  };
+
+  let easing: KeyframeEasing = prev?.easing ?? 'linear';
+  let bezier: [number, number, number, number] | undefined = prev?.bezier ? [...prev.bezier] : undefined;
+
+  if (typeof obj.presetId === 'string' && obj.presetId.trim()) {
+    const resolved = resolveEasingBezierById(obj.presetId.trim());
+    if (!resolved) throw new Error(`Unknown easing preset: ${obj.presetId}`);
+    easing = 'cubicBezier';
+    bezier = resolved;
+  } else {
+    if (obj.easing !== undefined) {
+      easing = parseEasingKind(obj.easing);
+    }
+    if (obj.bezier !== undefined) {
+      bezier = validateBezierTuple(obj.bezier);
+      if (obj.easing === undefined) easing = 'cubicBezier';
+    }
+  }
+
+  if (easing !== 'cubicBezier') {
+    bezier = undefined;
+  } else if (!bezier) {
+    bezier = [0.42, 0, 0.58, 1];
+  }
+
+  const opacity = readNum('opacity', prev?.opacity ?? fallback.opacity ?? 1, 0, 1);
+
+  return {
+    frame,
+    x: readNum('x', fallback.x, -100_000, 100_000),
+    y: readNum('y', fallback.y, -100_000, 100_000),
+    scaleX: readNum('scaleX', fallback.scaleX, -100, 100),
+    scaleY: readNum('scaleY', fallback.scaleY, -100, 100),
+    rotation: readNum('rotation', fallback.rotation, -Math.PI * 100, Math.PI * 100),
+    pivotX: readNum('pivotX', fallback.pivotX, -100_000, 100_000),
+    pivotY: readNum('pivotY', fallback.pivotY, -100_000, 100_000),
+    opacity,
+    easing,
+    ...(bezier ? { bezier } : {}),
+  };
+}
+
+const VALID_MIX_MODES = new Set<BrushMixMode>(['blend', 'smudge', 'dilute']);
+const VALID_TEXTURE_BLEND_MODES = new Set<BrushTextureBlendMode>(['subtract', 'multiply', 'overlay']);
+const VALID_DUAL_BLEND_MODES = new Set<DualBrushBlendMode>(['multiply', 'subtract', 'darken']);
+const VALID_ANGLE_MODES = new Set<'direction' | 'pen' | 'fixed'>(['direction', 'pen', 'fixed']);
+
+export function parsePluginBrushPatch(obj: Record<string, unknown>): PluginBrushPatch {
+  if (obj.stabilizerLevel !== undefined) {
+    throw new Error('Plugins cannot modify brush stabilizer settings.');
+  }
+  const patch: PluginBrushPatch = {};
+
+  const parseHex = (key: 'color' | 'secondaryColor') => {
+    if (obj[key] === undefined) return;
+    const val = String(obj[key]);
+    if (!/^#[0-9a-f]{6}$/i.test(val)) {
+      throw new Error(`Expected a #RRGGBB color for ${key}.`);
+    }
+    patch[key] = val;
+  };
+  parseHex('color');
+  parseHex('secondaryColor');
+
+  const parseBounded = <K extends keyof PluginBrushPatch>(key: K, min: number, max: number) => {
+    if (obj[key as string] === undefined) return;
+    const v = Number(obj[key as string]);
+    if (!Number.isFinite(v) || v < min || v > max) {
+      throw new Error(`Brush ${String(key)} must be between ${min} and ${max}.`);
+    }
+    patch[key] = v as PluginBrushPatch[K];
+  };
+
+  parseBounded('size', 1, 1000);
+  parseBounded('minSize', 0, 1);
+  parseBounded('opacity', 0, 1);
+  parseBounded('flow', 0.01, 1);
+  parseBounded('hardness', 0, 1);
+  parseBounded('spacing', 0.02, 1.5);
+  parseBounded('scatter', 0, 3);
+  parseBounded('roundness', 0.1, 1);
+  parseBounded('tipAngle', -360, 360);
+  parseBounded('tiltSize', 0, 1);
+  parseBounded('colorMixing', 0, 1);
+  parseBounded('paintAmount', 0, 1);
+  parseBounded('colorStretch', 0, 1);
+  parseBounded('fgBgMix', 0, 1);
+  parseBounded('hueJitter', 0, 1);
+  parseBounded('satJitter', 0, 1);
+  parseBounded('valJitter', 0, 1);
+  parseBounded('textureDensity', 0, 1);
+  parseBounded('textureScale', 0.5, 4);
+  parseBounded('dualSize', 0.1, 1);
+  parseBounded('dualScatter', 0, 2);
+
+  const parseBool = <K extends 'wetEdges' | 'textureInvert' | 'dualBrush'>(key: K) => {
+    if (obj[key] === undefined) return;
+    if (typeof obj[key] !== 'boolean') {
+      throw new Error(`Brush ${key} must be boolean.`);
+    }
+    patch[key] = obj[key] as boolean;
+  };
+  parseBool('wetEdges');
+  parseBool('textureInvert');
+  parseBool('dualBrush');
+
+  if (obj.mixMode !== undefined) {
+    if (typeof obj.mixMode !== 'string' || !VALID_MIX_MODES.has(obj.mixMode as BrushMixMode)) {
+      throw new Error('Brush mixMode must be "blend", "smudge", or "dilute".');
+    }
+    patch.mixMode = obj.mixMode as BrushMixMode;
+  }
+  if (obj.textureBlendMode !== undefined) {
+    if (
+      typeof obj.textureBlendMode !== 'string' ||
+      !VALID_TEXTURE_BLEND_MODES.has(obj.textureBlendMode as BrushTextureBlendMode)
+    ) {
+      throw new Error('Brush textureBlendMode must be "subtract", "multiply", or "overlay".');
+    }
+    patch.textureBlendMode = obj.textureBlendMode as BrushTextureBlendMode;
+  }
+  if (obj.dualBlendMode !== undefined) {
+    if (
+      typeof obj.dualBlendMode !== 'string' ||
+      !VALID_DUAL_BLEND_MODES.has(obj.dualBlendMode as DualBrushBlendMode)
+    ) {
+      throw new Error('Brush dualBlendMode must be "multiply", "subtract", or "darken".');
+    }
+    patch.dualBlendMode = obj.dualBlendMode as DualBrushBlendMode;
+  }
+  if (obj.angleMode !== undefined) {
+    if (
+      typeof obj.angleMode !== 'string' ||
+      !VALID_ANGLE_MODES.has(obj.angleMode as 'direction' | 'pen' | 'fixed')
+    ) {
+      throw new Error('Brush angleMode must be "direction", "pen", or "fixed".');
+    }
+    patch.angleMode = obj.angleMode as 'direction' | 'pen' | 'fixed';
+  }
+  if (obj.dynamics !== undefined) {
+    if (!obj.dynamics || typeof obj.dynamics !== 'object' || Array.isArray(obj.dynamics)) {
+      throw new Error('Brush dynamics must be an object.');
+    }
+    const normalized = normalizeBrushDynamics(obj.dynamics as Partial<BrushDynamicsConfig>);
+    if (normalized) patch.dynamics = normalized;
+  }
+
+  if (Object.keys(patch).length === 0) {
+    throw new Error('Provide at least one valid brush property to brush.set.');
+  }
+  return patch;
 }

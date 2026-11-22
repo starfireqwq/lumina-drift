@@ -1,7 +1,8 @@
-# Lumina Drift 插件開發指南（API v1 / v2）
+# Lumina Drift 插件開發指南（API v1 / v2 / v2.5）
 
 在畫布上方選擇 **插件 → 管理插件…** 即可匯入 `.lumina-plugin` 檔案，或直接下載內建原創示範：
 
+- **API v2.5 流光動態工坊**：[lumina-motion-atelier.lumina-plugin](../apps/client/public/plugins/lumina-motion-atelier.lumina-plugin)（涵蓋自訂畫布指標工具、時間軸／關鍵影格／自訂貝茲緩動與筆刷引擎 v2 動態混色預設）
 - **API v2 流光示範套件**：[lumina-drift-studio-kit.lumina-plugin](../apps/client/public/plugins/lumina-drift-studio-kit.lumina-plugin)（涵蓋分塊濾鏡、選區描邊指令、像素與圖層寫入及宣告式面板）
 - **API v1 基礎範例**：[studio-tools.lumina-plugin](../apps/client/public/plugins/studio-tools.lumina-plugin)
 
@@ -20,12 +21,13 @@
 | 記憶體 / 堆疊上限 | 桌面 `32 MiB`、行動／觸控 `24 MiB`；堆疊 `512 KiB` |
 | 指令 CPU / 牆鐘上限 | 累計 CPU `3,000 ms`（不含等待 GPU 讀取）；牆鐘總計 `15,000 ms`（超過 `300 ms` 顯示流光條與「中止」按鈕） |
 | 濾鏡 CPU 上限 | 單塊 `256×256` tile `500 ms`；預覽總計 `3,000 ms`；套用總計 `15,000 ms`（獨立 Worker，閒置 `60 s` 自動釋放） |
-| 單次執行配額 | 最多 `256` 次 RPC、累計讀寫像素 `64 MiB`、單次讀寫區塊至多 `512×512` px、最多建立 `20` 個圖層 |
+| 自訂工具指標保護 | 指標移動節流 `16..200 ms`（預設 `24 ms`，併發合併只送最新點）；單次事件 CPU `500 ms` / 牆鐘 `1,500 ms`；整筆拖曳 CPU `4,000 ms` / 牆鐘 `30,000 ms`（逾時或取消立即終止 Worker 並回滾預覽像素） |
+| 單次執行配額 | 最多 `256` 次 RPC、累計讀寫像素 `64 MiB`、單次讀寫區塊至多 `512×512` px、最多建立 `20` 個圖層、每插件最多 `8` 個自訂工具與 `16` 組自訂緩動 |
 
 ### 協作與權限鐵律（ACL）
-- 所有圖層與像素寫入均受房間權限守門（`layer-acl.ts`）：訪客（Guest）與瀏覽者（Viewer）不可寫入；鎖定圖層與他人私人圖層一律拒絕。
-- 插件**禁止**修改圖層所有權或安全屬性（不可執行 `claim`、`release`、`transfer`、更改 `isLocked` / `aclMode` / `isPublic`）。
-- 一次指令或面板動作中的所有圖層、像素與選區變更皆包覆在同一交易中：成功時以單一 `groupId` 寫入歷史（單次 `Ctrl+Z` 完整還原），中途失敗則全部回滾不汙染畫布。
+- 所有圖層、像素、時間軸與關鍵影格寫入均受房間權限守門（`layer-acl.ts`）：訪客（Guest）與旁觀者（Viewer）不可寫入；鎖定圖層與他人私人圖層一律拒絕；批次寫入關鍵影格（`keyframes.setBatch`）只要包含任一無權圖層即整批拒絕、零副作用。
+- 插件**禁止**修改圖層所有權或安全屬性（不可執行 `claim`、`release`、`transfer`、更改 `isLocked` / `aclMode` / `isPublic`），亦**禁止**透過 `brush.set` 更動防手震（`stabilizerLevel`）。
+- 一次指令、面板動作或自訂工具單筆拖曳中的所有圖層、像素、選區、時間軸與關鍵影格變更皆包覆在同一交易中：成功時以單一 `groupId` 寫入歷史（單次 `Ctrl+Z` 完整還原），中途失敗或取消則全部回滾不汙染畫布。
 
 ---
 
@@ -64,7 +66,11 @@
 | `filters` | 註冊 `manifest.filters` 並於獨立濾鏡 Worker 執行 `onFilter` |
 | `commands` | 註冊 `manifest.commands` 與建議快捷鍵並執行 `onCommand` |
 | `ui:panel` | 註冊 `manifest.panels` 宣告式 `ToolWindow` 面板並執行 `onPanelAction` |
-| `brush` | （選用）`api.brush.get / set` |
+| `timeline:read` | （v2.5）`api.timeline.getState / listLabels`、`api.keyframes.list / evaluate`、`api.easing.listPresets / evaluate` |
+| `timeline:write` | （v2.5）`api.timeline.setFrame / setFps / setLength / setRange / setLoop / setLabel / removeLabel / updateCel`、`api.keyframes.set / setBatch / remove / clear`、`api.easing.register / unregister` |
+| `tools` | （v2.5）註冊 `manifest.tools` 自訂工具至工具列、插件選單與防劫持快捷鍵 |
+| `input` | （v2.5）為啟用中的自訂工具接收節流畫布指標事件（`onPointerDown / onPointerMove / onPointerUp / onCancel`） |
+| `brush` | （選用）`api.brush.get / set`（支援筆刷引擎 v2 動態與混色參數，不可修改防手震） |
 
 ---
 
@@ -78,7 +84,9 @@
 
 可用方法：
 - `api.canvas`：`{ width, height, dpi, tileSize }`
-- `api.brush`：`get()`、`set({ color?, size? })`
+- `api.brush`：
+  - `get()`：讀取現行筆刷狀態，含筆刷引擎 v2 參數（`color`, `secondaryColor`, `size`, `minSize`, `opacity`, `flow`, `hardness`, `spacing`, `scatter`, `roundness`, `tipAngle`, `angleMode`, `tiltSize`, `mixMode`, `colorMixing`, `paintAmount`, `colorStretch`, `fgBgMix`, `wetEdges`, `hueJitter`, `satJitter`, `valJitter`, `textureDensity`, `textureScale`, `textureInvert`, `textureBlendMode`, `dualBrush`, `dualSize`, `dualScatter`, `dualBlendMode`, `dynamics`）。
+  - `set(patch)`：套用上述任一合法參數（`dynamics` 各通道自動正規化；傳入 `stabilizerLevel` 會被拒絕）。
 - `api.layers`：
   - `list()`、`get(layerId)`、`getActive()`
   - `create({ name, layerType?, blendMode?, opacity?, parentId?, aboveLayerId? })`
@@ -98,6 +106,20 @@
   - `selectRect(rect, mode?)`、`selectEllipse(rect, mode?)`、`selectPolygon(points, mode?)`（3..4096 點）
   - `expand(radius)`、`contract(radius)`、`feather(radius)`（1..128 px）
   - `invert()`、`clear()`
+- `api.timeline`（v2.5）：
+  - `getState()` → `{ fps, length, currentFrame, isPlaying, loop, range, tracks }`
+  - `setFrame(frame)`、`setFps(fps, folderId?)`（1..60）、`setLength(length | null, folderId?)`、`setRange({ start, end } | null)`、`setLoop(bool)`
+  - `listLabels(folderId?)`、`setLabel(frame, text, folderId?)`、`removeLabel(frame, folderId?)`
+  - `updateCel(entryId, { hold?, mark?, note? })`（`mark`: `'key' | 'inbetween' | null`）
+- `api.keyframes`（v2.5）：
+  - `list(layerId)`、`evaluate(layerId, frame?)`
+  - `set(layerId, { frame, x?, y?, scaleX?, scaleY?, rotation?, pivotX?, pivotY?, opacity?, easing?, bezier?, presetId? })`
+  - `setBatch([{ layerId, keyframes, replace? }])`（或 `setBatch(layerId, keyframes, { replace? })`；具備原子 ACL 檢查，任一無權圖層整批拒絕）
+  - `remove(layerId, frame)`、`clear(layerId)`
+- `api.easing`（v2.5）：
+  - `listPresets()` → 內建與已註冊自訂緩動清單
+  - `register(id, [x1, y1, x2, y2], label?)`、`unregister(id)`（`x1, x2 ∈ [0, 1]`，`y1, y2 ∈ [-2, 3]`，插件停用時自動清理）
+  - `evaluate(t, { easing?, bezier?, presetId? })` → `{ value }`
 
 ### 2. 自訂濾鏡（`manifest.filters` + `onFilter`）
 
@@ -117,6 +139,17 @@
 
 - 每個插件最多宣告 `4` 個面板、每面板最多 `24` 個欄位與 `8` 個動作按鈕，桌面端以浮動 `ToolWindow` 呈現並記憶位置，手機端自動切為底部抽屜。
 - 支援 9 種欄位：`section`、`text`、`range`、`number`、`toggle`、`select`、`color`、`layer`（自動同步畫布圖層與唯讀標記）、`input`（限 200 字），支援 `when: { key, is }` 與 `live: true`（200 ms 防抖觸發 `actionId = 'change'`）。
+
+### 5. 自訂工具與節流畫布指標事件（v2.5：`manifest.tools` + `onPointer*`）
+
+- 需同時宣告 `tools`（於工具列、插件選單與快捷鍵 `plugin:<pluginId>:tool:<toolId>` 註冊）與 `input`（接收畫布指標事件）。
+- 每個插件最多宣告 `8` 個工具，每個工具最多 `12` 個選項（支援 `range`、`select`、`toggle`、`color` 與 `when` 條件顯示），顯示於上方工具選項列；可選設 `icon`（`wand | brush | pen | sparkles | stamp | shapes | ruler | crosshair | layers | film`）、`cursor`（`crosshair | pointer | grab | move | cell | default`）與 `throttleMs`（`16..200`，預設 `24`）。
+- 在 `script` 中宣告非同步或同步事件處理器（單筆拖曳共享同一個 QuickJS Worker 狀態與同一個交易 `groupId`）：
+  - `async function onPointerDown(toolId, event, api)`
+  - `async function onPointerMove(toolId, event, api)`（經節流與併發合併，只派送最新指標點，完成後即時預覽像素）
+  - `async function onPointerUp(toolId, event, api)` → 可回傳 `{ notice? }`，完成後整筆提交為單步復原
+  - `async function onCancel(toolId, event, api)` → 多指手勢、視窗失焦、切換工具或逾時取消時呼叫，並自動回滾全部預覽像素
+- `event` 欄位：`{ phase, x, y, startX, startY, deltaX, deltaY, pressure, tiltX, tiltY, pointerType, buttons, shiftKey, ctrlKey, altKey, metaKey, timestamp, options }`。
 
 ---
 

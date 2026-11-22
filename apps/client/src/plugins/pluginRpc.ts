@@ -25,7 +25,27 @@ export type PluginRpcMethod =
   | 'selection.invert'
   | 'selection.expand'
   | 'selection.contract'
-  | 'selection.feather';
+  | 'selection.feather'
+  | 'timeline.getState'
+  | 'timeline.setFrame'
+  | 'timeline.setFps'
+  | 'timeline.setLength'
+  | 'timeline.setRange'
+  | 'timeline.setLoop'
+  | 'timeline.listLabels'
+  | 'timeline.setLabel'
+  | 'timeline.removeLabel'
+  | 'timeline.updateCel'
+  | 'keyframes.list'
+  | 'keyframes.evaluate'
+  | 'keyframes.set'
+  | 'keyframes.setBatch'
+  | 'keyframes.remove'
+  | 'keyframes.clear'
+  | 'easing.listPresets'
+  | 'easing.register'
+  | 'easing.unregister'
+  | 'easing.evaluate';
 
 export const PLUGIN_RPC_PERMISSION_MAP: Record<PluginRpcMethod, PluginPermissionV2> = {
   'brush.get': 'brush',
@@ -53,6 +73,26 @@ export const PLUGIN_RPC_PERMISSION_MAP: Record<PluginRpcMethod, PluginPermission
   'selection.expand': 'selection',
   'selection.contract': 'selection',
   'selection.feather': 'selection',
+  'timeline.getState': 'timeline:read',
+  'timeline.setFrame': 'timeline:write',
+  'timeline.setFps': 'timeline:write',
+  'timeline.setLength': 'timeline:write',
+  'timeline.setRange': 'timeline:write',
+  'timeline.setLoop': 'timeline:write',
+  'timeline.listLabels': 'timeline:read',
+  'timeline.setLabel': 'timeline:write',
+  'timeline.removeLabel': 'timeline:write',
+  'timeline.updateCel': 'timeline:write',
+  'keyframes.list': 'timeline:read',
+  'keyframes.evaluate': 'timeline:read',
+  'keyframes.set': 'timeline:write',
+  'keyframes.setBatch': 'timeline:write',
+  'keyframes.remove': 'timeline:write',
+  'keyframes.clear': 'timeline:write',
+  'easing.listPresets': 'timeline:read',
+  'easing.register': 'timeline:write',
+  'easing.unregister': 'timeline:write',
+  'easing.evaluate': 'timeline:read',
 };
 
 export interface PluginRpcRequest {

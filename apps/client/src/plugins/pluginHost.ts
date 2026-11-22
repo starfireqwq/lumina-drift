@@ -1,4 +1,10 @@
-import { PLUGIN_LIMITS, type PluginContext, type PluginManifestV2 } from './pluginApi';
+import {
+  PLUGIN_LIMITS,
+  type PluginContext,
+  type PluginManifestV2,
+  type PluginPointerEvent,
+  type PluginPointerPhase,
+} from './pluginApi';
 import {
   assertPluginRpcAllowed,
   parsePluginV2Result,
@@ -9,7 +15,7 @@ import {
   type PluginRpcResponse,
   type PluginV2Result,
 } from './pluginRpc';
-import { startPluginV2Session, type RunV2Entry } from './pluginSandboxCore';
+import { startPluginToolV2Session, startPluginV2Session, type RunV2Entry } from './pluginSandboxCore';
 
 export interface PluginExecutionHandle<T> {
   promise: Promise<T>;
@@ -183,4 +189,117 @@ export function startPluginV2Direct(
   );
 
   return { promise, abort };
+}
+
+export interface PluginToolSessionOptions {
+  eventWallLimitMs?: number;
+  eventCpuLimitMs?: number;
+  strokeWallLimitMs?: number;
+  strokeCpuLimitMs?: number;
+  memoryLimitBytes?: number;
+  maxStackSizeBytes?: number;
+  quota?: PluginQuotaConfig;
+}
+
+export interface PluginToolSessionHandle {
+  dispatchEvent: (phase: PluginPointerPhase, event: PluginPointerEvent) => Promise<PluginV2Result>;
+  abort: (reason?: string) => void;
+  dispose: () => void;
+}
+
+export function assertPluginToolAllowed(manifest: PluginManifestV2, toolId: string): void {
+  if (!manifest.permissions.includes('tools')) {
+    throw new Error('Missing permission: tools');
+  }
+  if (!manifest.permissions.includes('input')) {
+    throw new Error('Missing permission: input');
+  }
+  if (!(manifest.tools ?? []).some((t) => t.id === toolId)) {
+    throw new Error(`Unknown plugin tool: ${toolId}`);
+  }
+}
+
+/**
+ * In-process custom-tool pointer session via QuickJS WASM (used for deterministic unit tests).
+ * Browser runtime uses `startPluginToolSessionInWorker` in `runPlugin.ts` for hard `worker.terminate()`.
+ */
+export function startPluginToolDirect(
+  manifest: PluginManifestV2,
+  toolId: string,
+  context: PluginContext,
+  handler: PluginRpcHandler,
+  options?: PluginToolSessionOptions,
+): PluginToolSessionHandle {
+  assertPluginToolAllowed(manifest, toolId);
+
+  const eventWallLimitMs = options?.eventWallLimitMs ?? PLUGIN_LIMITS.toolEventWallLimitMs;
+  const eventCpuLimitMs = options?.eventCpuLimitMs ?? PLUGIN_LIMITS.toolEventCpuLimitMs;
+  const strokeWallLimitMs = options?.strokeWallLimitMs ?? PLUGIN_LIMITS.toolStrokeWallLimitMs;
+  const strokeCpuLimitMs = options?.strokeCpuLimitMs ?? PLUGIN_LIMITS.toolStrokeCpuLimitMs;
+  const memoryLimitBytes = options?.memoryLimitBytes ?? detectPluginMemoryLimitBytes();
+  const maxStackSizeBytes = options?.maxStackSizeBytes ?? PLUGIN_LIMITS.maxStackSizeBytes;
+
+  const { dispatch } = createGuardedRpcDispatcher(manifest, handler, options?.quota);
+  let closed = false;
+
+  const session = startPluginToolV2Session({
+    script: manifest.script,
+    toolId,
+    context: { ...context, tileSize: context.tileSize ?? 256 },
+    memoryLimitBytes,
+    maxStackSizeBytes,
+    eventCpuLimitMs,
+    strokeCpuLimitMs,
+    sendRpc: (req) => {
+      if (closed) return;
+      void dispatch(req).then((res) => {
+        if (!closed) session.deliverRpcResponse(res);
+      });
+    },
+  });
+
+  const strokeTimer = setTimeout(() => {
+    abort('Plugin tool stroke timed out.');
+  }, strokeWallLimitMs);
+
+  const cleanup = () => {
+    clearTimeout(strokeTimer);
+  };
+
+  const abort = (reason = 'Plugin tool aborted.') => {
+    if (closed) return;
+    closed = true;
+    cleanup();
+    session.abort(reason);
+  };
+
+  const dispose = () => {
+    if (closed) return;
+    closed = true;
+    cleanup();
+    session.dispose();
+  };
+
+  const dispatchEvent = async (
+    phase: PluginPointerPhase,
+    event: PluginPointerEvent,
+  ): Promise<PluginV2Result> => {
+    if (closed) throw new Error('Plugin tool session is closed.');
+    let eventTimer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const result = await new Promise<{ value: unknown; cpuUsedMs: number }>((resolve, reject) => {
+        eventTimer = setTimeout(() => {
+          const reason = 'Plugin tool event timed out.';
+          abort(reason);
+          reject(new Error(reason));
+        }, eventWallLimitMs);
+        session.dispatchEvent(phase, event).then(resolve, reject);
+      });
+      return parsePluginV2Result(result.value);
+    } finally {
+      if (eventTimer) clearTimeout(eventTimer);
+    }
+  };
+
+  return { dispatchEvent, abort, dispose };
 }

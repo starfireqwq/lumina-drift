@@ -15,9 +15,13 @@ export const makePluginCommandShortcutId = (pluginId: string, commandId: string)
 export const makePluginPanelShortcutId = (pluginId: string, panelId: string) =>
   `plugin:${pluginId}:panel:${panelId}`;
 
+export const makePluginToolShortcutId = (pluginId: string, toolId: string) =>
+  `plugin:${pluginId}:tool:${toolId}`;
+
 export type ParsedPluginShortcutId =
   | { kind: 'command'; pluginId: string; commandId: string }
-  | { kind: 'panel'; pluginId: string; panelId: string };
+  | { kind: 'panel'; pluginId: string; panelId: string }
+  | { kind: 'tool'; pluginId: string; toolId: string };
 
 export function normalizeSuggestedShortcut(raw: string | undefined): string {
   if (!raw) return '';
@@ -51,6 +55,13 @@ export function parsePluginShortcutId(actionId: string): ParsedPluginShortcutId 
     const pluginId = actionId.slice('plugin:'.length, panelIdx);
     const panelId = actionId.slice(panelIdx + panelMarker.length);
     if (pluginId && panelId) return { kind: 'panel', pluginId, panelId };
+  }
+  const toolMarker = ':tool:';
+  const toolIdx = actionId.lastIndexOf(toolMarker);
+  if (toolIdx > 'plugin:'.length) {
+    const pluginId = actionId.slice('plugin:'.length, toolIdx);
+    const toolId = actionId.slice(toolIdx + toolMarker.length);
+    if (pluginId && toolId) return { kind: 'tool', pluginId, toolId };
   }
   return null;
 }
@@ -839,6 +850,17 @@ export class ShortcutManager {
               name: `${pluginName} · ${label}`,
               description: cmd.group ? `${pluginName} · ${cmd.group}` : pluginName,
               suggested: normalizeSuggestedShortcut(cmd.suggestedShortcut),
+            });
+          }
+        }
+        if (manifest.permissions.includes('tools') && manifest.tools?.length) {
+          for (const tool of manifest.tools) {
+            const label = resolvePluginText(tool.label, tool.i18nLabel, language ?? 'en-US');
+            candidates.push({
+              id: makePluginToolShortcutId(manifest.id, tool.id),
+              name: `${pluginName} · ${label}`,
+              description: pluginName,
+              suggested: normalizeSuggestedShortcut(tool.suggestedShortcut),
             });
           }
         }

@@ -1,12 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 import { ToolType } from '@atelier/shared';
-import { ShortcutManager } from '../../engine/ShortcutManager';
+import { ShortcutManager, makePluginToolShortcutId } from '../../engine/ShortcutManager';
 import { ALL_TOOLS, ToolDef, getLocalizedToolGroups } from './toolCatalog';
 import { RailGrip, startDrag } from './DockSystem';
 import { TOOL_RAIL_WIDTH_MAX, TOOL_RAIL_WIDTH_MIN } from './dockStore';
 import { useI18n } from '../../context/I18nContext';
 import { useUiScale } from '../../theme/uiScale';
+import { resolvePluginName, resolvePluginText } from '../../plugins/pluginApi';
+import { getPluginLabels } from '../../plugins/pluginLabels';
+import type { RegisteredPluginTool } from '../../plugins/pluginTools';
+import { getPluginToolIcon } from './pluginToolIcons';
 
 /** Shortcut label for a tool, read live from the user's ShortcutManager bindings. */
 export const useShortcutLabel = () => {
@@ -19,6 +23,9 @@ export const useShortcutLabel = () => {
 interface ToolRailProps {
   currentTool: ToolType;
   onSelectTool: (tool: ToolType) => void;
+  pluginTools?: readonly RegisteredPluginTool[];
+  activePluginToolKey?: string | null;
+  onSelectPluginTool?: (pluginId: string, toolId: string) => void;
   orientation: 'vertical' | 'horizontal';
   /** Vertical rail: which screen edge it is on (tooltips open toward the canvas) */
   side?: 'left' | 'right';
@@ -26,11 +33,22 @@ interface ToolRailProps {
   onResizeWidth?: (width: number) => void;
 }
 
-export const ToolRail: React.FC<ToolRailProps> = ({ currentTool, onSelectTool, orientation, side = 'left', width, onResizeWidth }) => {
-  const { t } = useI18n();
+export const ToolRail: React.FC<ToolRailProps> = ({
+  currentTool,
+  onSelectTool,
+  pluginTools = [],
+  activePluginToolKey = null,
+  onSelectPluginTool,
+  orientation,
+  side = 'left',
+  width,
+  onResizeWidth,
+}) => {
+  const { t, language } = useI18n();
+  const pluginStrings = getPluginLabels(language);
   const ui = useUiScale();
   const label = useShortcutLabel();
-  const [tip, setTip] = useState<{ tool: ToolDef; x: number; y: number } | null>(null);
+  const [tip, setTip] = useState<{ label: string; hint?: string; shortcutId?: string; x: number; y: number } | null>(null);
   const [scrollState, setScrollState] = useState({ canUp: false, canDown: false });
   const navRef = useRef<HTMLElement>(null);
   const vertical = orientation === 'vertical';
@@ -113,22 +131,64 @@ export const ToolRail: React.FC<ToolRailProps> = ({ currentTool, onSelectTool, o
   const button = (tool: ToolDef) => {
     const Icon = tool.icon;
     const key = label(tool.shortcutId);
+    const active = !activePluginToolKey && currentTool === tool.id;
     return (
       <button
         key={tool.id}
         data-tool-id={tool.id}
         type="button"
         onClick={() => onSelectTool(tool.id)}
-        aria-pressed={currentTool === tool.id}
+        aria-pressed={active}
         aria-label={key ? `${tool.label}（${key}）` : tool.label}
         aria-keyshortcuts={key || undefined}
         onPointerEnter={(e) => {
           if (e.pointerType !== 'mouse') return;
           const r = e.currentTarget.getBoundingClientRect();
-          setTip(vertical ? { tool, x: side === 'right' ? r.left - 8 : r.right + 8, y: r.top + r.height / 2 } : { tool, x: r.left + r.width / 2, y: r.top - 8 });
+          setTip(
+            vertical
+              ? { label: tool.label, hint: tool.hint, shortcutId: tool.shortcutId, x: side === 'right' ? r.left - 8 : r.right + 8, y: r.top + r.height / 2 }
+              : { label: tool.label, hint: tool.hint, shortcutId: tool.shortcutId, x: r.left + r.width / 2, y: r.top - 8 },
+          );
         }}
         onPointerLeave={() => setTip(null)}
         className={`atelier-icon-btn shrink-0 ${vertical ? 'h-7 w-7 !rounded-sm' : 'h-10 w-10'}`}
+      >
+        <Icon className={vertical ? 'h-4 w-4' : 'h-5 w-5'} />
+      </button>
+    );
+  };
+
+  const pluginToolButton = (item: RegisteredPluginTool) => {
+    const Icon = getPluginToolIcon(item.tool.icon);
+    const shortcutId = makePluginToolShortcutId(item.plugin.id, item.tool.id);
+    const key = label(shortcutId);
+    const displayLabel = resolvePluginText(item.tool.label, item.tool.i18nLabel, language);
+    const hintText = item.tool.hint
+      ? resolvePluginText(item.tool.hint, item.tool.i18nHint, language)
+      : resolvePluginName(item.plugin, language);
+    const active = activePluginToolKey === item.key;
+    return (
+      <button
+        key={item.key}
+        data-plugin-tool-id={item.key}
+        type="button"
+        onClick={() => onSelectPluginTool?.(item.plugin.id, item.tool.id)}
+        aria-pressed={active}
+        aria-label={key ? `${displayLabel}（${key}）` : displayLabel}
+        aria-keyshortcuts={key || undefined}
+        onPointerEnter={(e) => {
+          if (e.pointerType !== 'mouse') return;
+          const r = e.currentTarget.getBoundingClientRect();
+          setTip(
+            vertical
+              ? { label: displayLabel, hint: hintText, shortcutId, x: side === 'right' ? r.left - 8 : r.right + 8, y: r.top + r.height / 2 }
+              : { label: displayLabel, hint: hintText, shortcutId, x: r.left + r.width / 2, y: r.top - 8 },
+          );
+        }}
+        onPointerLeave={() => setTip(null)}
+        className={`atelier-icon-btn shrink-0 ${vertical ? 'h-7 w-7 !rounded-sm' : 'h-10 w-10'} ${
+          active ? '!border-cyan-400/70 !bg-cyan-500/20 !text-cyan-200' : 'text-cyan-300/80'
+        }`}
       >
         <Icon className={vertical ? 'h-4 w-4' : 'h-5 w-5'} />
       </button>
@@ -140,9 +200,9 @@ export const ToolRail: React.FC<ToolRailProps> = ({ currentTool, onSelectTool, o
       style={vertical
         ? { left: tip.x, top: tip.y, transform: side === 'right' ? 'translate(-100%, -50%)' : 'translateY(-50%)' }
         : { left: tip.x, top: tip.y, transform: 'translate(-50%, -100%)' }}>
-      <span className="font-semibold">{tip.tool.label}</span>
-      {label(tip.tool.shortcutId) && <kbd className="atelier-kbd">{label(tip.tool.shortcutId)}</kbd>}
-      {tip.tool.hint && <span className="max-w-[220px] whitespace-normal text-neutral-400">{tip.tool.hint}</span>}
+      <span className="font-semibold">{tip.label}</span>
+      {label(tip.shortcutId) && <kbd className="atelier-kbd">{label(tip.shortcutId)}</kbd>}
+      {tip.hint && <span className="max-w-[220px] whitespace-normal text-neutral-400">{tip.hint}</span>}
     </div>
   );
 
@@ -162,6 +222,14 @@ export const ToolRail: React.FC<ToolRailProps> = ({ currentTool, onSelectTool, o
               </div>
             </React.Fragment>
           ))}
+          {pluginTools.length > 0 && (
+            <>
+              <div aria-hidden className="mx-0.5 h-6 w-px shrink-0 bg-cyan-500/40" />
+              <div role="group" aria-label={pluginStrings.toolsBadge} className="flex gap-1">
+                {pluginTools.map(pluginToolButton)}
+              </div>
+            </>
+          )}
         </nav>
         {tooltip}
       </>
@@ -191,6 +259,19 @@ export const ToolRail: React.FC<ToolRailProps> = ({ currentTool, onSelectTool, o
               </div>
             </React.Fragment>
           ))}
+          {pluginTools.length > 0 && (
+            <>
+              <div aria-hidden className="mx-1 h-px shrink-0 bg-cyan-500/40" />
+              <div
+                role="group"
+                aria-label={pluginStrings.toolsBadge}
+                className="grid justify-items-center gap-0.5"
+                style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}
+              >
+                {pluginTools.map(pluginToolButton)}
+              </div>
+            </>
+          )}
         </nav>
 
         {scrollState.canUp && (
