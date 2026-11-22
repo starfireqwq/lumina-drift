@@ -11,6 +11,8 @@ interface VectorOverlayProps {
   isVectorLayer: boolean;
   /** vector_edit: the stroke whose handles are shown, and its selected anchor (-1 = none) */
   selectedStrokeId?: string | null;
+  /** Additional / multi-selected strokes highlighted for batch alignment or editing */
+  selectedStrokeIds?: readonly string[];
   selectedAnchorIndex?: number;
   /** Stroke being dragged (node edit) or the pen path in progress, drawn as a guide line */
   previewStroke?: VectorStroke | null;
@@ -28,6 +30,7 @@ export const VectorOverlay: React.FC<VectorOverlayProps> = ({
   currentTool,
   isVectorLayer,
   selectedStrokeId = null,
+  selectedStrokeIds = [],
   selectedAnchorIndex = -1,
   previewStroke = null,
   penPoints = [],
@@ -99,13 +102,17 @@ export const VectorOverlay: React.FC<VectorOverlayProps> = ({
     ctx.save();
     ctx.setLineDash([]);
 
-    // Outline of the selected stroke, so it is clear which line the handles belong to
-    const selected = strokes.find((s) => s.id === selectedStrokeId);
-    if (currentTool === 'vector_edit' && selected && !previewStroke) {
-      tracePath(selected);
-      ctx.strokeStyle = 'rgba(14, 165, 233, 0.9)';
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
+    // Outline of selected stroke(s), so it is clear which line(s) are targeted
+    const multiSelected = new Set<string>(selectedStrokeIds);
+    if (selectedStrokeId) multiSelected.add(selectedStrokeId);
+    if (multiSelected.size > 0 && !previewStroke) {
+      for (const s of strokes) {
+        if (!multiSelected.has(s.id)) continue;
+        tracePath(s);
+        ctx.strokeStyle = s.id === selectedStrokeId ? 'rgba(14, 165, 233, 0.92)' : 'rgba(129, 140, 248, 0.85)';
+        ctx.lineWidth = s.id === selectedStrokeId ? 1.8 : 1.5;
+        ctx.stroke();
+      }
     }
 
     // Guide line of a stroke being edited or drawn with the pen
@@ -133,19 +140,20 @@ export const VectorOverlay: React.FC<VectorOverlayProps> = ({
       for (const stroke of strokes) {
         const s = edited && edited.id === stroke.id ? edited : stroke;
         const isSel = s.id === selectedStrokeId;
+        const isMulti = multiSelected.has(s.id);
         if (currentTool === 'vector_edit' && isSel) {
           s.anchors.forEach((a) => {
             drawHandle(a.x, a.y, a.cp1x, a.cp1y);
             drawHandle(a.x, a.y, a.cp2x, a.cp2y);
           });
         }
-        s.anchors.forEach((a, i) => drawAnchor(a.x, a.y, isCornerAnchor(a), isSel && i === selectedAnchorIndex, isSel ? 8 : 6));
+        s.anchors.forEach((a, i) => drawAnchor(a.x, a.y, isCornerAnchor(a), isSel && i === selectedAnchorIndex, isMulti ? 8 : 6));
       }
     }
     ctx.restore();
     // viewportState is a dependency on purpose: the viewport object itself never changes on
     // zoom / pan, so without it the anchors stayed where they were drawn before the view moved
-  }, [viewport, viewportState, strokes, currentTool, show, selectedStrokeId, selectedAnchorIndex, previewStroke, penPoints]);
+  }, [viewport, viewportState, strokes, currentTool, show, selectedStrokeId, selectedStrokeIds, selectedAnchorIndex, previewStroke, penPoints]);
 
   if (!show) return null;
 

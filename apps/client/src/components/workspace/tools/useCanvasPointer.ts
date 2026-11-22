@@ -412,7 +412,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       return;
     }
     if (currentTool === 'vector_edit') {
-      if (local) vector.vectorEditPointerDown(local, targetLayer);
+      if (local) vector.vectorEditPointerDown(local, targetLayer, e.shiftKey || e.ctrlKey || e.metaKey);
       return;
     }
     if (vector.isVectorDragTool(currentTool, targetLayer)) {

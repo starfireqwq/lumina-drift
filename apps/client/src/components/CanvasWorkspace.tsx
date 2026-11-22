@@ -1198,7 +1198,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const vector = useVectorTools(toolCtx);
   const {
     vectorEraserMode, setVectorEraserMode, vectorWidthMode, setVectorWidthMode, vectorStrokesList, setVectorStrokesList,
-    bezierMode, setBezierMode, penPoints, vectorSel, vectorPreview, penPreview, selectedAnchorExists,
+    bezierMode, setBezierMode, penPoints, vectorSel, selectedStrokeIds, selectedStrokeIdsRef, setSelectedStrokeIds, vectorPreview, penPreview, selectedAnchorExists,
     applyVectorPayload, finishPenPath, toggleSelectedAnchorCorner, deleteSelectedAnchor, handleVectorKey,
   } = vector;
   const brush = useBrushTool(toolCtx);
@@ -6639,6 +6639,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                   currentTool={currentTool}
                   isVectorLayer={activeLayer?.layerType === 'vector' || currentTool.startsWith('vector')}
                   selectedStrokeId={vectorSel?.strokeId ?? null}
+                  selectedStrokeIds={selectedStrokeIds}
                   selectedAnchorIndex={vectorSel?.index ?? -1}
                   previewStroke={vectorPreview ?? penPreview}
                   penPoints={currentTool === 'vector_bezier' ? penPoints : []}

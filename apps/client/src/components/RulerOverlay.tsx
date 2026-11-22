@@ -23,7 +23,8 @@ type DragTarget =
   | { type: 'vp1' }
   | { type: 'vp2' }
   | { type: 'vp3' }
-  | { type: 'parallel_angle'; startX: number; startY: number; startAngle: number };
+  | { type: 'parallel_angle'; startX: number; startY: number; startAngle: number }
+  | { type: 'guide'; id: string; axis: 'x' | 'y'; startClientX: number; startClientY: number; moved: boolean; additive: boolean };
 
 export const RulerOverlay: React.FC<RulerOverlayProps> = ({
   canvasWidth,
@@ -42,15 +43,16 @@ export const RulerOverlay: React.FC<RulerOverlayProps> = ({
     return rulerMgr.subscribe((newState) => setState({ ...newState }));
   }, []);
 
+  const hasGuides = state.guides.visible && state.guides.items.length > 0;
   const noopSub = useCallback(() => () => {}, []);
   const snap = useSyncExternalStore(
-    state.mode !== 'off' && subscribeViewport ? subscribeViewport : noopSub,
+    (state.mode !== 'off' || hasGuides) && subscribeViewport ? subscribeViewport : noopSub,
     getViewportSnapshot ?? getDefaultVp,
     getViewportSnapshot ?? getDefaultVp
   );
   const viewportZoom = getViewportSnapshot ? snap.zoom : (propZoom ?? 1);
 
-  if (state.mode === 'off') return null;
+  if (state.mode === 'off' && !hasGuides) return null;
 
   const handlePointerDown = (target: DragTarget, e: React.PointerEvent) => {
     e.stopPropagation();
@@ -100,11 +102,28 @@ export const RulerOverlay: React.FC<RulerOverlayProps> = ({
           rulerMgr.updateParallel({ angleDeg: deg });
           break;
         }
+        case 'guide': {
+          const current = dragTargetRef.current;
+          if (Math.hypot(ev.clientX - current.startClientX, ev.clientY - current.startClientY) >= 3) {
+            current.moved = true;
+          }
+          const found = rulerMgr.state.guides.items.find((item) => item.id === current.id);
+          if (current.moved && found && !found.locked) {
+            const raw = current.axis === 'x' ? canvasPt.x : canvasPt.y;
+            const limit = current.axis === 'x' ? canvasWidth : canvasHeight;
+            rulerMgr.updateGuide(current.id, { position: Math.max(0, Math.min(limit, Math.round(raw))) });
+          }
+          break;
+        }
       }
     };
 
     const onPointerUp = () => {
+      const finished = dragTargetRef.current;
       dragTargetRef.current = null;
+      if (finished && finished.type === 'guide' && !finished.moved) {
+        rulerMgr.toggleGuideSelected(finished.id, finished.additive);
+      }
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointercancel', onPointerUp);
@@ -491,9 +510,84 @@ export const RulerOverlay: React.FC<RulerOverlayProps> = ({
           </g>
         );
       })()}
+      {/* 5. 水平／垂直輔助線 (Canvas Guides) Overlay */}
+      {hasGuides && state.guides.items.map((guide) => {
+        const isSelected = state.guides.selectedIds.includes(guide.id);
+        const p0 = guide.axis === 'x'
+          ? canvasToScreen(guide.position, 0)
+          : canvasToScreen(0, guide.position);
+        const p1 = guide.axis === 'x'
+          ? canvasToScreen(guide.position, canvasHeight)
+          : canvasToScreen(canvasWidth, guide.position);
+        const strokeColor = isSelected ? '#818cf8' : '#38bdf8';
+        const label = `${guide.axis === 'x' ? 'X' : 'Y'} ${Math.round(guide.position)}`;
+        const tagX = guide.axis === 'x' ? p0.x + 6 : p0.x + 8;
+        const tagY = guide.axis === 'x' ? p0.y + 18 : p0.y - 6;
+        const onGuideDown = (e: React.PointerEvent) =>
+          handlePointerDown({
+            type: 'guide',
+            id: guide.id,
+            axis: guide.axis,
+            startClientX: e.clientX,
+            startClientY: e.clientY,
+            moved: false,
+            additive: e.shiftKey || e.ctrlKey || e.metaKey,
+          }, e);
+
+        return (
+          <g key={guide.id} data-guide-id={guide.id} data-guide-selected={isSelected ? 'true' : 'false'}>
+            <line
+              x1={p0.x} y1={p0.y} x2={p1.x} y2={p1.y}
+              stroke="#000000" strokeWidth={isSelected ? '3' : '2.2'} opacity="0.45"
+            />
+            <line
+              x1={p0.x} y1={p0.y} x2={p1.x} y2={p1.y}
+              stroke={strokeColor}
+              strokeWidth={isSelected ? '1.8' : '1.2'}
+              strokeDasharray={isSelected ? 'none' : '6 4'}
+              opacity={isSelected ? '0.95' : '0.85'}
+            />
+            {/* Wide transparent hit area for easy dragging or selecting on desktop & touch */}
+            <line
+              x1={p0.x} y1={p0.y} x2={p1.x} y2={p1.y}
+              stroke="transparent"
+              strokeWidth="12"
+              className={`pointer-events-auto ${guide.locked ? 'cursor-pointer' : guide.axis === 'x' ? 'cursor-ew-resize' : 'cursor-ns-resize'}`}
+              onPointerDown={onGuideDown}
+            />
+            <g
+              className={`pointer-events-auto ${guide.locked ? 'cursor-pointer' : guide.axis === 'x' ? 'cursor-ew-resize' : 'cursor-ns-resize'}`}
+              onPointerDown={onGuideDown}
+            >
+              <rect
+                x={tagX - 4}
+                y={tagY - 12}
+                width={Math.max(40, label.length * 6.8 + 10)}
+                height={16}
+                rx={4}
+                fill={isSelected ? '#312e81' : '#0f172a'}
+                fillOpacity="0.88"
+                stroke={strokeColor}
+                strokeWidth={isSelected ? '1.3' : '0.9'}
+              />
+              <text
+                x={tagX + 1}
+                y={tagY}
+                fill={isSelected ? '#e0e7ff' : '#bae6fd'}
+                fontSize="10"
+                fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+                fontWeight="600"
+              >
+                {label}
+              </text>
+            </g>
+          </g>
+        );
+      })}
     </svg>
 
     {/* On-canvas ruler bar: what is active, a quick adjuster and remove */}
+    {state.mode !== 'off' && (
     <div className="atelier-popover atelier-menu-in absolute left-1/2 top-3 z-30 flex -translate-x-1/2 select-none flex-wrap items-center gap-1.5 p-1.5 text-xs pointer-events-auto"
       onPointerDown={(e) => e.stopPropagation()}>
       <span className="flex items-center gap-1.5 pl-1.5 pr-1 font-medium text-neutral-100">
@@ -531,6 +625,7 @@ export const RulerOverlay: React.FC<RulerOverlayProps> = ({
         <Trash2 />移除
       </button>
     </div>
+    )}
     </>
   );
 };
