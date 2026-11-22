@@ -1,7 +1,8 @@
-# Lumina Drift 插件開發指南（API v1 / v2 / v2.5）
+# Lumina Drift 插件開發指南（API v1 / v2 / v2.5 / v3.0）
 
 在畫布上方選擇 **插件 → 管理插件…** 即可匯入 `.lumina-plugin` 檔案，或直接下載內建原創示範：
 
+- **API v3.0 桌面橋接示範**：[lumina-v3-bridge-demo.lumina-plugin](../apps/client/public/plugins/lumina-v3-bridge-demo.lumina-plugin)（涵蓋受信任本機工具橋接、本機 MCP 狀態查詢，以及於 Web／手機／多人房的安全降級）
 - **API v2.5 流光動態工坊**：[lumina-motion-atelier.lumina-plugin](../apps/client/public/plugins/lumina-motion-atelier.lumina-plugin)（涵蓋自訂畫布指標工具、時間軸／關鍵影格／自訂貝茲緩動與筆刷引擎 v2 動態混色預設）
 - **API v2 流光示範套件**：[lumina-drift-studio-kit.lumina-plugin](../apps/client/public/plugins/lumina-drift-studio-kit.lumina-plugin)（涵蓋分塊濾鏡、選區描邊指令、像素與圖層寫入及宣告式面板）
 - **API v1 基礎範例**：[studio-tools.lumina-plugin](../apps/client/public/plugins/studio-tools.lumina-plugin)
@@ -150,6 +151,27 @@
   - `async function onPointerUp(toolId, event, api)` → 可回傳 `{ notice? }`，完成後整筆提交為單步復原
   - `async function onCancel(toolId, event, api)` → 多指手勢、視窗失焦、切換工具或逾時取消時呼叫，並自動回滾全部預覽像素
 - `event` 欄位：`{ phase, x, y, startX, startY, deltaX, deltaY, pressure, tiltX, tiltY, pointerType, buttons, shiftKey, ctrlKey, altKey, metaKey, timestamp, options }`。
+
+---
+
+## API v3.0 桌面外部橋接與本機 MCP（僅限桌面版單機）
+
+`apiVersion: 3` 完整向下相容 v2 / v2.5 全部能力，並新增三項高權限能力，**僅在 Electron 桌面版的本機單機畫布開放**；Web 瀏覽器、手機裝置與多人協作房間預設全面封鎖並安全降級（套件中的 v2/v2.5 非 v3 功能仍可照常運作）。
+
+### 新增權限與安全護欄
+
+| 權限代碼 | 能力範圍 | 強制安全邊界 |
+| --- | --- | --- |
+| `bridge:local` | `api.bridge.listTools()`、`api.bridge.invoke(toolId, payload)` | 插件不可在 manifest 內嵌執行檔路徑或 shell 指令；使用者必須先在 **管理插件 → 桌面橋接與 MCP…** 透過系統檔案視窗綁定受信任執行檔並鎖定 SHA-256；一律以 `shell: false` 在一次性暫存目錄執行、禁止 shell 元字元與 `-` 開頭引數注入、禁止 `..` 路徑遍歷，執行前必彈二次授權視窗。 |
+| `mcp:server` | `api.mcp.serverStatus()`（絕不將 Bearer Token 暴露給插件沙盒） | 由桌面主行程管理，僅監聽 `127.0.0.1`（絕不綁 `0.0.0.0`），每次啟動輪換 256-bit Bearer Token（`timingSafeEqual`）、強制驗證 `Host` 與拒絕跨站 `Origin`（防 DNS Rebinding / CSRF）；預設唯讀，勾選允許寫入後仍強制走 `PluginCanvasTransaction`、`layer-acl.ts` 與單步 `Ctrl+Z` 復原，且不可更動防手震。 |
+| `mcp:client` | `api.mcp.listServers()`、`api.mcp.listTools(serverId)`、`api.mcp.callTool(serverId, name, args)` | 僅允許使用者在桌面控制台登錄之本機迴路（`127.0.0.1` / `localhost`）端點，拒絕外網與區網 SSRF，每次工具呼叫皆須經二次授權確認。 |
+
+### 本機 MCP 伺服器工具清單與 stdio 轉接
+
+- **唯讀工具（預設啟用）**：`canvas.get_info`、`layers.list`、`pixels.get_bounds`、`pixels.read_region`、`timeline.get_state`、`keyframes.list`。
+- **受控寫入工具（需顯式勾選「允許寫入畫布」）**：`layers.create`、`layers.update`、`pixels.fill_rect`、`timeline.set_frame`、`keyframes.set`（每次呼叫皆為單步復原交易，且禁止任何防手震或圖層所有權異動）。
+- **零依賴 stdio 轉接腳本**：若外部代理僅支援 stdio，可使用 `apps/client/scripts/mcp-stdio-bridge.mjs` 並設定環境變數 `LUMINA_MCP_URL` 與 `LUMINA_MCP_TOKEN`（同樣拒絕非本機迴路 URL）。
+- **隨時中斷（Kill Switch）**：v3 橋接或 MCP 運作期間，畫布底部顯示流光警示列，可隨時一鍵「中止全部橋接」終止全部子行程、關閉 MCP 伺服器並撤銷工作階段授權；切入多人協作房間或覆蓋更新／停用插件亦會自動撤銷與中斷。
 
 ---
 
