@@ -70,6 +70,11 @@ import {
   sanitizeFileNameSegment,
 } from '../src/engine/animationExport';
 import {
+  buildWebCodecsCandidates,
+  computeFrameDurationUs,
+  computeFrameTimestampUs,
+} from '../src/engine/videoExport';
+import {
   ShortcutManager,
   makePluginCommandShortcutId,
   makePluginPanelShortcutId,
@@ -3856,5 +3861,25 @@ await (async () => {
   assert.deepEqual(Array.from(bmp24.slice(54, 60)), [255, 0, 0, 255, 255, 255]);
   // Top row in BMP is y=0 of source: (255,0,0) red -> BGR (0,0,255), then green -> BGR (0,255,0)
   assert.deepEqual(Array.from(bmp24.slice(62, 68)), [0, 0, 255, 0, 255, 0]);
+
+  // D2: WebCodecs offline candidate selection & zero-drift CFR timestamp math
+  const c4k = buildWebCodecsCandidates(3840, 2160, 'mp4', '4k');
+  assert.equal(c4k[0].container, 'mp4');
+  assert.equal(c4k[0].webCodecsCodec, 'avc1.640033'); // Level 5.1 for 4K
+  assert.equal(c4k.some((c) => c.container === 'webm' && c.muxerCodec === 'V_VP9'), true);
+  const c1080 = buildWebCodecsCandidates(1920, 1080, 'mp4', '1080p');
+  assert.equal(c1080[0].webCodecsCodec, 'avc1.640028'); // Level 4.0 for 1080p
+  assert.equal(c1080.every((c) => c.width % 2 === 0 && c.height % 2 === 0), true);
+  const cWebm = buildWebCodecsCandidates(1280, 720, 'webm', '1080p');
+  assert.equal(cWebm[0].container, 'webm');
+  assert.equal(cWebm[0].muxerCodec, 'V_VP9');
+
+  // 144 frames @ 12 FPS = exact 12_000_000 us with zero cumulative drift
+  let sumDur = 0;
+  for (let f = 0; f < 144; f++) {
+    sumDur += computeFrameDurationUs(f, 1, 12);
+  }
+  assert.equal(sumDur, 12_000_000);
+  assert.equal(computeFrameTimestampUs(144, 12), 12_000_000);
 })();
 console.log('ui-logic checks passed');

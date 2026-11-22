@@ -4,15 +4,94 @@ import { writePsd, Psd, Layer as PsdLayer } from 'ag-psd';
 
 import { LayerCanvasItem, LayerTree, compositeLayers, maskCoverage } from './layerComposite';
 import {
+  cropAndScaleCanvas,
+  resolveExportRegion,
+  type ExportCropRect,
+} from './animationExport';
+import {
   buildVideoRecorderCandidates,
+  buildWebCodecsCandidates,
+  computeFrameDurationUs,
+  computeFrameTimestampUs,
   createMediaRecorderForStream,
   getVideoBitrateForResolution,
+  isWebCodecsVideoEncoderAvailable,
   stopMediaStream,
   unwrapMediaRecorderError,
   type VideoExportResolution,
   type VideoRecorderCandidate,
+  type WebCodecsVideoCandidate,
 } from './videoExport';
 export type { LayerCanvasItem } from './layerComposite';
+
+export interface AnimationVideoExportOptions {
+  signal?: AbortSignal;
+  cropRegion?: ExportCropRect | null;
+  onProgress?: (info: {
+    currentFrame: number;
+    totalFrames: number;
+    backend: 'webcodecs' | 'mediarecorder';
+  }) => void;
+  forceBackend?: 'auto' | 'mediarecorder';
+}
+
+function isAbortError(err: unknown): boolean {
+  return (
+    (err instanceof DOMException && err.name === 'AbortError') ||
+    (err instanceof Error && err.name === 'AbortError')
+  );
+}
+
+function createAbortError(): Error {
+  try {
+    return new DOMException('Export cancelled', 'AbortError');
+  } catch {
+    const e = new Error('Export cancelled');
+    e.name = 'AbortError';
+    return e;
+  }
+}
+
+function drawCroppedToContext(
+  ctx: CanvasRenderingContext2D,
+  source: HTMLCanvasElement,
+  region: ExportCropRect,
+  targetWidth: number,
+  targetHeight: number,
+  bgColor: string | null = null
+): void {
+  if (bgColor) {
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, targetWidth, targetHeight);
+  } else {
+    ctx.clearRect(0, 0, targetWidth, targetHeight);
+  }
+  const sx = region.x;
+  const sy = region.y;
+  const sw = region.width;
+  const sh = region.height;
+  const scaleX = targetWidth / sw;
+  const scaleY = targetHeight / sh;
+  const clipLeft = Math.max(0, sx);
+  const clipTop = Math.max(0, sy);
+  const clipRight = Math.min(source.width, sx + sw);
+  const clipBottom = Math.min(source.height, sy + sh);
+  const clipW = clipRight - clipLeft;
+  const clipH = clipBottom - clipTop;
+  if (clipW > 0 && clipH > 0) {
+    ctx.drawImage(
+      source,
+      clipLeft,
+      clipTop,
+      clipW,
+      clipH,
+      (clipLeft - sx) * scaleX,
+      (clipTop - sy) * scaleY,
+      clipW * scaleX,
+      clipH * scaleY
+    );
+  }
+}
 
 /** PSD layer masks are greyscale; an inverted mask is written as its negative (PSD has no invert flag) */
 function greyMaskCanvas(mask: HTMLCanvasElement, inverted = false): HTMLCanvasElement {
@@ -111,20 +190,31 @@ export class ExportEngine {
     frameCount: number,
     width: number,
     height: number,
-    fps: number = 12
+    fps: number = 12,
+    options?: { signal?: AbortSignal; cropRegion?: ExportCropRect | null }
   ): Promise<Blob> {
     const { GIFEncoder, quantize, applyPalette } = await import('gifenc');
     const gif = GIFEncoder();
+    const region = resolveExportRegion(width, height, options?.cropRegion);
+    const outW = region.width;
+    const outH = region.height;
+    const needsCrop = region.x !== 0 || region.y !== 0 || outW !== width || outH !== height;
 
     for (let i = 0; i < frameCount; i++) {
+      if (options?.signal?.aborted) throw createAbortError();
       const { canvas, hold } = await nextFrame(i);
-      const ctx = canvas.getContext('2d');
+      const frameCanvas = needsCrop ? cropAndScaleCanvas(canvas, region, outW, outH, '#FFFFFF') : canvas;
+      const ctx = frameCanvas.getContext('2d');
       if (!ctx) continue;
-      const data = ctx.getImageData(0, 0, width, height).data;
+      const data = ctx.getImageData(0, 0, outW, outH).data;
       const palette = quantize(data, 256);
       const index = applyPalette(data, palette);
       // A held cel is one GIF frame with a longer delay
-      gif.writeFrame(index, width, height, { palette, delay: Math.round((1000 / fps) * Math.max(1, hold)) });
+      gif.writeFrame(index, outW, outH, { palette, delay: Math.round((1000 / fps) * Math.max(1, hold)) });
+      if (needsCrop) {
+        frameCanvas.width = 0;
+        frameCanvas.height = 0;
+      }
     }
 
     gif.finish();
@@ -133,7 +223,9 @@ export class ExportEngine {
   }
 
   /**
-   * Export Animated Video (.mp4 or .webm) using Canvas captureStream & MediaRecorder (streams 1 frame at a time)
+   * Export Animated Video (.mp4 or .webm).
+   * Phase D2: Uses offline WebCodecs VideoEncoder (constant frame rate, faster than real-time)
+   * with MIT mp4-muxer / webm-muxer, falling back to MediaRecorder when unavailable.
    */
   public static async exportVideoAnimation(
     nextFrame: (i: number) => Promise<{ canvas: HTMLCanvasElement; hold: number }>,
@@ -142,16 +234,39 @@ export class ExportEngine {
     height: number,
     fps: number = 12,
     format: 'mp4' | 'webm' = 'mp4',
-    resolution: VideoExportResolution = '4k'
+    resolution: VideoExportResolution = '4k',
+    options?: AnimationVideoExportOptions
   ): Promise<Blob> {
     if (frameCount <= 0) throw new Error('No animation frames to export');
-    const candidates = buildVideoRecorderCandidates(width, height, format, resolution);
+    if (options?.signal?.aborted) throw createAbortError();
+    const region = resolveExportRegion(width, height, options?.cropRegion);
+
+    if (options?.forceBackend !== 'mediarecorder' && isWebCodecsVideoEncoderAvailable()) {
+      const webCodecsCandidates = buildWebCodecsCandidates(region.width, region.height, format, resolution);
+      for (const candidate of webCodecsCandidates) {
+        if (options?.signal?.aborted) throw createAbortError();
+        try {
+          const blob = await this.encodeVideoOfflineWebCodecs(candidate, nextFrame, frameCount, region, fps, options);
+          if (blob) return blob;
+        } catch (err) {
+          if (isAbortError(err)) throw err;
+          console.warn(
+            `[ExportEngine] Offline VideoEncoder candidate failed (${candidate.container}/${candidate.webCodecsCodec} ${candidate.width}x${candidate.height}), trying next:`,
+            unwrapMediaRecorderError(err).message
+          );
+        }
+      }
+    }
+
+    const candidates = buildVideoRecorderCandidates(region.width, region.height, format, resolution);
     let lastError: Error | null = null;
 
     for (let i = 0; i < candidates.length; i++) {
+      if (options?.signal?.aborted) throw createAbortError();
       try {
-        return await this.recordVideoAnimationAttempt(candidates[i], nextFrame, frameCount, fps, resolution);
+        return await this.recordVideoAnimationAttempt(candidates[i], nextFrame, frameCount, region, fps, resolution, options);
       } catch (err) {
+        if (isAbortError(err)) throw err;
         lastError = unwrapMediaRecorderError(err);
         if (i === candidates.length - 1) throw lastError;
         console.warn(
@@ -164,12 +279,187 @@ export class ExportEngine {
     throw lastError ?? new Error('Unable to initialize video recorder');
   }
 
+  private static async encodeVideoOfflineWebCodecs(
+    candidate: WebCodecsVideoCandidate,
+    nextFrame: (i: number) => Promise<{ canvas: HTMLCanvasElement; hold: number }>,
+    frameCount: number,
+    region: ExportCropRect,
+    fps: number,
+    options?: AnimationVideoExportOptions
+  ): Promise<Blob | null> {
+    const safeFps = Math.max(1, fps || 12);
+    const baseConfig: VideoEncoderConfig = {
+      codec: candidate.webCodecsCodec,
+      width: candidate.width,
+      height: candidate.height,
+      bitrate: candidate.bitrate,
+      framerate: safeFps,
+      ...(candidate.muxerCodec === 'avc' ? { avc: { format: 'avc' as const } } : {}),
+    };
+
+    let selectedConfig: VideoEncoderConfig | null = null;
+    for (const hw of ['no-preference', 'prefer-software'] as const) {
+      const probe: VideoEncoderConfig = { ...baseConfig, hardwareAcceleration: hw };
+      try {
+        const res = await VideoEncoder.isConfigSupported(probe);
+        if (res.supported) {
+          selectedConfig = res.config ?? probe;
+          break;
+        }
+      } catch {
+        // Ignore unsupported acceleration hint
+      }
+    }
+    if (!selectedConfig) return null;
+
+    let addVideoChunk: (chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata) => void;
+    let finalizeMuxer: () => ArrayBuffer;
+
+    if (candidate.container === 'mp4') {
+      const { Muxer, ArrayBufferTarget } = await import('mp4-muxer');
+      const target = new ArrayBufferTarget();
+      const muxer = new Muxer({
+        target,
+        video: {
+          codec: candidate.muxerCodec === 'vp9' ? 'vp9' : 'avc',
+          width: candidate.width,
+          height: candidate.height,
+          frameRate: safeFps,
+        },
+        fastStart: 'in-memory',
+        firstTimestampBehavior: 'offset',
+      });
+      addVideoChunk = (chunk, meta) => muxer.addVideoChunk(chunk, meta);
+      finalizeMuxer = () => {
+        muxer.finalize();
+        return target.buffer;
+      };
+    } else {
+      const { Muxer, ArrayBufferTarget } = await import('webm-muxer');
+      const target = new ArrayBufferTarget();
+      const muxer = new Muxer({
+        target,
+        video: {
+          codec: candidate.muxerCodec === 'V_VP8' ? 'V_VP8' : 'V_VP9',
+          width: candidate.width,
+          height: candidate.height,
+          frameRate: safeFps,
+        },
+        firstTimestampBehavior: 'offset',
+      });
+      addVideoChunk = (chunk, meta) => muxer.addVideoChunk(chunk, meta);
+      finalizeMuxer = () => {
+        muxer.finalize();
+        return target.buffer;
+      };
+    }
+
+    let encoderError: Error | null = null;
+    const encoder = new VideoEncoder({
+      output: (chunk, meta) => {
+        try {
+          addVideoChunk(chunk, meta);
+        } catch (err) {
+          encoderError = unwrapMediaRecorderError(err);
+        }
+      },
+      error: (err) => {
+        encoderError = unwrapMediaRecorderError(err);
+      },
+    });
+
+    const animCanvas = document.createElement('canvas');
+    animCanvas.width = candidate.width;
+    animCanvas.height = candidate.height;
+    const ctx = animCanvas.getContext('2d')!;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+
+    const waitForQueueDrain = async () => {
+      if (encoder.encodeQueueSize <= 8) return;
+      await new Promise<void>((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          encoder.removeEventListener('dequeue', onDequeue);
+          resolve();
+        };
+        const onDequeue = () => {
+          if (encoder.encodeQueueSize <= 4) finish();
+        };
+        const timer = setTimeout(finish, 30);
+        encoder.addEventListener('dequeue', onDequeue);
+      });
+    };
+
+    try {
+      encoder.configure(selectedConfig);
+      const keyInterval = Math.max(1, Math.round(safeFps * 2));
+      let logicalFrame = 0;
+
+      for (let i = 0; i < frameCount; i++) {
+        if (options?.signal?.aborted) throw createAbortError();
+        if (encoderError) throw encoderError;
+
+        const { canvas, hold } = await nextFrame(i);
+        if (options?.signal?.aborted) throw createAbortError();
+        if (encoderError) throw encoderError;
+
+        drawCroppedToContext(ctx, canvas, region, candidate.width, candidate.height, '#FFFFFF');
+        const repeatCount = Math.max(1, Math.floor(hold) || 1);
+
+        for (let k = 0; k < repeatCount; k++) {
+          if (options?.signal?.aborted) throw createAbortError();
+          if (encoderError) throw encoderError;
+          await waitForQueueDrain();
+
+          const timestamp = computeFrameTimestampUs(logicalFrame, safeFps);
+          const duration = computeFrameDurationUs(logicalFrame, 1, safeFps);
+          const vf = new VideoFrame(animCanvas, { timestamp, duration });
+          try {
+            encoder.encode(vf, { keyFrame: logicalFrame === 0 || logicalFrame % keyInterval === 0 });
+          } finally {
+            vf.close();
+          }
+          logicalFrame++;
+        }
+
+        options?.onProgress?.({
+          currentFrame: i + 1,
+          totalFrames: frameCount,
+          backend: 'webcodecs',
+        });
+      }
+
+      if (options?.signal?.aborted) throw createAbortError();
+      await encoder.flush();
+      if (encoderError) throw encoderError;
+      const buffer = finalizeMuxer();
+      if (buffer.byteLength === 0) {
+        throw new Error(`Offline encoder produced empty output (${candidate.mimeType})`);
+      }
+      return new Blob([buffer], { type: candidate.mimeType });
+    } finally {
+      try {
+        if (encoder.state !== 'closed') encoder.close();
+      } catch {
+        // Ignore close errors
+      }
+      animCanvas.width = 0;
+      animCanvas.height = 0;
+    }
+  }
+
   private static async recordVideoAnimationAttempt(
     candidate: VideoRecorderCandidate,
     nextFrame: (i: number) => Promise<{ canvas: HTMLCanvasElement; hold: number }>,
     frameCount: number,
+    region: ExportCropRect,
     fps: number,
-    resolution: VideoExportResolution = '4k'
+    resolution: VideoExportResolution = '4k',
+    options?: AnimationVideoExportOptions
   ): Promise<Blob> {
     const animCanvas = document.createElement('canvas');
     animCanvas.width = candidate.width;
@@ -206,7 +496,18 @@ export class ExportEngine {
         animCanvas.width = 0;
         animCanvas.height = 0;
       };
+      const onAbort = () => {
+        if (settled) return;
+        aborted = true;
+        settled = true;
+        try { if (recorder.state === 'recording') recorder.stop(); } catch {}
+        cleanupSurface();
+        reject(createAbortError());
+      };
+      options?.signal?.addEventListener('abort', onAbort, { once: true });
+
       recorder.onstop = () => {
+        options?.signal?.removeEventListener('abort', onAbort);
         if (settled) return;
         settled = true;
         cleanupSurface();
@@ -219,6 +520,7 @@ export class ExportEngine {
         resolve(blob);
       };
       recorder.onerror = (err) => {
+        options?.signal?.removeEventListener('abort', onAbort);
         if (settled) return;
         aborted = true;
         settled = true;
@@ -231,11 +533,15 @@ export class ExportEngine {
 
       void (async () => {
         try {
+          if (options?.signal?.aborted) {
+            onAbort();
+            return;
+          }
           // Paint first frame before starting recorder so frame 0 isn't blank
           const first = await nextFrame(0);
           if (aborted) return;
-          ctx.clearRect(0, 0, candidate.width, candidate.height);
-          ctx.drawImage(first.canvas, 0, 0, candidate.width, candidate.height);
+          drawCroppedToContext(ctx, first.canvas, region, candidate.width, candidate.height, '#FFFFFF');
+          options?.onProgress?.({ currentFrame: 1, totalFrames: frameCount, backend: 'mediarecorder' });
           recorder.start(200);
           const startTime = performance.now();
           let logicalFrames = Math.max(1, first.hold);
@@ -245,8 +551,8 @@ export class ExportEngine {
           for (let i = 1; i < frameCount && !aborted; i++) {
             const { canvas, hold } = await nextFrame(i);
             if (aborted) break;
-            ctx.clearRect(0, 0, candidate.width, candidate.height);
-            ctx.drawImage(canvas, 0, 0, candidate.width, candidate.height);
+            drawCroppedToContext(ctx, canvas, region, candidate.width, candidate.height, '#FFFFFF');
+            options?.onProgress?.({ currentFrame: i + 1, totalFrames: frameCount, backend: 'mediarecorder' });
             logicalFrames += Math.max(1, hold);
             const targetTime = startTime + logicalFrames * frameDelay;
             const remaining = targetTime - performance.now();
@@ -260,6 +566,7 @@ export class ExportEngine {
           }
         } catch (err) {
           aborted = true;
+          options?.signal?.removeEventListener('abort', onAbort);
           stopMediaStream(stream);
           try { if (recorder.state === 'recording') recorder.stop(); } catch {}
           if (!settled) {

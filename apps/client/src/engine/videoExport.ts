@@ -315,3 +315,143 @@ export function stopMediaStream(stream: MediaStream | null | undefined): void {
     }
   }
 }
+
+export interface WebCodecsVideoCandidate {
+  container: 'mp4' | 'webm';
+  muxerCodec: 'avc' | 'vp9' | 'V_VP9' | 'V_VP8';
+  webCodecsCodec: string;
+  width: number;
+  height: number;
+  bitrate: number;
+  mimeType: string;
+}
+
+export function isWebCodecsVideoEncoderAvailable(): boolean {
+  return (
+    typeof VideoEncoder === 'function' &&
+    typeof VideoFrame === 'function' &&
+    typeof VideoEncoder.isConfigSupported === 'function'
+  );
+}
+
+/**
+ * Exact microsecond timestamp for constant-frame-rate encoding without cumulative rounding drift.
+ */
+export function computeFrameTimestampUs(logicalFrameIndex: number, fps: number): number {
+  const safeFps = Math.max(1, fps || 1);
+  return Math.round((Math.max(0, logicalFrameIndex) * 1_000_000) / safeFps);
+}
+
+export function computeFrameDurationUs(
+  logicalFrameIndex: number,
+  holdFrames: number,
+  fps: number
+): number {
+  const start = computeFrameTimestampUs(logicalFrameIndex, fps);
+  const end = computeFrameTimestampUs(logicalFrameIndex + Math.max(1, holdFrames), fps);
+  return Math.max(1, end - start);
+}
+
+function avcCodecsForDimensions(width: number, height: number): string[] {
+  const pixels = width * height;
+  if (pixels > 2_097_152) {
+    // > 1080p requires H.264 Level 5.1 (0x33) or higher
+    return ['avc1.640033', 'avc1.4d0033', 'avc1.420033'];
+  }
+  return ['avc1.640028', 'avc1.4d002a', 'avc1.420028'];
+}
+
+/**
+ * Builds an ordered list of offline WebCodecs VideoEncoder candidates.
+ * Tries requested container first across resolution step-down tiers, then falls back to the
+ * alternate offline container so encoding stays offline even if proprietary H.264 is unavailable.
+ */
+export function buildWebCodecsCandidates(
+  srcWidth: number,
+  srcHeight: number,
+  format: 'mp4' | 'webm' = 'mp4',
+  resolution: VideoExportResolution = '4k'
+): WebCodecsVideoCandidate[] {
+  const tierResolutions: VideoExportResolution[] =
+    resolution === '4k' ? ['4k', '2k', '1080p'] : resolution === '2k' ? ['2k', '1080p'] : ['1080p'];
+
+  const tiers: Array<{ width: number; height: number; bitrate: number }> = [];
+  const seenDims = new Set<string>();
+  for (const tier of tierResolutions) {
+    const dims = computeVideoExportDimensionsForResolution(srcWidth, srcHeight, tier);
+    const key = `${dims.width}x${dims.height}`;
+    if (seenDims.has(key)) continue;
+    seenDims.add(key);
+    tiers.push({ ...dims, bitrate: getVideoBitrateForResolution(tier) });
+  }
+
+  const out: WebCodecsVideoCandidate[] = [];
+  const seen = new Set<string>();
+  const pushUnique = (c: WebCodecsVideoCandidate) => {
+    const key = `${c.container}:${c.webCodecsCodec}:${c.width}x${c.height}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(c);
+  };
+
+  const addMp4 = () => {
+    for (const t of tiers) {
+      for (const codec of avcCodecsForDimensions(t.width, t.height)) {
+        pushUnique({
+          container: 'mp4',
+          muxerCodec: 'avc',
+          webCodecsCodec: codec,
+          width: t.width,
+          height: t.height,
+          bitrate: t.bitrate,
+          mimeType: 'video/mp4',
+        });
+      }
+    }
+    const primary = tiers[0];
+    if (primary) {
+      pushUnique({
+        container: 'mp4',
+        muxerCodec: 'vp9',
+        webCodecsCodec: 'vp09.00.10.08',
+        width: primary.width,
+        height: primary.height,
+        bitrate: primary.bitrate,
+        mimeType: 'video/mp4',
+      });
+    }
+  };
+
+  const addWebm = () => {
+    for (const t of tiers) {
+      pushUnique({
+        container: 'webm',
+        muxerCodec: 'V_VP9',
+        webCodecsCodec: 'vp09.00.10.08',
+        width: t.width,
+        height: t.height,
+        bitrate: t.bitrate,
+        mimeType: 'video/webm',
+      });
+      pushUnique({
+        container: 'webm',
+        muxerCodec: 'V_VP8',
+        webCodecsCodec: 'vp8',
+        width: t.width,
+        height: t.height,
+        bitrate: t.bitrate,
+        mimeType: 'video/webm',
+      });
+    }
+  };
+
+  if (format === 'mp4') {
+    addMp4();
+    addWebm();
+  } else {
+    addWebm();
+    addMp4();
+  }
+
+  return out;
+}
