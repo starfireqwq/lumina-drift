@@ -700,6 +700,22 @@ export interface Translations {
     needEditableLayer: string;
     layerChanged: string;
     failed: string;
+    /** Text and vector layers are redrawn from their text or strokes, so a filter would not last */
+    needRaster: string;
+    lineartNotOnMask: string;
+    dragCenter: string;
+    recenter: string;
+    grayscaleHint: string;
+    histogramAria: string;
+    softenHint: string;
+    sharpenHint: string;
+    /** Small headings inside a filter's parameters */
+    sections: {
+      tone: string;
+      color: string;
+      input: string;
+      output: string;
+    };
     groups: {
       color: string;
       library: string;
@@ -724,6 +740,24 @@ export interface Translations {
       gradient: string;
       liquify: string;
       meshWarp: string;
+      colorAdjust: string;
+      levels: string;
+      grayscale: string;
+      threshold: string;
+      lineWidth: string;
+      despeckle: string;
+      extractLines: string;
+      lineColor: string;
+      mosaic: string;
+      glow: string;
+      outline: string;
+      motionBlur: string;
+      radialBlur: string;
+      soften: string;
+      wave: string;
+      spherize: string;
+      sharpen: string;
+      unsharp: string;
     };
     /** Parameter names; a select's option names share this table */
     params: {
@@ -736,17 +770,66 @@ export interface Translations {
       offsetY: string;
       density: string;
       dotSize: string;
+      center: string;
+      brightness: string;
+      contrast: string;
+      hue: string;
+      saturation: string;
+      temperature: string;
+      tint: string;
+      blackPoint: string;
+      whitePoint: string;
+      midtones: string;
+      threshold: string;
+      target: string;
+      targetColor: string;
+      targetAlpha: string;
+      targetBoth: string;
+      lineAmount: string;
+      keepThin: string;
+      speckSize: string;
+      mode: string;
+      modeOpaque: string;
+      modeOnWhite: string;
+      modeFillAround: string;
+      modeFillCurrent: string;
+      whiteRange: string;
+      keepColor: string;
+      useCurrent: string;
+      inkColor: string;
+      chromaShift: string;
+      chromaRadial: string;
+      spread: string;
+      cellSize: string;
+      outlineWidth: string;
+      position: string;
+      positionOutside: string;
+      positionInside: string;
+      positionCenter: string;
+      distance: string;
+      direction: string;
+      dirBoth: string;
+      dirForward: string;
+      dirBackward: string;
+      dirIn: string;
+      dirOut: string;
+      waveHorizontal: string;
+      waveVertical: string;
+      waveBoth: string;
+      amplitude: string;
+      wavelength: string;
+      squash: string;
     };
   };
 
-  /** Align the current layer to the canvas or the selection (對齊 L1) */
+  /** Align & distribute layers to objects, canvas, or selection (對齊 L2) */
   align: {
     title: string;
     openTitle: string;
     menuItem: string;
-    oneAtATime: string;
+    targetCount: string;
     basis: string;
-    basisNames: { auto: string; canvas: string; selection: string };
+    basisNames: { auto: string; objects: string; canvas: string; selection: string };
     /** Next to the basis menu while it is on auto: {basis} = the frame in use */
     autoUses: string;
     horizontal: string;
@@ -757,22 +840,37 @@ export interface Translations {
     /** A pad cell's name: {x} and {y} */
     both: string;
     middle: string;
+    distribute: string;
+    distributeH: string;
+    distributeV: string;
+    dist: {
+      left: string;
+      hcenter: string;
+      right: string;
+      hgap: string;
+      top: string;
+      vcenter: string;
+      bottom: string;
+      vgap: string;
+    };
     done: string;
     alreadyAligned: string;
+    distributed: string;
+    alreadyDistributed: string;
     empty: string;
     failed: string;
     noSelection: string;
+    needMulti: string;
     cropTitle: string;
     cropBody: string;
     cropConfirm: string;
     blocked: {
       noLayer: string;
       busy: string;
-      group: string;
       mask: string;
       notEditable: string;
-      hasMask: string;
       keyframes: string;
+      animationFolder: string;
     };
   };
 

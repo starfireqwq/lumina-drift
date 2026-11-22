@@ -73,6 +73,8 @@ export interface ScopedUndoOp {
   userId: string;
   layerId: string;
   opType: string;
+  /** Optional shared id linking contiguous ops (e.g. multi-layer align) into one logical undo/redo step */
+  groupId?: string;
   beforeTiles: TileData[];
   afterTiles: TileData[];
   /** Source-over brush pixels rendered onto transparent tiles, including unchanged ink. */

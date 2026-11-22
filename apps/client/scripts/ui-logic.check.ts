@@ -8,8 +8,9 @@ import { contrastRatio, resolveTheme, THEME_PRESETS, DEFAULT_CUSTOM_THEME } from
 import { nextSizeStep } from '../src/components/workspace/toolCatalog';
 import { findContentBounds } from '../src/utils/pixelBounds';
 import {
-  alignBlocker, alignCrops, alignDestination, alignOffset, copyRgbaRect, rectMinus, resolveAlignBasis, selectionFrame,
-  type AlignRect,
+  alignCrops, alignDestination, alignManyOffsets, alignOffset, alignTargetsBlocker, copyRgbaRect,
+  distributeOffsets, rectMinus, resolveAlignBasis, resolveAlignTargets, selectionFrame, unionRect,
+  type AlignLayerLike, type AlignRect, type DistributeMode,
 } from '../src/utils/layerAlign';
 import { applyColorOutline } from '../src/engine/colorOutline';
 import { addRecentVisit, lastVisitOn, normalizeServer, parseRecentVisits, removeRecentVisit, RECENT_VISITS_LIMIT, type RecentVisit } from '../src/utils/recentVisits';
@@ -58,9 +59,13 @@ import { buildCanvasGroupEntries, toggleCollapsedCanvasGroup } from '../src/util
 import { buildRoomShareUrl } from '../src/utils/serverLinks';
 import { apiErrorMessage, isForeignApiReply } from '../src/utils/apiErrors';
 import { translations, type Language } from '../src/locales';
-import { DEFAULT_COMMUNITY_PRESETS, MIN_BRUSH_SPACING, PIXEL_FILTER_RUNNERS, runPixelFilter, type CanvasModel } from '@atelier/shared';
 import {
-  BUILTIN_FILTERS, FILTER_GROUPS, defaultFilterValues, filterGroupsInUse, getFilter, normalizeFilterValues, snapRange,
+  DEFAULT_COMMUNITY_PRESETS, MIN_BRUSH_SPACING, PIXEL_FILTER_RUNNERS, distanceField, downscale, runDraftFilter, runPixelFilter, toneHistogram, upscale,
+  type CanvasModel, type FilterValues,
+} from '@atelier/shared';
+import {
+  BUILTIN_FILTERS, FILTER_DRAFT, FILTER_GROUPS, defaultFilterValues, filterDraftFactor, filterFitsLayer, filterGroupsInUse, filterPointParam, getFilter,
+  normalizeFilterValues, paramShown, snapRange,
 } from '../src/utils/filterRegistry';
 
 const hex = (channels: string) => `#${channels.split(' ').map((n) => Number(n).toString(16).padStart(2, '0')).join('')}`;
@@ -154,6 +159,212 @@ for (const preset of [...THEME_PRESETS.map((p) => p.id), 'custom' as const]) {
   assert.deepEqual(Array.from(tileToRgba(newer.beforeTiles[0])), [...blank, ...blue, ...red]);
   assert.deepEqual(Array.from(tileToRgba(older.beforeTiles[0])), [...blue, ...blue, ...red]);
   assert.deepEqual(Array.from(tileToRgba(newer.afterTiles[0])), [...red, ...blue, ...blue]);
+}
+
+// ScopedUndoManager groupId: atomic multi-layer undo/redo, rollback, permission skip, non-splitting trim, and foreign merge
+{
+  const blank = [0, 0, 0, 0];
+  const blue = [59, 130, 246, 255];
+  const red = [253, 0, 48, 255];
+  const tile = (...pixels: number[][]): TileData => ({
+    col: 0, row: 0, width: pixels.length, height: 1, compression: 'raw', data: Uint8Array.from(pixels.flat()),
+  });
+  const makeOp = (opId: string, layerId: string, userId = 'artist', groupId?: string, extra: Partial<ScopedUndoOp> = {}): ScopedUndoOp => ({
+    opId,
+    userId,
+    layerId,
+    opType: extra.opType ?? 'ALIGN',
+    groupId,
+    timestamp: 0,
+    beforeTiles: [tile(blank, blank)],
+    afterTiles: [tile(red, blank)],
+    ...extra,
+  });
+
+  // 1. undoGroup / redoGroup / rollbackGroup / logical counts
+  const mgr = new ScopedUndoManager();
+  const single = makeOp('s0', 'l0');
+  const peer = makeOp('p0', 'l0', 'other');
+  const gA = makeOp('gA', 'l1', 'artist', 'grp-1');
+  const gB = makeOp('gB', 'l2', 'artist', 'grp-1');
+  const gC = makeOp('gC', 'l3', 'artist', 'grp-1');
+  mgr.push(single);
+  mgr.push(peer);
+  mgr.push(gA);
+  mgr.push(gB);
+  mgr.push(gC);
+  assert.equal(mgr.getUndoCount(), 3, 'Grouped ops count as 1 logical step globally');
+  assert.equal(mgr.getUndoCount('artist'), 2);
+  assert.equal(mgr.getUndoCount('other'), 1);
+  assert.equal(mgr.getRedoCount(), 0);
+
+  const undone = mgr.undoGroup('artist');
+  assert.deepEqual(undone.map((o) => o.opId), ['gC', 'gB', 'gA'], 'undoGroup returns ops in reverse push order');
+  assert.equal(mgr.getUndoCount('artist'), 1);
+  assert.equal(mgr.getRedoCount('artist'), 1);
+
+  mgr.rollbackGroup(undone, true);
+  assert.equal(mgr.getUndoCount('artist'), 2);
+  assert.equal(mgr.getRedoCount('artist'), 0);
+  assert.deepEqual(mgr.inspect().undo.map((o) => o.opId), ['s0', 'p0', 'gA', 'gB', 'gC'], 'rollbackGroup restores undo order');
+
+  const undone2 = mgr.undoGroup('artist');
+  assert.deepEqual(undone2.map((o) => o.opId), ['gC', 'gB', 'gA']);
+  const redone = mgr.redoGroup('artist');
+  assert.deepEqual(redone.map((o) => o.opId), ['gA', 'gB', 'gC'], 'redoGroup returns ops in original order');
+  assert.equal(mgr.getUndoCount('artist'), 2);
+  assert.equal(mgr.getRedoCount('artist'), 0);
+
+  mgr.rollbackGroup(redone, false);
+  assert.equal(mgr.getUndoCount('artist'), 1);
+  assert.equal(mgr.getRedoCount('artist'), 1);
+  assert.deepEqual(mgr.inspect().redo.map((o) => o.opId), ['gC', 'gB', 'gA']);
+  assert.deepEqual(mgr.redoGroup('artist').map((o) => o.opId), ['gA', 'gB', 'gC']);
+
+  // 2. Whole-group permission skip & SELECTION exemption & other-user skip
+  const permMgr = new ScopedUndoManager();
+  const baseOp = makeOp('base', 'l1');
+  const lockA = makeOp('la', 'l1', 'artist', 'grp-lock');
+  const selInGroup = makeOp('sel', '__selection__', 'artist', 'grp-lock', { opType: 'SELECTION' });
+  const lockB = makeOp('lb', 'l-locked', 'artist', 'grp-lock');
+  const otherG1 = makeOp('og1', 'l1', 'other', 'grp-other');
+  const otherG2 = makeOp('og2', 'l2', 'other', 'grp-other');
+  permMgr.push(baseOp);
+  permMgr.push(lockA);
+  permMgr.push(selInGroup);
+  permMgr.push(lockB);
+  permMgr.push(otherG1);
+  permMgr.push(otherG2);
+
+  const popped = permMgr.undoGroup('artist', (layerId) => layerId !== 'l-locked' && layerId !== '__selection__');
+  assert.deepEqual(popped.map((o) => o.opId), ['base'], 'Skips other user group and partially-locked group intact');
+  assert.deepEqual(permMgr.inspect().undo.map((o) => o.opId), ['la', 'sel', 'lb', 'og1', 'og2']);
+
+  // SELECTION inside an editable group passes permission check
+  const selMgr = new ScopedUndoManager();
+  selMgr.push(makeOp('sa', 'l1', 'artist', 'grp-sel'));
+  selMgr.push(makeOp('ss', '__selection__', 'artist', 'grp-sel', { opType: 'SELECTION' }));
+  assert.deepEqual(
+    selMgr.undoGroup('artist', (layerId) => layerId !== '__selection__').map((o) => o.opId),
+    ['ss', 'sa'],
+  );
+
+  // redoGroup permission skip mirrors undoGroup
+  const redoSkipMgr = new ScopedUndoManager();
+  redoSkipMgr.push(makeOp('ok1', 'l1', 'artist', 'grp-ok'));
+  redoSkipMgr.push(makeOp('ok2', 'l2', 'artist', 'grp-ok'));
+  redoSkipMgr.push(makeOp('bad1', 'l1', 'artist', 'grp-bad'));
+  redoSkipMgr.push(makeOp('bad2', 'l-locked', 'artist', 'grp-bad'));
+  redoSkipMgr.undoGroup('artist'); // pops grp-bad -> redoStack = [bad2, bad1]
+  redoSkipMgr.undoGroup('artist'); // pops grp-ok -> redoStack = [bad2, bad1, ok2, ok1]
+  assert.deepEqual(
+    redoSkipMgr.redoGroup('artist', (layerId) => layerId !== 'l1').map((o) => o.opId),
+    [],
+    'Returns [] when no group passes',
+  );
+  assert.deepEqual(
+    redoSkipMgr.redoGroup('artist', (layerId) => layerId !== 'l2').map((o) => o.opId),
+    ['bad1', 'bad2'],
+    'Skips grp-ok when one member is locked and redoes grp-bad instead',
+  );
+
+  // 3. trimStacks counts logical steps and drops whole group without splitting
+  const trimMgr = new ScopedUndoManager(5);
+  const t1 = makeOp('t1', 'l1', 'artist', 'g-old', { foreign: new Map([['0_0', new Uint8Array([1])]]) });
+  const t2 = makeOp('t2', 'l2', 'artist', 'g-old');
+  const t3 = makeOp('t3', 'l3', 'artist', 'g-old');
+  trimMgr.push(t1);
+  trimMgr.push(t2);
+  trimMgr.push(t3);
+  for (let k = 1; k <= 4; k++) trimMgr.push(makeOp(`u${k}`, 'l1'));
+  assert.equal(trimMgr.getUndoCount(), 5, '1 group of 3 + 4 singles = 5 logical steps');
+  assert.equal(trimMgr.inspect().undo.length, 7, 'All 3 ops of oldest group stay intact at limit');
+  trimMgr.push(makeOp('u5', 'l1'));
+  assert.equal(trimMgr.getUndoCount(), 5);
+  assert.deepEqual(trimMgr.inspect().undo.map((o) => o.opId), ['u1', 'u2', 'u3', 'u4', 'u5'], 'Entire oldest group dropped at once');
+  for (const dropped of [t1, t2, t3]) {
+    assert.equal(dropped.beforeTiles.length, 0);
+    assert.equal(dropped.afterTiles.length, 0);
+    assert.equal(dropped.foreign, undefined);
+  }
+
+  // redoStack trimming also drops whole group without splitting
+  const redoTrim = new ScopedUndoManager(6);
+  for (let k = 1; k <= 5; k++) redoTrim.push(makeOp(`rs${k}`, 'l1'));
+  const rOld1 = makeOp('ro1', 'l1', 'artist', 'g-redo-old');
+  const rOld2 = makeOp('ro2', 'l2', 'artist', 'g-redo-old');
+  redoTrim.push(rOld1);
+  redoTrim.push(rOld2);
+  for (let k = 1; k <= 6; k++) redoTrim.undoGroup('artist'); // 1st undo pops g-redo-old -> oldest on redoStack
+  redoTrim.setMaxStackSize(5);
+  assert.equal(redoTrim.getRedoCount(), 5);
+  assert.equal(redoTrim.inspect().redo.length, 5, 'Oldest redo group dropped as one unit');
+  assert.equal(rOld1.beforeTiles.length, 0);
+  assert.equal(rOld2.beforeTiles.length, 0);
+
+  // 4. opsTouchingTile / recordForeignTile / setForeignEditActive / mergeForeignTile / rebaseBeforeTiles / remapLayer on grouped ops
+  const fxMgr = new ScopedUndoManager();
+  const fxA = makeOp('fxA', 'layer-a', 'artist', 'grp-fx', {
+    baseSeq: 4,
+    beforeTiles: [tile(blue, blank)],
+    afterTiles: [tile(red, blank)],
+  });
+  const fxB = makeOp('fxB', 'layer-b', 'artist', 'grp-fx', {
+    baseSeq: 4,
+    beforeTiles: [tile(blank, blank)],
+    afterTiles: [tile(red, red)],
+  });
+  fxMgr.push(fxA);
+  fxMgr.push(fxB);
+  fxMgr.rebaseBeforeTiles('layer-a', 2, 5, tile(blue, blank), tile(blank, blank));
+  assert.deepEqual(Array.from(tileToRgba(fxA.beforeTiles[0])), [...blank, ...blank], 'rebaseBeforeTiles updates grouped op');
+  const touching = fxMgr.opsTouchingTile('layer-a', 0, 0);
+  assert.deepEqual(touching.map((o) => o.opId), ['fxA']);
+  fxMgr.recordForeignTile(touching, '0_0', {
+    edit: fxMgr.foreignEdit('peer', 2),
+    changed: Uint8Array.from([0, 1]),
+  });
+  fxMgr.remapLayer('layer-a', 'layer-a-remapped');
+  assert.equal(fxA.layerId, 'layer-a-remapped');
+  const poppedFx = fxMgr.undoGroup('artist');
+  assert.deepEqual(poppedFx.map((o) => o.opId), ['fxB', 'fxA']);
+  const current = tile(red, blue).data as Uint8Array;
+  const target = tileToRgba(fxA.beforeTiles[0]);
+  const mine = tileToRgba(fxA.afterTiles[0]);
+  const merged = fxMgr.mergeForeignTile(fxA, '0_0', target, mine, current);
+  assert.equal(merged.conflicts, 0);
+  assert.deepEqual(Array.from(merged.pixels), [...blank, ...blue], 'Foreign pixel untouched when own edit did not touch index 1');
+
+  // When own edit DID touch index 1 and peer also painted index 1, conflict is preserved (and disabled when peer undoes)
+  const fxA2 = makeOp('fxA2', 'layer-a2', 'artist', 'grp-fx2', {
+    beforeTiles: [tile(blank, blank)],
+    afterTiles: [tile(red, red)],
+  });
+  fxMgr.push(fxA2);
+  fxMgr.recordForeignTile(fxMgr.opsTouchingTile('layer-a2', 0, 0), '0_0', {
+    edit: fxMgr.foreignEdit('peer2', 3),
+    changed: Uint8Array.from([0, 1]),
+  });
+  const [poppedA2] = fxMgr.undoGroup('artist');
+  const merged2 = fxMgr.mergeForeignTile(
+    poppedA2,
+    '0_0',
+    tileToRgba(poppedA2.beforeTiles[0]),
+    tileToRgba(poppedA2.afterTiles[0]),
+    tile(red, blue).data as Uint8Array,
+  );
+  assert.equal(merged2.conflicts, 1, 'Conflict preserved for grouped op');
+  assert.deepEqual(Array.from(merged2.pixels), [...blank, ...blue]);
+  fxMgr.setForeignEditActive('layer-a2', 3, false);
+  const mergedAfterPeerUndo = fxMgr.mergeForeignTile(
+    poppedA2,
+    '0_0',
+    tileToRgba(poppedA2.beforeTiles[0]),
+    tileToRgba(poppedA2.afterTiles[0]),
+    tile(red, red).data as Uint8Array,
+  );
+  assert.equal(mergedAfterPeerUndo.conflicts, 0, 'Deactivating foreign edit on grouped op restores cleanly');
+  assert.deepEqual(Array.from(mergedAfterPeerUndo.pixels), [...blank, ...blank]);
 }
 
 // Brush size steps
@@ -855,7 +1066,9 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
       if (param.kind === 'range') assert.ok(param.min <= param.initial && param.initial <= param.max, `${def.id}.${param.key} default is in range`);
     }
   }
-  assert.deepEqual(filterGroupsInUse(), ['color', 'effect', 'blur', 'distort'], 'Groups with no filters yet stay out of the menu');
+  assert.deepEqual(filterGroupsInUse(), ['color', 'lineart', 'effect', 'blur', 'distort', 'sharpen'], 'Groups with no filters yet stay out of the menu');
+  assert.equal(filterFitsLayer(getFilter('despeckle')!, 'mask'), false, 'Line-art fixes stay off masks');
+  assert.equal(filterFitsLayer(getFilter('despeckle')!, 'raster'), true);
 
   const halftone = getFilter('halftone')!;
   assert.deepEqual(normalizeFilterValues(halftone, null), defaultFilterValues(halftone), 'Nothing stored: defaults');
@@ -868,6 +1081,26 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   assert.ok(dot.kind === 'range');
   assert.equal(snapRange(dot, 2.04), 2, 'Snapping never passes max');
   assert.equal(snapRange(dot, 0.05), 0.1, 'Snapping never passes min');
+
+  // The centre is dragged on the canvas each time: never a stored default, never kept from storage
+  const twirl = getFilter('twirl')!;
+  assert.ok(filterPointParam(twirl), 'Twirl has a centre');
+  assert.equal(filterPointParam(halftone), null, 'Halftone has none');
+  assert.equal('center' in defaultFilterValues(twirl), false, 'The centre is not a default value');
+  assert.equal('center' in normalizeFilterValues(twirl, { center: { x: 1, y: 2 }, radius: 50 }), false, 'A stored centre is dropped');
+  for (const def of BUILTIN_FILTERS) {
+    if (def.pointRadius) {
+      const radius = def.params.find((param) => param.key === def.pointRadius);
+      assert.ok(radius?.kind === 'range', `${def.id} draws its centre circle from a range parameter`);
+    }
+    for (const param of def.params) {
+      if (param.when) assert.ok(def.params.some((other) => other.key === param.when!.key), `${def.id}.${param.key} depends on a parameter it has`);
+    }
+  }
+  assert.equal(paramShown({ kind: 'toggle', key: 'a', label: 'center', initial: true, when: { key: 'mode', is: ['radial'] } }, { mode: 'shift' }), false,
+    'A parameter for another mode is hidden');
+  assert.equal(paramShown({ kind: 'toggle', key: 'a', label: 'center', initial: true, when: { key: 'mode', is: ['radial'] } }, { mode: 'radial' }), true);
+  assert.equal(filterFitsLayer(twirl, 'mask'), true, 'Only line-art fixes stay off masks');
 }
 
 // Filter runners: colour-only filters keep alpha and empty pixels, the mask limits the change, input is never written
@@ -897,10 +1130,278 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   assert.notDeepEqual(blurred, source, 'Blur changes the pixels');
 }
 
+// Draft previews: the registry and the runners agree, big layers only, a draft keeps what it leaves alone
+{
+  for (const def of BUILTIN_FILTERS) {
+    const draft = PIXEL_FILTER_RUNNERS[def.id]?.draft;
+    assert.equal(Boolean(def.draft), Boolean(draft), `${def.id}: the registry and the runner agree on a draft`);
+    for (const key of draft?.lengths ?? []) {
+      assert.ok(def.params.some((param) => param.key === key && param.kind === 'range'), `${def.id}.${key} (scaled in a draft) is a range parameter`);
+    }
+    for (const key of draft?.points ?? []) {
+      assert.ok(def.params.some((param) => param.key === key && param.kind === 'point'), `${def.id}.${key} (scaled in a draft) is a point`);
+    }
+  }
+  const glowDef = getFilter('glow')!;
+  assert.equal(filterDraftFactor(glowDef, 2000, 2000, false), 0, 'A layer up to the desktop limit previews in full');
+  assert.equal(filterDraftFactor(glowDef, 4000, 3000, false), 3, '4000 × 3000 on a desktop: a draft a third the size');
+  assert.equal(filterDraftFactor(glowDef, 2000, 1000, true), 2, 'Touch screens draft smaller layers');
+  assert.equal(filterDraftFactor(getFilter('unsharp')!, 8000, 8000, false), 0, 'Sharpening never drafts (it is all fine detail)');
+  assert.ok(FILTER_DRAFT.touch.above < FILTER_DRAFT.desktop.above);
+
+  // Shrink and stretch: a flat colour comes back the same, sizes round up
+  const flat = new Uint8Array(5 * 3 * 4).fill(200);
+  const small = downscale(flat, 5, 3, 2);
+  assert.deepEqual([small.width, small.height], [3, 2], 'Shrunk sizes round up');
+  assert.ok(small.pixels.every((value) => value === 200), 'A flat colour shrinks to itself');
+  assert.ok(upscale(small.pixels, 3, 2, 5, 3, 2).every((value) => value === 200), 'And stretches back to itself');
+
+  // A blot in one corner of a 64 × 48 layer, a selection over its left half
+  const width = 64, height = 48;
+  const source = new Uint8Array(width * height * 4);
+  for (let y = 4; y < 14; y++) for (let x = 4; x < 14; x++) source.set([240, 240, 240, 255], (y * width + x) * 4);
+  const mask = new Uint8Array(width * height);
+  for (let y = 0; y < height; y++) mask.fill(255, y * width, y * width + 32);
+  const drafted = runDraftFilter(PIXEL_FILTER_RUNNERS.gaussian, source, width, height, { radius: 4 }, mask, 2);
+  const full = runPixelFilter(PIXEL_FILTER_RUNNERS.gaussian, source, width, height, { radius: 4 }, mask);
+  assert.equal(drafted.length, source.length, 'A draft has the layer\'s size');
+  for (let p = 0; p < width * height; p++) {
+    const x = p % width, y = Math.floor(p / width);
+    if (x > 30 || y > 30) assert.deepEqual([...drafted.slice(p * 4, p * 4 + 4)], [...source.slice(p * 4, p * 4 + 4)], 'Outside the selection and far from the blot: untouched');
+  }
+  const at = (pixels: Uint8Array, x: number, y: number) => pixels[(y * width + x) * 4 + 3];
+  assert.ok(at(drafted, 16, 9) > 0 && Math.abs(at(drafted, 16, 9) - at(full, 16, 9)) < 48, 'Next to the blot the draft blurs about as far as the full filter');
+  assert.deepEqual(runDraftFilter(PIXEL_FILTER_RUNNERS.unsharp, source, width, height, { radius: 2 }, null, 3),
+    runPixelFilter(PIXEL_FILTER_RUNNERS.unsharp, source, width, height, { radius: 2 }), 'A filter without a draft runs in full');
+}
+
+// Filters with a centre turn round the given point, and fall back to the middle without one
+{
+  const width = 9, height = 9;
+  const source = new Uint8Array(width * height * 4);
+  for (let x = 0; x < width; x++) source.set([255, 255, 255, 255], (4 * width + x) * 4);
+  const middle = runPixelFilter(PIXEL_FILTER_RUNNERS.twirl, source, width, height, { radius: 6, angle: 90 });
+  const atMiddle = runPixelFilter(PIXEL_FILTER_RUNNERS.twirl, source, width, height, { radius: 6, angle: 90, center: { x: 4.5, y: 4.5 } });
+  const corner = runPixelFilter(PIXEL_FILTER_RUNNERS.twirl, source, width, height, { radius: 6, angle: 90, center: { x: 0, y: 0 } });
+  assert.deepEqual(middle, atMiddle, 'No centre means the middle');
+  assert.notDeepEqual(corner, middle, 'Moving the centre moves the twirl');
+  const spun = runPixelFilter(PIXEL_FILTER_RUNNERS.spin, source, width, height, { angle: 60, center: { x: 0, y: 4 } });
+  assert.notDeepEqual(spun, runPixelFilter(PIXEL_FILTER_RUNNERS.spin, source, width, height, { angle: 60 }), 'Spin blur turns round its centre');
+}
+
+/** One premultiplied pixel through a filter */
+const filterPixel = (id: string, values: FilterValues, pixel: number[]) =>
+  [...runPixelFilter(PIXEL_FILTER_RUNNERS[id], new Uint8Array(pixel), 1, 1, values)];
+
+// 色彩濾鏡: neutral settings change nothing, each setting moves colour the right way, alpha stays
+{
+  const grey = [100, 100, 100, 255];
+  assert.deepEqual(filterPixel('colorAdjust', {}, grey), grey, 'Neutral colour adjust changes nothing');
+  assert.ok(filterPixel('colorAdjust', { brightness: 50 }, grey)[0] > 100, 'Brightness lightens');
+  assert.ok(filterPixel('colorAdjust', { contrast: 50 }, [200, 200, 200, 255])[0] > 200, 'Contrast pushes light tones lighter');
+  assert.ok(filterPixel('colorAdjust', { contrast: -50 }, [200, 200, 200, 255])[0] < 200, 'Less contrast pulls them to grey');
+  const warm = filterPixel('colorAdjust', { temperature: 60 }, grey);
+  assert.ok(warm[0] > warm[2], 'Warmer is redder than bluer');
+  const magenta = filterPixel('colorAdjust', { tint: 60 }, grey);
+  assert.ok(magenta[1] < magenta[0] && magenta[1] < magenta[2], 'Towards magenta pulls green down');
+  const flat = filterPixel('colorAdjust', { saturation: -100 }, [200, 50, 50, 255]);
+  assert.ok(Math.abs(flat[0] - flat[1]) <= 1 && Math.abs(flat[1] - flat[2]) <= 1, 'No saturation is grey');
+  const turned = filterPixel('colorAdjust', { hue: 120 }, [200, 40, 40, 255]);
+  assert.ok(turned[1] > turned[0] && turned[1] > turned[2], 'Red turned 120° is green');
+  assert.deepEqual(filterPixel('colorAdjust', { brightness: 40 }, [50, 50, 50, 128]), [76, 76, 76, 128], 'Half-clear colour is adjusted straight, alpha kept');
+  assert.deepEqual(filterPixel('colorAdjust', { brightness: 40 }, [0, 0, 0, 0]), [0, 0, 0, 0], 'Clear stays clear');
+
+  assert.deepEqual(filterPixel('levels', {}, [10, 128, 250, 255]), [10, 128, 250, 255], 'Default levels change nothing');
+  assert.deepEqual(filterPixel('levels', { inBlack: 50, inWhite: 200 }, [50, 125, 200, 255]), [0, 128, 255, 255], 'Input points stretch the range');
+  assert.ok(filterPixel('levels', { midtones: 50 }, grey)[0] > 100, 'Positive midtones brighten');
+  assert.ok(filterPixel('levels', { midtones: -50 }, grey)[0] < 100, 'Negative midtones darken');
+  assert.deepEqual(filterPixel('levels', { outBlack: 20, outWhite: 220 }, [0, 0, 255, 255]), [20, 20, 220, 255], 'Output points squeeze it');
+  assert.deepEqual(filterPixel('levels', { inBlack: 200, inWhite: 100 }, [150, 150, 150, 255]).length, 4, 'Crossed points do not break');
+
+  assert.deepEqual(filterPixel('grayscale', {}, [255, 0, 0, 255]), [76, 76, 76, 255], 'Grayscale uses luma weights');
+
+  assert.deepEqual(filterPixel('threshold', { threshold: 128, target: 'color' }, [200, 200, 200, 255]), [255, 255, 255, 255]);
+  assert.deepEqual(filterPixel('threshold', { threshold: 128, target: 'color' }, [30, 30, 30, 255]), [0, 0, 0, 255]);
+  assert.deepEqual(filterPixel('threshold', { threshold: 128, target: 'alpha' }, [60, 30, 0, 100]), [0, 0, 0, 0], 'Faint alpha clears');
+  assert.deepEqual(filterPixel('threshold', { threshold: 128, target: 'alpha' }, [100, 50, 0, 200]), [128, 64, 0, 255], 'Strong alpha turns opaque, colour kept');
+  assert.deepEqual(filterPixel('threshold', { threshold: 128, target: 'both' }, [100, 50, 0, 200]), [0, 0, 0, 255], 'Both: opaque and black');
+
+  const bins = toneHistogram(new Uint8Array([255, 255, 255, 255, 0, 0, 0, 0, 32, 32, 32, 128]), 3, 1);
+  assert.equal(bins[255], 1, 'White counted');
+  assert.equal(bins[64], 1, 'Half-clear grey counted by its straight tone');
+  assert.equal(bins.reduce((sum, n) => sum + n, 0), 2, 'Clear pixels are not counted');
+  assert.equal(toneHistogram(new Uint8Array([255, 255, 255, 255, 0, 0, 0, 255]), 2, 1, new Uint8Array([0, 255]))[255], 0, 'Only inside the selection');
+}
+
+/** A width × height picture filled by `paint(x, y)` (premultiplied RGBA, or null for clear) */
+const picture = (width: number, height: number, paint: (x: number, y: number) => number[] | null) => {
+  const pixels = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const color = paint(x, y);
+    if (color) pixels.set(color, (y * width + x) * 4);
+  }
+  return pixels;
+};
+const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pixels[(y * width + x) * 4 + 3];
+
+// 修正線稿: exact distances, growing and thinning lines, specks and gaps, line extraction and colour
+{
+  const marked = new Uint8Array(7 * 5);
+  marked[2 * 7 + 3] = 1;
+  const field = distanceField(marked, 7, 5);
+  assert.equal(field.dist2[2 * 7 + 3], 0, 'A marked pixel is at distance 0');
+  assert.equal(field.dist2[0], 13, 'Corner to (3,2) is √13 away');
+  assert.equal(field.nearest[0], 2 * 7 + 3, 'And that is its nearest mark');
+  assert.equal(distanceField(new Uint8Array(4), 2, 2).nearest[0], -1, 'Nothing marked: no nearest');
+
+  const W = 9, H = 9;
+  const run = (id: string, values: FilterValues, pixels: Uint8Array) => runPixelFilter(PIXEL_FILTER_RUNNERS[id], pixels, W, H, values);
+  const line = (from: number, to: number) => picture(W, H, (x) => (x >= from && x <= to ? [0, 0, 0, 255] : null));
+
+  const grown = run('lineWidth', { amount: 2 }, line(4, 4));
+  assert.equal(alphaAt(grown, W, 5, 4), 255, 'One pixel out is inked');
+  assert.equal(alphaAt(grown, W, 6, 4), 255, 'Two pixels out is inked: 2 px more on each side');
+  assert.equal(alphaAt(grown, W, 7, 4), 0, 'Three pixels out stays clear');
+  assert.deepEqual([...grown.slice((4 * W + 5) * 4, (4 * W + 5) * 4 + 3)], [0, 0, 0], 'Grown ink takes the line colour');
+  const dot = picture(W, H, (x, y) => (x === 4 && y === 4 ? [0, 0, 0, 255] : null));
+  const ring = alphaAt(run('lineWidth', { amount: 1 }, dot), W, 5, 5);
+  assert.ok(ring > 0 && ring < 255, 'Diagonal edges come out soft');
+
+  const thinned = run('lineWidth', { amount: -1, keepThin: false }, line(3, 5));
+  assert.equal(alphaAt(thinned, W, 3, 4), 0, 'Thinning by 1 clears one pixel on each side');
+  assert.equal(alphaAt(thinned, W, 4, 4), 255, 'And keeps the middle');
+  assert.equal(alphaAt(run('lineWidth', { amount: -2, keepThin: false }, line(3, 5)), W, 4, 4), 0, 'Thinning a 3 px line by 2 clears it');
+  assert.equal(alphaAt(run('lineWidth', { amount: -2, keepThin: true }, line(3, 5)), W, 4, 4), 255, 'Keeping thin lines keeps the middle');
+  assert.equal(alphaAt(run('lineWidth', { amount: -3, keepThin: true }, line(4, 4)), W, 4, 4), 255, 'A 1 px line survives');
+  assert.equal(alphaAt(run('lineWidth', { amount: -3, keepThin: false }, line(4, 4)), W, 4, 4), 0, 'Unless asked not to keep it');
+
+  const S = 20;
+  const specks = picture(S, S, (x, y) => ((x >= 3 && x <= 4 && y >= 3 && y <= 4) || (x >= 10 && x <= 15 && y >= 10 && y <= 15) ? [0, 0, 0, 255] : null));
+  const cleaned = runPixelFilter(PIXEL_FILTER_RUNNERS.despeckle, specks, S, S, { size: 3, mode: 'opaque' });
+  assert.equal(alphaAt(cleaned, S, 3, 3), 0, 'A 2 × 2 speck is removed');
+  assert.equal(alphaAt(cleaned, S, 12, 12), 255, 'A 6 × 6 block stays');
+
+  const red = [255, 0, 0, 255];
+  const holed = (hx: number, hy: number) => picture(W, H, (x, y) => (x === hx && y === hy ? null : red));
+  const filled = run('despeckle', { size: 2, mode: 'fillAround' }, holed(4, 4));
+  assert.deepEqual([...filled.slice((4 * W + 4) * 4, (4 * W + 4) * 4 + 4)], red, 'A small hole takes the colour around it');
+  assert.equal(alphaAt(run('despeckle', { size: 2, mode: 'fillAround' }, holed(0, 4)), W, 0, 4), 0, 'A hole on the edge is left open');
+  const painted = run('despeckle', { size: 2, mode: 'fillCurrent', currentColor: '#00ff00' }, holed(4, 4));
+  assert.deepEqual([...painted.slice((4 * W + 4) * 4, (4 * W + 4) * 4 + 4)], [0, 255, 0, 255], 'Or the current colour');
+  const page = run('despeckle', { size: 2, mode: 'onWhite' }, picture(W, H, (x, y) => (x === 4 && y === 4 ? [0, 0, 0, 255] : [255, 255, 255, 255])));
+  assert.deepEqual([...page.slice((4 * W + 4) * 4, (4 * W + 4) * 4 + 4)], [255, 255, 255, 255], 'A dark dot on white paper turns white');
+
+  assert.deepEqual(filterPixel('extractLines', { whiteRange: 0 }, [255, 255, 255, 255]), [0, 0, 0, 0], 'White paper turns clear');
+  assert.deepEqual(filterPixel('extractLines', { whiteRange: 0 }, [0, 0, 0, 255]), [0, 0, 0, 255], 'Black ink stays');
+  assert.deepEqual(filterPixel('extractLines', { whiteRange: 0 }, [128, 128, 128, 255]), [0, 0, 0, 127], 'Grey becomes half-clear black');
+  assert.deepEqual(filterPixel('extractLines', { whiteRange: 20 }, [230, 230, 230, 255]), [0, 0, 0, 0], 'Near-white within the range is paper');
+  assert.deepEqual(filterPixel('extractLines', { whiteRange: 0, keepColor: true }, [255, 128, 128, 255]), [127, 0, 0, 127],
+    'Kept colour is unmixed from the paper');
+
+  assert.deepEqual(filterPixel('lineColor', { currentColor: '#ff0000' }, [0, 0, 0, 128]), [128, 0, 0, 128], 'Lines take the current colour, alpha kept');
+  assert.deepEqual(filterPixel('lineColor', { useCurrent: false, color: '#0000ff', currentColor: '#ff0000' }, [0, 0, 0, 255]), [0, 0, 255, 255],
+    'Or a chosen colour');
+}
+
+// 效果: radial colour split, mosaic, glow and outline
+{
+  const W = 9, H = 9;
+  const run = (id: string, values: FilterValues, pixels: Uint8Array) => runPixelFilter(PIXEL_FILTER_RUNNERS[id], pixels, W, H, values);
+  const pixelAt = (pixels: Uint8Array, x: number, y: number) => [...pixels.slice((y * W + x) * 4, (y * W + x) * 4 + 4)];
+
+  const ramp = picture(W, H, (x) => [x * 28, 0, 255 - x * 28, 255]);
+  const split = run('chromatic', { mode: 'radial', spread: 6, center: { x: 0, y: 4 } }, ramp);
+  assert.ok(pixelAt(split, 8, 4)[0] < pixelAt(ramp, 8, 4)[0], 'Far from the centre, red comes from nearer it');
+  assert.deepEqual(pixelAt(split, 0, 4), pixelAt(ramp, 0, 4), 'The centre itself does not move');
+  assert.deepEqual(run('chromatic', { offsetX: 2 }, ramp), run('chromatic', { mode: 'shift', offsetX: 2 }, ramp), 'Settings stored before the mode existed still shift');
+
+  const checker = picture(4, 4, (x, y) => ((x + y) % 2 ? [255, 255, 255, 255] : [0, 0, 0, 255]));
+  const tiles = runPixelFilter(PIXEL_FILTER_RUNNERS.mosaic, checker, 4, 4, { cell: 2 });
+  for (let p = 0; p < 16; p++) assert.deepEqual([...tiles.slice(p * 4, p * 4 + 4)], [128, 128, 128, 255], 'Each cell is the average of what it covers');
+
+  const spark = picture(W, H, (x, y) => (x === 4 && y === 4 ? [255, 255, 255, 255] : null));
+  const glowed = run('glow', { radius: 4, strength: 100, threshold: 0 }, spark);
+  assert.ok(alphaAt(glowed, W, 5, 4) > 0, 'The halo spills onto clear pixels');
+  assert.deepEqual(pixelAt(glowed, 4, 4), [255, 255, 255, 255], 'The bright pixel stays');
+  const ember = picture(W, H, (x, y) => (x === 4 && y === 4 ? [40, 40, 40, 255] : null));
+  assert.deepEqual(run('glow', { radius: 4, strength: 100, threshold: 200 }, ember), ember, 'Nothing above the threshold: no glow');
+
+  const block = picture(W, H, (x, y) => (x >= 3 && x <= 5 && y >= 3 && y <= 5 ? [0, 0, 0, 255] : null));
+  const outside = run('outline', { size: 1, color: '#ff0000', position: 'outside' }, block);
+  assert.deepEqual(pixelAt(outside, 6, 4), [255, 0, 0, 255], 'Outside: the pixel next to the shape is stroked');
+  assert.equal(alphaAt(outside, W, 7, 4), 0, 'Two pixels out stays clear');
+  assert.deepEqual(pixelAt(outside, 5, 4), [0, 0, 0, 255], 'The shape itself is untouched');
+  const inside = run('outline', { size: 1, color: '#ff0000', position: 'inside' }, block);
+  assert.deepEqual(pixelAt(inside, 5, 4), [255, 0, 0, 255], 'Inside: the shape edge is stroked');
+  assert.deepEqual(pixelAt(inside, 4, 4), [0, 0, 0, 255], 'Its middle is not');
+  assert.equal(alphaAt(inside, W, 6, 4), 0, 'Nothing outside');
+  const straddle = run('outline', { size: 2, color: '#ff0000', position: 'center' }, block);
+  assert.deepEqual(pixelAt(straddle, 6, 4), [255, 0, 0, 255], 'On the edge: half outside');
+  assert.deepEqual(pixelAt(straddle, 5, 4), [255, 0, 0, 255], 'and half inside');
+}
+
+// 模糊、變形、銳化: streaks follow the angle and direction, the distortions move what they should
+{
+  const W = 15, H = 9;
+  const run = (id: string, values: FilterValues, pixels: Uint8Array) => runPixelFilter(PIXEL_FILTER_RUNNERS[id], pixels, W, H, values);
+  const dot = picture(W, H, (x, y) => (x === 7 && y === 4 ? [255, 255, 255, 255] : null));
+
+  const both = run('motionBlur', { distance: 4, angle: 0, direction: 'both' }, dot);
+  assert.ok(alphaAt(both, W, 5, 4) > 0 && alphaAt(both, W, 9, 4) > 0, 'Both ways: the streak runs left and right');
+  assert.equal(alphaAt(both, W, 7, 6), 0, 'Not up or down');
+  const forward = run('motionBlur', { distance: 4, angle: 0, direction: 'forward' }, dot);
+  assert.ok(alphaAt(forward, W, 10, 4) > 0 && alphaAt(forward, W, 5, 4) === 0, 'Forward at 0°: the streak trails to the right');
+  const backward = run('motionBlur', { distance: 4, angle: 0, direction: 'backward' }, dot);
+  assert.ok(alphaAt(backward, W, 4, 4) > 0 && alphaAt(backward, W, 9, 4) === 0, 'Backward: to the left');
+  const upward = run('motionBlur', { distance: 4, angle: 90, direction: 'forward' }, dot);
+  assert.ok(alphaAt(upward, W, 7, 1) > 0 && alphaAt(upward, W, 7, 6) === 0, 'Forward at 90°: upwards');
+  const slanted = run('motionBlur', { distance: 6, angle: 45, direction: 'both' }, dot);
+  assert.ok(alphaAt(slanted, W, 9, 2) > 0 && alphaAt(slanted, W, 9, 6) === 0, '45°: up and to the right');
+
+  const zoomed = run('radialBlur', { strength: 60, direction: 'out', center: { x: 7, y: 4 } }, dot);
+  assert.ok(alphaAt(zoomed, W, 7, 4) > 0, 'Zoom blur keeps what sits on its centre');
+  const ray = picture(W, H, (x, y) => (y === 4 && x >= 10 ? [255, 255, 255, 255] : null));
+  assert.equal(alphaAt(run('radialBlur', { strength: 60, direction: 'out', center: { x: 0, y: 4 } }, ray), W, 10, 0), 0,
+    'It smears along lines through the centre, not across them');
+
+  const soft = run('soften', {}, dot);
+  assert.deepEqual([alphaAt(soft, W, 7, 4), alphaAt(soft, W, 8, 4), alphaAt(soft, W, 8, 5)], [64, 32, 16], 'Soften spreads with 1-2-1 weights');
+
+  const column = picture(W, H, (x) => (x === 7 ? [255, 255, 255, 255] : null));
+  const swayed = run('wave', { direction: 'horizontal', amplitude: 2, wavelength: 8 }, column);
+  assert.equal(alphaAt(swayed, W, 9, 2), 255, 'A quarter wave down, the row moves 2 px over');
+  assert.equal(alphaAt(swayed, W, 7, 2), 0, 'and leaves its old place');
+  assert.equal(alphaAt(swayed, W, 7, 0), 255, 'Rows on the axis stay');
+  const bobbed = run('wave', { direction: 'vertical', amplitude: 2, wavelength: 8 }, column);
+  assert.ok(alphaAt(bobbed, W, 7, 3) === 255 && alphaAt(bobbed, W, 8, 3) === 0, 'Swaying up and down keeps a vertical line in its column');
+
+  const grid = picture(W, H, (x, y) => (x % 3 === 0 || y % 3 === 0 ? [0, 0, 0, 255] : null));
+  const bulged = run('spherize', { strength: 80, radius: 4, squash: 0, center: { x: 7, y: 4 } }, grid);
+  assert.notDeepEqual(bulged, grid, 'Spherize moves what is inside its circle');
+  for (const [x, y] of [[0, 0], [14, 8], [1, 4], [13, 4]]) {
+    assert.deepEqual([...bulged.slice((y * W + x) * 4, (y * W + x) * 4 + 4)], [...grid.slice((y * W + x) * 4, (y * W + x) * 4 + 4)], 'and nothing outside it');
+  }
+  assert.deepEqual(run('spherize', { strength: 0, radius: 4, center: { x: 7, y: 4 } }, grid), grid, 'No strength, no change');
+
+  const step = picture(W, H, (x) => (x < 7 ? [100, 100, 100, 255] : [150, 150, 150, 255]));
+  const crisp = run('unsharp', { radius: 1, amount: 100, threshold: 0 }, step);
+  assert.ok(crisp[(4 * W + 6) * 4] < 100 && crisp[(4 * W + 7) * 4] > 150, 'Sharpening pushes the two sides of an edge apart');
+  assert.equal(crisp[(4 * W + 0) * 4], 100, 'Flat areas stay');
+  assert.deepEqual(run('unsharp', { radius: 1, amount: 100, threshold: 100 }, step), step, 'Differences under the threshold are left alone');
+  assert.notDeepEqual(run('unsharp', { radius: 1, amount: 100 }, step), run('unsharp', { radius: 2, amount: 100 }, step), 'Each radius step sharpens differently');
+  const fringe = run('sharpen', {}, picture(W, H, (x) => (x < 7 ? [200, 200, 200, 200] : null)));
+  for (let i = 0; i < fringe.length; i += 4) {
+    assert.ok(fringe[i] <= fringe[i + 3] && fringe[i + 1] <= fringe[i + 3] && fringe[i + 2] <= fringe[i + 3], 'Sharpened colour never exceeds alpha');
+  }
+}
+
 // 對齊 L1: basis, whole-pixel offsets, off-canvas parts, and a pixel-level run of the move
 {
-  assert.equal(resolveAlignBasis('auto', false), 'canvas', 'Auto without a selection uses the canvas');
-  assert.equal(resolveAlignBasis('auto', true), 'selection', 'Auto with a selection uses the selection');
+  assert.equal(resolveAlignBasis('auto', false), 'canvas', 'Auto without a selection and 1 target uses the canvas');
+  assert.equal(resolveAlignBasis('auto', false, 2), 'objects', 'Auto without a selection and >=2 targets uses objects');
+  assert.equal(resolveAlignBasis('auto', true, 2), 'selection', 'Auto with a selection prefers selection over objects');
+  assert.equal(resolveAlignBasis('objects', false, 1), null, 'Objects basis requires at least 2 targets');
+  assert.equal(resolveAlignBasis('objects', true, 2), 'objects');
   assert.equal(resolveAlignBasis('selection', false), null, 'The selection basis needs a selection');
   assert.equal(resolveAlignBasis('canvas', true), 'canvas');
 
@@ -932,15 +1433,232 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   assert.equal(area(rectMinus(a, { x: 4, y: 6, w: 10, h: 10 })) + 6 * 4, 100, 'Strips + overlap = the whole rect');
   assert.deepEqual(rectMinus(a, { x: -5, y: -5, w: 30, h: 30 }), [], 'Fully covered: nothing to clear');
 
-  assert.equal(alignBlocker(null, { canEdit: true, busy: false, hasMask: false, movedByKeyframes: false }), 'noLayer');
-  const raster = { id: 'r', layerType: 'raster' };
-  assert.equal(alignBlocker(raster, { canEdit: true, busy: false, hasMask: false, movedByKeyframes: false }), null);
-  assert.equal(alignBlocker(raster, { canEdit: true, busy: true, hasMask: false, movedByKeyframes: false }), 'busy');
-  assert.equal(alignBlocker({ id: 'g', layerType: 'group' }, { canEdit: true, busy: false, hasMask: false, movedByKeyframes: false }), 'group');
-  assert.equal(alignBlocker({ id: 'm', layerType: 'mask' }, { canEdit: true, busy: false, hasMask: false, movedByKeyframes: false }), 'mask');
-  assert.equal(alignBlocker(raster, { canEdit: false, busy: false, hasMask: true, movedByKeyframes: true }), 'notEditable');
-  assert.equal(alignBlocker(raster, { canEdit: true, busy: false, hasMask: true, movedByKeyframes: false }), 'hasMask');
-  assert.equal(alignBlocker({ id: 't', layerType: 'text' }, { canEdit: true, busy: false, hasMask: false, movedByKeyframes: true }), 'keyframes');
+  // resolveAlignTargets: multi-select, nested group dedup, masked layers, group masks, animation folders, cycle safety
+  const mkLayer = (
+    id: string,
+    layerType: string,
+    parentId: string | null = null,
+    meta: { animation?: unknown } | null = null,
+  ): AlignLayerLike => ({ id, layerType, parentId, meta });
+
+  const tree: AlignLayerLike[] = [
+    mkLayer('rSolo', 'raster'),
+    mkLayer('mSolo', 'mask', 'rSolo'),
+    mkLayer('grp', 'group'),
+    mkLayer('gm', 'mask', 'grp'),
+    mkLayer('rInGrp', 'raster', 'grp'),
+    mkLayer('mInGrp', 'mask', 'rInGrp'),
+    mkLayer('sub', 'folder', 'grp'),
+    mkLayer('subMask', 'mask', 'sub'),
+    mkLayer('vInSub', 'vector', 'sub'),
+    mkLayer('mInSub', 'mask', 'vInSub'),
+    mkLayer('animRoot', 'group', null, { animation: { fps: 12 } }),
+    mkLayer('animCel', 'raster', 'animRoot'),
+    mkLayer('wrapAnim', 'group'),
+    mkLayer('nestedAnim', 'folder', 'wrapAnim', { animation: { fps: 24 } }),
+    mkLayer('nestedCel', 'raster', 'nestedAnim'),
+    mkLayer('standaloneMask', 'mask'),
+  ];
+
+  // Active fallback and missing selection fallback
+  assert.deepEqual(resolveAlignTargets(tree, null), []);
+  assert.deepEqual(resolveAlignTargets(tree, 'rSolo', new Set(['missing'])).map((t) => t.id), ['rSolo']);
+  const soloTargets = resolveAlignTargets(tree, 'rSolo');
+  assert.equal(soloTargets.length, 1);
+  assert.equal(soloTargets[0].isGroup, false);
+  assert.deepEqual(soloTargets[0].members.map((l) => l.id), ['rSolo']);
+  assert.deepEqual(soloTargets[0].masks.map((l) => l.id), ['mSolo']);
+
+  // Multi-select preserves layers order & deduplicates descendants / masks under selected ancestors
+  const multiTargets = resolveAlignTargets(
+    tree,
+    'rSolo',
+    new Set(['vInSub', 'grp', 'mInGrp', 'rSolo', 'mSolo']),
+  );
+  assert.deepEqual(multiTargets.map((t) => t.id), ['rSolo', 'grp']);
+  const grpUnit = multiTargets[1];
+  assert.equal(grpUnit.isGroup, true);
+  assert.equal(grpUnit.hasAnimationFolder, false);
+  assert.deepEqual(grpUnit.members.map((l) => l.id), ['rInGrp', 'vInSub']);
+  assert.deepEqual(grpUnit.masks.map((l) => l.id), ['gm', 'mInGrp', 'subMask', 'mInSub']);
+
+  // Standalone mask & animation folders
+  const maskTarget = resolveAlignTargets(tree, 'standaloneMask');
+  assert.equal(maskTarget[0].root.layerType, 'mask');
+  assert.equal(maskTarget[0].isGroup, false);
+  assert.equal(resolveAlignTargets(tree, 'animRoot')[0].hasAnimationFolder, true);
+  assert.equal(resolveAlignTargets(tree, 'wrapAnim')[0].hasAnimationFolder, true);
+
+  // Cycle guard on parentId
+  const cyclic: AlignLayerLike[] = [
+    mkLayer('cycA', 'raster', 'cycB'),
+    mkLayer('cycB', 'group', 'cycC'),
+    mkLayer('cycC', 'group', 'cycB'),
+  ];
+  assert.deepEqual(resolveAlignTargets(cyclic, 'cycA').map((t) => t.id), ['cycA']);
+  assert.deepEqual(resolveAlignTargets(cyclic, 'cycB').map((t) => t.id), ['cycB']);
+
+  // alignTargetsBlocker: batch validation, group roots exempt from canEdit, priority order
+  const editableAll = () => true;
+  const noKeys = () => false;
+  assert.equal(alignTargetsBlocker([], { busy: false, canEdit: editableAll, movedByKeyframes: noKeys }), 'noLayer');
+  assert.equal(alignTargetsBlocker(soloTargets, { busy: true, canEdit: editableAll, movedByKeyframes: noKeys }), 'busy');
+  assert.equal(
+    alignTargetsBlocker([...soloTargets, ...maskTarget], { busy: false, canEdit: editableAll, movedByKeyframes: noKeys }),
+    'mask',
+  );
+  assert.equal(
+    alignTargetsBlocker(
+      [...soloTargets, ...resolveAlignTargets(tree, 'wrapAnim')],
+      { busy: false, canEdit: () => false, movedByKeyframes: () => true },
+    ),
+    'animationFolder',
+    'animationFolder beats notEditable and keyframes',
+  );
+
+  // Group root must NEVER be passed to canEdit (canEditOwnPixels returns false on groups)
+  const seenCanEdit = new Set<string>();
+  const batchOk = alignTargetsBlocker(multiTargets, {
+    busy: false,
+    canEdit: (l) => {
+      seenCanEdit.add(l.id);
+      return l.layerType !== 'group' && l.layerType !== 'folder';
+    },
+    movedByKeyframes: noKeys,
+  });
+  assert.equal(batchOk, null);
+  assert.ok(!seenCanEdit.has('grp') && !seenCanEdit.has('sub'));
+  assert.ok(seenCanEdit.has('rInGrp') && seenCanEdit.has('gm') && seenCanEdit.has('mInSub'));
+
+  // Whole-batch rejection if 1 member or 1 mask in multi-target batch fails canEdit
+  assert.equal(
+    alignTargetsBlocker(multiTargets, {
+      busy: false,
+      canEdit: (l) => l.id !== 'mInSub',
+      movedByKeyframes: (id) => id === 'rSolo',
+    }),
+    'notEditable',
+    'Locked mask rejects whole batch before keyframes',
+  );
+  assert.equal(
+    alignTargetsBlocker(multiTargets, { busy: false, canEdit: editableAll, movedByKeyframes: (id) => id === 'grp' }),
+    'keyframes',
+    'Keyframed group root blocks batch',
+  );
+  assert.equal(
+    alignTargetsBlocker(multiTargets, { busy: false, canEdit: editableAll, movedByKeyframes: (id) => id === 'mSolo' }),
+    'keyframes',
+    'Keyframed mask blocks batch',
+  );
+
+  // unionRect & alignManyOffsets
+  assert.equal(unionRect([]), null);
+  const sampleRects: AlignRect[] = [
+    { x: 50, y: 10, w: 12, h: 15 },
+    { x: 10, y: 30, w: 20, h: 25 },
+    { x: 25, y: 5, w: 15, h: 10 },
+  ];
+  const uRect = unionRect(sampleRects)!;
+  assert.deepEqual(uRect, { x: 10, y: 5, w: 52, h: 50 });
+  assert.deepEqual(
+    alignManyOffsets(sampleRects, uRect, 'left', 'top'),
+    [{ dx: -40, dy: -5 }, { dx: 0, dy: -25 }, { dx: -15, dy: 0 }],
+  );
+
+  // distributeOffsets: count guards
+  assert.deepEqual(distributeOffsets([], 'hgap', 'objects', canvasFrame), []);
+  assert.deepEqual(distributeOffsets([{ x: 10, y: 10, w: 10, h: 10 }, { x: 40, y: 10, w: 10, h: 10 }], 'hgap', 'objects', canvasFrame), [
+    { dx: 0, dy: 0 }, { dx: 0, dy: 0 },
+  ]);
+  assert.deepEqual(distributeOffsets([{ x: 10, y: 10, w: 10, h: 10 }], 'hgap', 'canvas', canvasFrame), [{ dx: 0, dy: 0 }]);
+
+  // 2 rects on canvas / selection snap to frame outer edges
+  assert.deepEqual(
+    distributeOffsets([{ x: 40, y: 10, w: 12, h: 8 }, { x: 15, y: 20, w: 10, h: 8 }], 'left', 'canvas', canvasFrame),
+    [{ dx: 48, dy: 0 }, { dx: -15, dy: 0 }],
+    '2 rects on canvas snap first (x=15) to 0 and last (x=40, w=12) to 100-12=88',
+  );
+  const selDistFrame: AlignRect = { x: 20, y: 10, w: 60, h: 40 };
+  assert.deepEqual(
+    distributeOffsets([{ x: 25, y: 30, w: 8, h: 10 }, { x: 25, y: 12, w: 8, h: 6 }], 'vgap', 'selection', selDistFrame),
+    [{ dx: 0, dy: 10 }, { dx: 0, dy: -2 }],
+    '2 rects vertically on selection snap top=10 and bottom=10+40-10=40',
+  );
+
+  // All 8 modes across objects, canvas, selection with 4 unsorted rects of varied sizes & fractional spacing
+  const applyDist = (rects: AlignRect[], mode: DistributeMode, basis: 'objects' | 'canvas' | 'selection', frame: AlignRect) => {
+    const offsets = distributeOffsets(rects, mode, basis, frame);
+    return rects.map((r, i) => ({ x: r.x + offsets[i].dx, y: r.y + offsets[i].dy, w: r.w, h: r.h, dx: offsets[i].dx, dy: offsets[i].dy }));
+  };
+  const fourRects: AlignRect[] = [
+    { x: 63, y: 55, w: 11, h: 9 },
+    { x: 10, y: 5, w: 10, h: 10 },
+    { x: 24, y: 22, w: 7, h: 13 },
+    { x: 41, y: 38, w: 9, h: 8 },
+  ];
+  const allModes: DistributeMode[] = ['left', 'hcenter', 'right', 'hgap', 'top', 'vcenter', 'bottom', 'vgap'];
+  for (const basis of ['objects', 'canvas', 'selection'] as const) {
+    const frame = basis === 'selection' ? { x: 5, y: 4, w: 85, h: 71 } : canvasFrame;
+    for (const mode of allModes) {
+      const horiz = mode === 'left' || mode === 'hcenter' || mode === 'right' || mode === 'hgap';
+      const moved = applyDist(fourRects, mode, basis, frame);
+      for (const m of moved) {
+        if (horiz) assert.equal(m.dy, 0, `${basis}/${mode} keeps dy=0`);
+        else assert.equal(m.dx, 0, `${basis}/${mode} keeps dx=0`);
+      }
+      const key = (r: AlignRect) => {
+        const p = horiz ? r.x : r.y;
+        const s = horiz ? r.w : r.h;
+        if (mode === 'hcenter' || mode === 'vcenter') return p + s / 2;
+        if (mode === 'right' || mode === 'bottom') return p + s;
+        return p;
+      };
+      const byOriginalOrder = fourRects
+        .map((r, idx) => ({ idx, k: key(r), p: horiz ? r.x : r.y }))
+        .sort((a, b) => (a.k - b.k) || (a.p - b.p) || (a.idx - b.idx));
+      const firstMoved = moved[byOriginalOrder[0].idx];
+      const lastMoved = moved[byOriginalOrder[byOriginalOrder.length - 1].idx];
+      if (basis === 'objects') {
+        assert.equal(firstMoved.dx, 0);
+        assert.equal(firstMoved.dy, 0);
+        assert.equal(lastMoved.dx, 0);
+        assert.equal(lastMoved.dy, 0);
+      } else {
+        const fPos = horiz ? frame.x : frame.y;
+        const fSize = horiz ? frame.w : frame.h;
+        assert.equal(horiz ? firstMoved.x : firstMoved.y, fPos, `${basis}/${mode} snaps first to frame start`);
+        assert.equal(
+          (horiz ? lastMoved.x + lastMoved.w : lastMoved.y + lastMoved.h),
+          fPos + fSize,
+          `${basis}/${mode} snaps last to frame end`,
+        );
+      }
+      const orderedMoved = byOriginalOrder.map((e) => moved[e.idx]);
+      if (mode === 'hgap' || mode === 'vgap') {
+        const gaps = orderedMoved.slice(0, -1).map((r, idx) => {
+          const next = orderedMoved[idx + 1];
+          return (horiz ? next.x - (r.x + r.w) : next.y - (r.y + r.h));
+        });
+        assert.ok(Math.max(...gaps) - Math.min(...gaps) <= 1, `${basis}/${mode} gaps differ by <= 1 px (got ${gaps.join(',')})`);
+      } else {
+        const anchors = orderedMoved.map(key);
+        const steps = anchors.slice(0, -1).map((v, idx) => anchors[idx + 1] - v);
+        assert.ok(Math.max(...steps) - Math.min(...steps) <= 1, `${basis}/${mode} anchors evenly spaced within <= 1 px (got ${steps.join(',')})`);
+      }
+    }
+  }
+
+  // Overlapping rects with hgap on objects produce uniform negative gap
+  const overlapping: AlignRect[] = [
+    { x: 0, y: 0, w: 20, h: 10 },
+    { x: 5, y: 0, w: 20, h: 10 },
+    { x: 20, y: 0, w: 20, h: 10 },
+  ];
+  assert.deepEqual(
+    distributeOffsets(overlapping, 'hgap', 'objects', canvasFrame),
+    [{ dx: 0, dy: 0 }, { dx: 5, dy: 0 }, { dx: 0, dy: 0 }],
+    'Overlapping rects equalize to -10px gap',
+  );
 
   // The move as useLayerAlign does it, on a CPU buffer: clear what the pixels leave, write them where they land
   const W = 40;

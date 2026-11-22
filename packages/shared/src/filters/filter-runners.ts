@@ -8,6 +8,20 @@ import {
   applyHalftoneDot, applyNoiseGrain, applyTwirlDistortion,
   type ColorCurvesOptions, type FilterContext, type GradientStop,
 } from './pixel-filters';
+import { adjustColor, grayscalePixels, levelsLut, mapChannels, thresholdPixels } from './color-filters';
+import { changeLineWidth, despeckle, extractLines, recolorLines } from './lineart-filters';
+import { boxBlur, glow, mosaic, outline, radialChromatic } from './effect-filters';
+import { motionBlur, soften, spherize, unsharpMask, wave, zoomBlur } from './blur-distort-filters';
+import { downscale, upscale } from './resample';
+
+/** A '#rrggbb' setting, or the fallback */
+function filterColor(values: FilterValues, key: string, fallback: string) {
+  const value = values[key];
+  return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value) ? value : fallback;
+}
+
+/** The colour the user is painting with, which the workspace adds to every run as `currentColor` */
+const currentColor = (values: FilterValues) => filterColor(values, 'currentColor', '#000000');
 
 /** A filter's settings, by parameter key (never by position) */
 export type FilterValues = Record<string, unknown>;
@@ -15,6 +29,11 @@ export type FilterValues = Record<string, unknown>;
 export interface PixelFilterRunner {
   /** Changes colour only: it sees straight (un-premultiplied) colour, re-premultiplied afterwards */
   colorOnly?: boolean;
+  /**
+   * Slow on a big layer and still readable from a smaller copy, so a preview may show a draft first
+   * (runDraftFilter). Lists the settings measured in pixels, which shrink with the copy.
+   */
+  draft?: { lengths?: readonly string[]; points?: readonly string[] };
   run: (ctx: FilterContext, values: FilterValues) => Uint8Array;
 }
 
@@ -26,51 +45,61 @@ export function filterNumber(values: FilterValues, key: string, fallback: number
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-function blurBox(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, radius: number) {
-  const r = Math.max(1, Math.round(radius));
-  const horizontal = new Uint8Array(pixels.length);
-  const output = new Uint8Array(pixels.length);
-  const span = r * 2 + 1;
-  const pass = (source: ArrayLike<number>, target: Uint8Array, length: number, lines: number, stride: number, lineStride: number) => {
-    for (let line = 0; line < lines; line++) {
-      const base = line * lineStride;
-      for (let channel = 0; channel < 4; channel++) {
-        let sum = 0;
-        for (let k = -r; k <= r; k++) sum += source[base + Math.min(length - 1, Math.max(0, k)) * stride + channel];
-        for (let at = 0; at < length; at++) {
-          target[base + at * stride + channel] = Math.round(sum / span);
-          sum -= source[base + Math.max(0, at - r) * stride + channel];
-          sum += source[base + Math.min(length - 1, at + r + 1) * stride + channel];
-        }
-      }
-    }
-  };
-  pass(pixels, horizontal, width, height, 4, width * 4);
-  pass(horizontal, output, height, width, width * 4, 4);
-  return output;
+/** A point setting ({ x, y } in canvas pixels), or the middle of the picture */
+export function filterPoint(values: FilterValues, key: string, width: number, height: number) {
+  const value = values[key] as { x?: unknown; y?: unknown } | null | undefined;
+  const x = typeof value?.x === 'number' && Number.isFinite(value.x) ? value.x : width / 2;
+  const y = typeof value?.y === 'number' && Number.isFinite(value.y) ? value.y : height / 2;
+  return { x, y };
 }
 
-function spinBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, degrees: number) {
+/** A string setting that must be one of `choices`; the first choice otherwise */
+export function filterChoice<T extends string>(values: FilterValues, key: string, choices: readonly T[]): T {
+  const value = values[key];
+  return choices.includes(value as T) ? value as T : choices[0];
+}
+
+/**
+ * 旋轉模糊: 13 reads along an arc round the centre. The parts of each read's position that depend
+ * on x alone, and on y alone, are worked out once (the same sums in the same order as before).
+ */
+function spinBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, degrees: number, cx: number, cy: number) {
   const result = new Uint8Array(pixels.length);
-  const cx = (width - 1) / 2;
-  const cy = (height - 1) / 2;
-  const samples = Array.from({ length: 13 }, (_, index) => {
-    const angle = radians(degrees) * (index / 12 - 0.5);
-    return [Math.cos(angle), Math.sin(angle)];
-  });
-  const sums = [0, 0, 0, 0];
-  for (let y = 0; y < height; y++) {
+  const count = 13;
+  const cos = new Float64Array(count), sin = new Float64Array(count);
+  for (let s = 0; s < count; s++) {
+    const angle = radians(degrees) * (s / 12 - 0.5);
+    cos[s] = Math.cos(angle);
+    sin[s] = Math.sin(angle);
+  }
+  // sx = (cx + (x − cx)·cos) − (y − cy)·sin, sy = (cy + (x − cx)·sin) + (y − cy)·cos
+  const alongX = new Float64Array(count * width), downX = new Float64Array(count * width);
+  for (let s = 0; s < count; s++) {
     for (let x = 0; x < width; x++) {
-      sums.fill(0);
-      for (const [cos, sin] of samples) {
-        const sx = Math.round(cx + (x - cx) * cos - (y - cy) * sin);
-        const sy = Math.round(cy + (x - cx) * sin + (y - cy) * cos);
+      alongX[s * width + x] = cx + (x - cx) * cos[s];
+      downX[s * width + x] = cy + (x - cx) * sin[s];
+    }
+  }
+  const alongY = new Float64Array(count), downY = new Float64Array(count);
+  for (let y = 0; y < height; y++) {
+    for (let s = 0; s < count; s++) {
+      alongY[s] = (y - cy) * sin[s];
+      downY[s] = (y - cy) * cos[s];
+    }
+    for (let x = 0; x < width; x++) {
+      let r = 0, g = 0, b = 0, a = 0;
+      for (let s = 0; s < count; s++) {
+        const sx = Math.round(alongX[s * width + x] - alongY[s]);
+        const sy = Math.round(downX[s * width + x] + downY[s]);
         if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
         const src = (sy * width + sx) * 4;
-        for (let k = 0; k < 4; k++) sums[k] += pixels[src + k];
+        r += pixels[src]; g += pixels[src + 1]; b += pixels[src + 2]; a += pixels[src + 3];
       }
       const dst = (y * width + x) * 4;
-      for (let k = 0; k < 4; k++) result[dst + k] = Math.round(sums[k] / samples.length);
+      result[dst] = Math.round(r / count);
+      result[dst + 1] = Math.round(g / count);
+      result[dst + 2] = Math.round(b / count);
+      result[dst + 3] = Math.round(a / count);
     }
   }
   return result;
@@ -78,9 +107,44 @@ function spinBlur(pixels: Uint8Array | Uint8ClampedArray, width: number, height:
 
 /** Built-in filters. Each id matches an entry of the client's filter registry. */
 export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> = {
-  box: { run: ({ pixels, width, height }, v) => blurBox(pixels, width, height, filterNumber(v, 'radius', 4)) },
-  gaussian: { run: (ctx, v) => applyGaussianBlur(ctx, filterNumber(v, 'radius', 8)) },
-  spin: { run: ({ pixels, width, height }, v) => spinBlur(pixels, width, height, filterNumber(v, 'angle', 15)) },
+  box: { run: ({ pixels, width, height }, v) => boxBlur(pixels, width, height, filterNumber(v, 'radius', 4)) },
+  motionBlur: {
+    draft: { lengths: ['distance'] },
+    run: ({ pixels, width, height }, v) => motionBlur(pixels, width, height, filterNumber(v, 'distance', 20), filterNumber(v, 'angle', 0),
+      filterChoice(v, 'direction', ['both', 'forward', 'backward'] as const)),
+  },
+  radialBlur: {
+    draft: { points: ['center'] },
+    run: ({ pixels, width, height }, v) => {
+      const center = filterPoint(v, 'center', width, height);
+      return zoomBlur(pixels, width, height, center.x, center.y, filterNumber(v, 'strength', 30), filterChoice(v, 'direction', ['both', 'in', 'out'] as const));
+    },
+  },
+  soften: { run: ({ pixels, width, height }) => soften(pixels, width, height) },
+  wave: {
+    draft: { lengths: ['amplitude', 'wavelength'] },
+    run: ({ pixels, width, height }, v) => wave(pixels, width, height, filterChoice(v, 'direction', ['horizontal', 'vertical', 'both'] as const),
+      filterNumber(v, 'amplitude', 10), filterNumber(v, 'wavelength', 120)),
+  },
+  spherize: {
+    run: ({ pixels, width, height }, v) => {
+      const center = filterPoint(v, 'center', width, height);
+      return spherize(pixels, width, height, center.x, center.y, filterNumber(v, 'strength', 50), filterNumber(v, 'radius', 300), filterNumber(v, 'squash', 0));
+    },
+  },
+  sharpen: { run: ({ pixels, width, height }) => unsharpMask(pixels, width, height, 1, 60, 0) },
+  unsharp: {
+    run: ({ pixels, width, height }, v) =>
+      unsharpMask(pixels, width, height, filterNumber(v, 'radius', 2), filterNumber(v, 'amount', 100), filterNumber(v, 'threshold', 0)),
+  },
+  gaussian: { draft: { lengths: ['radius'] }, run: (ctx, v) => applyGaussianBlur(ctx, filterNumber(v, 'radius', 8)) },
+  spin: {
+    draft: { points: ['center'] },
+    run: ({ pixels, width, height }, v) => {
+      const center = filterPoint(v, 'center', width, height);
+      return spinBlur(pixels, width, height, filterNumber(v, 'angle', 15), center.x, center.y);
+    },
+  },
   posterize: {
     colorOnly: true,
     run: ({ pixels }, v) => {
@@ -102,14 +166,71 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
       return result;
     },
   },
+  colorAdjust: {
+    colorOnly: true,
+    run: ({ pixels }, v) => adjustColor(pixels, {
+      brightness: filterNumber(v, 'brightness', 0),
+      contrast: filterNumber(v, 'contrast', 0),
+      hue: filterNumber(v, 'hue', 0),
+      saturation: filterNumber(v, 'saturation', 0),
+      temperature: filterNumber(v, 'temperature', 0),
+      tint: filterNumber(v, 'tint', 0),
+    }),
+  },
+  levels: {
+    colorOnly: true,
+    run: ({ pixels }, v) => mapChannels(pixels, levelsLut(
+      filterNumber(v, 'inBlack', 0), filterNumber(v, 'inWhite', 255), filterNumber(v, 'midtones', 0),
+      filterNumber(v, 'outBlack', 0), filterNumber(v, 'outWhite', 255),
+    )),
+  },
+  grayscale: { colorOnly: true, run: ({ pixels }) => grayscalePixels(pixels) },
+  threshold: {
+    run: ({ pixels }, v) => thresholdPixels(pixels, filterNumber(v, 'threshold', 128), filterChoice(v, 'target', ['color', 'alpha', 'both'] as const)),
+  },
+  lineWidth: {
+    run: ({ pixels, width, height }, v) => changeLineWidth(pixels, width, height, Math.round(filterNumber(v, 'amount', 1)), v.keepThin !== false),
+  },
+  despeckle: {
+    run: ({ pixels, width, height }, v) => despeckle(pixels, width, height, filterNumber(v, 'size', 3),
+      filterChoice(v, 'mode', ['opaque', 'onWhite', 'fillAround', 'fillCurrent'] as const), currentColor(v)),
+  },
+  extractLines: { run: ({ pixels }, v) => extractLines(pixels, filterNumber(v, 'whiteRange', 10), v.keepColor === true) },
+  lineColor: {
+    colorOnly: true,
+    run: ({ pixels }, v) => recolorLines(pixels, v.useCurrent === false ? filterColor(v, 'color', '#000000') : currentColor(v)),
+  },
   noise: { colorOnly: true, run: (ctx, v) => applyNoiseGrain(ctx, filterNumber(v, 'amount', 25) / 100, filterNumber(v, 'grain', 1)) },
-  chromatic: { colorOnly: true, run: (ctx, v) => applyChromaticAberration(ctx, filterNumber(v, 'offsetX', 6), filterNumber(v, 'offsetY', 0)) },
+  chromatic: {
+    colorOnly: true,
+    run: (ctx, v) => {
+      if (filterChoice(v, 'mode', ['shift', 'radial'] as const) === 'shift') {
+        return applyChromaticAberration(ctx, filterNumber(v, 'offsetX', 6), filterNumber(v, 'offsetY', 0));
+      }
+      const center = filterPoint(v, 'center', ctx.width, ctx.height);
+      return radialChromatic(ctx.pixels, ctx.width, ctx.height, center.x, center.y, filterNumber(v, 'spread', 8));
+    },
+  },
+  mosaic: { run: ({ pixels, width, height }, v) => mosaic(pixels, width, height, filterNumber(v, 'cell', 12)) },
+  glow: {
+    draft: { lengths: ['radius'] },
+    run: ({ pixels, width, height }, v) =>
+      glow(pixels, width, height, filterNumber(v, 'radius', 16), filterNumber(v, 'strength', 80), filterNumber(v, 'threshold', 160)),
+  },
+  outline: {
+    draft: { lengths: ['size'] },
+    run: ({ pixels, width, height }, v) => outline(pixels, width, height, filterNumber(v, 'size', 3), filterColor(v, 'color', '#ffffff'),
+      filterChoice(v, 'position', ['outside', 'inside', 'center'] as const)),
+  },
   halftone: {
     colorOnly: true,
     run: (ctx, v) => applyHalftoneDot(ctx, filterNumber(v, 'density', 45), radians(filterNumber(v, 'angle', 45)), filterNumber(v, 'dotSize', 1)),
   },
   twirl: {
-    run: (ctx, v) => applyTwirlDistortion(ctx, ctx.width / 2, ctx.height / 2, filterNumber(v, 'radius', 300), radians(filterNumber(v, 'angle', 135))),
+    run: (ctx, v) => {
+      const center = filterPoint(v, 'center', ctx.width, ctx.height);
+      return applyTwirlDistortion(ctx, center.x, center.y, filterNumber(v, 'radius', 300), radians(filterNumber(v, 'angle', 135)));
+    },
   },
   curves: { colorOnly: true, run: (ctx, v) => applyColorCurves(ctx, (v.options ?? {}) as ColorCurvesOptions) },
   gradient: {
@@ -143,13 +264,95 @@ export function runPixelFilter(
   const result = runner.run(context, values);
   // A runner may hand back its input: never write over the caller's pixels
   const output = result === pixels ? new Uint8Array(result) : result;
-  for (let i = 0; i < output.length; i += 4) {
-    const factor = mask ? mask[i / 4] / 255 : 1;
-    const alpha = output[i + 3];
-    for (let k = 0; k < 4; k++) {
-      const filtered = runner.colorOnly && k < 3 ? output[i + k] * alpha / 255 : output[i + k];
-      output[i + k] = Math.round(pixels[i + k] * (1 - factor) + filtered * factor);
+  blendFiltered(pixels, output, mask, runner.colorOnly === true);
+  return output;
+}
+
+/**
+ * Puts `output` (the filter's result, changed in place) in through the selection mask: the original
+ * where the mask is 0, the result where it is 255. Colour-only results are re-premultiplied by their
+ * alpha. Whole-number arithmetic: x / 255 and x / 65025 never land on .5 for a whole x, so
+ * `(x + 127) / 255 | 0` rounds exactly like Math.round did on the floating-point blend.
+ */
+export function blendFiltered(pixels: ArrayLike<number>, output: Uint8Array, mask: Uint8Array | null | undefined, colorOnly: boolean) {
+  if (!mask && !colorOnly) return;
+  for (let i = 0, p = 0; i < output.length; i += 4, p++) {
+    const m = mask ? mask[p] : 255;
+    if (m === 0) {
+      output[i] = pixels[i]; output[i + 1] = pixels[i + 1]; output[i + 2] = pixels[i + 2]; output[i + 3] = pixels[i + 3];
+      continue;
+    }
+    if (colorOnly) {
+      const alpha = output[i + 3];
+      if (m === 255) {
+        for (let k = 0; k < 3; k++) output[i + k] = ((output[i + k] * alpha + 127) / 255) | 0;
+      } else {
+        const keep = 255 - m;
+        for (let k = 0; k < 3; k++) output[i + k] = ((pixels[i + k] * keep * 255 + output[i + k] * alpha * m + 32512) / 65025) | 0;
+        output[i + 3] = ((pixels[i + 3] * keep + alpha * m + 127) / 255) | 0;
+      }
+    } else if (m !== 255) {
+      const keep = 255 - m;
+      for (let k = 0; k < 4; k++) output[i + k] = ((pixels[i + k] * keep + output[i + k] * m + 127) / 255) | 0;
     }
   }
+}
+
+/**
+ * A quick draft of a slow filter on a big layer: worked out on a copy shrunk by a whole `factor`
+ * (with the runner's pixel-sized settings and points shrunk too) and stretched back. Where the
+ * shrunk copy came out unchanged, the layer's own pixels stay, so untouched parts keep their
+ * sharpness; the selection mask is applied at full size. Filters without `draft` run in full.
+ */
+export function runDraftFilter(
+  runner: PixelFilterRunner,
+  pixels: Uint8Array,
+  width: number,
+  height: number,
+  values: FilterValues,
+  mask: Uint8Array | null | undefined,
+  factor: number,
+): Uint8Array {
+  const f = Math.floor(factor);
+  if (!runner.draft || f < 2 || width < f * 2 || height < f * 2) return runPixelFilter(runner, pixels, width, height, values, mask);
+  const small = downscale(pixels, width, height, f);
+  const scaled: FilterValues = { ...values };
+  for (const key of runner.draft.lengths ?? []) {
+    const value = values[key];
+    if (typeof value === 'number' && Number.isFinite(value)) scaled[key] = value / f;
+  }
+  for (const key of runner.draft.points ?? []) {
+    const point = values[key] as { x?: unknown; y?: unknown } | null | undefined;
+    if (typeof point?.x === 'number' && typeof point.y === 'number') scaled[key] = { x: (point.x + 0.5) / f - 0.5, y: (point.y + 0.5) / f - 0.5 };
+  }
+  const { width: sw, height: sh } = small;
+  const filtered = runPixelFilter(runner, small.pixels, sw, sh, scaled, null);
+  // Small pixels the filter changed, grown by one: the stretch reads each output pixel from its block and the next
+  const changed = new Uint8Array(sw * sh);
+  for (let p = 0, i = 0; p < changed.length; p++, i += 4) {
+    const s = small.pixels;
+    if (filtered[i] !== s[i] || filtered[i + 1] !== s[i + 1] || filtered[i + 2] !== s[i + 2] || filtered[i + 3] !== s[i + 3]) changed[p] = 1;
+  }
+  const output = upscale(filtered, sw, sh, width, height, f, { original: pixels, near: growByOne(changed, sw, sh) });
+  blendFiltered(pixels, output, mask, false);
   return output;
+}
+
+/** 1 wherever `marks` has a 1 within one pixel (3 × 3) */
+function growByOne(marks: Uint8Array, width: number, height: number) {
+  const across = new Uint8Array(marks.length);
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      across[row + x] = marks[row + x] | (x > 0 ? marks[row + x - 1] : 0) | (x + 1 < width ? marks[row + x + 1] : 0);
+    }
+  }
+  const grown = new Uint8Array(marks.length);
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      grown[row + x] = across[row + x] | (y > 0 ? across[row - width + x] : 0) | (y + 1 < height ? across[row + width + x] : 0);
+    }
+  }
+  return grown;
 }

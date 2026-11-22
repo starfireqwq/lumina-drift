@@ -15,6 +15,7 @@ import {
   RenderTexture,
   Sprite,
   Texture,
+  type TextureSource,
 } from 'pixi.js';
 // Overlay, soft light, colour dodge… are filter-based in Pixi 8 and fall back to normal without this
 import 'pixi.js/advanced-blend-modes';
@@ -1464,11 +1465,47 @@ export class LayerManager {
   /** Replaces rectangles of a texture with premultiplied RGBA (no blending) */
   private upload(target: RenderTexture, parts: Array<{ x: number; y: number; w: number; h: number; raw: Uint8Array }>, clear = false) {
     if (!parts.length && !clear) return;
+    if (clear) this.clearTexture(target);
+    if (!parts.length) return;
+    const r = this.renderer as unknown as {
+      gl?: WebGLRenderingContext;
+      texture?: {
+        bindSource?: (s: TextureSource, loc?: number) => void;
+        _activateLocation?: (loc: number) => void;
+        _activeTextureLocation?: number;
+        _premultiplyAlpha?: boolean;
+      };
+    };
+    const texSys = r.texture;
+    const bindSource = texSys?.bindSource;
+    // Direct texSubImage2D keeps 1:1 uploads bit-exact (a linear-sampled quad drifts ±1 across >2048px canvases).
+    if (r.gl && texSys && bindSource) {
+      const gl = r.gl;
+      bindSource.call(texSys, target.source, 0);
+      if (texSys._activateLocation) texSys._activateLocation(0);
+      else {
+        gl.activeTexture(gl.TEXTURE0);
+        if (texSys._activeTextureLocation !== undefined) texSys._activeTextureLocation = 0;
+      }
+      if (texSys._premultiplyAlpha) {
+        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 0);
+        texSys._premultiplyAlpha = false;
+      }
+      for (const p of parts) {
+        if (p.w <= 0 || p.h <= 0) continue;
+        const expected = p.w * p.h * 4;
+        if (p.raw.byteLength < expected) continue;
+        const bytes = p.raw.byteLength === expected ? p.raw : p.raw.subarray(0, expected);
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, p.x, p.y, p.w, p.h, gl.RGBA, gl.UNSIGNED_BYTE, bytes);
+      }
+      this.mips.markDirty(target.source);
+      return;
+    }
     const holder = new Container();
     const textures: Texture[] = [];
     for (const p of parts) {
       const tex = new Texture({
-        source: new BufferImageSource({ resource: p.raw, width: p.w, height: p.h, format: 'rgba8unorm', alphaMode: 'premultiplied-alpha' }),
+        source: new BufferImageSource({ resource: p.raw, width: p.w, height: p.h, format: 'rgba8unorm', alphaMode: 'premultiplied-alpha', scaleMode: 'nearest' }),
       });
       textures.push(tex);
       const s = new Sprite(tex);
@@ -1476,7 +1513,7 @@ export class LayerManager {
       s.blendMode = 'none'; // only honoured below a root container
       holder.addChild(s);
     }
-    this.renderer.render({ container: holder, target, clear, clearColor: [0, 0, 0, 0] });
+    this.renderer.render({ container: holder, target, clear: false });
     textures.forEach((t) => t.destroy(true));
     holder.destroy({ children: true });
   }
@@ -2261,13 +2298,54 @@ export class LayerManager {
     this.finishFreeze(job);
   }
 
+  /** Copies every pixel of `src` into same-sized `dst` without linear sampling drift on large canvases */
+  private copyInto(src: RenderTexture, dst: RenderTexture) {
+    const r = this.renderer as unknown as {
+      gl?: WebGLRenderingContext;
+      texture?: { _activateLocation?: (loc: number) => void; _activeTextureLocation?: number };
+      renderTarget?: {
+        copyToTexture?: (
+          source: RenderTexture,
+          dest: RenderTexture,
+          originSrc: { x: number; y: number },
+          size: { width: number; height: number },
+          originDest: { x: number; y: number }
+        ) => void;
+        resetState?: () => void;
+      };
+    };
+    if (r.renderTarget?.copyToTexture) {
+      if (r.texture?._activateLocation) r.texture._activateLocation(0);
+      else if (r.gl) {
+        r.gl.activeTexture(r.gl.TEXTURE0);
+        if (r.texture && r.texture._activeTextureLocation !== undefined) r.texture._activeTextureLocation = 0;
+      }
+      r.renderTarget.copyToTexture(src, dst, { x: 0, y: 0 }, { width: src.width, height: src.height }, { x: 0, y: 0 });
+      r.renderTarget.resetState?.();
+      this.mips.markDirty(dst.source);
+      return;
+    }
+    const prevMag = src.source.magFilter;
+    const prevMin = src.source.minFilter;
+    const prevMip = src.source.mipmapFilter;
+    src.source.magFilter = 'nearest';
+    src.source.minFilter = 'nearest';
+    src.source.mipmapFilter = 'nearest';
+    src.source.style.update();
+    const blit = new Sprite(src);
+    this.renderer.render({ container: blit, target: dst, clear: true, clearColor: [0, 0, 0, 0] });
+    blit.destroy();
+    src.source.magFilter = prevMag;
+    src.source.minFilter = prevMin;
+    src.source.mipmapFilter = prevMip;
+    src.source.style.update();
+  }
+
   /** A new texture holding a copy of src */
   /** @internal */
   copyTexture(src: RenderTexture): RenderTexture {
     const rt = RenderTexture.create({ width: src.width, height: src.height, resolution: 1 });
-    const blit = new Sprite(src);
-    this.renderer.render({ container: blit, target: rt, clear: true, clearColor: [0, 0, 0, 0] });
-    blit.destroy();
+    this.copyInto(src, rt);
     return rt;
   }
 
@@ -2544,14 +2622,7 @@ export class LayerManager {
     }
 
     this.flushPendingReads();
-    const blitSprite = new Sprite(item.renderTexture);
-    this.renderer.render({
-      container: blitSprite,
-      target: item.pp,
-      clear: true,
-      clearColor: [0, 0, 0, 0],
-    });
-    blitSprite.destroy();
+    this.copyInto(item.renderTexture, item.pp);
     item.ppClean = true;
   }
 
@@ -2579,14 +2650,7 @@ export class LayerManager {
     if (!item.pp) return; // never allocated = nothing changed since the last sync
 
     this.flushPendingReads();
-    const blitSprite = new Sprite(item.pp);
-    this.renderer.render({
-      container: blitSprite,
-      target: item.rt,
-      clear: true,
-      clearColor: [0, 0, 0, 0],
-    });
-    blitSprite.destroy();
+    this.copyInto(item.pp, item.rt);
     if (item.shown) this.onStageChange?.();
   }
 

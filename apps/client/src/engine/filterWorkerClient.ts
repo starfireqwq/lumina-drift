@@ -1,7 +1,9 @@
 import type { FilterValues } from '@atelier/shared';
 
-type Reply = { request: number; output?: Uint8Array; error?: string; cancelled?: boolean };
-type Pending = { resolve: (output: Uint8Array | null) => void; reject: (error: Error) => void; postedAt: number };
+type Reply = { request: number; output?: Uint8Array; histogram?: Uint32Array; error?: string; cancelled?: boolean };
+/** A finished job: the filtered pixels, and the layer's tone counts when they were asked for */
+export type FilterResult = { output: Uint8Array; histogram?: Uint32Array };
+type Pending = { resolve: (result: FilterResult | null) => void; reject: (error: Error) => void; postedAt: number };
 
 /** A cancelled job still running after this long is cut short by restarting the worker */
 const RESTART_AFTER_MS = 250;
@@ -22,14 +24,19 @@ export class FilterWorkerClient {
   /** Workers started so far (read by the self-checks through __debugPixi) */
   started = 0;
 
-  /** Runs a registered filter. `pixels` is handed over to the worker (its buffer is transferred). */
-  run(id: string, pixels: Uint8Array<ArrayBuffer>, width: number, height: number, values: FilterValues, mask?: Uint8Array | null) {
+  /**
+   * Runs a registered filter. `pixels` is handed over to the worker (its buffer is transferred).
+   * With `histogram`, the reply also counts the layer's tones before filtering (the levels window).
+   * With `draft` (2 or more), a filter that allows it is worked out on a copy shrunk that many times.
+   */
+  run(id: string, pixels: Uint8Array<ArrayBuffer>, width: number, height: number, values: FilterValues, mask?: Uint8Array | null,
+    options?: { histogram?: boolean; draft?: number }) {
     this.clearIdle();
     const worker = this.ensure();
     const request = ++this.seq;
-    return new Promise<Uint8Array | null>((resolve, reject) => {
+    return new Promise<FilterResult | null>((resolve, reject) => {
       this.pending.set(request, { resolve, reject, postedAt: performance.now() });
-      worker.postMessage({ request, id, pixels, width, height, values, mask }, [pixels.buffer]);
+      worker.postMessage({ request, id, pixels, width, height, values, mask, histogram: options?.histogram, draft: options?.draft }, [pixels.buffer]);
     });
   }
 
@@ -66,7 +73,7 @@ export class FilterWorkerClient {
       const job = this.pending.get(data.request);
       if (!job) return;
       this.pending.delete(data.request);
-      if (data.output) job.resolve(data.output);
+      if (data.output) job.resolve({ output: data.output, histogram: data.histogram });
       else if (data.cancelled) job.resolve(null);
       else job.reject(new Error(data.error ?? 'Filter worker returned no result'));
       this.scheduleIdle();

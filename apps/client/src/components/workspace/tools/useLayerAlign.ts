@@ -3,15 +3,21 @@ import type { LayerMeta, LayerModel, ScopedUndoOp, TileCoord, VectorStroke } fro
 import type { LayerManager } from '../../../engine/LayerManager';
 import { findContentBounds } from '../../../utils/pixelBounds';
 import {
-  alignCrops, alignDestination, alignOffset, copyRgbaRect, rectMinus, selectionFrame,
-  type AlignBasis, type AlignRect, type AlignX, type AlignY,
+  alignCrops, alignDestination, alignManyOffsets, copyRgbaRect, distributeOffsets,
+  rectMinus, selectionFrame, unionRect,
+  type AlignBasis, type AlignOutcome, type AlignRect, type AlignTargetUnit,
+  type AlignX, type AlignY, type DistributeMode,
 } from '../../../utils/layerAlign';
 import { shiftVectorStroke } from '../../../services/offlineStore';
 import type { ToolContext } from './toolContext';
 import { commitInOrder, diffTilesAsync } from './asyncTiles';
 
-/** What one click did: moved, nothing to do, or it needs the user's OK first (part would leave the canvas) */
-export type AlignOutcome = 'moved' | 'aligned' | 'empty' | 'confirm' | 'noSelection' | 'failed';
+export {
+  alignCrops, alignDestination, alignManyOffsets, copyRgbaRect, distributeOffsets,
+  rectMinus, selectionFrame, unionRect,
+  type AlignBasis, type AlignOutcome, type AlignRect, type AlignTargetUnit,
+  type AlignX, type AlignY, type DistributeMode,
+};
 
 interface AlignDeps {
   layersRef: MutableRefObject<LayerModel[]>;
@@ -21,12 +27,26 @@ interface AlignDeps {
   updateLayerMeta: (layerId: string, meta: LayerMeta) => void;
 }
 
+type LayerContent = NonNullable<Awaited<ReturnType<typeof readContent>>>;
+
+type MovedLayerEdit = {
+  layer: LayerModel;
+  dx: number;
+  dy: number;
+  beforeTiles: ScopedUndoOp['beforeTiles'];
+  afterTiles: ScopedUndoOp['afterTiles'];
+};
+
+type BatchOp =
+  | { kind: 'align'; x: AlignX | null; y: AlignY | null }
+  | { kind: 'distribute'; mode: DistributeMode };
+
 type Work =
   | { kind: Exclude<AlignOutcome, 'moved'> }
-  | { kind: 'moved'; dx: number; dy: number; beforeTiles: ScopedUndoOp['beforeTiles']; afterTiles: ScopedUndoOp['afterTiles'] };
+  | { kind: 'moved'; isDistribute: boolean; edits: MovedLayerEdit[] };
 
-/** The layer's painted pixels: the tiles it occupies read in one rect, and the bounds of what has alpha */
-async function readContent(lm: LayerManager, layerId: string, canvasW: number, canvasH: number, ts: number) {
+/** The layer's painted pixels: the tiles it occupies read in one rect, and the bounds of what has alpha (also used for a filter's starting centre) */
+export async function readContent(lm: LayerManager, layerId: string, canvasW: number, canvasH: number, ts: number) {
   const occupied = lm.occupiedTiles(layerId);
   if (occupied && occupied.length === 0) return null;
   let box: AlignRect = { x: 0, y: 0, w: canvasW, h: canvasH };
@@ -49,59 +69,129 @@ async function readContent(lm: LayerManager, layerId: string, canvasW: number, c
 }
 
 /**
- * 對齊 L1: moves the whole active layer by whole pixels so its painted area lines up with the
- * canvas or the selection's frame (the selection is only the frame: nothing is cut out of the
- * layer). One undo step; a text layer moves its text box with it and a vector layer its strokes,
- * so redrawing them later puts them where they now are.
+ * 對齊・均分: moves layers or groups (with their masks) by whole pixels to align to objects, the
+ * canvas, or the selection's frame, or to distribute evenly along edges, centres, or equal gaps.
+ * Multi-layer moves share one undo groupId; text layers shift their box and vector layers shift
+ * their strokes so redrawing keeps them in sync.
  */
 export function useLayerAlign(ctx: ToolContext, deps: AlignDeps) {
-  const { canvas, layerManagerRef, tileEngineRef, selectionEngineRef, vectorEngineRef, scopedUndoRef, updateUndoRedoState, commitOp, userRef } = ctx;
+  const {
+    canvas, layerManagerRef, tileEngineRef, selectionEngineRef, vectorEngineRef,
+    scopedUndoRef, updateUndoRedoState, commitOp, commitTilePatch, userRef,
+  } = ctx;
 
-  const alignLayer = (layer: LayerModel, x: AlignX | null, y: AlignY | null, basis: AlignBasis, allowCrop = false): Promise<AlignOutcome> => {
+  const runBatch = (
+    targets: AlignTargetUnit<LayerModel>[],
+    op: BatchOp,
+    basis: AlignBasis,
+    allowCrop = false,
+  ): Promise<AlignOutcome> => {
     const lm = layerManagerRef.current;
     const te = tileEngineRef.current;
-    const item = lm?.getLayerItem(layer.id);
-    if (!lm || !te || !item || !canvas) return Promise.resolve('failed');
+    if (!lm || !te || !canvas || targets.length === 0) return Promise.resolve('failed');
     const W = canvas.width;
     const H = canvas.height;
-    let frame: AlignRect = { x: 0, y: 0, w: W, h: H };
-    if (basis === 'selection') {
-      const sel = selectionEngineRef.current;
-      const b = sel?.hasSelection() ? (sel.getMaskData()?.bounds ?? sel.getSelection()?.bounds) : null;
-      if (!b) return Promise.resolve('noSelection');
-      frame = selectionFrame(b);
+    const trackedLayers = targets.flatMap((t) => [...t.members, ...t.masks]);
+    const itemByLayer = new Map<string, ReturnType<LayerManager['getLayerItem']>>();
+    for (const layer of trackedLayers) {
+      const item = lm.getLayerItem(layer.id);
+      if (!item) return Promise.resolve('failed');
+      itemByLayer.set(layer.id, item);
     }
-    const layerId = layer.id;
-    const stillThere = () => layerManagerRef.current === lm && lm.getLayerItem(layerId) === item;
+    const stillThere = () =>
+      layerManagerRef.current === lm &&
+      tileEngineRef.current === te &&
+      trackedLayers.every((l) => lm.getLayerItem(l.id) === itemByLayer.get(l.id));
+    const isDistribute = op.kind === 'distribute';
 
     const work = async (): Promise<Work> => {
       try {
         if (!stillThere()) return { kind: 'failed' };
-        const content = await readContent(lm, layerId, W, H, te.tileSize);
+        const uniqueLayers = [...new Map(trackedLayers.map((l) => [l.id, l])).values()];
+        const contents = await Promise.all(uniqueLayers.map((l) => readContent(lm, l.id, W, H, te.tileSize)));
         if (!stillThere()) return { kind: 'failed' };
-        if (!content) return { kind: 'empty' };
-        const r = content.rect;
-        const { dx, dy } = alignOffset(r, frame, x, y);
-        if (!dx && !dy) return { kind: 'aligned' };
-        if (!allowCrop && alignCrops(r, dx, dy, W, H)) return { kind: 'confirm' };
-        const dest = alignDestination(r, dx, dy, W, H);
-        const destPx = dest && copyRgbaRect(content.px, content.box.w, {
-          x: r.x - content.box.x + dest.sx, y: r.y - content.box.y + dest.sy, w: dest.w, h: dest.h,
-        });
-        const coords = new Map<string, TileCoord>();
-        for (const rect of dest ? [r, dest] : [r]) {
-          for (const c of te.getDirtyTilesForBounds(rect.x, rect.y, rect.x + rect.w - 1, rect.y + rect.h - 1)) coords.set(`${c.col}_${c.row}`, c);
+        const contentByLayer = new Map<string, LayerContent | null>();
+        uniqueLayers.forEach((l, idx) => contentByLayer.set(l.id, contents[idx]));
+
+        const nonEmpty: Array<{ target: AlignTargetUnit<LayerModel>; rect: AlignRect }> = [];
+        for (const target of targets) {
+          const memberRects: AlignRect[] = [];
+          for (const member of target.members) {
+            const c = contentByLayer.get(member.id);
+            if (c) memberRects.push(c.rect);
+          }
+          // Masks move by their target's delta without altering the target's visual bounds
+          const rect = unionRect(memberRects);
+          if (rect) nonEmpty.push({ target, rect });
         }
-        const diff = diffTilesAsync(lm, layerId, [...coords.values()], () => {
-          // Clear where the pixels were (except where they land), then write them at their new place
-          for (const s of rectMinus(r, dest)) lm.writeRegion(layerId, s.x, s.y, s.w, s.h, new Uint8Array(s.w * s.h * 4));
-          if (dest && destPx) lm.writeRegion(layerId, dest.x, dest.y, dest.w, dest.h, destPx);
-        }, 'before');
-        lm.syncPingPong(layerId); // queued after the reads: the next edit's baseline
-        const tiles = await diff;
-        return { kind: 'moved', dx, dy, ...tiles };
+
+        if (nonEmpty.length === 0) return { kind: 'empty' };
+        if (isDistribute) {
+          if (nonEmpty.length < 2) return { kind: 'needMulti' };
+          if (basis === 'objects' && nonEmpty.length < 3) return { kind: 'aligned' };
+        } else if (basis === 'objects' && nonEmpty.length < 2) {
+          return { kind: 'needMulti' };
+        }
+
+        let frame: AlignRect;
+        if (basis === 'selection') {
+          const sel = selectionEngineRef.current;
+          const b = sel?.hasSelection() ? (sel.getMaskData()?.bounds ?? sel.getSelection()?.bounds) : null;
+          if (!b) return { kind: 'noSelection' };
+          frame = selectionFrame(b);
+        } else if (basis === 'canvas') {
+          frame = { x: 0, y: 0, w: W, h: H };
+        } else {
+          frame = unionRect(nonEmpty.map((t) => t.rect))!;
+        }
+
+        const rects = nonEmpty.map((t) => t.rect);
+        const offsets = op.kind === 'distribute'
+          ? distributeOffsets(rects, op.mode, basis, frame)
+          : alignManyOffsets(rects, frame, op.x, op.y);
+
+        const movable: Array<{ layer: LayerModel; content: LayerContent; dx: number; dy: number }> = [];
+        nonEmpty.forEach(({ target }, index) => {
+          const { dx, dy } = offsets[index];
+          if (!dx && !dy) return;
+          for (const layer of [...target.members, ...target.masks]) {
+            const content = contentByLayer.get(layer.id);
+            if (content) movable.push({ layer, content, dx, dy });
+          }
+        });
+
+        if (movable.length === 0) return { kind: 'aligned' };
+        if (!allowCrop && movable.some((m) => alignCrops(m.content.rect, m.dx, m.dy, W, H))) {
+          return { kind: 'confirm' };
+        }
+
+        const edits = await Promise.all(
+          movable.map(async ({ layer, content, dx, dy }) => {
+            const layerId = layer.id;
+            const r = content.rect;
+            const dest = alignDestination(r, dx, dy, W, H);
+            const destPx = dest && copyRgbaRect(content.px, content.box.w, {
+              x: r.x - content.box.x + dest.sx, y: r.y - content.box.y + dest.sy, w: dest.w, h: dest.h,
+            });
+            const coords = new Map<string, TileCoord>();
+            for (const rect of dest ? [r, dest] : [r]) {
+              for (const c of te.getDirtyTilesForBounds(rect.x, rect.y, rect.x + rect.w - 1, rect.y + rect.h - 1)) {
+                coords.set(`${c.col}_${c.row}`, c);
+              }
+            }
+            const diff = diffTilesAsync(lm, layerId, [...coords.values()], () => {
+              // Clear where the pixels were (except where they land), then write them at their new place
+              for (const s of rectMinus(r, dest)) lm.writeRegion(layerId, s.x, s.y, s.w, s.h, new Uint8Array(s.w * s.h * 4));
+              if (dest && destPx) lm.writeRegion(layerId, dest.x, dest.y, dest.w, dest.h, destPx);
+            }, 'before');
+            lm.syncPingPong(layerId); // queued after the reads: the next edit's baseline
+            const tiles = await diff;
+            return { layer, dx, dy, ...tiles };
+          }),
+        );
+        return { kind: 'moved', isDistribute, edits };
       } catch (err) {
-        console.warn('[align] failed:', err);
+        console.warn(`[${isDistribute ? 'distribute' : 'align'}] failed:`, err);
         return { kind: 'failed' };
       }
     };
@@ -113,51 +203,77 @@ export function useLayerAlign(ctx: ToolContext, deps: AlignDeps) {
           return;
         }
         try {
-          const { dx, dy, beforeTiles, afterTiles } = res;
-          const live = deps.layersRef.current.find((l) => l.id === layerId) ?? layer;
-          const extra: Partial<ScopedUndoOp> = {};
-          if (live.layerType === 'text' && live.meta?.text) {
-            const metaAfter: LayerMeta = { ...live.meta, text: { ...live.meta.text, x: live.meta.text.x + dx, y: live.meta.text.y + dy } };
-            extra.metaBefore = live.meta;
-            extra.metaAfter = metaAfter;
-            deps.updateLayerMeta(layerId, metaAfter);
-          }
-          let vector: { vectorRemovedIds: string[]; vectorAdded: VectorStroke[] } | null = null;
-          const strokes = live.layerType === 'vector' ? vectorEngineRef.current?.getStrokes(layerId) ?? [] : [];
-          if (strokes.length) {
-            const before = strokes.map((s) => ({ ...s }));
-            const after = before.map((s) => shiftVectorStroke(s, dx, dy));
-            extra.vectorRemovedStrokes = before;
-            extra.vectorAddedStrokes = after;
-            // Same ids: removals go first wherever the list is replayed, so each stroke is replaced in place
-            vector = { vectorRemovedIds: before.map((s) => s.id), vectorAdded: after };
-          }
-          scopedUndoRef.current.push({
-            opId: `op_align_${Date.now()}`,
-            userId: userRef.current?.id || 'guest',
-            layerId,
-            opType: 'STROKE',
-            beforeTiles,
-            afterTiles,
-            timestamp: Date.now(),
-            desc: '對齊',
-            ...extra,
+          const now = Date.now();
+          const userId = userRef.current?.id || 'guest';
+          const groupId = res.edits.length > 1
+            ? `grp_${res.isDistribute ? 'dist' : 'align'}_${now}_${Math.random().toString(36).slice(2, 6)}`
+            : undefined;
+          const desc = res.isDistribute ? '均分' : '對齊';
+          res.edits.forEach((edit, i) => {
+            const { layer, dx, dy, beforeTiles, afterTiles } = edit;
+            const layerId = layer.id;
+            const live = deps.layersRef.current.find((l) => l.id === layerId) ?? layer;
+            const extra: Partial<ScopedUndoOp> = {};
+            if (live.layerType === 'text' && live.meta?.text) {
+              const metaAfter: LayerMeta = { ...live.meta, text: { ...live.meta.text, x: live.meta.text.x + dx, y: live.meta.text.y + dy } };
+              extra.metaBefore = live.meta;
+              extra.metaAfter = metaAfter;
+              deps.updateLayerMeta(layerId, metaAfter);
+            }
+            let vector: { vectorRemovedIds: string[]; vectorAdded: VectorStroke[] } | null = null;
+            const strokes = live.layerType === 'vector' ? vectorEngineRef.current?.getStrokes(layerId) ?? [] : [];
+            if (strokes.length) {
+              const before = strokes.map((s) => ({ ...s }));
+              const after = before.map((s) => shiftVectorStroke(s, dx, dy));
+              extra.vectorRemovedStrokes = before;
+              extra.vectorAddedStrokes = after;
+              // Same ids: removals go first wherever the list is replayed, so each stroke is replaced in place
+              vector = { vectorRemovedIds: before.map((s) => s.id), vectorAdded: after };
+            }
+            scopedUndoRef.current.push({
+              opId: `op_${res.isDistribute ? 'dist' : 'align'}_${now}_${i}_${Math.random().toString(36).slice(2, 6)}`,
+              userId,
+              layerId,
+              opType: 'STROKE',
+              ...(groupId ? { groupId } : {}),
+              beforeTiles,
+              afterTiles,
+              timestamp: now,
+              desc,
+              ...extra,
+            });
+            // Commit immediately after pushing so peekLatestForLayer(layerId) binds baseSeq/seq cleanly
+            if (vector) {
+              deps.applyVectorPayload(layerId, vector);
+              commitOp(layerId, 'VECTOR_EDIT', { tiles: afterTiles, ...vector, actionDesc: desc }, true);
+            } else {
+              commitTilePatch(layerId, afterTiles, false, desc, true);
+            }
           });
           updateUndoRedoState();
-          if (vector) {
-            deps.applyVectorPayload(layerId, vector);
-            commitOp(layerId, 'VECTOR_EDIT', { tiles: afterTiles, ...vector, actionDesc: '對齊' }, true);
-          } else {
-            commitOp(layerId, 'STROKE', { tool: 'align', tiles: afterTiles }, true);
-          }
           resolve('moved');
         } catch (err) {
-          console.warn('[align] commit failed:', err);
+          console.warn(`[${res.isDistribute ? 'distribute' : 'align'}] commit failed:`, err);
           resolve('failed');
         }
       });
     });
   };
 
-  return { alignLayer };
+  const alignTargets = (
+    targets: AlignTargetUnit<LayerModel>[],
+    x: AlignX | null,
+    y: AlignY | null,
+    basis: AlignBasis,
+    allowCrop = false,
+  ): Promise<AlignOutcome> => runBatch(targets, { kind: 'align', x, y }, basis, allowCrop);
+
+  const distributeTargets = (
+    targets: AlignTargetUnit<LayerModel>[],
+    mode: DistributeMode,
+    basis: AlignBasis,
+    allowCrop = false,
+  ): Promise<AlignOutcome> => runBatch(targets, { kind: 'distribute', mode }, basis, allowCrop);
+
+  return { alignTargets, distributeTargets };
 }

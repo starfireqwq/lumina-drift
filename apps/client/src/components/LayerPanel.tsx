@@ -174,7 +174,9 @@ interface LayerPanelProps {
   onLoadLayerSelection?: (layerId: string) => void;
   onMergeDown?: (layerId: string) => void;
   /** Selects the layer and opens the align window (對齊) */
-  onOpenAlign?: (layerId: string) => void;
+  onOpenAlign?: (layerId?: string) => void;
+  selectedLayerIds?: Set<string>;
+  onSelectedLayerIdsChange?: (next: Set<string> | ((prev: Set<string>) => Set<string>)) => void;
   /** Puts these layers into a new group (inside their common group) */
   onGroupLayers?: (layerIds: string[]) => void;
   /** 複製圖層 / 貼上圖層 (the copy works across canvases in this tab) */
@@ -412,6 +414,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   onLoadLayerSelection,
   onMergeDown,
   onOpenAlign,
+  selectedLayerIds: controlledSelectedLayerIds,
+  onSelectedLayerIdsChange,
   onGroupLayers,
   onCopyLayers,
   onPasteLayers,
@@ -491,7 +495,9 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
 
   // Mobile Batch Selection state
   const [isBatchMode, setIsBatchMode] = useState<boolean>(false);
-  const [selectedLayerIds, setSelectedLayerIds] = useState<Set<string>>(new Set());
+  const [internalSelectedLayerIds, setInternalSelectedLayerIds] = useState<Set<string>>(new Set());
+  const selectedLayerIds = controlledSelectedLayerIds ?? internalSelectedLayerIds;
+  const setSelectedLayerIds = onSelectedLayerIdsChange ?? setInternalSelectedLayerIds;
   const [batchGroupMenuOpen, setBatchGroupMenuOpen] = useState<boolean>(false);
   const batchGroupPos = useAnchoredPopover(batchGroupMenuOpen, batchGroupBtnRef, batchGroupPopRef, { align: 'right', gap: 4, margin: 8, fallbackWidth: 176 });
 
@@ -1145,12 +1151,18 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
 
       {/* Batch mode bar */}
       {(isBatchMode || selectedLayerIds.size > 0) && (
-        <div className="flex shrink-0 items-center gap-1 border-b border-atelier-border bg-amber-950/30 px-2 py-1">
+        <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-atelier-border bg-amber-950/30 px-2 py-1">
           <button type="button" onClick={handleSelectAll} className="rounded border border-neutral-700 px-2 py-0.5 text-[11px] text-neutral-200 hover:bg-neutral-800">
             {selectedLayerIds.size === layers.length ? t.layers.deselectAll : t.layers.selectAll}
           </button>
           <span className="text-[11px] font-semibold text-amber-300">{t.layers.selectedCount.replace('{count}', String(selectedLayerIds.size))}</span>
-          <div className="relative ml-auto flex items-center gap-1">
+          <div className="relative ml-auto flex flex-wrap items-center gap-1">
+            {onOpenAlign && (
+              <button type="button" disabled={selectedLayerIds.size === 0} onClick={() => onOpenAlign()}
+                className="rounded border border-indigo-500/60 bg-indigo-500/20 px-2 py-0.5 text-[11px] font-medium text-indigo-200 disabled:opacity-40">
+                {t.align.title}
+              </button>
+            )}
             <button type="button" disabled={selectedLayerIds.size === 0} onClick={handleBatchGroupSelected}
               className="rounded bg-amber-600 px-2 py-0.5 text-[11px] font-semibold text-white disabled:opacity-40">{t.layers.batchGroup}</button>
             {allGroups.length > 0 && (
@@ -1487,7 +1499,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                 onClick={close(() => { if (confirm(t.layers.rasterizeTextConfirm)) onUpdateLayerProps?.(layer.id, { layerType: 'raster' }); })} />
             )}
             {onOpenAlign && layer.layerType !== 'mask' && (
-              <MenuItem label={t.align.menuItem} disabledReason={ids.length > 1 ? t.align.oneAtATime : null} onClick={close(() => onOpenAlign(layer.id))} />
+              <MenuItem label={t.align.menuItem} onClick={close(() => onOpenAlign(layer.id))} />
             )}
             <MenuItem label={t.layers.renameLayer} hint="F2" disabledReason={canManage(layer) ? null : t.layers.notYourLayer} onClick={close(() => handleStartRename(layer))} />
             <div className="my-1 h-px bg-neutral-700/70" />

@@ -90,8 +90,11 @@ import { useFillTools } from './workspace/tools/useFillTools';
 import { useVectorTools } from './workspace/tools/useVectorTools';
 import { useBrushTool } from './workspace/tools/useBrushTool';
 import { useTransformTool } from './workspace/tools/useTransformTool';
-import { useLayerAlign } from './workspace/tools/useLayerAlign';
-import { alignBlocker, type AlignBasis, type AlignX, type AlignY } from '../utils/layerAlign';
+import { readContent, useLayerAlign } from './workspace/tools/useLayerAlign';
+import {
+  alignTargetsBlocker, resolveAlignTargets, selectionFrame,
+  type AlignBasis, type AlignX, type AlignY, type DistributeMode,
+} from '../utils/layerAlign';
 import { useCanvasPointer } from './workspace/tools/useCanvasPointer';
 import { findContentBounds } from '../utils/pixelBounds';
 import { VectorEditResult } from '../engine/VectorEngine';
@@ -108,6 +111,7 @@ import {
 import type { TransformBox } from './TransformOverlay';
 import { RulerManager } from '../engine/RulerManager';
 import { RulerOverlay } from './RulerOverlay';
+import { FilterPointOverlay } from './FilterPointOverlay';
 import { TouchRadialMenu } from './TouchRadialMenu';
 import type { DistortMode } from '../utils/distortModes';
 import { LiquifyEngine } from '../engine/LiquifyEngine';
@@ -138,7 +142,8 @@ import {
 } from '@atelier/shared';
 import { VectorOverlay } from './VectorOverlay';
 import { VectorEngine } from '../engine/VectorEngine';
-import { filterLabel, getFilter, type FilterJob } from '../utils/filterRegistry';
+import { filterDraftFactor, filterFitsLayer, filterLabel, filterPointParam, getFilter, type FilterJob } from '../utils/filterRegistry';
+import { filterPoint } from '../utils/filterPoint';
 import { FilterWorkerClient } from '../engine/filterWorkerClient';
 import { AlertCircle, ImagePlus, Keyboard, Layers, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
 import { type DroppedImages, type ImageDropTarget, ImageImportError, imageEntries, isImageDrag, loadImageEntry, readDroppedImages } from '../utils/imageImport';
@@ -213,6 +218,12 @@ type DeletedLayers = { deleted: string[]; lifted: string[] };
 let layerClipboard: LayerClipboard | null = null;
 /** While an animation plays, the cels of this many upcoming frames are decoded ahead (in workers) */
 const ANIM_PREFETCH_FRAMES = 6;
+/** A filter preview still working after this long shows the filter window's light sweep */
+const FILTER_REFINING_DELAY_MS = 200;
+/** After a draft preview shows, the full one starts if the settings stay put this long */
+const FILTER_DRAFT_SETTLE_MS = 100;
+/** Touch screens (phones, tablets) are slower: their draft previews start on smaller layers */
+const coarsePointer = () => typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
 /**
  * Tools that draw, erase, fill, warp or pick on the active layer where the pointer is. With one of
  * them on a layer moved by keyframes, that layer is shown where it is drawn (keyframes paused).
@@ -429,6 +440,25 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const brushPropsRef = useRef<BrushProperties | null>(null);
   const layersRef = useRef(layers);
   layersRef.current = layers;
+  const [selectedLayerIds, setSelectedLayerIds] = useState<Set<string>>(new Set());
+  const selectedLayerIdsRef = useRef(selectedLayerIds);
+  selectedLayerIdsRef.current = selectedLayerIds;
+  useEffect(() => {
+    setSelectedLayerIds((prev) => (prev.size === 0 ? prev : new Set()));
+  }, [canvas?.id]);
+  useEffect(() => {
+    setSelectedLayerIds((prev) => {
+      if (prev.size === 0) return prev;
+      const valid = new Set(layers.map((l) => l.id));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (valid.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [layers]);
 
   // Personal eye: this viewer's own show/hide overrides, kept on this device per canvas, never synced
   const localVisKey = canvas ? `atelier_local_vis_${canvas.id}` : '';
@@ -582,12 +612,21 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     historyOp?: ScopedUndoOp;
   };
   const recentLocalCommitsRef = useRef<LocalTileCommit[]>([]);
+  const localClientOpsRef = useRef<Set<string>>(new Set());
   const appliedClientOpsRef = useRef<Set<string>>(new Set());
   const appliedVectorOpsRef = useRef<Set<string>>(new Set());
   const appliedFootprintOpsRef = useRef<Set<string>>(new Set());
   const speculativeConcurrencyOpsRef = useRef<Set<string>>(new Set());
+  const rememberOpId = (set: Set<string>, id: string) => {
+    set.add(id);
+    if (set.size > 500) {
+      const first = set.values().next().value;
+      if (first !== undefined) set.delete(first);
+    }
+  };
   useEffect(() => {
     recentLocalCommitsRef.current = [];
+    localClientOpsRef.current.clear();
     appliedClientOpsRef.current.clear();
     appliedVectorOpsRef.current.clear();
     appliedFootprintOpsRef.current.clear();
@@ -644,6 +683,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const clientOpId = typeof pObj?.clientOpId === 'string'
       ? pObj.clientOpId
       : `cop_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    if (!OfflineSessionStore.isOfflineCanvas(canvas?.id)) rememberOpId(localClientOpsRef.current, clientOpId);
     const baseSeq = typeof pObj?.baseSeq === 'number' ? pObj.baseSeq : getLatestSeq();
     const tiles = Array.isArray(pObj?.tiles) ? (pObj!.tiles as TileData[]) : null;
     if (tiles?.length) {
@@ -673,6 +713,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (!alreadySynced) layerManagerRef.current?.syncPingPong(layerId);
     refreshLayerThumbnail(layerId);
     const clientOpId = `cop_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    if (!OfflineSessionStore.isOfflineCanvas(canvas?.id)) rememberOpId(localClientOpsRef.current, clientOpId);
     const baseSeq = getLatestSeq();
     if (tiles?.length) {
       const latestUndo = !isUndo && actionDesc !== 'REDO' ? scopedUndoRef.current.peekLatestForLayer(layerId) : undefined;
@@ -711,7 +752,18 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const filterWorkerRef = useRef<FilterWorkerClient | null>(null);
   const filterRequestRef = useRef(0);
   const [filterBusy, setFilterBusy] = useState(false);
+  /** A preview is still being worked out (a draft is shown, or it is slow): the filter window shows a light sweep */
+  const [filterRefining, setFilterRefining] = useState(false);
+  const filterRefineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** The layer's tone counts for the levels window (counted by the filter worker on the first preview) */
+  const [filterHistogram, setFilterHistogram] = useState<Uint32Array | null>(null);
+  const filterHistogramRef = useRef<Uint32Array | null>(null);
   const filterPreviewRef = useRef<{ item: NonNullable<ReturnType<LayerManager['getLayerItem']>>; texture: RenderTexture } | null>(null);
+  /**
+   * The layer's pixels as read for the last preview, kept while its version shows nothing has
+   * changed them since: the next preview skips reading the whole layer back from the GPU again.
+   */
+  const filterSourceRef = useRef<{ item: NonNullable<ReturnType<LayerManager['getLayerItem']>>; version: number; width: number; height: number; pixels: Uint8Array } | null>(null);
 
   // Tools & Properties State
   const [currentTool, setCurrentTool] = useState<ToolType>('brush');
@@ -961,8 +1013,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     isTransformActive, transformPreviewUrl, transformBox, setTransformBox, distortMode, setDistortMode, isMeshWarpActive,
     transformLayerIdRef, transformSourceCanvasRef, meshWarpInitialBoundsRef, startTransformMode, startFloatingPaste, applyTransform, cancelTransform, applyMeshWarp,
   } = transform;
-  // 對齊 L1: the active layer lines up with the canvas or the selection's frame (whole-pixel move, one undo step)
-  const { alignLayer } = useLayerAlign(toolCtx, {
+  // 對齊・均分: layers/groups (with their masks) align to objects/canvas/selection or distribute evenly
+  const { alignTargets, distributeTargets } = useLayerAlign(toolCtx, {
     layersRef,
     applyVectorPayload,
     updateLayerMeta: (layerId, meta) => { void onUpdateLayerProps?.(layerId, { meta }); },
@@ -1838,6 +1890,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       destroyed = true;
       timeline.pause();
       cancelFilterWork();
+      showFilterRefining(false);
       clearFilterPreview();
       setIsEngineReady(false);
       lastReplayedCanvasIdRef.current = null;
@@ -2191,6 +2244,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
 
   const clearFilterPreview = () => {
+    filterSourceRef.current = null;
     const preview = filterPreviewRef.current;
     if (!preview) return;
     if (!preview.item.sprite.destroyed) preview.item.sprite.texture = preview.item.renderTexture;
@@ -2204,10 +2258,35 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     filterWorkerRef.current?.cancel();
   };
 
+  /**
+   * Turns the filter window's light sweep on (after a short wait, so a quick preview never flashes
+   * it; already on, it stays on into the next preview) or off.
+   */
+  const showFilterRefining = (on: boolean) => {
+    if (filterRefineTimerRef.current) clearTimeout(filterRefineTimerRef.current);
+    filterRefineTimerRef.current = null;
+    if (!on) {
+      setFilterRefining(false);
+      return;
+    }
+    filterRefineTimerRef.current = setTimeout(() => {
+      filterRefineTimerRef.current = null;
+      setFilterRefining(true);
+    }, FILTER_REFINING_DELAY_MS);
+  };
+
+  const forgetFilterHistogram = () => {
+    filterHistogramRef.current = null;
+    setFilterHistogram(null);
+  };
+
   const closeFilters = () => {
     cancelFilterWork();
+    showFilterRefining(false);
     setFilterBusy(false);
     clearFilterPreview();
+    filterPoint.clear();
+    forgetFilterHistogram();
     setFilterMenuOpen(false);
     setIsColorCurvesOpen(false);
     setIsGradientMapOpen(false);
@@ -2222,19 +2301,52 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       else shortcutActionsRef.current.transform('mesh');
       return;
     }
+    const layer = activeLayerRef.current;
+    if (def && !filterFitsLayer(def, layer?.layerType)) {
+      setPermissionWarning(t.filters.lineartNotOnMask);
+      setTimeout(() => setPermissionWarning(null), 3000);
+      return;
+    }
     cancelFilterWork();
+    showFilterRefining(false);
     setFilterBusy(false);
     clearFilterPreview();
+    forgetFilterHistogram();
+    if (filterPointParam(def) && layer) startFilterPoint(layer.id);
+    else filterPoint.clear();
     setLayerFilterId(def && !def.dialog ? def.id : null);
     setFilterMenuOpen(!def?.dialog);
     setIsColorCurvesOpen(def?.dialog === 'curves');
     setIsGradientMapOpen(def?.dialog === 'gradient');
   };
 
+  /** Text and vector layers are redrawn from their text or strokes, which would wipe a filter out */
+  const isRedrawnLayer = (layer: LayerModel | null | undefined) => layer?.layerType === 'text' || layer?.layerType === 'vector';
+
   const getFilterLayer = () => {
     const layer = activeLayerRef.current;
-    if (!layer || !canEditPixels(layer) || !canvas || !isEngineReady || transformLayerIdRef.current) return null;
+    if (!layer || isRedrawnLayer(layer) || !canEditPixels(layer) || !canvas || !isEngineReady || transformLayerIdRef.current) return null;
     return layerManagerRef.current?.getLayerItem(layer.id) ?? null;
+  };
+
+  /**
+   * A filter's centre starts on the selection's middle, else on the middle of what the layer has
+   * painted (read in the background; the canvas middle until it arrives, unless moved by then).
+   */
+  const startFilterPoint = (layerId: string) => {
+    if (!canvas) return;
+    const { width, height } = canvas;
+    const sel = selectionEngineRef.current;
+    const picked = sel?.hasSelection() ? (sel.getMaskData()?.bounds ?? sel.getSelection()?.bounds) : null;
+    const frame = picked ? selectionFrame(picked) : null;
+    const middle = (rect: { x: number; y: number; w: number; h: number }) => ({ x: Math.round(rect.x + rect.w / 2), y: Math.round(rect.y + rect.h / 2) });
+    const session = filterPoint.start(middle(frame ?? { x: 0, y: 0, w: width, h: height }), { width, height });
+    const lm = layerManagerRef.current;
+    const te = tileEngineRef.current;
+    if (frame || !lm || !te) return;
+    readContent(lm, layerId, width, height, te.tileSize)
+      .then((content) => { if (content) filterPoint.rehome(session, middle(content.rect)); })
+      .catch(() => { /* the canvas middle stays */ });
   };
 
   const openFilterRef = useRef<(id?: 'curves' | 'gradient') => void>(() => {});
@@ -2246,7 +2358,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         setFilterMenuOpen(true);
       }
     } else {
-      setPermissionWarning(t.filters.needEditableLayer);
+      setPermissionWarning(isRedrawnLayer(activeLayerRef.current) ? t.filters.needRaster : t.filters.needEditableLayer);
       setTimeout(() => setPermissionWarning(null), 3000);
     }
   };
@@ -2254,32 +2366,77 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   const runLayerFilter = async (filter: FilterJob | null, previewOnly: boolean): Promise<boolean> => {
     cancelFilterWork();
-    if (!filter) { clearFilterPreview(); return true; }
+    if (!filter) { clearFilterPreview(); showFilterRefining(false); return true; }
     const request = filterRequestRef.current;
     const item = getFilterLayer();
     const engine = tileEngineRef.current;
     if (!item || !engine || !canvas) return false;
-    if (!previewOnly) setFilterBusy(true);
+    if (!previewOnly) {
+      setFilterBusy(true);
+      showFilterRefining(false);
+    } else {
+      showFilterRefining(true);
+    }
 
     try {
       const lm = layerManagerRef.current;
       if (!lm) return false;
       const { width, height } = canvas;
       const mask = selectionEngineRef.current?.getMaskArray();
-      // Read without stalling the page (and without making a sparse layer one big texture)
-      const [source] = await lm.readAsync(item.model.id, [{ x: 0, y: 0, w: width, h: height }]);
+      // Read without stalling the page (and without making a sparse layer one big texture). A preview
+      // reuses the last preview's read while the layer's version shows nothing has changed it.
+      const cached = filterSourceRef.current;
+      let sourceVersion: number | null = item.version;
+      const source = previewOnly && cached && cached.item === item && cached.version === item.version && cached.width === width && cached.height === height
+        ? cached.pixels
+        : (await lm.readAsync(item.model.id, [{ x: 0, y: 0, w: width, h: height }]))[0];
       if (request !== filterRequestRef.current) return false;
       const client = filterWorkerRef.current ??= new FilterWorkerClient();
-      const pixels = await client.run(filter.id, new Uint8Array(source), width, height, filter.values, mask);
-      if (!pixels || request !== filterRequestRef.current || tileEngineRef.current !== engine || activeLayerRef.current?.id !== item.model.id || getFilterLayer() !== item) return false;
-      if (previewOnly) {
+      const def = getFilter(filter.id);
+      let wantHistogram = previewOnly && Boolean(def?.histogram) && !filterHistogramRef.current;
+      // Line colour and gap filling can use the colour being painted with
+      const values = { ...filter.values, currentColor: brushProps.color };
+      const stale = () => request !== filterRequestRef.current || tileEngineRef.current !== engine ||
+        activeLayerRef.current?.id !== item.model.id || getFilterLayer() !== item;
+      const compute = async (draft: number) => {
+        const result = await client.run(filter.id, new Uint8Array(source), width, height, values, mask, { histogram: wantHistogram, draft });
+        if (result?.histogram && request === filterRequestRef.current) {
+          wantHistogram = false;
+          filterHistogramRef.current = result.histogram;
+          setFilterHistogram(result.histogram);
+        }
+        return result?.output ?? null;
+      };
+      const showPreview = (filtered: Uint8Array) => {
         if (filterPreviewRef.current?.item !== item) clearFilterPreview();
         const texture = filterPreviewRef.current?.texture ?? RenderTexture.create({ width, height, resolution: 1 });
         filterPreviewRef.current = { item, texture };
-        engine.writeRegion(texture, 0, 0, width, height, pixels);
+        engine.writeRegion(texture, 0, 0, width, height, filtered);
+        // Unchanged since the read: the read stays good for the next preview (taking the texture
+        // below counts as a possible change, so the version after it is the one kept)
+        const unchanged = sourceVersion !== null && item.version === sourceVersion;
         void item.renderTexture; // resident while previewing: its one sprite shows the preview texture
         item.sprite.texture = texture;
+        // Once something else changed the layer, the read is never kept again
+        sourceVersion = unchanged ? item.version : null;
+        filterSourceRef.current = unchanged ? { item, version: item.version, width, height, pixels: source } : null;
         requestRenderRef.current();
+      };
+
+      // A slow filter on a big layer: a draft from a shrunk copy first, then (unless the settings
+      // change again meanwhile) the full preview, which also is what Apply computes
+      const draft = previewOnly ? filterDraftFactor(def, width, height, coarsePointer()) : 0;
+      if (draft) {
+        const quick = await compute(draft);
+        if (!quick || stale()) return false;
+        showPreview(quick);
+        await new Promise((resolve) => setTimeout(resolve, FILTER_DRAFT_SETTLE_MS));
+        if (stale()) return false;
+      }
+      const pixels = await compute(0);
+      if (!pixels || stale()) return false;
+      if (previewOnly) {
+        showPreview(pixels);
         return true;
       }
 
@@ -2310,7 +2467,6 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         return false;
       }
       lm.writeRegion(item.model.id, 0, 0, width, height, pixels);
-      const def = getFilter(filter.id);
       const label = def ? filterLabel(def, t) : filter.id;
       scopedUndoRef.current.push({
         opId: `op_filter_${Date.now()}_${Math.random().toString(36).slice(2)}`,
@@ -2332,7 +2488,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       setPermissionWarning(t.filters.failed);
       return false;
     } finally {
-      if (request === filterRequestRef.current && !previewOnly) setFilterBusy(false);
+      if (request === filterRequestRef.current) {
+        if (previewOnly) showFilterRefining(false);
+        else setFilterBusy(false);
+      }
     }
   };
 
@@ -2782,161 +2941,171 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     });
   const undoNow = async () => {
     const effectiveUserId = userRef.current?.id || user?.id || 'guest';
-    const op = scopedUndoRef.current.undo(effectiveUserId, (layerId, candidate) => {
+    const ops = scopedUndoRef.current.undoGroup(effectiveUserId, (layerId, candidate) => {
       const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model;
       return Boolean(target && (target.ownerId === effectiveUserId || canEditPixels(target)));
     });
 
-    if (op && op.selectionBefore !== undefined) {
-      selectionEngineRef.current?.restoreSnapshot(op.selectionBefore);
-      selection.refreshSelection();
-    }
-
-    // Undo of a new layer (text / pasted / mask too): the layer goes away (redo makes it again).
-    // A new group that layers were put into since: only the group goes, its layers stay
-    if (op?.layerCreated) {
-      const live = layersRef.current.find((layer) => layer.id === op.layerId);
-      const deleted = await onDeleteLayer?.(op.layerId, { keepContents: true });
-      if (deleted === false) scopedUndoRef.current.rollbackStep(op, true);
-      else {
-        if (live) op.layerCreated.model = live;
-        undoneLayerIdsRef.current.add(op.layerId);
+    let totalConflicts = 0;
+    const undoSingleOp = async (op: ScopedUndoOp) => {
+      if (op.selectionBefore !== undefined) {
+        selectionEngineRef.current?.restoreSnapshot(op.selectionBefore);
+        selection.refreshSelection();
       }
-      updateUndoRedoState();
-      return;
-    }
 
-    // Undo of a deleted layer: bring it back with its pixels, properties, mask and vector strokes
-    // (a group with everything that was inside it)
-    if (op?.opType === 'LAYER_DELETE' && op.layerRemoved) {
-      const created = await restoreRemovedLayer(op.layerRemoved);
-      if (created) onSelectLayer?.(created.id);
-      updateUndoRedoState();
-      return;
-    }
+      // Undo of a new layer (text / pasted / mask too): the layer goes away (redo makes it again).
+      // A new group that layers were put into since: only the group goes, its layers stay
+      if (op.layerCreated) {
+        const live = layersRef.current.find((layer) => layer.id === op.layerId);
+        const deleted = await onDeleteLayer?.(op.layerId, { keepContents: true });
+        if (deleted === false) scopedUndoRef.current.rollbackGroup([op], true);
+        else {
+          if (live) op.layerCreated.model = live;
+          undoneLayerIdsRef.current.add(op.layerId);
+        }
+        return;
+      }
 
-    const hasPixelOrMeta = Boolean(
-      op &&
-      (op.beforeTiles.length > 0 ||
+      // Undo of a deleted layer: bring it back with its pixels, properties, mask and vector strokes
+      // (a group with everything that was inside it)
+      if (op.opType === 'LAYER_DELETE' && op.layerRemoved) {
+        const created = await restoreRemovedLayer(op.layerRemoved);
+        if (created) onSelectLayer?.(created.id);
+        return;
+      }
+
+      const hasPixelOrMeta = Boolean(
+        op.beforeTiles.length > 0 ||
         op.afterTiles.length > 0 ||
         op.layerRemoved ||
         op.vectorStroke ||
         op.vectorRemovedStrokes ||
         op.vectorAddedStrokes ||
-        op.metaBefore !== undefined)
-    );
+        op.metaBefore !== undefined
+      );
 
-    if (op && hasPixelOrMeta && layerManagerRef.current && tileEngineRef.current) {
-      // Undo of a merge down: the merged layer comes back on top of the one it went into
-      if (op.layerRemoved) {
-        const removed = op.layerRemoved;
-        await recreateLayer(removed.model, removed.tiles, removed.mask, op.layerId, removed.strokes);
-      }
-      const layerItem = layerManagerRef.current.getLayerItem(op.layerId);
-      if (layerItem) {
-        showFrameOf(op.layerId);
-        const lm = layerManagerRef.current;
-        await mergeForUndo(op, op.beforeTiles, op.afterTiles, (undoTiles, conflicts, before, historyTiles, decoded) => {
-          warnUndoConflicts(conflicts);
-          if (op.metaBefore !== undefined) onUpdateLayerProps?.(op.layerId, { meta: op.metaBefore });
-          // Restore reverse diff tiles locally
-          lm.applyTiles(op.layerId, undoTiles, undefined, decoded);
+      if (hasPixelOrMeta && layerManagerRef.current && tileEngineRef.current) {
+        // Undo of a merge down: the merged layer comes back on top of the one it went into
+        if (op.layerRemoved) {
+          const removed = op.layerRemoved;
+          await recreateLayer(removed.model, removed.tiles, removed.mask, op.layerId, removed.strokes);
+        }
+        const layerItem = layerManagerRef.current.getLayerItem(op.layerId);
+        if (layerItem) {
+          showFrameOf(op.layerId);
+          const lm = layerManagerRef.current;
+          await mergeForUndo(op, op.beforeTiles, op.afterTiles, (undoTiles, conflicts, before, historyTiles, decoded) => {
+            totalConflicts += conflicts;
+            if (op.metaBefore !== undefined) onUpdateLayerProps?.(op.layerId, { meta: op.metaBefore });
+            // Restore reverse diff tiles locally
+            lm.applyTiles(op.layerId, undoTiles, undefined, decoded);
 
-          // Vector ops also carry their stroke-list change, reversed here and sent along, so other
-          // painters and the next reload agree on which strokes exist
-          const vectorOp = op.vectorStroke || op.vectorRemovedStrokes || op.vectorAddedStrokes;
-          if (vectorOp) {
-            const payload = {
-              tiles: undoTiles,
-              isUndo: true,
-              actionDesc: 'UNDO',
-              vectorRemovedIds: [...(op.vectorAddedStrokes || []), ...(op.vectorStroke ? [op.vectorStroke] : [])].map((s: VectorStroke) => s.id),
-              vectorAdded: op.vectorRemovedStrokes || [],
-            };
-            applyVectorPayload(op.layerId, payload);
-            commitOp(op.layerId, 'VECTOR_EDIT', payload);
-          } else {
-            // Broadcast compensation Op to room
-            commitTilePatch(op.layerId, undoTiles, true, 'UNDO', false, before,
-              op.seq ? { targetOpSeq: op.seq, historyTiles } : undefined);
-          }
-        });
+            // Vector ops also carry their stroke-list change, reversed here and sent along, so other
+            // painters and the next reload agree on which strokes exist
+            const vectorOp = op.vectorStroke || op.vectorRemovedStrokes || op.vectorAddedStrokes;
+            if (vectorOp) {
+              const payload = {
+                tiles: undoTiles,
+                isUndo: true,
+                actionDesc: 'UNDO',
+                vectorRemovedIds: [...(op.vectorAddedStrokes || []), ...(op.vectorStroke ? [op.vectorStroke] : [])].map((s: VectorStroke) => s.id),
+                vectorAdded: op.vectorRemovedStrokes || [],
+              };
+              applyVectorPayload(op.layerId, payload);
+              commitOp(op.layerId, 'VECTOR_EDIT', payload);
+            } else {
+              // Broadcast compensation Op to room
+              commitTilePatch(op.layerId, undoTiles, true, 'UNDO', false, before,
+                op.seq ? { targetOpSeq: op.seq, historyTiles } : undefined);
+            }
+          });
+        }
       }
+    };
+
+    for (const op of ops) {
+      await undoSingleOp(op);
     }
+    warnUndoConflicts(totalConflicts);
     updateUndoRedoState();
   };
 
   // Personal Scoped Redo
   const redoNow = async () => {
     const effectiveUserId = userRef.current?.id || user?.id || 'guest';
-    const op = scopedUndoRef.current.redo(effectiveUserId, (layerId, candidate) => {
+    const ops = scopedUndoRef.current.redoGroup(effectiveUserId, (layerId, candidate) => {
       if (undoneLayerIdsRef.current.has(layerId)) return true; // a layer undo took away
       const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model;
       return Boolean(target && (target.ownerId === effectiveUserId || canEditPixels(target)));
     });
 
-    if (op && op.selectionAfter !== undefined) {
-      selectionEngineRef.current?.restoreSnapshot(op.selectionAfter);
-      selection.refreshSelection();
-    }
+    let totalConflicts = 0;
+    const redoSingleOp = async (op: ScopedUndoOp) => {
+      if (op.selectionAfter !== undefined) {
+        selectionEngineRef.current?.restoreSnapshot(op.selectionAfter);
+        selection.refreshSelection();
+      }
 
-    // Redo of a new text / pasted / mask layer: it is made again with its text and pixels
-    if (op?.layerCreated) {
-      const oldId = op.layerId;
-      const created = await recreateLayer(op.layerCreated.model, op.afterTiles);
-      if (created) {
-        undoneLayerIdsRef.current.delete(oldId);
-        onSelectLayer?.(created.id);
-      } else scopedUndoRef.current.rollbackStep(op, false);
-      updateUndoRedoState();
-      return;
-    }
-    // Redo of a deleted layer: delete the restored layer again
-    if (op?.opType === 'LAYER_DELETE' && op.layerRemoved) {
-      await onDeleteLayer?.(op.layerRemoved.model.id);
-      updateUndoRedoState();
-      return;
-    }
-    // Redo of a merge down: the merged layer goes away again
-    if (op?.layerRemoved) await onDeleteLayer?.(op.layerRemoved.model.id);
+      // Redo of a new text / pasted / mask layer: it is made again with its text and pixels
+      if (op.layerCreated) {
+        const oldId = op.layerId;
+        const created = await recreateLayer(op.layerCreated.model, op.afterTiles);
+        if (created) {
+          undoneLayerIdsRef.current.delete(oldId);
+          onSelectLayer?.(created.id);
+        } else scopedUndoRef.current.rollbackGroup([op], false);
+        return;
+      }
+      // Redo of a deleted layer: delete the restored layer again
+      if (op.opType === 'LAYER_DELETE' && op.layerRemoved) {
+        await onDeleteLayer?.(op.layerRemoved.model.id);
+        return;
+      }
+      // Redo of a merge down: the merged layer goes away again
+      if (op.layerRemoved) await onDeleteLayer?.(op.layerRemoved.model.id);
 
-    const hasPixelOrMeta = Boolean(
-      op &&
-      (op.beforeTiles.length > 0 ||
+      const hasPixelOrMeta = Boolean(
+        op.beforeTiles.length > 0 ||
         op.afterTiles.length > 0 ||
         op.vectorStroke ||
         op.vectorRemovedStrokes ||
         op.vectorAddedStrokes ||
-        op.metaAfter !== undefined)
-    );
+        op.metaAfter !== undefined
+      );
 
-    if (op && hasPixelOrMeta && layerManagerRef.current && tileEngineRef.current) {
-      const layerItem = layerManagerRef.current.getLayerItem(op.layerId);
-      if (layerItem) {
-        showFrameOf(op.layerId);
-        const lm = layerManagerRef.current;
-        await mergeForUndo(op, op.afterTiles, op.beforeTiles, (redoTiles, conflicts, before, historyTiles, decoded) => {
-          warnUndoConflicts(conflicts);
-          if (op.metaAfter !== undefined) onUpdateLayerProps?.(op.layerId, { meta: op.metaAfter });
-          lm.applyTiles(op.layerId, redoTiles, undefined, decoded);
+      if (hasPixelOrMeta && layerManagerRef.current && tileEngineRef.current) {
+        const layerItem = layerManagerRef.current.getLayerItem(op.layerId);
+        if (layerItem) {
+          showFrameOf(op.layerId);
+          const lm = layerManagerRef.current;
+          await mergeForUndo(op, op.afterTiles, op.beforeTiles, (redoTiles, conflicts, before, historyTiles, decoded) => {
+            totalConflicts += conflicts;
+            if (op.metaAfter !== undefined) onUpdateLayerProps?.(op.layerId, { meta: op.metaAfter });
+            lm.applyTiles(op.layerId, redoTiles, undefined, decoded);
 
-          const vectorOp = op.vectorStroke || op.vectorRemovedStrokes || op.vectorAddedStrokes;
-          if (vectorOp) {
-            const payload = {
-              tiles: redoTiles,
-              actionDesc: 'REDO',
-              vectorRemovedIds: (op.vectorRemovedStrokes || []).map((s: VectorStroke) => s.id),
-              vectorAdded: [...(op.vectorAddedStrokes || []), ...(op.vectorStroke ? [op.vectorStroke] : [])],
-            };
-            applyVectorPayload(op.layerId, payload);
-            commitOp(op.layerId, 'VECTOR_EDIT', payload);
-          } else {
-            commitTilePatch(op.layerId, redoTiles, false, 'REDO', false, before,
-              op.seq ? { targetOpSeq: op.seq, historyTiles } : undefined);
-          }
-        });
+            const vectorOp = op.vectorStroke || op.vectorRemovedStrokes || op.vectorAddedStrokes;
+            if (vectorOp) {
+              const payload = {
+                tiles: redoTiles,
+                actionDesc: 'REDO',
+                vectorRemovedIds: (op.vectorRemovedStrokes || []).map((s: VectorStroke) => s.id),
+                vectorAdded: [...(op.vectorAddedStrokes || []), ...(op.vectorStroke ? [op.vectorStroke] : [])],
+              };
+              applyVectorPayload(op.layerId, payload);
+              commitOp(op.layerId, 'VECTOR_EDIT', payload);
+            } else {
+              commitTilePatch(op.layerId, redoTiles, false, 'REDO', false, before,
+                op.seq ? { targetOpSeq: op.seq, historyTiles } : undefined);
+            }
+          });
+        }
       }
+    };
+
+    for (const op of ops) {
+      await redoSingleOp(op);
     }
+    warnUndoConflicts(totalConflicts);
     updateUndoRedoState();
   };
 
@@ -3150,13 +3319,22 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
       const payload = latestBroadcastOp.payload as any;
       const clientOpId = typeof payload?.clientOpId === 'string' ? payload.clientOpId : null;
-      const rememberOpId = (set: Set<string>, id: string) => {
-        set.add(id);
-        if (set.size > 500) {
-          const first = set.values().next().value;
-          if (first !== undefined) set.delete(first);
+      const incomingSeq = latestBroadcastOp.seq || 0;
+      if (clientOpId && localClientOpsRef.current.has(clientOpId)) {
+        // An op we already committed on this tab (e.g. replayed via getOpsSince after a socket reconnect):
+        // backfill its server seq if missing, and never mark our own pixels as foreign.
+        if (incomingSeq > 0) {
+          const rec = recentLocalCommitsRef.current.find((r) => r.clientOpId === clientOpId && r.seq === null);
+          if (rec) {
+            rec.seq = incomingSeq;
+            if (rec.historyOp) {
+              rec.historyOp.seq = incomingSeq;
+              rec.historyOp = undefined;
+            }
+          }
         }
-      };
+        return;
+      }
       const hasVectorDelta = Boolean(
         payload && (Array.isArray(payload.vectorAdded) || Array.isArray(payload.vectorRemovedIds) || payload.vectorStroke)
       );
@@ -3178,7 +3356,6 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         // Sync brush footprint even if P2P TILE_PATCH and Socket STROKE arrive in different order
         markForeignFootprint(latestBroadcastOp.layerId, payload);
       }
-      const incomingSeq = latestBroadcastOp.seq || 0;
       const foreignEdit = scopedUndoRef.current.foreignEdit(clientOpId ?? `seq:${incomingSeq}`, incomingSeq);
       const isAuthoritativeResync = Boolean(
         clientOpId &&
@@ -4560,28 +4737,49 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     });
   };
 
-  // ---------- Align (對齊 L1) ----------
-  const alignBlockFor = (layer: LayerModel | null, list: LayerModel[], busy: boolean) => alignBlocker(layer, {
-    canEdit: Boolean(layer && canEditPixels(layer)),
-    busy,
-    hasMask: Boolean(layer && list.some((l) => l.layerType === 'mask' && l.parentId === layer.id)),
-    movedByKeyframes: movedByKeyframes(list, layer?.id),
-  });
+  // ---------- Align & Distribute (對齊・均分) ----------
+  const alignTargetsList = useMemo(
+    () => resolveAlignTargets(layers, activeLayer?.id ?? null, selectedLayerIds),
+    [layers, activeLayer?.id, selectedLayerIds],
+  );
   // Mid-transform, while typing text or with a filter previewing, the layer's pixels are not settled
   const alignBusy = Boolean(isTransformActive || textEdit || filterModalOpenRef.current);
-  const alignBlockReason = alignOpen ? alignBlockFor(activeLayer, layers, alignBusy) : null;
+  const alignBlockReason = alignOpen
+    ? alignTargetsBlocker(alignTargetsList, {
+      busy: alignBusy,
+      canEdit: canEditPixels,
+      movedByKeyframes: (id) => movedByKeyframes(layers, id),
+    })
+    : null;
+  const liveAlignTargets = () => {
+    const list = layersRef.current;
+    const targets = resolveAlignTargets(list, activeLayerRef.current?.id ?? null, selectedLayerIdsRef.current);
+    // The window may be a render behind: re-check against live layers and busy refs
+    const blocked = alignTargetsBlocker(targets, {
+      busy: Boolean(transformLayerIdRef.current || filterModalOpenRef.current),
+      canEdit: canEditPixels,
+      movedByKeyframes: (id) => movedByKeyframes(list, id),
+    });
+    return blocked ? null : targets;
+  };
   const runAlign = (x: AlignX | null, y: AlignY | null, basis: AlignBasis, allowCrop?: boolean) => {
-    const layer = activeLayerRef.current;
-    // The window may be a render behind: check the layer as it is now
-    if (!layer || alignBlockFor(layer, layersRef.current, Boolean(transformLayerIdRef.current || filterModalOpenRef.current))) {
-      return Promise.resolve('failed' as const);
-    }
-    return alignLayer(layer, x, y, basis, allowCrop);
+    const targets = liveAlignTargets();
+    return targets ? alignTargets(targets, x, y, basis, allowCrop) : Promise.resolve('failed' as const);
+  };
+  const runDistribute = (mode: DistributeMode, basis: AlignBasis, allowCrop?: boolean) => {
+    const targets = liveAlignTargets();
+    return targets ? distributeTargets(targets, mode, basis, allowCrop) : Promise.resolve('failed' as const);
   };
   const openAlign = (layerId?: string) => {
-    if (layerId && layerId !== activeLayerRef.current?.id) onSelectLayer?.(layerId);
+    if (layerId && !selectedLayerIdsRef.current.has(layerId)) {
+      setSelectedLayerIds(new Set());
+      if (layerId !== activeLayerRef.current?.id) onSelectLayer?.(layerId);
+    }
     setAlignOpen(true);
   };
+  const alignTargetLabel = alignTargetsList.length > 1
+    ? t.align.targetCount.replace('{count}', String(alignTargetsList.length))
+    : (alignTargetsList[0]?.root.name ?? null);
 
   // Pointer & touch input: layer checks, tool routing and navigation gestures (workspace/tools/useCanvasPointer)
   const pointer = useCanvasPointer(toolCtx, { brush, liquify, shapes, selection, fill, vector, transform }, {
@@ -4847,6 +5045,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           onAddMask={(id) => void addLayerMask(id)}
           onMergeDown={mergeDown}
           onOpenAlign={openAlign}
+          selectedLayerIds={selectedLayerIds}
+          onSelectedLayerIdsChange={setSelectedLayerIds}
           onGroupLayers={(ids) => void groupLayers(ids)}
           onCopyLayers={copyLayers}
           onPasteLayers={() => void pasteLayers()}
@@ -5157,6 +5357,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 getViewportSnapshot={getViewportSnapshot}
               />
 
+              <FilterPointOverlay
+                canvasToScreen={(cx, cy) => viewportRef.current?.canvasToScreen(cx, cy) ?? { x: cx, y: cy }}
+                screenToCanvas={(sx, sy) => viewportRef.current?.screenToCanvas(sx, sy) ?? { x: sx, y: sy }}
+                subscribeViewport={subscribeViewport}
+                getViewportSnapshot={getViewportSnapshot}
+              />
+
               {isMeshWarpActive && (
                 <Suspense fallback={null}>
                   <MeshWarpOverlay
@@ -5444,12 +5651,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       )}
 
       <OverlayPresence open={alignOpen && Boolean(canvas)} kind="popover">
-        <Suspense fallback={null}><LayerAlignWindow layerName={activeLayer?.name ?? null} blocker={alignBlockReason}
-          hasSelection={hasSelectionState} onAlign={runAlign} onClose={() => setAlignOpen(false)} /></Suspense>
+        <Suspense fallback={null}><LayerAlignWindow targetLabel={alignTargetLabel} targetCount={alignTargetsList.length}
+          blocker={alignBlockReason} hasSelection={hasSelectionState}
+          onAlign={runAlign} onDistribute={runDistribute} onClose={() => setAlignOpen(false)} /></Suspense>
       </OverlayPresence>
       <OverlayPresence open={filterMenuOpen} kind="popover">
-        <Suspense fallback={null}><LayerFilterDialog key={layerFilterId ?? 'list'} filterId={layerFilterId} busy={filterBusy}
-          layerName={activeLayer?.name ?? ''} onChoose={chooseFilter} onBack={() => chooseFilter(null)} onClose={closeFilters}
+        <Suspense fallback={null}><LayerFilterDialog key={layerFilterId ?? 'list'} filterId={layerFilterId} busy={filterBusy} refining={filterRefining}
+          layerName={activeLayer?.name ?? ''} layerType={activeLayer?.layerType} histogram={filterHistogram} onChoose={chooseFilter} onBack={() => chooseFilter(null)} onClose={closeFilters}
           onPreview={filterCallbacks.parameters}
           onApply={(values) => layerFilterId ? runLayerFilter({ id: layerFilterId, values }, false) : Promise.resolve(false)} /></Suspense>
       </OverlayPresence>
