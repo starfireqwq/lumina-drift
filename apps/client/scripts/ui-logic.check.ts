@@ -133,6 +133,9 @@ import { translations, type Language } from '../src/locales';
 import {
   DEFAULT_COMMUNITY_PRESETS, MIN_BRUSH_SPACING, PIXEL_FILTER_RUNNERS, distanceField, downscale, runDraftFilter, runPixelFilter, toneHistogram, upscale,
   type CanvasModel, type FilterValues,
+  AbrParser, SutParser, SqliteReader, parseSutEffectorBlob,
+  evaluateDynamicChannel, evaluateAngleJitterRadians, evaluateFgBgMixRatio,
+  resolveDefaultBrushDynamics, normalizeBrushDynamics,
 } from '@atelier/shared';
 import {
   BUILTIN_FILTERS, FILTER_DRAFT, FILTER_GROUPS, defaultFilterValues, filterDraftFactor, filterFitsLayer, filterGroupsInUse, filterLabel,
@@ -3881,5 +3884,231 @@ await (async () => {
   }
   assert.equal(sumDur, 12_000_000);
   assert.equal(computeFrameTimestampUs(144, 12), 12_000_000);
+})();
+
+// Brush Engine v2: dynamics evaluators, ABR v6 desc/samp parser, and SUT SQLite3 Variant/Effector parser
+(() => {
+  // 1. Dynamic channel evaluation
+  const opDyn = { pressure: true, min: 0.25 };
+  assert.ok(Math.abs(evaluateDynamicChannel(opDyn, { pressure: 0, tilt: 0, velocity: 0, rand: 0 }) - 0.25) < 1e-6);
+  assert.ok(Math.abs(evaluateDynamicChannel(opDyn, { pressure: 0.5, tilt: 0, velocity: 0, rand: 0 }) - 0.625) < 1e-6);
+  assert.ok(Math.abs(evaluateDynamicChannel(opDyn, { pressure: 1, tilt: 0, velocity: 0, rand: 0 }) - 1) < 1e-6);
+  // Disabled channel returns fallback 1
+  assert.equal(evaluateDynamicChannel({ pressure: false, min: 0.1 }, { pressure: 0.1, tilt: 0, velocity: 0, rand: 0.5 }), 1);
+  // Velocity inverted: fast stroke decreases value
+  const velDyn = { velocity: true, velocityInvert: true, min: 0.2 };
+  assert.ok(evaluateDynamicChannel(velDyn, { pressure: 1, tilt: 0, velocity: 1, rand: 0 }) < 0.25);
+  assert.ok(evaluateDynamicChannel(velDyn, { pressure: 1, tilt: 0, velocity: 0, rand: 0 }) > 0.95);
+  // Angle jitter & fg/bg mix
+  assert.ok(Math.abs(evaluateAngleJitterRadians({ random: 1 }, { pressure: 1, tilt: 0, velocity: 0, rand: 1 }) - Math.PI) < 1e-6);
+  assert.ok(Math.abs(evaluateFgBgMixRatio(0.8, { pressure: true }, { pressure: 0.5, tilt: 0, velocity: 0, rand: 0 }) - 0.4) < 1e-6);
+  // Default dynamics resolution & normalization
+  const penDefaults = resolveDefaultBrushDynamics({ brushType: 'pen', hardness: 1, flow: 1, size: 20, minSize: 4 });
+  assert.equal(penDefaults.size?.pressure, true);
+  assert.equal(penDefaults.opacity?.pressure, false);
+  const paintDefaults = resolveDefaultBrushDynamics({ brushType: 'brush', hardness: 0.6, flow: 0.85, size: 40, minSize: 10 });
+  assert.equal(paintDefaults.opacity?.pressure, true);
+  const norm = normalizeBrushDynamics({ opacity: { pressure: true, min: 1.5, random: -0.2 } });
+  assert.equal(norm?.opacity?.min, 1);
+  assert.equal(norm?.opacity?.random, 0);
+
+  // 2. Synthetic ABR v6 binary with `samp` (UUID + 4x4 tip) + `desc` (Action Descriptor preset)
+  const chunks: number[] = [];
+  const pushU16 = (v: number) => chunks.push((v >> 8) & 0xff, v & 0xff);
+  const pushU32 = (v: number) => chunks.push((v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff);
+  const pushF64 = (v: number) => {
+    const b = new ArrayBuffer(8);
+    new DataView(b).setFloat64(0, v, false);
+    chunks.push(...new Uint8Array(b));
+  };
+  const pushAscii = (s: string) => { for (let i = 0; i < s.length; i++) chunks.push(s.charCodeAt(i)); };
+  const pushUni = (s: string) => {
+    pushU32(s.length + 1);
+    for (let i = 0; i < s.length; i++) pushU16(s.charCodeAt(i));
+    pushU16(0);
+  };
+  const pushId = (id: string) => {
+    if (id.length === 4) { pushU32(0); pushAscii(id); }
+    else { pushU32(id.length); pushAscii(id); }
+  };
+
+  // Header: version 6, subversion 1
+  pushU16(6); pushU16(1);
+  // Build `samp` section with 1 sample (UUID + 4x4 raw grayscale)
+  const uuid = '11111111-2222-3333-4444-555555555555';
+  const sampPayload: number[] = [];
+  const recBytes: number[] = [];
+  recBytes.push(uuid.length, ...Array.from(uuid, (c) => c.charCodeAt(0))); // 37 bytes
+  for (let i = 0; i < 10; i++) recBytes.push(0); // subversion 1 extra header = 10 bytes
+  // Rect top=0, left=0, bottom=4, right=4; depth=8, compression=0
+  const rectBuf = new ArrayBuffer(19);
+  const rv = new DataView(rectBuf);
+  rv.setInt32(0, 0, false); rv.setInt32(4, 0, false); rv.setInt32(8, 4, false); rv.setInt32(12, 4, false);
+  rv.setUint16(16, 8, false); rv.setUint8(18, 0);
+  recBytes.push(...new Uint8Array(rectBuf));
+  for (let i = 0; i < 16; i++) recBytes.push(i === 5 || i === 6 || i === 9 || i === 10 ? 255 : 0);
+  const recLenBuf = new ArrayBuffer(4);
+  new DataView(recLenBuf).setUint32(0, recBytes.length, false);
+  sampPayload.push(...new Uint8Array(recLenBuf), ...recBytes);
+  while (sampPayload.length % 4 !== 0) sampPayload.push(0);
+  pushAscii('8BIMsamp'); pushU32(sampPayload.length); chunks.push(...sampPayload);
+
+  // Build `desc` section (Action Descriptor v16 -> root Objc -> Brsh VlLs -> 1 preset Objc)
+  const descStartLen = chunks.length;
+  pushAscii('8BIMdesc');
+  const descLenPos = chunks.length;
+  pushU32(0); // placeholder
+  const descBodyStart = chunks.length;
+  pushU32(16); // descriptor version
+  pushUni(''); pushId('null'); pushU32(1); // root object: 1 key ('Brsh')
+  pushId('Brsh'); pushAscii('VlLs'); pushU32(1); // 1 preset
+  pushAscii('Objc'); pushUni(''); pushId('Brsh'); pushU32(7); // 7 keys on preset
+  // 1. Nm
+  pushId('Nm  '); pushAscii('TEXT'); pushUni('Soft Wash ABR');
+  // 2. Brsh
+  pushId('Brsh'); pushAscii('Objc'); pushUni(''); pushId('sampledBrush'); pushU32(5);
+  pushId('Dmtr'); pushAscii('UntF'); pushAscii('#Pxl'); pushF64(48);
+  pushId('Hrdn'); pushAscii('UntF'); pushAscii('#Prc'); pushF64(60);
+  pushId('Spcn'); pushAscii('UntF'); pushAscii('#Prc'); pushF64(25);
+  pushId('Rndn'); pushAscii('UntF'); pushAscii('#Prc'); pushF64(75);
+  pushId('sampledData'); pushAscii('TEXT'); pushUni(uuid);
+  // 3. useTipDynamics + szVr
+  pushId('useTipDynamics'); pushAscii('bool'); chunks.push(1);
+  pushId('szVr'); pushAscii('Objc'); pushUni(''); pushId('brVr'); pushU32(3);
+  pushId('bVTy'); pushAscii('long'); pushU32(2); // pen pressure
+  pushId('jitter'); pushAscii('UntF'); pushAscii('#Prc'); pushF64(15);
+  pushId('Mnm '); pushAscii('UntF'); pushAscii('#Prc'); pushF64(20);
+  // 4. usePaintDynamics + opVr
+  pushId('usePaintDynamics'); pushAscii('bool'); chunks.push(1);
+  pushId('opVr'); pushAscii('Objc'); pushUni(''); pushId('brVr'); pushU32(3);
+  pushId('bVTy'); pushAscii('long'); pushU32(2); // pen pressure
+  pushId('jitter'); pushAscii('UntF'); pushAscii('#Prc'); pushF64(10);
+  pushId('Mnm '); pushAscii('UntF'); pushAscii('#Prc'); pushF64(30);
+  // 5. wetEdges
+  pushId('wetEdges'); pushAscii('bool'); chunks.push(1);
+  const descBodyLen = chunks.length - descBodyStart;
+  chunks[descLenPos] = (descBodyLen >>> 24) & 0xff;
+  chunks[descLenPos + 1] = (descBodyLen >>> 16) & 0xff;
+  chunks[descLenPos + 2] = (descBodyLen >>> 8) & 0xff;
+  chunks[descLenPos + 3] = descBodyLen & 0xff;
+  assert.ok(descStartLen > 0);
+
+  const abrParsed = new AbrParser(new Uint8Array(chunks)).parse();
+  assert.equal(abrParsed.length, 1);
+  assert.equal(abrParsed[0].name, 'Soft Wash ABR');
+  assert.equal(abrParsed[0].size, 48);
+  assert.ok(Math.abs((abrParsed[0].hardness ?? 0) - 0.6) < 1e-6);
+  assert.ok(Math.abs((abrParsed[0].spacing ?? 0) - 0.25) < 1e-6);
+  assert.ok(Math.abs((abrParsed[0].roundness ?? 0) - 0.75) < 1e-6);
+  assert.equal(abrParsed[0].dynamics?.size?.pressure, true);
+  assert.ok(Math.abs((abrParsed[0].dynamics?.size?.min ?? 0) - 0.2) < 1e-6);
+  assert.equal(abrParsed[0].dynamics?.opacity?.pressure, true);
+  assert.ok(Math.abs((abrParsed[0].dynamics?.opacity?.min ?? 0) - 0.3) < 1e-6);
+  assert.equal(abrParsed[0].wetEdges, true);
+  assert.ok(typeof abrParsed[0].dataUrl === 'string' && abrParsed[0].dataUrl.startsWith('data:image/'));
+
+  // 3. Synthetic SQLite 3 SUT database (3 pages: sqlite_master, Node, Variant with Effectors)
+  const pageSize = 512;
+  const db = new Uint8Array(pageSize * 3);
+  const dbView = new DataView(db.buffer);
+  const magic = 'SQLite format 3\0';
+  for (let i = 0; i < magic.length; i++) db[i] = magic.charCodeAt(i);
+  dbView.setUint16(16, pageSize, false);
+  db[18] = 1; db[19] = 1; db[21] = 64; db[22] = 32; db[23] = 32;
+  dbView.setUint32(56, 1, false); // UTF-8
+
+  const encVarint = (v: number): number[] => {
+    if (v < 0x80) return [v];
+    if (v < 0x4000) return [0x80 | ((v >> 7) & 0x7f), v & 0x7f];
+    return [0x80 | ((v >> 14) & 0x7f), 0x80 | ((v >> 7) & 0x7f), v & 0x7f];
+  };
+  const encodeSqliteRecord = (vals: Array<null | number | string | Uint8Array>): Uint8Array => {
+    const sts: number[] = [];
+    const body: number[] = [];
+    const utf8 = new TextEncoder();
+    for (const v of vals) {
+      if (v === null) {
+        sts.push(0);
+      } else if (typeof v === 'number') {
+        if (v === 0) sts.push(8);
+        else if (v === 1) sts.push(9);
+        else if (Number.isInteger(v) && v >= -128 && v <= 127) { sts.push(1); body.push(v & 0xff); }
+        else if (Number.isInteger(v) && v >= -32768 && v <= 32767) { sts.push(2); body.push((v >> 8) & 0xff, v & 0xff); }
+        else {
+          sts.push(7);
+          const f = new ArrayBuffer(8);
+          new DataView(f).setFloat64(0, v, false);
+          body.push(...new Uint8Array(f));
+        }
+      } else if (typeof v === 'string') {
+        const b = utf8.encode(v);
+        sts.push(...encVarint(b.length * 2 + 13));
+        body.push(...b);
+      } else {
+        sts.push(...encVarint(v.length * 2 + 12));
+        body.push(...v);
+      }
+    }
+    const hdrSize = sts.length + encVarint(sts.length + 1).length;
+    const hdr = [...encVarint(hdrSize), ...sts];
+    return new Uint8Array([...hdr, ...body]);
+  };
+  const writeLeafPage = (pageNum: number, rows: Array<{ rowId: number; values: Array<null | number | string | Uint8Array> }>) => {
+    const pageStart = (pageNum - 1) * pageSize;
+    const hdrStart = pageNum === 1 ? 100 : pageStart;
+    db[hdrStart] = 0x0d; // leaf table B-tree
+    dbView.setUint16(hdrStart + 3, rows.length, false);
+    let contentEnd = pageSize;
+    for (let i = 0; i < rows.length; i++) {
+      const rec = encodeSqliteRecord(rows[i].values);
+      const cell = new Uint8Array([...encVarint(rec.length), ...encVarint(rows[i].rowId), ...rec]);
+      contentEnd -= cell.length;
+      db.set(cell, pageStart + contentEnd);
+      dbView.setUint16(hdrStart + 8 + i * 2, contentEnd, false);
+    }
+    dbView.setUint16(hdrStart + 5, contentEnd, false);
+  };
+
+  // Page 1: sqlite_master
+  writeLeafPage(1, [
+    { rowId: 1, values: ['table', 'Node', 'Node', 2, 'CREATE TABLE Node (_PW_ID INTEGER PRIMARY KEY, NodeName TEXT, NodeVariantID INTEGER)'] },
+    { rowId: 2, values: ['table', 'Variant', 'Variant', 3, 'CREATE TABLE Variant (VariantID INTEGER PRIMARY KEY, BrushSize REAL, Opacity INTEGER, BrushMixColor INTEGER, BrushAmountOfPaint INTEGER, BrushColorStretch INTEGER, BrushSizeEffector BLOB, OpacityEffector BLOB)'] },
+  ]);
+  // Page 2: Node
+  writeLeafPage(2, [
+    { rowId: 1, values: [null, 'CSP Wet Mix Brush', 10] },
+  ]);
+  // Page 3: Variant with big-endian Effector blobs (pressure=0x01, tilt=0x02, min=25%)
+  const mkEff = (flags: number, minPct: number) => {
+    const b = new Uint8Array(12);
+    const v = new DataView(b.buffer);
+    v.setUint32(0, 4, false);
+    v.setUint32(4, flags, false);
+    v.setInt32(8, minPct, false);
+    return b;
+  };
+  writeLeafPage(3, [
+    { rowId: 10, values: [10, 36, 90, 1, 45, 70, mkEff(0x01 | 0x02, 15), mkEff(0x01, 25)] },
+  ]);
+
+  const reader = new SqliteReader(db);
+  assert.deepEqual(reader.getTableNames().sort(), ['Node', 'Variant']);
+  const effDecoded = parseSutEffectorBlob(mkEff(0x01 | 0x04, 20));
+  assert.equal(effDecoded?.pressure, true);
+  assert.equal(effDecoded?.velocity, true);
+  assert.ok(Math.abs((effDecoded?.min ?? 0) - 0.2) < 1e-6);
+
+  const sutParsed = new SutParser(db.buffer).parse();
+  assert.equal(sutParsed.length, 1);
+  assert.equal(sutParsed[0].name, 'CSP Wet Mix Brush');
+  assert.equal(sutParsed[0].size, 36);
+  assert.ok(Math.abs((sutParsed[0].opacity ?? 0) - 0.9) < 1e-6);
+  assert.ok((sutParsed[0].colorMixing ?? 0) >= 0.7);
+  assert.ok(Math.abs((sutParsed[0].paintAmount ?? 0) - 0.45) < 1e-6);
+  assert.ok(Math.abs((sutParsed[0].colorStretch ?? 0) - 0.7) < 1e-6);
+  assert.equal(sutParsed[0].dynamics?.size?.pressure, true);
+  assert.equal(sutParsed[0].dynamics?.size?.tilt, true);
+  assert.equal(sutParsed[0].dynamics?.opacity?.pressure, true);
+  assert.ok(Math.abs((sutParsed[0].dynamics?.opacity?.min ?? 0) - 0.25) < 1e-6);
 })();
 console.log('ui-logic checks passed');

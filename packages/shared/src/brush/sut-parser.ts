@@ -1,35 +1,407 @@
 /**
  * Clip Studio Paint (.sut) Sub-Tool Brush Parser
- * Extracts embedded PNG/JPEG brush tip textures and sub-tool configurations.
+ * Reads SQLite 3 Node/Variant/MaterialFile tables (zero dependencies) to restore
+ * brush parameters, dynamics effectors, color mixing, textures, and embedded tip bitmaps.
+ * Falls back cleanly to raw PNG/JPEG scanning for non-SQLite or stripped files.
  */
 
-import { ParsedBrushTip } from './abr-parser';
+import type { ParsedBrushTip } from './abr-parser';
 import { MIN_BRUSH_SPACING } from './brush-spacing';
+import type {
+  BrushDynamicChannel,
+  BrushDynamicsConfig,
+  BrushMixMode,
+  BrushTextureBlendMode,
+} from './brush-dynamics';
+import { isSqlite3Buffer, SqliteReader, type SqliteRow, type SqliteValue } from './sqlite-reader';
+
+const clamp01 = (v: number): number => (Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0);
+
+interface EmbeddedImage {
+  width: number;
+  height: number;
+  dataUrl: string;
+  isTextureHint: boolean;
+}
+
+/**
+ * Decodes a big-endian CSP *Effector binary blob into a BrushDynamicChannel.
+ * CSP effector blobs encode a 32-bit controller bitmask (pressure / tilt / velocity / random)
+ * and optional minimum ratio in big-endian fields. Unknown layouts degrade safely without throwing.
+ */
+export function parseSutEffectorBlob(blob: Uint8Array | null | undefined): BrushDynamicChannel | undefined {
+  if (!blob || blob.length < 8) return undefined;
+  const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+
+  // Common CSP Effector header layout:
+  // [0..3]: version/magic (usually 4 or 0x0000002c / 0x00000038 or small int)
+  // [4..7]: flags bitmask (0x01=pressure, 0x02=tilt, 0x04=velocity, 0x08=random)
+  // [8..11] or [12..15]: optional min value (float32 or int32 percentage 0..100 / 0..1000)
+  const w0 = view.getUint32(0, false);
+  const w1 = view.getUint32(4, false);
+
+  // Detect which word carries the bitmask flags (some versions put flags at offset 4, others at offset 8)
+  let flags = w1;
+  let minOffset = 8;
+  if (flags === 0 && blob.length >= 12) {
+    const w2 = view.getUint32(8, false);
+    if ((w2 & 0x0f) !== 0 && w2 <= 0xff) {
+      flags = w2;
+      minOffset = 12;
+    }
+  }
+  // If w0 itself is a small flag mask (compact 8-byte effector)
+  if ((flags & 0x0f) === 0 && (w0 & 0x0f) !== 0 && w0 <= 0xff) {
+    flags = w0;
+    minOffset = 4;
+  }
+
+  const pressure = (flags & 0x01) !== 0;
+  const tilt = (flags & 0x02) !== 0;
+  const velocity = (flags & 0x04) !== 0;
+  const hasRandom = (flags & 0x08) !== 0;
+
+  if (!pressure && !tilt && !velocity && !hasRandom) {
+    return { pressure: false, tilt: false, velocity: false, random: 0, min: 0 };
+  }
+
+  let min = 0;
+  if (blob.length >= minOffset + 4) {
+    const rawInt = view.getInt32(minOffset, false);
+    const rawFloat = view.getFloat32(minOffset, false);
+    if (rawInt > 0 && rawInt <= 100) {
+      min = clamp01(rawInt / 100);
+    } else if (rawInt > 100 && rawInt <= 1000) {
+      min = clamp01(rawInt / 1000);
+    } else if (Number.isFinite(rawFloat) && rawFloat >= 0.001 && rawFloat <= 1) {
+      min = clamp01(rawFloat);
+    }
+  }
+
+  return {
+    pressure,
+    tilt,
+    velocity,
+    random: hasRandom ? 0.35 : 0,
+    min,
+  };
+}
 
 export class SutParser {
   private buffer: Uint8Array;
-  private view: DataView;
 
   constructor(arrayBuffer: ArrayBuffer) {
     this.buffer = new Uint8Array(arrayBuffer);
-    this.view = new DataView(arrayBuffer);
   }
 
   public parse(): ParsedBrushTip[] {
-    const tips: ParsedBrushTip[] = [];
-    const buf = this.buffer;
-    const len = buf.length;
+    if (isSqlite3Buffer(this.buffer)) {
+      const sqliteTips = this.parseSqliteSut();
+      if (sqliteTips.length > 0) return sqliteTips;
+    }
 
-    // 1. Try to extract subtool title from text strings
     const toolTitle = this.extractToolName() || '匯入筆刷 (SubTool)';
+    const images = this.scanEmbeddedImages(this.buffer, false);
+    if (images.length > 0) {
+      return images.map((img, idx) => ({
+        id: `sut_tip_${idx + 1}`,
+        name: images.length === 1 ? toolTitle : `${toolTitle} - 筆尖貼圖 #${idx + 1} (${img.width}x${img.height})`,
+        width: img.width,
+        height: img.height,
+        dataUrl: img.dataUrl,
+        spacing: MIN_BRUSH_SPACING,
+        hardness: 0.8,
+        sourceFormat: 'sut',
+      }));
+    }
 
-    // 2. Scan for embedded PNG images
-    // PNG Header: 89 50 4E 47 0D 0A 1A 0A
-    // PNG IEND: 49 45 4E 44 AE 42 60 82
+    return [this.createParametricCspTip(toolTitle)];
+  }
+
+  private parseSqliteSut(): ParsedBrushTip[] {
+    let reader: SqliteReader;
+    try {
+      reader = new SqliteReader(this.buffer);
+    } catch {
+      return [];
+    }
+
+    const nodes = reader.readTable('Node');
+    const variants = reader.readTable('Variant');
+    const materials = reader.readTable('MaterialFile');
+
+    // Collect embedded images from MaterialFile rows first (preserving tip vs texture distinction)
+    const tipImages: EmbeddedImage[] = [];
+    const textureImages: EmbeddedImage[] = [];
+    for (const mat of materials) {
+      const pathStr = String(this.pickColumn(mat, ['OriginalPath', 'CatalogPath', 'FilePath']) ?? '').toLowerCase();
+      const isTexture = /texture|paper|grain|紙|テクスチャ/.test(pathStr);
+      const fileData = this.pickColumn(mat, ['FileData', 'Data', 'ImageData']);
+      if (fileData instanceof Uint8Array && fileData.length > 16) {
+        const imgs = this.scanEmbeddedImages(fileData, isTexture);
+        for (const img of imgs) {
+          if (img.isTextureHint) textureImages.push(img);
+          else tipImages.push(img);
+        }
+      }
+    }
+    // Fallback raw scan if MaterialFile stored images elsewhere in the SQLite file
+    if (tipImages.length === 0) {
+      const rawImgs = this.scanEmbeddedImages(this.buffer, false);
+      tipImages.push(...rawImgs);
+    }
+
+    // Index variants by VariantID (or rowid)
+    const variantById = new Map<number, SqliteRow>();
+    for (const v of variants) {
+      const vid = this.pickNumber(v, ['VariantID', '_PW_ID', 'id', '_rowid']);
+      if (vid !== null) variantById.set(vid, v);
+    }
+
+    // Determine primary tool name and target variant row(s)
+    const namedNodes = nodes.filter((n) => {
+      const name = this.pickString(n, ['NodeName', 'Name']);
+      return Boolean(name && name.trim().length > 0);
+    });
+
+    const primaryNode = namedNodes[0] ?? nodes[0];
+    const toolName =
+      this.pickString(primaryNode, ['NodeName', 'Name'])?.trim() ||
+      this.extractToolName() ||
+      '匯入筆刷 (SubTool)';
+
+    const targetVariantId = primaryNode
+      ? this.pickNumber(primaryNode, ['NodeVariantID', 'VariantID', 'NodeInitVariantID'])
+      : null;
+    const primaryVariant =
+      (targetVariantId !== null ? variantById.get(targetVariantId) : undefined) ??
+      variants[0] ??
+      null;
+
+    const restored = primaryVariant ? this.mapVariantToProps(primaryVariant) : {};
+    const textureDataUrl = textureImages[0]?.dataUrl ?? null;
+
+    const results: ParsedBrushTip[] = [];
+    if (tipImages.length > 0) {
+      for (let i = 0; i < tipImages.length; i++) {
+        const img = tipImages[i];
+        results.push({
+          id: `sut_sqlite_tip_${i + 1}`,
+          name: tipImages.length === 1 ? toolName : `${toolName} #${i + 1}`,
+          width: img.width,
+          height: img.height,
+          dataUrl: img.dataUrl,
+          textureDataUrl,
+          ...restored,
+          sourceFormat: 'sut',
+        });
+      }
+    } else {
+      // Procedural / round CSP sub-tool without custom tip bitmap
+      results.push({
+        id: 'sut_sqlite_procedural',
+        name: toolName,
+        width: Math.round(restored.size ?? 32),
+        height: Math.round(restored.size ?? 32),
+        dataUrl: null,
+        textureDataUrl,
+        ...restored,
+        sourceFormat: 'sut',
+      });
+    }
+
+    return results;
+  }
+
+  private mapVariantToProps(row: SqliteRow): Partial<ParsedBrushTip> {
+    const out: Partial<ParsedBrushTip> = {};
+    const dynamics: BrushDynamicsConfig = {};
+
+    // Brush size (CSP may store raw px or 0.1px integer scale depending on version)
+    const rawSize = this.pickNumber(row, ['BrushSize', 'Size']);
+    if (rawSize !== null && rawSize > 0) {
+      const px = rawSize > 500 ? rawSize / 10 : rawSize;
+      out.size = Math.max(1, Math.min(500, Math.round(px * 10) / 10));
+    }
+
+    // Opacity (0..100 or 0..1)
+    const rawOpacity = this.pickNumber(row, ['Opacity', 'BrushOpacity']);
+    if (rawOpacity !== null) {
+      out.opacity = clamp01(rawOpacity > 1 ? rawOpacity / 100 : rawOpacity);
+    }
+
+    // Paint Density / Flow (0..100 or 0..1)
+    const rawDensity = this.pickNumber(row, ['BrushDensityOfPaint', 'BrushDensity', 'BrushFlow']);
+    if (rawDensity !== null) {
+      out.flow = clamp01(rawDensity > 1 ? rawDensity / 100 : rawDensity);
+    }
+
+    // Hardness (CSP uses 1..5 discrete steps or 0..100 percentage)
+    const rawHardness = this.pickNumber(row, ['BrushHardness', 'Hardness']);
+    if (rawHardness !== null) {
+      if (rawHardness >= 1 && rawHardness <= 5 && Number.isInteger(rawHardness)) {
+        out.hardness = clamp01((rawHardness - 1) / 4);
+      } else {
+        out.hardness = clamp01(rawHardness > 1 ? rawHardness / 100 : rawHardness);
+      }
+    }
+
+    // Spacing / Interval (CSP percentage or 0..1)
+    const rawInterval = this.pickNumber(row, ['BrushInterval', 'BrushGap', 'BrushSpacing']);
+    if (rawInterval !== null && rawInterval > 0) {
+      const ratio = rawInterval > 1.5 ? rawInterval / 100 : rawInterval;
+      out.spacing = Math.max(MIN_BRUSH_SPACING, Math.min(1.5, ratio));
+    }
+
+    // Thickness / Roundness (0..100 or 1..2000)
+    const rawThickness = this.pickNumber(row, ['BrushThickness', 'BrushRoundness']);
+    if (rawThickness !== null && rawThickness > 0) {
+      const ratio = rawThickness > 100 ? rawThickness / 1000 : rawThickness > 1 ? rawThickness / 100 : rawThickness;
+      out.roundness = Math.max(0.1, Math.min(1, ratio));
+    }
+
+    // Angle & Direction
+    const rawAngle = this.pickNumber(row, ['BrushAngle', 'BrushDirectionAngle']);
+    if (rawAngle !== null) {
+      let deg = rawAngle > 360 || rawAngle < -360 ? rawAngle / 10 : rawAngle;
+      while (deg > 90) deg -= 180;
+      while (deg < -90) deg += 180;
+      out.angle = Math.round(deg);
+    }
+    const rawAngleMode = this.pickNumber(row, ['BrushDirection', 'BrushAngleMode']);
+    if (rawAngleMode === 1) out.angleMode = 'direction';
+    else if (rawAngleMode === 2 || rawAngleMode === 3) out.angleMode = 'pen';
+    else if (rawAngleMode === 0) out.angleMode = 'fixed';
+
+    // Color Mixing / Amount of Paint / Color Stretch
+    const mixFlag = this.pickNumber(row, ['BrushMixColor', 'BrushUseMixColor', 'BrushMixGroundColor']);
+    const rawAmount = this.pickNumber(row, ['BrushAmountOfPaint']);
+    const rawStretch = this.pickNumber(row, ['BrushColorStretch']);
+    const rawMixMode = this.pickNumber(row, ['BrushMixColorMode']);
+
+    if (rawAmount !== null) {
+      out.paintAmount = clamp01(rawAmount > 1 ? rawAmount / 100 : rawAmount);
+    }
+    if (rawStretch !== null) {
+      out.colorStretch = clamp01(rawStretch > 1 ? rawStretch / 100 : rawStretch);
+    }
+    if (mixFlag !== null && mixFlag > 0) {
+      // If mixFlag is boolean 1, derive strength from paintAmount/colorStretch; if 2..100 treat as percentage
+      out.colorMixing = mixFlag === 1
+        ? clamp01(Math.max(0.35, 1 - (out.paintAmount ?? 0.5) * 0.5, out.colorStretch ?? 0))
+        : clamp01(mixFlag / 100);
+      if (rawMixMode === 2) {
+        out.mixMode = 'dilute';
+      } else if ((out.paintAmount ?? 0.7) <= 0.05 && (out.colorStretch ?? 0) > 0.1) {
+        out.mixMode = 'smudge';
+      } else {
+        out.mixMode = 'blend';
+      }
+    }
+
+    // Paper Texture
+    const useTexture = this.pickNumber(row, ['BrushUseTexture', 'UseTexture']);
+    const rawTexDensity = this.pickNumber(row, ['BrushTextureDensity', 'TextureDensity']);
+    const rawTexScale = this.pickNumber(row, ['BrushTextureScale', 'BrushTextureZoom', 'TextureScale']);
+    const rawTexInvert = this.pickNumber(row, ['BrushTextureInvert', 'TextureInvert']);
+    const rawTexMode = this.pickNumber(row, ['BrushTextureMode', 'TextureBlendMode']);
+
+    if ((useTexture !== null && useTexture > 0) || (rawTexDensity !== null && rawTexDensity > 0)) {
+      out.textureDensity = rawTexDensity !== null ? clamp01(rawTexDensity > 1 ? rawTexDensity / 100 : rawTexDensity) : 0.4;
+      if (rawTexScale !== null && rawTexScale > 0) {
+        out.textureScale = Math.max(0.5, Math.min(4, rawTexScale > 4 ? rawTexScale / 100 : rawTexScale));
+      }
+      if (rawTexInvert !== null) out.textureInvert = rawTexInvert !== 0;
+      const modeMap: Record<number, BrushTextureBlendMode> = { 0: 'multiply', 1: 'subtract', 2: 'overlay' };
+      if (rawTexMode !== null && modeMap[rawTexMode]) out.textureBlendMode = modeMap[rawTexMode];
+    }
+
+    // Spray / Scatter
+    const useSpray = this.pickNumber(row, ['BrushSpray', 'BrushUseSpray', 'BrushUseScatter']);
+    const rawSprayDev = this.pickNumber(row, ['BrushSprayDeviation', 'BrushScatter']);
+    if (useSpray === null || useSpray > 0) {
+      if (rawSprayDev !== null && rawSprayDev > 0) {
+        out.scatter = clamp01(rawSprayDev > 1 ? rawSprayDev / 100 : rawSprayDev);
+      }
+    }
+
+    // Color Jitter
+    const useColorJitter = this.pickNumber(row, ['BrushUseChangeColor', 'BrushChangeColor']);
+    if (useColorJitter === null || useColorJitter > 0) {
+      const h = this.pickNumber(row, ['BrushChangeColorHue', 'BrushHueJitter']);
+      const s = this.pickNumber(row, ['BrushChangeColorSaturation', 'BrushSaturationJitter']);
+      const v = this.pickNumber(row, ['BrushChangeColorLuminance', 'BrushChangeColorValue', 'BrushValueJitter']);
+      const subMix = this.pickNumber(row, ['BrushChangeColorSubColor', 'BrushSubColorMix']);
+      if (h !== null && h > 0) out.hueJitter = clamp01(h > 1 ? h / 100 : h);
+      if (s !== null && s > 0) out.satJitter = clamp01(s > 1 ? s / 100 : s);
+      if (v !== null && v > 0) out.valJitter = clamp01(v > 1 ? v / 100 : v);
+      if (subMix !== null && subMix > 0) out.fgBgMix = clamp01(subMix > 1 ? subMix / 100 : subMix);
+    }
+
+    // Effector dynamic blobs
+    const sizeEff = parseSutEffectorBlob(this.pickBlob(row, ['BrushSizeEffector', 'SizeEffector']));
+    if (sizeEff) dynamics.size = sizeEff;
+
+    const opEff = parseSutEffectorBlob(this.pickBlob(row, ['OpacityEffector', 'BrushOpacityEffector']));
+    if (opEff) dynamics.opacity = opEff;
+
+    const flowEff = parseSutEffectorBlob(this.pickBlob(row, ['BrushDensityOfPaintEffector', 'BrushDensityEffector']));
+    if (flowEff) dynamics.flow = flowEff;
+
+    const angleEff = parseSutEffectorBlob(this.pickBlob(row, ['BrushAngleEffector', 'BrushDirectionEffector']));
+    if (angleEff) dynamics.angle = angleEff;
+
+    const scatterEff = parseSutEffectorBlob(this.pickBlob(row, ['BrushSprayDeviationEffector', 'BrushScatterEffector']));
+    if (scatterEff) dynamics.scatter = scatterEff;
+
+    const colorEff = parseSutEffectorBlob(this.pickBlob(row, ['BrushChangeColorEffector', 'BrushSubColorEffector']));
+    if (colorEff) dynamics.colorMix = colorEff;
+
+    if (Object.keys(dynamics).length > 0) {
+      out.dynamics = dynamics;
+    }
+
+    return out;
+  }
+
+  private pickColumn(row: SqliteRow | undefined, candidates: string[]): SqliteValue | undefined {
+    if (!row) return undefined;
+    for (const c of candidates) {
+      if (c in row && row[c] !== null && row[c] !== undefined) return row[c];
+    }
+    const lowerMap = new Map<string, SqliteValue>();
+    for (const [k, v] of Object.entries(row)) {
+      if (v !== null && v !== undefined) lowerMap.set(k.toLowerCase(), v);
+    }
+    for (const c of candidates) {
+      const hit = lowerMap.get(c.toLowerCase());
+      if (hit !== undefined) return hit;
+    }
+    return undefined;
+  }
+
+  private pickNumber(row: SqliteRow | undefined, candidates: string[]): number | null {
+    const val = this.pickColumn(row, candidates);
+    return typeof val === 'number' && Number.isFinite(val) ? val : null;
+  }
+
+  private pickString(row: SqliteRow | undefined, candidates: string[]): string | null {
+    const val = this.pickColumn(row, candidates);
+    return typeof val === 'string' ? val : null;
+  }
+
+  private pickBlob(row: SqliteRow | undefined, candidates: string[]): Uint8Array | null {
+    const val = this.pickColumn(row, candidates);
+    return val instanceof Uint8Array ? val : null;
+  }
+
+  private scanEmbeddedImages(buf: Uint8Array, isTextureHint: boolean): EmbeddedImage[] {
+    const images: EmbeddedImage[] = [];
+    const len = buf.length;
     let pos = 0;
-    let tipIdx = 1;
 
-    while (pos < len - 8) {
+    while (pos < len - 8 && images.length < 32) {
+      // PNG: 89 50 4E 47 0D 0A 1A 0A ... IEND
       if (
         buf[pos] === 0x89 &&
         buf[pos + 1] === 0x50 &&
@@ -42,8 +414,6 @@ export class SutParser {
       ) {
         const pngStart = pos;
         let pngEnd = -1;
-
-        // Search for IEND marker
         for (let i = pngStart + 8; i < len - 8; i++) {
           if (
             buf[i] === 0x49 &&
@@ -51,15 +421,12 @@ export class SutParser {
             buf[i + 2] === 0x4e &&
             buf[i + 3] === 0x44
           ) {
-            pngEnd = i + 8; // IEND + 4 bytes CRC
+            pngEnd = i + 8;
             break;
           }
         }
-
         if (pngEnd !== -1 && pngEnd > pngStart) {
           const pngBytes = buf.subarray(pngStart, pngEnd);
-
-          // Read width and height from IHDR chunk (offset 16, 4 bytes each, big endian)
           let width = 128;
           let height = 128;
           if (pngBytes.length >= 24) {
@@ -67,27 +434,20 @@ export class SutParser {
             width = ihdrView.getUint32(16, false);
             height = ihdrView.getUint32(20, false);
           }
-
           if (width > 0 && height > 0 && width <= 4096 && height <= 4096) {
-            const dataUrl = this.uint8ArrayToPngDataUrl(pngBytes);
-            tips.push({
-              id: `sut_tip_${tipIdx}`,
-              name: `${toolTitle} - 筆尖貼圖 #${tipIdx} (${width}x${height})`,
+            images.push({
               width,
               height,
-              dataUrl,
-              spacing: MIN_BRUSH_SPACING,
-              hardness: 0.8,
+              dataUrl: this.uint8ArrayToDataUrl(pngBytes, 'image/png'),
+              isTextureHint,
             });
-            tipIdx++;
           }
-
           pos = pngEnd;
           continue;
         }
       }
 
-      // Check for JPEG (FF D8 FF ... FF D9)
+      // JPEG: FF D8 FF ... FF D9
       if (buf[pos] === 0xff && buf[pos + 1] === 0xd8 && buf[pos + 2] === 0xff) {
         const jpgStart = pos;
         let jpgEnd = -1;
@@ -97,20 +457,14 @@ export class SutParser {
             break;
           }
         }
-
         if (jpgEnd !== -1 && jpgEnd - jpgStart > 100) {
           const jpgBytes = buf.subarray(jpgStart, jpgEnd);
-          const dataUrl = this.uint8ArrayToJpgDataUrl(jpgBytes);
-          tips.push({
-            id: `sut_jpg_${tipIdx}`,
-            name: `${toolTitle} - 貼圖 #${tipIdx}`,
+          images.push({
             width: 256,
             height: 256,
-            dataUrl,
-            spacing: MIN_BRUSH_SPACING,
-            hardness: 0.75,
+            dataUrl: this.uint8ArrayToDataUrl(jpgBytes, 'image/jpeg'),
+            isTextureHint,
           });
-          tipIdx++;
           pos = jpgEnd;
           continue;
         }
@@ -119,20 +473,14 @@ export class SutParser {
       pos++;
     }
 
-    // 3. If no embedded images found, check if it's an SQLite 3 database or pure parametric brush
-    if (tips.length === 0) {
-      tips.push(this.createParametricCspTip(toolTitle));
-    }
-
-    return tips;
+    return images;
   }
 
   /**
-   * Scans the SUT binary for tool name strings
+   * Scans the SUT binary for tool name strings when SQLite metadata is unavailable
    */
   private extractToolName(): string | null {
     const buf = this.buffer;
-    // Look for recognizable strings (min length 3, alphanumeric or CJK)
     let bestName = '';
     let currentChars: number[] = [];
 
@@ -171,7 +519,6 @@ export class SutParser {
   }
 
   private createParametricCspTip(name: string): ParsedBrushTip {
-    // Generate a high-quality CSP style soft-air/water procedural tip
     const size = 128;
     const canvas = typeof document !== 'undefined' ? document.createElement('canvas') : null;
     if (canvas) {
@@ -193,6 +540,7 @@ export class SutParser {
           dataUrl: canvas.toDataURL('image/png'),
           spacing: MIN_BRUSH_SPACING,
           hardness: 0.7,
+          sourceFormat: 'sut',
         };
       }
     }
@@ -205,10 +553,11 @@ export class SutParser {
       dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=',
       spacing: MIN_BRUSH_SPACING,
       hardness: 0.8,
+      sourceFormat: 'sut',
     };
   }
 
-  private uint8ArrayToPngDataUrl(bytes: Uint8Array): string {
+  private uint8ArrayToDataUrl(bytes: Uint8Array, mime: string): string {
     let base64 = '';
     if (typeof (globalThis as any).Buffer !== 'undefined') {
       base64 = (globalThis as any).Buffer.from(bytes).toString('base64');
@@ -220,21 +569,6 @@ export class SutParser {
       }
       base64 = (globalThis as any).btoa(binary);
     }
-    return `data:image/png;base64,${base64}`;
-  }
-
-  private uint8ArrayToJpgDataUrl(bytes: Uint8Array): string {
-    let base64 = '';
-    if (typeof (globalThis as any).Buffer !== 'undefined') {
-      base64 = (globalThis as any).Buffer.from(bytes).toString('base64');
-    } else {
-      let binary = '';
-      const chunk = 8192;
-      for (let i = 0; i < bytes.length; i += chunk) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-      }
-      base64 = (globalThis as any).btoa(binary);
-    }
-    return `data:image/jpeg;base64,${base64}`;
+    return `data:${mime};base64,${base64}`;
   }
 }
