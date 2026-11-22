@@ -86,6 +86,67 @@ contextBridge.exposeInMainWorld('atelierDesktop', {
     closeDirectory: (dirId: string) =>
       ipcRenderer.invoke('atelier:export-close-directory', dirId) as Promise<boolean>,
   },
+  pluginV3: {
+    listProfiles: () => ipcRenderer.invoke('atelier:plugin-v3-list-profiles'),
+    pickExecutable: () => ipcRenderer.invoke('atelier:plugin-v3-pick-exe'),
+    saveToolProfile: (input: {
+      id: string;
+      label: string;
+      executablePath: string;
+      argTemplate?: string[];
+      expectsOutputFile?: boolean;
+      timeoutMs?: number;
+    }) => ipcRenderer.invoke('atelier:plugin-v3-save-tool', input),
+    removeToolProfile: (id: string) => ipcRenderer.invoke('atelier:plugin-v3-remove-tool', id),
+    invokeTool: (req: {
+      runId?: string;
+      toolId: string;
+      args?: Record<string, unknown>;
+      stdinText?: string;
+      inputFileName?: string;
+      inputBytes?: Uint8Array;
+      outputFileName?: string;
+      timeoutMs?: number;
+    }) => ipcRenderer.invoke('atelier:plugin-v3-invoke-tool', req),
+    abortRun: (runId: string) => ipcRenderer.invoke('atelier:plugin-v3-abort-run', runId),
+    killAll: () => ipcRenderer.invoke('atelier:plugin-v3-kill-all'),
+    mcpServer: {
+      getStatus: () => ipcRenderer.invoke('atelier:plugin-v3-mcp-server-status'),
+      start: (options?: { port?: number; allowWrite?: boolean }) =>
+        ipcRenderer.invoke('atelier:plugin-v3-mcp-server-start', options),
+      stop: () => ipcRenderer.invoke('atelier:plugin-v3-mcp-server-stop'),
+      setAllowWrite: (allowWrite: boolean) =>
+        ipcRenderer.invoke('atelier:plugin-v3-mcp-server-set-write', allowWrite),
+      rotateToken: () => ipcRenderer.invoke('atelier:plugin-v3-mcp-server-rotate-token'),
+      onCanvasRequest: (
+        callback: (payload: {
+          requestId: string;
+          toolName: string;
+          args: Record<string, unknown>;
+          allowWrite: boolean;
+        }) => void,
+      ) => {
+        const handler = (
+          _event: unknown,
+          payload: { requestId: string; toolName: string; args: Record<string, unknown>; allowWrite: boolean },
+        ) => callback(payload);
+        ipcRenderer.on('lumina:mcp-canvas-request', handler);
+        return () => {
+          ipcRenderer.removeListener('lumina:mcp-canvas-request', handler);
+        };
+      },
+      sendCanvasResponse: (payload: { requestId: string; ok: boolean; result?: unknown; error?: string }) => {
+        ipcRenderer.send('lumina:mcp-canvas-response', payload);
+      },
+    },
+    mcpClient: {
+      saveProfile: (input: { id: string; label: string; endpointUrl: string; bearerToken?: string }) =>
+        ipcRenderer.invoke('atelier:plugin-v3-save-mcp-client', input),
+      removeProfile: (id: string) => ipcRenderer.invoke('atelier:plugin-v3-remove-mcp-client', id),
+      call: (payload: { serverId: string; method: string; params?: unknown; timeoutMs?: number }) =>
+        ipcRenderer.invoke('atelier:plugin-v3-mcp-client-call', payload),
+    },
+  },
   consumePendingLumina: () => ipcRenderer.invoke('lumina:consume-pending'),
   onOpenLumina: (
     callback: (payload: { filePath: string; data: Uint8Array }) => void
