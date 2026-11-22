@@ -9,8 +9,11 @@ import {
   DynamicStabilizer,
   MIN_BRUSH_SPACING,
   evaluatePressureCurve,
+  evaluateDynamicChannel,
+  evaluateAngleJitterRadians,
   PressureCurveConfig,
   PressureCurveType,
+  type BrushDynamicsConfig,
 } from '@atelier/shared';
 
 export interface RawPoint {
@@ -44,6 +47,8 @@ export interface WorkerBrushConfig {
   antiAlias?: 'none' | 'weak' | 'medium' | 'strong';
   /** 'pen': the dab angle follows the pen (twist, else the tilt direction) instead of the stroke */
   angleMode?: 'direction' | 'pen' | 'fixed';
+  /** Brush Engine v2 per-channel dynamics (pressure / tilt / velocity / random + min floor) */
+  dynamics?: BrushDynamicsConfig;
 }
 
 // Float count per dab: [x, y, size, pressure, alpha, rotation, tilt (0 upright … 1 flat)]
@@ -72,6 +77,9 @@ export class StrokeWorkerEngine {
   private distanceToNextDab = 0; // Remaining path length, carried across segments and worker messages.
   // The pen's latest tilt / twist: they change slowly, so a batch of dabs shares them
   private pen = { tilt: 0, azimuth: 0, twist: 0, has: false };
+  // Smoothed normalized stroke velocity (0..1) for velocity-driven dynamics (does not alter stabilizer)
+  private lastRawForVel: { x: number; y: number; time: number } | null = null;
+  private currentVelocity = 0;
 
   private trackPen(pt: RawPoint) {
     const tx = pt.tiltX ?? 0;
@@ -82,6 +90,14 @@ export class StrokeWorkerEngine {
       twist: ((pt.twist ?? 0) * Math.PI) / 180,
       has: tx !== 0 || ty !== 0 || Boolean(pt.twist),
     };
+    const now = pt.time ?? 0;
+    if (this.lastRawForVel && now > this.lastRawForVel.time) {
+      const dt = Math.max(1, now - this.lastRawForVel.time);
+      const speedPxPerMs = Math.hypot(pt.x - this.lastRawForVel.x, pt.y - this.lastRawForVel.y) / dt;
+      const norm = Math.max(0, Math.min(1, speedPxPerMs / 2.5));
+      this.currentVelocity = this.currentVelocity * 0.65 + norm * 0.35;
+    }
+    this.lastRawForVel = { x: pt.x, y: pt.y, time: now };
   }
 
   /** The dab angle for 'pen' mode: barrel twist if the pen reports it, else where it leans */
@@ -100,6 +116,8 @@ export class StrokeWorkerEngine {
     this.prevAnchor = { ...initialPoint };
     this.lastControl = { ...initialPoint };
     this.hasFirstSegment = false;
+    this.lastRawForVel = null;
+    this.currentVelocity = 0;
     this.trackPen(initialPoint);
 
     // Generate the initial dab at start of stroke
@@ -119,24 +137,47 @@ export class StrokeWorkerEngine {
     const p = Math.max(0, Math.min(1.0, mappedPressure));
     if (p === 0) return { size: 0, alpha: 0 };
     const effectiveMin = Math.max(0, Math.min(this.config.minSize, this.config.size));
+    const dyn = this.config.dynamics;
+    const dynInput = {
+      pressure: p,
+      tilt: this.pen.tilt,
+      velocity: this.currentVelocity,
+      rand: Math.random(),
+    };
 
     if (this.config.eraserMode) {
+      const size = dyn?.size
+        ? Math.max(0.35, this.config.size * evaluateDynamicChannel(dyn.size, dynInput, 1))
+        : effectiveMin + (this.config.size - effectiveMin) * p;
+      const opMult = dyn?.opacity ? evaluateDynamicChannel(dyn.opacity, dynInput, 1) : 1;
       return {
-        size: effectiveMin + (this.config.size - effectiveMin) * p,
-        alpha: Math.max(0, Math.min(1, this.config.opacity)),
+        size,
+        alpha: Math.max(0, Math.min(1, this.config.opacity * opMult)),
       };
     }
 
     const explicitAirbrush = this.config.brushType === 'airbrush';
     if (this.config.antiAlias === 'none' && !explicitAirbrush) {
-      const size = Math.max(1, Math.round(effectiveMin + (this.config.size - effectiveMin) * p));
+      const size = dyn?.size
+        ? Math.max(1, Math.round(this.config.size * evaluateDynamicChannel(dyn.size, dynInput, 1)))
+        : Math.max(1, Math.round(effectiveMin + (this.config.size - effectiveMin) * p));
       return { size, alpha: 1.0 };
     }
 
+    // Compute dab size using explicit v2 size dynamics when configured, else preserve legacy minSize..size taper
+    const computeSize = (defaultSize: number): number => {
+      if (!dyn?.size) return defaultSize;
+      const minRatio = dyn.size.min ?? (this.config.size > 0 ? effectiveMin / this.config.size : 0);
+      const mult = evaluateDynamicChannel({ ...dyn.size, min: minRatio }, dynInput, 1);
+      return Math.max(0.35, this.config.size * mult);
+    };
+
     const isAirbrush = explicitAirbrush || this.config.hardness <= 0.25;
     if (isAirbrush) {
-      const size = Math.max(1.5, effectiveMin + (this.config.size - effectiveMin) * (0.72 + 0.28 * p));
-      const passAlpha = Math.min(0.96, this.config.flow * this.config.opacity * Math.pow(p, 1.4));
+      const size = Math.max(1.5, computeSize(effectiveMin + (this.config.size - effectiveMin) * (0.72 + 0.28 * p)));
+      const opMult = dyn?.opacity ? evaluateDynamicChannel(dyn.opacity, dynInput, 1) : Math.pow(p, 1.4);
+      const flowMult = dyn?.flow ? evaluateDynamicChannel(dyn.flow, dynInput, 1) : 1;
+      const passAlpha = Math.min(0.96, this.config.flow * flowMult * this.config.opacity * opMult);
       const overlap = Math.max(1, 0.63 * size / this.spacingForSize(size));
       const alpha = 1 - Math.pow(1 - passAlpha, 1 / overlap);
       return { size, alpha };
@@ -147,20 +188,25 @@ export class StrokeWorkerEngine {
       (this.config.brushType === 'pen' ||
         (this.config.hardness >= 0.92 && (this.config.colorMixing ?? 0) === 0 && this.config.flow >= 0.98));
 
-    if (isInkingPen) {
-      const size = effectiveMin + (this.config.size - effectiveMin) * p;
+    if (isInkingPen && !dyn?.opacity && !dyn?.flow) {
+      const size = computeSize(effectiveMin + (this.config.size - effectiveMin) * p);
       const alpha = this.config.flow * this.config.opacity * (0.78 + 0.22 * Math.pow(p, 0.5));
       return { size, alpha };
     }
 
-    // Painting, blending & shading brushes (Impasto, Watercolor, Oil, Pastel, Pencil, Standard Brush):
-    // Pen pressure modulates stroke opacity so light strokes produce smooth translucent washes.
-    const size = effectiveMin + (this.config.size - effectiveMin) * p;
+    // Painting, blending & shading brushes (or any brush with explicit v2 opacity/flow dynamics):
+    const size = computeSize(effectiveMin + (this.config.size - effectiveMin) * p);
     const isPlainSolidBrush = (this.config.colorMixing ?? 0) === 0 && this.config.flow >= 0.99 && this.config.hardness >= 0.8;
-    const pressureOpacity = isPlainSolidBrush && p >= 0.8
+    const legacyPressureOpacity = isPlainSolidBrush && p >= 0.8
       ? Math.min(0.999, 0.75 + (p - 0.8) * 1.245)
       : Math.pow(p, 1.35);
-    const passAlpha = Math.min(0.999, this.config.flow * this.config.opacity * pressureOpacity);
+    const opMult = dyn?.opacity ? evaluateDynamicChannel(dyn.opacity, dynInput, 1) : legacyPressureOpacity;
+    const flowMult = dyn?.flow ? evaluateDynamicChannel(dyn.flow, dynInput, 1) : 1;
+    const passAlpha = Math.min(0.999, this.config.flow * flowMult * this.config.opacity * opMult);
+    // When opacity dynamics are explicitly OFF and flow is full on a hard brush, stamp directly without overlap attenuation
+    if (dyn?.opacity && !dyn.opacity.pressure && !dyn.opacity.tilt && !dyn.opacity.velocity && !(dyn.opacity.random ?? 0) && this.config.flow * flowMult >= 0.99 && this.config.hardness >= 0.85) {
+      return { size, alpha: passAlpha };
+    }
     const overlap = Math.max(1.2, 0.55 / Math.max(MIN_BRUSH_SPACING, this.config.spacing));
     const alpha = 1 - Math.pow(1 - passAlpha, 1 / overlap);
     return { size, alpha };
@@ -323,12 +369,25 @@ export class StrokeWorkerEngine {
           let x = previous.x + dx * u;
           let y = previous.y + dy * u;
           let rotation = this.penAngle(angle);
-          if (this.config.scatter > 0) {
+          const dynInput = {
+            pressure,
+            tilt: this.pen.tilt,
+            velocity: this.currentVelocity,
+            rand: Math.random(),
+          };
+          if (this.config.dynamics?.angle) {
+            rotation += evaluateAngleJitterRadians(this.config.dynamics.angle, dynInput);
+          }
+          const scatterMult = this.config.dynamics?.scatter
+            ? evaluateDynamicChannel(this.config.dynamics.scatter, dynInput, 1)
+            : 1;
+          const effScatter = this.config.scatter * scatterMult;
+          if (effScatter > 0) {
             const normal = angle + Math.PI / 2;
-            const jitter = (Math.random() - 0.5) * 4 * this.config.scatter * size;
+            const jitter = (Math.random() - 0.5) * 4 * effScatter * size;
             x += Math.cos(normal) * jitter;
             y += Math.sin(normal) * jitter;
-            rotation += (Math.random() - 0.5) * Math.PI * this.config.scatter;
+            rotation += (Math.random() - 0.5) * Math.PI * effScatter;
           }
 
           outputDabs.push(x, y, size, pressure, alpha, rotation, this.pen.tilt);

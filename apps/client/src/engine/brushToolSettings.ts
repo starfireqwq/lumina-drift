@@ -20,18 +20,27 @@ const COMMON: Partial<BrushProperties> = {
   colorMixing: 0,
   paintAmount: 0.7,
   colorStretch: 0,
+  mixMode: 'blend',
   textureDensity: 0,
   textureScale: 1,
+  textureInvert: false,
+  textureBlendMode: 'subtract',
+  customTextureUrl: null,
   dualBrush: false,
   dualSize: 0.4,
   dualScatter: 0.6,
+  dualTipUrl: null,
+  dualBlendMode: 'multiply',
   hueJitter: 0,
   satJitter: 0,
   valJitter: 0,
+  fgBgMix: 0,
   angleMode: 'direction',
   tipAngle: 0,
   roundness: 1,
   tiltSize: 0,
+  wetEdges: false,
+  dynamics: undefined,
 };
 
 export const BRUSH_TOOL_DEFAULTS: Record<BrushToolId, Partial<BrushProperties>> = {
@@ -53,13 +62,18 @@ export const eraserStrokeProperties = (props: BrushProperties): BrushProperties 
   customBrushUrl: null,
   antiAlias: props.antiAlias === 'none' ? 'medium' : props.antiAlias,
   colorMixing: 0,
+  mixMode: 'blend',
   textureDensity: 0,
+  customTextureUrl: null,
   dualBrush: false,
+  dualTipUrl: null,
   hueJitter: 0,
   satJitter: 0,
   valJitter: 0,
+  fgBgMix: 0,
   roundness: 1,
   tiltSize: 0,
+  wetEdges: false,
 });
 
 const KEY = 'atelier_brush_tools';
@@ -67,6 +81,8 @@ const KEY = 'atelier_brush_tools';
 const strip = (p: Partial<BrushProperties>): Partial<BrushProperties> => {
   const { color: _c, secondaryColor: _s, ...rest } = p;
   if (typeof rest.customBrushUrl === 'string' && rest.customBrushUrl.startsWith('blob:')) rest.customBrushUrl = null;
+  if (typeof rest.customTextureUrl === 'string' && rest.customTextureUrl.startsWith('blob:')) rest.customTextureUrl = null;
+  if (typeof rest.dualTipUrl === 'string' && rest.dualTipUrl.startsWith('blob:')) rest.dualTipUrl = null;
   return rest;
 };
 
