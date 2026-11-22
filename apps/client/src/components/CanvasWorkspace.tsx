@@ -136,6 +136,7 @@ import {
 import {
   buildKeyframeFromEval,
   resolveParentWorldAffine,
+  sampleKeyframeMotionPath,
   type KeyframeBaseRect,
 } from '../utils/keyframeTransform';
 import { lightIdsFor, loadLightTable, saveLightTable, type LightTableState } from '../engine/lightTable';
@@ -214,6 +215,7 @@ const RulerControlsModal = lazy(() => import('./RulerControlsModal').then((m) =>
 const ReferenceViewportHUD = lazy(() => import('./ReferenceViewportHUD').then((m) => ({ default: m.ReferenceViewportHUD })));
 const TransformOverlay = lazy(() => import('./TransformOverlay').then((m) => ({ default: m.TransformOverlay })));
 const KeyframeTransformOverlay = lazy(() => import('./KeyframeTransformOverlay').then((m) => ({ default: m.KeyframeTransformOverlay })));
+const KeyframeMotionPathOverlay = lazy(() => import('./KeyframeMotionPathOverlay').then((m) => ({ default: m.KeyframeMotionPathOverlay })));
 const MeshWarpOverlay = lazy(() => import('./MeshWarpOverlay').then((m) => ({ default: m.MeshWarpOverlay })));
 const TextCanvasEditor = lazy(() => import('./TextCanvasEditor').then((m) => ({ default: m.TextCanvasEditor })));
 const ComicStudioOverlay = lazy(() => import('./ComicStudioOverlay').then((m) => ({ default: m.ComicStudioOverlay })));
@@ -880,6 +882,21 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   // show the motion again
   const [keyframePanelOpen, setKeyframePanelOpen] = useState(false);
   const [showKeyframeHandles, setShowKeyframeHandles] = useState(true);
+  const [showMotionPath, setShowMotionPath] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('atelier_keyframe_motion_path');
+      return saved === null ? true : saved === '1';
+    } catch {
+      return true;
+    }
+  });
+  const toggleMotionPath = useCallback(() => {
+    setShowMotionPath((prev) => {
+      const next = !prev;
+      try { localStorage.setItem('atelier_keyframe_motion_path', next ? '1' : '0'); } catch {}
+      return next;
+    });
+  }, []);
   const [animFrame, setAnimFrame] = useState(0);
   const [liveKeyframePreview, setLiveKeyframePreview] = useState<{ layerId: string; frame: number; evaluated: EvaluatedTransform } | null>(null);
   const [animPlaying, setAnimPlaying] = useState(false);
@@ -5498,6 +5515,38 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       height: Math.min(canvas.height, h),
     };
   }, [keyframeHandlesActive, activeLayer, layers, canvas]);
+
+  const activeMotionPath = useMemo(() => {
+    if (
+      !isAnimationTimelineOpen ||
+      !showMotionPath ||
+      animPlaying ||
+      isTransformActive ||
+      textEdit ||
+      isResizeModalOpen ||
+      filterModalOpenRef.current ||
+      !activeLayer ||
+      !canvas
+    ) {
+      return null;
+    }
+    const override =
+      liveKeyframePreview && liveKeyframePreview.layerId === activeLayer.id
+        ? { frame: liveKeyframePreview.frame, evaluated: liveKeyframePreview.evaluated }
+        : null;
+    return sampleKeyframeMotionPath(layers, activeLayer.id, canvas.width, canvas.height, override);
+  }, [
+    isAnimationTimelineOpen,
+    showMotionPath,
+    animPlaying,
+    isTransformActive,
+    textEdit,
+    isResizeModalOpen,
+    activeLayer,
+    canvas,
+    layers,
+    liveKeyframePreview,
+  ]);
   const alignBlockReason = alignOpen
     ? alignTargetsBlocker(alignTargetsList, {
       busy: alignBusy,
@@ -6033,7 +6082,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               />
 
               <ConditionalViewportConsumer
-                active={Boolean(textEdit || (isTransformActive && distortMode === 'transform') || isResizeModalOpen || keyframeHandlesActive)}
+                active={Boolean(textEdit || (isTransformActive && distortMode === 'transform') || isResizeModalOpen || keyframeHandlesActive || activeMotionPath)}
                 subscribe={subscribeViewport}
                 getSnapshot={getViewportSnapshot}
               >
@@ -6081,6 +6130,21 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                           onModifiersChange={setResizeModifiers}
                           canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
                           screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
+                        />
+                      </Suspense>
+                    )}
+
+                    {activeMotionPath && (
+                      <Suspense fallback={null}>
+                        <KeyframeMotionPathOverlay
+                          path={activeMotionPath}
+                          currentFrame={animFrame}
+                          canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
+                          onSelectFrame={(frame) => {
+                            skipSelectShownRef.current = true;
+                            animationEngine?.goTo(frame);
+                            skipSelectShownRef.current = false;
+                          }}
                         />
                       </Suspense>
                     )}
@@ -6236,6 +6300,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 liveKeyframeEval={liveKeyframePreview && activeLayer && liveKeyframePreview.layerId === activeLayer.id ? liveKeyframePreview.evaluated : null}
                 showKeyframeHandles={showKeyframeHandles}
                 onToggleKeyframeHandles={() => setShowKeyframeHandles((v) => !v)}
+                showMotionPath={showMotionPath}
+                onToggleMotionPath={toggleMotionPath}
                 ownerNames={Object.fromEntries([
                   ...layers.filter((l) => l.ownerId).map((l) => [l.ownerId as string, l.ownerDisplayName || '畫師']),
                   ...(user ? [[user.id, `${user.displayName || user.username}（你）`]] : []),
