@@ -1,4 +1,8 @@
-import { PLUGIN_LIMITS, type PluginManifestV2, type PluginPermissionV2 } from './pluginApi';
+import {
+  PLUGIN_LIMITS,
+  type PluginManifestModern,
+  type PluginPermissionV3,
+} from './pluginApi';
 
 export type PluginRpcMethod =
   | 'brush.get'
@@ -45,9 +49,15 @@ export type PluginRpcMethod =
   | 'easing.listPresets'
   | 'easing.register'
   | 'easing.unregister'
-  | 'easing.evaluate';
+  | 'easing.evaluate'
+  | 'bridge.listTools'
+  | 'bridge.invoke'
+  | 'mcp.serverStatus'
+  | 'mcp.listServers'
+  | 'mcp.listTools'
+  | 'mcp.callTool';
 
-export const PLUGIN_RPC_PERMISSION_MAP: Record<PluginRpcMethod, PluginPermissionV2> = {
+export const PLUGIN_RPC_PERMISSION_MAP: Record<PluginRpcMethod, PluginPermissionV3> = {
   'brush.get': 'brush',
   'brush.set': 'brush',
   'layers.list': 'layers:read',
@@ -93,7 +103,22 @@ export const PLUGIN_RPC_PERMISSION_MAP: Record<PluginRpcMethod, PluginPermission
   'easing.register': 'timeline:write',
   'easing.unregister': 'timeline:write',
   'easing.evaluate': 'timeline:read',
+  'bridge.listTools': 'bridge:local',
+  'bridge.invoke': 'bridge:local',
+  'mcp.serverStatus': 'mcp:server',
+  'mcp.listServers': 'mcp:client',
+  'mcp.listTools': 'mcp:client',
+  'mcp.callTool': 'mcp:client',
 };
+
+export const PLUGIN_V3_RPC_METHODS: ReadonlySet<PluginRpcMethod> = new Set([
+  'bridge.listTools',
+  'bridge.invoke',
+  'mcp.serverStatus',
+  'mcp.listServers',
+  'mcp.listTools',
+  'mcp.callTool',
+]);
 
 export interface PluginRpcRequest {
   id: number;
@@ -185,22 +210,25 @@ export function isPluginRpcMethod(method: unknown): method is PluginRpcMethod {
 }
 
 export function assertPluginRpcAllowed(
-  manifest: PluginManifestV2,
+  manifest: PluginManifestModern,
   method: unknown,
   params: unknown,
 ): asserts method is PluginRpcMethod {
   if (!isPluginRpcMethod(method)) {
     throw new Error(`Unknown RPC method: ${String(method)}`);
   }
+  if (PLUGIN_V3_RPC_METHODS.has(method) && manifest.apiVersion < 3) {
+    throw new Error(`RPC method "${method}" requires Plugin API v3.`);
+  }
   const required = PLUGIN_RPC_PERMISSION_MAP[method];
-  if (!manifest.permissions.includes(required)) {
+  if (!(manifest.permissions as readonly string[]).includes(required)) {
     throw new Error(`Missing permission: ${required}`);
   }
   // Decision 4: pixels.write defaults respectSelection = true;
   // setting respectSelection = false explicitly requires the "selection" permission.
   if (method === 'pixels.write' && params && typeof params === 'object') {
     const patch = (params as { patch?: { respectSelection?: unknown } }).patch;
-    if (patch && patch.respectSelection === false && !manifest.permissions.includes('selection')) {
+    if (patch && patch.respectSelection === false && !(manifest.permissions as readonly string[]).includes('selection')) {
       throw new Error('Setting respectSelection: false requires the "selection" permission.');
     }
   }

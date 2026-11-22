@@ -14,7 +14,7 @@ import { AtelierModal } from './components/AtelierModal';
 import type { CanvasPluginAccess, CanvasProjectAccess } from './components/CanvasWorkspace';
 import { getPlugins, subscribePlugins } from './plugins/pluginStore';
 import { getPluginLabels } from './plugins/pluginLabels';
-import { resolvePluginName, type PluginManifestV2 } from './plugins/pluginApi';
+import { isModernPluginManifest, resolvePluginName, type PluginManifestModern } from './plugins/pluginApi';
 import { ShortcutManager, type ParsedPluginShortcutId } from './engine/ShortcutManager';
 import type { PluginPanelValues } from './components/PluginPanelWindow';
 import { ConnectionGateway, InitialCanvasOptions } from './components/ConnectionGateway';
@@ -80,7 +80,7 @@ export const App: React.FC = () => {
   useEffect(() => {
     const validKeys = new Set<string>();
     for (const { manifest, enabled } of plugins) {
-      if (!enabled || manifest.apiVersion !== 2 || !manifest.permissions.includes('ui:panel')) continue;
+      if (!enabled || !isModernPluginManifest(manifest) || !manifest.permissions.includes('ui:panel')) continue;
       for (const panel of manifest.panels) {
         validKeys.add(`${manifest.id}:${panel.id}`);
       }
@@ -678,7 +678,7 @@ export const App: React.FC = () => {
 
   const handleTogglePluginPanel = useCallback((pluginId: string, panelId: string) => {
     const plugin = getPlugins().find(({ manifest, enabled }) => enabled && manifest.id === pluginId)?.manifest;
-    if (!plugin || plugin.apiVersion !== 2 || !plugin.permissions.includes('ui:panel')) return;
+    if (!plugin || !isModernPluginManifest(plugin) || !plugin.permissions.includes('ui:panel')) return;
     if (!plugin.panels.some((p) => p.id === panelId)) return;
     const key = `${pluginId}:${panelId}`;
     setOpenPluginPanels((prev) => (prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]));
@@ -696,7 +696,7 @@ export const App: React.FC = () => {
     const controller = new AbortController();
     pluginCmdAbortRef.current = controller;
     try {
-      if (plugin.apiVersion === 2) {
+      if (isModernPluginManifest(plugin)) {
         const access = pluginAccessRef.current;
         if (!access || access.canvasId !== canvasId) return;
         const result = await access.runV2Command(plugin, commandId, {
@@ -756,7 +756,7 @@ export const App: React.FC = () => {
 
   const handlePluginPanelAction = useCallback(
     async (
-      plugin: PluginManifestV2,
+      plugin: PluginManifestModern,
       panelId: string,
       actionId: string,
       values: PluginPanelValues,
@@ -1504,7 +1504,7 @@ export const App: React.FC = () => {
             }
           : null;
         const panelEntries = plugins.flatMap(({ manifest, enabled }) => {
-          if (!enabled || manifest.apiVersion !== 2 || !manifest.permissions.includes('ui:panel')) return [];
+          if (!enabled || !isModernPluginManifest(manifest) || !manifest.permissions.includes('ui:panel')) return [];
           return manifest.panels.map((panel) => ({
             key: `${manifest.id}:${panel.id}`,
             plugin: manifest,

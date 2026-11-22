@@ -644,7 +644,7 @@ export class PluginCanvasTransaction {
     return layer;
   }
 
-  createRpcHandler(): PluginRpcHandler {
+  createRpcHandler(v3Handler?: PluginRpcHandler): PluginRpcHandler {
     return async (method: PluginRpcMethod, params: unknown, buffer?: ArrayBuffer) => {
       if (this.closed) throw new Error('Plugin transaction is already closed.');
       const obj = (params && typeof params === 'object' ? params : {}) as Record<string, unknown>;
@@ -1671,6 +1671,18 @@ export class PluginCanvasTransaction {
             }
           }
           return { result: { value: evaluateEasing(t, easingKind, bezier) } };
+        }
+
+        case 'bridge.listTools':
+        case 'bridge.invoke':
+        case 'mcp.serverStatus':
+        case 'mcp.listServers':
+        case 'mcp.listTools':
+        case 'mcp.callTool': {
+          if (!v3Handler) {
+            throw new Error('Plugin API v3.0 desktop bridges and local MCP are unavailable in this environment.');
+          }
+          return v3Handler(method, params, buffer);
         }
       }
     };

@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { PluginAction, PluginManifestV2 } from '../plugins/pluginApi';
+import type { PluginAction, PluginManifestModern } from '../plugins/pluginApi';
 import type { PluginV2Result } from '../plugins/pluginRpc';
 import {
   PluginCanvasTransaction,
@@ -356,12 +356,12 @@ export interface CanvasPluginAccess {
   canvasId: string;
   apply(action: Exclude<PluginAction, { kind: 'message' }>): Promise<boolean>;
   runV2Command(
-    plugin: PluginManifestV2,
+    plugin: PluginManifestModern,
     commandId: string,
     options?: { onSlowStart?: () => void; signal?: AbortSignal },
   ): Promise<PluginV2Result>;
   runV2PanelAction(
-    plugin: PluginManifestV2,
+    plugin: PluginManifestModern,
     panelId: string,
     actionId: string,
     values: Record<string, unknown>,
@@ -5697,7 +5697,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
 
   const runPluginV2 = async (
-    plugin: PluginManifestV2,
+    plugin: PluginManifestModern,
     invocation:
       | { kind: 'command'; commandId: string }
       | { kind: 'panel'; panelId: string; actionId: string; values: Record<string, unknown> },

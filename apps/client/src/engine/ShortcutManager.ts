@@ -830,7 +830,7 @@ export class ShortcutManager {
       if (!entry.enabled) continue;
       const { manifest } = entry;
       const pluginName = resolvePluginName(manifest, language ?? 'en-US');
-      if (manifest.apiVersion === 2) {
+      if (manifest.apiVersion === 2 || manifest.apiVersion === 3) {
         if (manifest.permissions.includes('ui:panel')) {
           for (const panel of manifest.panels) {
             const title = resolvePluginText(panel.title, panel.i18nTitle, language ?? 'en-US');

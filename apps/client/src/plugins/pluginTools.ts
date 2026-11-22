@@ -1,7 +1,8 @@
 import {
+  isModernPluginManifest,
   PLUGIN_LIMITS,
   type PluginFilterParam,
-  type PluginManifestV2,
+  type PluginManifestModern,
   type PluginPointerEvent,
   type PluginPointerPhase,
   type PluginToolDeclaration,
@@ -13,7 +14,7 @@ import type { PluginV2Result } from './pluginRpc';
 
 export interface RegisteredPluginTool {
   key: string;
-  plugin: PluginManifestV2;
+  plugin: PluginManifestModern;
   tool: PluginToolDeclaration;
   hasInputPermission: boolean;
 }
@@ -25,7 +26,7 @@ export function makePluginToolKey(pluginId: string, toolId: string): string {
 export function collectEnabledPluginTools(plugins: readonly InstalledPlugin[]): RegisteredPluginTool[] {
   const out: RegisteredPluginTool[] = [];
   for (const entry of plugins) {
-    if (!entry.enabled || entry.manifest.apiVersion !== 2) continue;
+    if (!entry.enabled || !isModernPluginManifest(entry.manifest)) continue;
     if (!entry.manifest.permissions.includes('tools')) continue;
     const tools = entry.manifest.tools ?? [];
     if (tools.length === 0) continue;
@@ -77,11 +78,11 @@ export interface RawPointerSample {
 
 export interface PluginToolStrokeHooks {
   createSession: (
-    plugin: PluginManifestV2,
+    plugin: PluginManifestModern,
     toolId: string,
     tx: PluginCanvasTransaction,
   ) => PluginToolSessionHandle;
-  createTransaction: (plugin: PluginManifestV2, groupId: string) => PluginCanvasTransaction;
+  createTransaction: (plugin: PluginManifestModern, groupId: string) => PluginCanvasTransaction;
   onNotice?: (text: string) => void;
   onError?: (message: string) => void;
 }
@@ -96,7 +97,7 @@ export interface PluginToolStrokeHooks {
 export class PluginToolPointerController {
   private active: {
     pointerId: number;
-    plugin: PluginManifestV2;
+    plugin: PluginManifestModern;
     tool: PluginToolDeclaration;
     options: Record<string, string | number | boolean>;
     tx: PluginCanvasTransaction;

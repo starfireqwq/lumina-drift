@@ -17,7 +17,7 @@ import {
   resolvePluginName,
   resolvePluginText,
   type PluginFieldCondition,
-  type PluginManifestV2,
+  type PluginManifestModern,
   type PluginPanelAction,
   type PluginPanelDeclaration,
   type PluginPanelField,
@@ -151,7 +151,7 @@ function renderPanelIcon(iconName?: string) {
 }
 
 interface PluginPanelWindowProps {
-  plugin: PluginManifestV2;
+  plugin: PluginManifestModern;
   panel: PluginPanelDeclaration;
   layers: LayerModel[];
   activeLayerId: string | null;
