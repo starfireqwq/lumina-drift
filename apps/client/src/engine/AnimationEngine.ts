@@ -1,6 +1,8 @@
 import {
   Affine2D,
+  CelMark,
   IDENTITY_AFFINE,
+  TimelineLabel,
   TransformKeyframe,
   evaluateTransformKeyframes,
   multiplyAffine,
@@ -25,6 +27,10 @@ export interface CelEntry {
   ref?: string;
   /** A blank frame put on the timeline on purpose (meta.cel.ref = ''), not a reuse of a deleted cel */
   blank?: boolean;
+  /** Key drawing (○) or inbetween (●) badge */
+  mark?: CelMark;
+  /** Optional short memo for this cel */
+  note?: string;
   ownerId: string | null;
   isGroup: boolean;
 }
@@ -35,6 +41,8 @@ export interface AnimationTrack {
   ownerId: string | null;
   shared: boolean;
   entries: CelEntry[];
+  /** Shared timeline frame labels stored on the folder's meta.animation.labels */
+  labels?: TimelineLabel[];
 }
 
 /**
@@ -60,6 +68,8 @@ export const MAX_TIMELINE_FRAMES = 6000;
 /** A cel can stay on screen for the whole timeline */
 export const MAX_HOLD = MAX_TIMELINE_FRAMES;
 export const MAX_ONION = 10;
+/** Max frames to each side when flipbooking (hold-to-flip) */
+export const MAX_FLIP_SPAN = 5;
 /** Frames past the end of the longest track that the playhead can be put on (to place cels there) */
 export const TIMELINE_SLACK = 24;
 /** Layer name of a blank frame (the timeline draws it as ×) */
@@ -74,8 +84,188 @@ type AnimLayer = {
   opacity: number;
   name?: string;
   ownerId?: string | null;
-  meta?: { animation?: unknown; cel?: { hold?: number; ref?: string }; keyframes?: TransformKeyframe[] } | null;
+  meta?: {
+    animation?: { fps?: number; shared?: boolean; length?: number; labels?: TimelineLabel[] } | unknown;
+    cel?: { hold?: number; ref?: string; mark?: CelMark; note?: string };
+    keyframes?: TransformKeyframe[];
+  } | null;
 };
+
+/** Sanitize and sort timeline labels by frame (deduplicating same frame, last wins) */
+export function normalizeTimelineLabels(list: ReadonlyArray<TimelineLabel> | undefined | null): TimelineLabel[] {
+  if (!Array.isArray(list) || list.length === 0) return [];
+  const byFrame = new Map<number, string>();
+  for (const item of list) {
+    if (!item || typeof item !== 'object') continue;
+    const frame = Math.round(Number(item.frame));
+    if (!Number.isFinite(frame) || frame < 0 || frame >= MAX_TIMELINE_FRAMES) continue;
+    const text = typeof item.text === 'string' ? item.text.trim().slice(0, 40) : '';
+    if (!text) continue;
+    byFrame.set(frame, text);
+  }
+  return [...byFrame.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([frame, text]) => ({ frame, text }));
+}
+
+export function upsertTimelineLabel(
+  list: ReadonlyArray<TimelineLabel> | undefined | null,
+  frame: number,
+  text: string,
+): TimelineLabel[] {
+  const f = Math.max(0, Math.min(MAX_TIMELINE_FRAMES - 1, Math.round(frame)));
+  const cleaned = text.trim().slice(0, 40);
+  const rest = normalizeTimelineLabels(list).filter((l) => l.frame !== f);
+  if (!cleaned) return rest;
+  return normalizeTimelineLabels([...rest, { frame: f, text: cleaned }]);
+}
+
+export function removeTimelineLabel(
+  list: ReadonlyArray<TimelineLabel> | undefined | null,
+  frame: number,
+): TimelineLabel[] {
+  const f = Math.round(frame);
+  return normalizeTimelineLabels(list).filter((l) => l.frame !== f);
+}
+
+export interface RepeatCelPlanItem {
+  /** '' for blank frame, otherwise the real cel layer id to reference */
+  ref: string;
+  hold: number;
+  blank?: boolean;
+  /** Display name for the created ref group layer */
+  name: string;
+}
+
+export interface RepeatCelPlan {
+  items: RepeatCelPlanItem[];
+  /** Total timeline frames covered by the original selected run plus all repeated items */
+  totalFrames: number;
+  /** Number of extra frames added by the repeated items */
+  addedFrames: number;
+  /** Whether the plan was capped by maxItems */
+  capped: boolean;
+}
+
+export const MAX_REPEAT_CREATED_ITEMS = 200;
+
+/**
+ * Computes the extra ref/blank entries needed to repeat a selected sequence of cels.
+ * - mode 'count': total cycles including the original selection (e.g. 4 cels × count 3 = 12 frames, adding 2 cycles = 8 items).
+ * - mode 'toEnd': repeats until `targetEndFrame` (timeline length), trimming the last item's hold if needed.
+ */
+export function planRepeatCels(
+  allEntries: ReadonlyArray<CelEntry>,
+  selectedIds: ReadonlyArray<string>,
+  opts: { mode: 'count' | 'toEnd'; count?: number; targetEndFrame?: number; maxItems?: number },
+): RepeatCelPlan {
+  const idSet = new Set(selectedIds);
+  const picked: Array<{ entry: CelEntry; index: number }> = [];
+  allEntries.forEach((entry, index) => {
+    if (idSet.has(entry.id)) picked.push({ entry, index });
+  });
+  if (picked.length === 0) return { items: [], totalFrames: 0, addedFrames: 0, capped: false };
+
+  const byId = new Map(allEntries.map((e) => [e.id, e]));
+  const template = picked.map(({ entry }) => {
+    const targetId = celLayerOf(entry);
+    if (!targetId) {
+      return { ref: '', hold: entry.hold, blank: true, name: BLANK_CEL_NAME };
+    }
+    const targetLabel = byId.get(targetId)?.label || entry.label || '1';
+    return { ref: targetId, hold: entry.hold, name: `↻ ${targetLabel}` };
+  });
+  const baseFrames = template.reduce((sum, item) => sum + item.hold, 0);
+  const maxItems = Math.max(1, opts.maxItems ?? MAX_REPEAT_CREATED_ITEMS);
+  const items: RepeatCelPlanItem[] = [];
+  let addedFrames = 0;
+  let capped = false;
+
+  if (opts.mode === 'count') {
+    const cycles = Math.max(1, Math.min(100, Math.round(opts.count ?? 2)));
+    const extraCycles = cycles - 1;
+    for (let c = 0; c < extraCycles; c++) {
+      for (const tpl of template) {
+        if (items.length >= maxItems) {
+          capped = true;
+          break;
+        }
+        items.push({ ...tpl });
+        addedFrames += tpl.hold;
+      }
+      if (capped) break;
+    }
+  } else {
+    const lastIdx = picked[picked.length - 1].index;
+    const afterStart = entryStart(allEntries as CelEntry[], lastIdx) + picked[picked.length - 1].entry.hold;
+    const targetEnd = Math.max(afterStart, Math.min(MAX_TIMELINE_FRAMES, Math.round(opts.targetEndFrame ?? afterStart)));
+    let remaining = targetEnd - afterStart;
+    let cursor = 0;
+    while (remaining > 0) {
+      if (items.length >= maxItems) {
+        capped = true;
+        break;
+      }
+      const tpl = template[cursor % template.length];
+      const hold = Math.min(tpl.hold, remaining);
+      items.push({ ...tpl, hold });
+      addedFrames += hold;
+      remaining -= hold;
+      cursor++;
+    }
+  }
+
+  return {
+    items,
+    totalFrames: baseFrames + addedFrames,
+    addedFrames,
+    capped,
+  };
+}
+
+export interface SequentialRenamePlan {
+  renames: Array<{ id: string; name: string }>;
+  skippedOthers: number;
+}
+
+/**
+ * Plans sequential cel renames (1, 2, 3...) following timeline appearance order.
+ * Applies to raster and folder cels alike; skips blank frames and ref entries for numbering,
+ * while keeping editable ref labels synced (`↻ <newName>`). Other painters' cels are skipped.
+ */
+export function planSequentialCelRenames(
+  entries: ReadonlyArray<CelEntry>,
+  canEdit: (entryId: string) => boolean,
+): SequentialRenamePlan {
+  const renames: Array<{ id: string; name: string }> = [];
+  const newNameById = new Map<string, string>();
+  let skippedOthers = 0;
+  let seq = 0;
+
+  for (const e of entries) {
+    if (e.ref !== undefined || e.blank) continue;
+    seq += 1;
+    const desired = String(seq);
+    if (!canEdit(e.id)) {
+      skippedOthers += 1;
+      newNameById.set(e.id, e.label);
+      continue;
+    }
+    newNameById.set(e.id, desired);
+    if (e.label !== desired) renames.push({ id: e.id, name: desired });
+  }
+
+  for (const e of entries) {
+    if (!e.ref || e.blank) continue;
+    if (!canEdit(e.id)) continue;
+    const targetName = newNameById.get(e.ref);
+    if (!targetName) continue;
+    const desired = `↻ ${targetName}`;
+    if (e.label !== desired) renames.push({ id: e.id, name: desired });
+  }
+
+  return { renames, skippedOthers };
+}
 
 export function upsertTransformKeyframe(
   list: ReadonlyArray<TransformKeyframe> | undefined | null,
@@ -97,6 +287,48 @@ export function removeTransformKeyframe(
   return list.filter((k) => Math.round(k.frame) !== target);
 }
 
+/** Previous (-1) or next (+1) keyframe frame number strictly before/after `currentFrame`, or null */
+export function adjacentKeyframeFrame(
+  list: ReadonlyArray<TransformKeyframe> | undefined | null,
+  currentFrame: number,
+  direction: -1 | 1,
+): number | null {
+  if (!list?.length) return null;
+  const cur = Math.round(currentFrame);
+  const frames = [...new Set(list.map((k) => Math.round(k.frame)))].sort((a, b) => a - b);
+  if (direction < 0) {
+    for (let i = frames.length - 1; i >= 0; i--) {
+      if (frames[i] < cur) return frames[i];
+    }
+    return null;
+  }
+  for (let i = 0; i < frames.length; i++) {
+    if (frames[i] > cur) return frames[i];
+  }
+  return null;
+}
+
+/**
+ * Finds the previous/next keyframe frame: prefers the active layer's own keyframes,
+ * falling back to all keyed layers when the active layer has none.
+ */
+export function findAdjacentKeyframe(
+  layers: ReadonlyArray<AnimLayer>,
+  activeLayerId: string | null | undefined,
+  currentFrame: number,
+  direction: -1 | 1,
+): number | null {
+  const active = activeLayerId ? layers.find((l) => l.id === activeLayerId) : undefined;
+  if (active?.meta?.keyframes?.length) {
+    return adjacentKeyframeFrame(active.meta.keyframes, currentFrame, direction);
+  }
+  const all: TransformKeyframe[] = [];
+  for (const l of layers) {
+    if (l.meta?.keyframes?.length) all.push(...l.meta.keyframes);
+  }
+  return adjacentKeyframeFrame(all, currentFrame, direction);
+}
+
 export const isAnimationFolder = (l: AnimLayer) => l.layerType === 'group' && Boolean(l.meta?.animation);
 
 /** A track's entries, bottom layer first */
@@ -113,7 +345,19 @@ export function celEntriesOf(layers: AnimLayer[], folderId: string): CelEntry[] 
       ref = target && target.id !== l.id && target.meta?.cel?.ref === undefined ? target.id : '';
     }
     const blank = cel?.ref === '' ? { blank: true } : null;
-    return { id: l.id, label: l.name ?? '', hold, ref, ...blank, ownerId: l.ownerId ?? null, isGroup: l.layerType === 'group' };
+    const mark: CelMark | undefined = cel?.mark === 'key' || cel?.mark === 'inbetween' ? cel.mark : undefined;
+    const note = typeof cel?.note === 'string' && cel.note.trim() ? cel.note.trim().slice(0, 120) : undefined;
+    return {
+      id: l.id,
+      label: l.name ?? '',
+      hold,
+      ref,
+      ...blank,
+      ...(mark ? { mark } : null),
+      ...(note ? { note } : null),
+      ownerId: l.ownerId ?? null,
+      isGroup: l.layerType === 'group',
+    };
   });
 }
 
@@ -500,6 +744,7 @@ export function exportSegments<T extends AnimLayer>(
 
 const ONION_KEY = 'atelier_onion_skin';
 const LOOP_KEY = 'atelier_anim_loop';
+const FLIP_SPAN_KEY = 'atelier_anim_flip_span';
 /** A gap between ticks longer than this (a hidden tab gets none) restarts the count instead of jumping ahead */
 const RESYNC_AFTER_MS = 500;
 const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
@@ -523,6 +768,10 @@ export class AnimationEngine {
   private rafId = 0;
   /** Playback counts frames from here: when it (re)started and the frame it was on */
   private clock = { at: 0, frame: 0, lastTick: 0, shown: 0 };
+  /** Flipbook (手翻書): frame to return to on release, span N to each side, and active timer */
+  private flipOrigin: number | null = null;
+  private flipSpan = 2;
+  private flipTimer: ReturnType<typeof setInterval> | null = null;
 
   private onionSkinConfig: OnionSkinConfig = {
     enabled: true,
@@ -543,6 +792,10 @@ export class AnimationEngine {
       const saved = JSON.parse(localStorage.getItem(ONION_KEY) || 'null');
       if (saved && typeof saved === 'object') this.onionSkinConfig = AnimationEngine.cleanOnion({ ...this.onionSkinConfig, ...saved });
       this.loop = localStorage.getItem(LOOP_KEY) !== '0';
+      const savedFlip = Number(localStorage.getItem(FLIP_SPAN_KEY));
+      if (Number.isFinite(savedFlip) && savedFlip >= 1) {
+        this.flipSpan = Math.max(1, Math.min(MAX_FLIP_SPAN, Math.round(savedFlip)));
+      }
     } catch {
       // storage blocked: defaults
     }
@@ -720,6 +973,81 @@ export class AnimationEngine {
     this.notifyFrameChange(true);
   }
 
+  /** Personal flipbook span N (1..MAX_FLIP_SPAN frames on each side of the current frame) */
+  public getFlipSpan(): number {
+    return this.flipSpan;
+  }
+
+  public setFlipSpan(span: number) {
+    const next = Math.max(1, Math.min(MAX_FLIP_SPAN, Math.round(Number(span) || 1)));
+    if (next === this.flipSpan) return;
+    this.flipSpan = next;
+    try {
+      localStorage.setItem(FLIP_SPAN_KEY, String(next));
+    } catch {
+      // storage blocked: kept for this session
+    }
+    this.notifyFrameChange(false);
+  }
+
+  public isFlipping(): boolean {
+    return this.flipOrigin !== null;
+  }
+
+  /** Peek at `origin + offset` while holding a flip key; call `endFlip()` on release to snap back */
+  public flip(offset: number) {
+    if (this.playing) this.pause();
+    if (this.flipOrigin === null) this.flipOrigin = this.time;
+    const target = Math.max(0, Math.min(this.length - 1, this.flipOrigin + Math.round(offset)));
+    if (target !== this.time) {
+      this.time = target;
+      this.notifyFrameChange(true);
+    }
+  }
+
+  /** Hold-to-flip ping-pong loop between [origin - N, origin + N]; release via `endFlip()` snaps back */
+  public startFlipLoop() {
+    if (this.flipTimer !== null) return;
+    if (this.playing) this.pause();
+    if (this.flipOrigin === null) this.flipOrigin = this.time;
+    const origin = Math.max(0, Math.min(this.length - 1, this.flipOrigin));
+    const lo = Math.max(0, origin - this.flipSpan);
+    const hi = Math.min(this.length - 1, origin + this.flipSpan);
+    if (lo >= hi) return;
+    const seq: number[] = [];
+    for (let f = lo; f <= hi; f++) seq.push(f);
+    for (let f = hi - 1; f > lo; f--) seq.push(f);
+    // Start immediately on a neighbour so holding feels instant
+    let idx = seq.indexOf(origin);
+    if (idx < 0) idx = 0;
+    const step = () => {
+      idx = (idx + 1) % seq.length;
+      const next = seq[idx];
+      if (next !== this.time) {
+        this.time = next;
+        this.notifyFrameChange(true);
+      }
+    };
+    step();
+    const intervalMs = Math.max(40, Math.round(1000 / Math.max(1, this.fps)));
+    this.flipTimer = setInterval(step, intervalMs);
+  }
+
+  /** End flipbook preview and snap playhead back to where flipping started (no undo record) */
+  public endFlip() {
+    if (this.flipTimer !== null) {
+      clearInterval(this.flipTimer);
+      this.flipTimer = null;
+    }
+    if (this.flipOrigin === null) return;
+    const origin = this.flipOrigin;
+    this.flipOrigin = null;
+    if (this.time !== origin) {
+      this.time = Math.max(0, Math.min(origin, this.length - 1 + TIMELINE_SLACK));
+      this.notifyFrameChange(true);
+    }
+  }
+
   public onFrameChange(cb: (time: number, byUser: boolean) => void) {
     this.onFrameChangeListeners.push(cb);
     return () => {
@@ -743,6 +1071,7 @@ export class AnimationEngine {
   }
 
   public destroy() {
+    this.endFlip();
     this.pause();
     this.onFrameChangeListeners = [];
     this.onPlaybackStateChangeListeners = [];

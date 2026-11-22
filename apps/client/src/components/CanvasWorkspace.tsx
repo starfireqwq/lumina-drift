@@ -41,6 +41,8 @@ import {
   TilePatchPacket,
   ToolType,
   CanvasUnit,
+  CelMark,
+  TimelineLabel,
   clampDpi,
 } from '@atelier/shared';
 import { useAuth } from '../context/AuthContext';
@@ -121,8 +123,8 @@ import type { LayerCanvasItem } from '../engine/layerComposite';
 import { LayerPanel } from './LayerPanel';
 import { getUserColor } from '../utils/userColors';
 import {
-  AnimationEngine, AnimationTrack, animationDisplay, BLANK_CEL_NAME, celEntriesOf, celInsertAt, celLayerOf, celOfLayer, entryIndexAt, entryStart, exportSegments, isAnimationFolder, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
-  placeEntries, trackLength,
+  AnimationEngine, AnimationTrack, animationDisplay, BLANK_CEL_NAME, celEntriesOf, celInsertAt, celLayerOf, celOfLayer, entryIndexAt, entryStart, exportSegments, findAdjacentKeyframe, isAnimationFolder, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
+  normalizeTimelineLabels, placeEntries, planRepeatCels, planSequentialCelRenames, trackLength,
 } from '../engine/AnimationEngine';
 import { lightIdsFor, loadLightTable, saveLightTable, type LightTableState } from '../engine/lightTable';
 import { DEFAULT_TEXT, renderText, textBounds } from '../engine/textLayer';
@@ -838,7 +840,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   lastAnimFolderRef.current = animFolder?.id ?? null;
   animFolderIdRef.current = animFolder?.id ?? null;
   const animTracks: AnimationTrack[] = animFolders.map((f) => ({
-    folderId: f.id, name: f.name, ownerId: f.ownerId, shared: Boolean(f.meta?.animation?.shared), entries: celEntriesOf(layers, f.id),
+    folderId: f.id,
+    name: f.name,
+    ownerId: f.ownerId,
+    shared: Boolean(f.meta?.animation?.shared),
+    entries: celEntriesOf(layers, f.id),
+    labels: normalizeTimelineLabels(f.meta?.animation?.labels),
   }));
   const animEntries = animTracks.find((t) => t.folderId === animFolder?.id)?.entries ?? [];
   const animEntriesRef = useRef(animEntries);
@@ -920,6 +927,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     groupLayers: async (_ids: string[]) => {},
     copyLayers: (_ids: string[]) => {},
     pasteLayers: async () => {},
+    animAddCel: async () => {},
+    animAddBlank: async () => {},
+    animJumpKeyframe: (_dir: -1 | 1) => {},
     selection: { has: (): boolean => false, canPaste: (): boolean => false, invert: () => {}, copy: () => {}, cut: () => {}, clear: () => {}, paste: () => {} },
   });
   const brushCursorRef = useRef<HTMLDivElement>(null);
@@ -1261,6 +1271,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     let renderRaf = 0;
     let handleKeyDown: ((ev: KeyboardEvent) => void) | null = null;
     let handleKeyUp: ((ev: KeyboardEvent) => void) | null = null;
+    let handleWindowBlur: (() => void) | null = null;
+    let activeFlipKeyCode: string | null = null;
     let vpSyncRaf = 0;
     const invalidateContainerRect = () => { containerRectRef.current = null; };
     window.addEventListener('resize', invalidateContainerRect, { passive: true });
@@ -1836,6 +1848,30 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               engine.setOnionSkinConfig({ enabled: on });
               warn(on ? '洋蔥皮：開' : '洋蔥皮：關', 1200);
             }
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_add_cel'), ev)) {
+            ev.preventDefault();
+            if (!ev.repeat) void shortcutActionsRef.current.animAddCel();
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_add_blank'), ev)) {
+            ev.preventDefault();
+            if (!ev.repeat) void shortcutActionsRef.current.animAddBlank();
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_first_frame'), ev)) {
+            ev.preventDefault();
+            animEngineRef.current?.goToStart();
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_last_frame'), ev)) {
+            ev.preventDefault();
+            animEngineRef.current?.goToEnd();
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_prev_keyframe'), ev)) {
+            ev.preventDefault();
+            shortcutActionsRef.current.animJumpKeyframe(-1);
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_next_keyframe'), ev)) {
+            ev.preventDefault();
+            shortcutActionsRef.current.animJumpKeyframe(1);
+          } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_flip'), ev)) {
+            ev.preventDefault();
+            if (!ev.repeat && animEngineRef.current) {
+              activeFlipKeyCode = ev.code;
+              animEngineRef.current.startFlipLoop();
+            }
           } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_reset_view'), ev)) {
             fitViewport(false);
           } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_zoom_in'), ev)) {
@@ -1857,10 +1893,22 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           pointer.isSpacePressedRef.current = false;
           if (containerRef.current) containerRef.current.style.cursor = 'crosshair';
         }
+        if (activeFlipKeyCode && ev.code === activeFlipKeyCode) {
+          activeFlipKeyCode = null;
+          animEngineRef.current?.endFlip();
+        }
+      };
+
+      handleWindowBlur = () => {
+        if (activeFlipKeyCode || animEngineRef.current?.isFlipping()) {
+          activeFlipKeyCode = null;
+          animEngineRef.current?.endFlip();
+        }
       };
 
       window.addEventListener('keydown', handleKeyDown);
       window.addEventListener('keyup', handleKeyUp);
+      window.addEventListener('blur', handleWindowBlur);
 
       // Synchronize layers and replay operations if layers are already loaded
       const currentLayers = layersRef.current;
@@ -1907,6 +1955,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       container.removeEventListener('wheel', handleWheel);
       if (handleKeyDown) window.removeEventListener('keydown', handleKeyDown);
       if (handleKeyUp) window.removeEventListener('keyup', handleKeyUp);
+      if (handleWindowBlur) window.removeEventListener('blur', handleWindowBlur);
+      activeFlipKeyCode = null;
+      animEngineRef.current?.endFlip();
       pointer.reset();
       brush.reset();
       container.style.cursor = '';
@@ -3158,16 +3209,17 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   }, [canvas?.id, canvas?.width, canvas?.height]);
 
   /** 新增圖層／圖層組 (buttons, shortcuts, 群組): Ctrl+Z takes it away again, redo brings it back */
-  const recordLayerCreation = (created: LayerModel, afterTiles: TileData[] = []) => {
+  const recordLayerCreation = (created: LayerModel, afterTiles: TileData[] = [], opts?: { groupId?: string; desc?: string }) => {
     scopedUndoRef.current.push({
       opId: `op_new_layer_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       userId: userRef.current?.id || user?.id || 'guest',
       layerId: created.id,
       opType: 'LAYER_CREATE',
+      ...(opts?.groupId ? { groupId: opts.groupId } : null),
       beforeTiles: [],
       afterTiles,
       timestamp: Date.now(),
-      desc: `新增${created.layerType === 'group' ? '圖層組' : '圖層'}「${created.name}」`,
+      desc: opts?.desc ?? `新增${created.layerType === 'group' ? '圖層組' : '圖層'}「${created.name}」`,
       layerCreated: { model: created },
     });
     updateUndoRedoState();
@@ -4052,6 +4104,117 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const setAnimationFps = (fps: number) => {
     if (animFolder && canManageLayer(animFolder)) onUpdateLayerProps?.(animFolder.id, { meta: { ...animFolder.meta, animation: { ...animFolder.meta?.animation, fps } } });
   };
+  /** Update key/inbetween mark (○/●) or memo note on a single cel */
+  const updateAnimationCelMeta = (entryId: string, patch: { mark?: CelMark | null; note?: string | null }) => {
+    const layer = layersRef.current.find((l) => l.id === entryId);
+    if (!layer) return;
+    if (!canManageLayer(layer)) return warn('這一格是其他畫師的，只有他能編輯記號或備註。');
+    const cel: NonNullable<LayerMeta['cel']> = { ...layer.meta?.cel };
+    if (patch.mark !== undefined) {
+      if (patch.mark === 'key' || patch.mark === 'inbetween') cel.mark = patch.mark;
+      else delete cel.mark;
+    }
+    if (patch.note !== undefined) {
+      const cleaned = typeof patch.note === 'string' ? patch.note.trim().slice(0, 120) : '';
+      if (cleaned) cel.note = cleaned;
+      else delete cel.note;
+    }
+    const nextMeta: LayerMeta = { ...layer.meta };
+    if (Object.keys(cel).length > 0) nextMeta.cel = cel;
+    else delete nextMeta.cel;
+    onUpdateLayerProps?.(layer.id, { meta: nextMeta });
+  };
+  /** Save timeline frame labels on the active animation folder */
+  const setAnimationLabels = (labels: TimelineLabel[]) => {
+    if (!animFolder || !canManageLayer(animFolder)) return;
+    const cleaned = normalizeTimelineLabels(labels);
+    const animation: NonNullable<LayerMeta['animation']> = { fps: 12, ...animFolder.meta?.animation };
+    if (cleaned.length > 0) animation.labels = cleaned;
+    else delete animation.labels;
+    onUpdateLayerProps?.(animFolder.id, { meta: { ...animFolder.meta, animation } });
+  };
+  /**
+   * Repeat a selected run of cels using ref entries (single grouped undo step).
+   * Rejects the entire batch without creating anything if it would touch or shift another painter's cel.
+   */
+  const repeatAnimationEntries = async (
+    folderId: string,
+    entryIds: string[],
+    opts: { mode: 'count' | 'toEnd'; count: number },
+  ): Promise<boolean> => {
+    const folder = layersRef.current.find((l) => l.id === folderId);
+    if (!onCreateLayer || !folder) return false;
+    if (!canAddCel(folder)) {
+      warn('這個動畫資料夾沒有共用，只有建立者能加格。');
+      return false;
+    }
+    const entries = celEntriesOf(layersRef.current, folderId);
+    const pickedSet = new Set(entryIds);
+    const pickedIndices: number[] = [];
+    entries.forEach((e, i) => { if (pickedSet.has(e.id)) pickedIndices.push(i); });
+    if (pickedIndices.length === 0) return false;
+
+    const lastPickedIdx = pickedIndices[pickedIndices.length - 1];
+    const touchedIds = new Set<string>([
+      ...pickedIndices.map((i) => entries[i].id),
+      ...entries.slice(lastPickedIdx + 1).map((e) => e.id),
+    ]);
+    for (const id of touchedIds) {
+      const l = entryLayer(id);
+      if (!l || !canManageLayer(l)) {
+        warn('重複指定會動到其他畫師的格，已取消整批操作。', 3200);
+        return false;
+      }
+    }
+
+    const plan = planRepeatCels(entries, pickedIndices.map((i) => entries[i].id), {
+      mode: opts.mode,
+      count: opts.count,
+      targetEndFrame: animTimelineLength,
+    });
+    if (plan.items.length === 0) return false;
+
+    const groupId = `anim_repeat_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+    let afterId = entries[lastPickedIdx].id;
+    const createdIds: string[] = [];
+    for (const item of plan.items) {
+      const celMeta: NonNullable<LayerMeta['cel']> = {
+        ref: item.ref,
+        ...(item.hold > 1 ? { hold: item.hold } : {}),
+      };
+      const created = await onCreateLayer(item.name, 'normal', 'group', afterId, folderId, {
+        meta: { cel: celMeta },
+        select: false,
+      });
+      if (!created) break;
+      afterId = created.id;
+      createdIds.push(created.id);
+      recordLayerCreation(created, [], { groupId, desc: '動畫：重複指定' });
+    }
+    if (createdIds.length > 0) await waitForLayerModels(createdIds);
+    return createdIds.length > 0;
+  };
+  /** Rename cels (1, 2, 3...) in timeline appearance order; skips other painters' cels with a notice */
+  const renameAnimationCelsInOrder = (folderId: string) => {
+    const entries = celEntriesOf(layersRef.current, folderId);
+    const plan = planSequentialCelRenames(entries, (id) => {
+      const l = entryLayer(id);
+      return Boolean(l && canManageLayer(l));
+    });
+    for (const r of plan.renames) {
+      onUpdateLayerProps?.(r.id, { name: r.name });
+    }
+    if (plan.skippedOthers > 0) {
+      warn(`已依序重新命名（略過 ${plan.skippedOthers} 張其他畫師的膠片）。`, 3200);
+    }
+  };
+  /** Jump to previous (-1) or next (+1) transform keyframe */
+  const jumpAdjacentKeyframe = (direction: -1 | 1) => {
+    const engine = animEngineRef.current;
+    if (!engine) return;
+    const target = findAdjacentKeyframe(layersRef.current, activeLayerRef.current?.id ?? null, engine.getTime(), direction);
+    if (target !== null) engine.goTo(target);
+  };
   /** Timeline length in frames, kept on the edited folder; null = up to the end of the longest track */
   const setAnimationLength = (frames: number | null) => {
     if (!animFolder || !canManageLayer(animFolder)) return;
@@ -4358,6 +4521,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   shortcutActionsRef.current.groupLayers = groupLayers;
   shortcutActionsRef.current.copyLayers = copyLayers;
   shortcutActionsRef.current.pasteLayers = pasteLayers;
+  shortcutActionsRef.current.animAddCel = addAnimationFrame;
+  shortcutActionsRef.current.animAddBlank = addBlankAnimationFrame;
+  shortcutActionsRef.current.animJumpKeyframe = jumpAdjacentKeyframe;
 
   // ---------- 匯入圖片 (drop on the canvas or the layer list, 檔案 → 匯入圖片) ----------
   /** aboveId / parentId for onCreateLayer; an undefined parent lets App pick it from the active layer, as 新增圖層 does */
@@ -5490,6 +5656,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 onDeleteFrame={deleteAnimationFrame}
                 onMoveFrame={moveAnimationFrame}
                 onSetHold={setAnimationHold}
+                onUpdateCelMeta={updateAnimationCelMeta}
+                onUpdateLabels={setAnimationLabels}
+                onRepeatEntries={repeatAnimationEntries}
+                onRenameInOrder={renameAnimationCelsInOrder}
+                onJumpKeyframe={jumpAdjacentKeyframe}
                 onToggleShared={toggleAnimationShared}
                 onFpsChange={setAnimationFps}
                 onSelectCell={selectAnimationCell}

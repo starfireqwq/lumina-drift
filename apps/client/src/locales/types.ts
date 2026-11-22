@@ -1011,6 +1011,37 @@ export interface Translations {
     lightWholeTrack: string;
     lightOpacity: string;
     lightClear: string;
+    celMarkKey: string;
+    celMarkInbetween: string;
+    celMarkClear: string;
+    celNote: string;
+    celNotePlaceholder: string;
+    celNoteClear: string;
+    timelineLabel: string;
+    timelineLabelAdd: string;
+    timelineLabelPlaceholder: string;
+    timelineLabelDelete: string;
+    timelineLabelFrame: string;
+    repeatCels: string;
+    repeatModalTitle: string;
+    repeatModeCount: string;
+    repeatModeToEnd: string;
+    repeatCountLabel: string;
+    repeatSummary: string;
+    repeatNoRoom: string;
+    renameInOrder: string;
+    renameInOrderTooltip: string;
+    jumpToFrame: string;
+    jumpToFramePlaceholder: string;
+    prevKeyframe: string;
+    nextKeyframe: string;
+    flipbook: string;
+    flipbookTooltip: string;
+    flipbookSpan: string;
+    moreOptions: string;
+    celActions: string;
+    playbackAndExport: string;
+    multiSelect: string;
   };
 
   comic: {

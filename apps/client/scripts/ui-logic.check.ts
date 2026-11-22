@@ -36,10 +36,11 @@ import {
 } from '@atelier/shared';
 import { getBoxPivotCanvasPoint, type TransformBox } from '../src/utils/transformProjection';
 import {
-  AnimationEngine, animationDisplay, celEntriesOf, celInsertAt, celOfLayer, entryIndexAt, exportSegments, formatTimecode, frameSignature, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
-  parseTimecode, placeEntries, playbackFrame, removeTransformKeyframe,
-  timeOfCel, trackLength, upsertTransformKeyframe,
+  adjacentKeyframeFrame, AnimationEngine, animationDisplay, celEntriesOf, celInsertAt, celOfLayer, entryIndexAt, exportSegments, findAdjacentKeyframe, formatTimecode, frameSignature, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
+  normalizeTimelineLabels, parseTimecode, placeEntries, planRepeatCels, planSequentialCelRenames, playbackFrame, removeTimelineLabel, removeTransformKeyframe,
+  timeOfCel, trackLength, upsertTimelineLabel, upsertTransformKeyframe,
 } from '../src/engine/AnimationEngine';
+import { ShortcutManager } from '../src/engine/ShortcutManager';
 import { cleanLightTable, clearLightTable, emptyLightTable, lightIdsFor, toggleLightCel } from '../src/engine/lightTable';
 import { nextGroupName } from '../src/utils/canvasName';
 import { verticalRuns } from '../src/engine/textLayer';
@@ -1729,5 +1730,142 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
   assert.deepEqual(parseRecentVisits(JSON.stringify([...list, { mode: 'online', server: 'nope', canvasId: 'z', title: '', width: 1, height: 1, at: 1 }, 5, null])), list, 'Bad entries are dropped');
   assert.deepEqual(parseRecentVisits('{broken'), []);
   assert.deepEqual(parseRecentVisits(null), []);
+}
+// Animation Phase B1 & B2: cel marks (○/●), notes, and timeline labels
+{
+  const entries = celEntriesOf([
+    { id: 'f', parentId: null, layerType: 'group', sortOrder: 10, isVisible: true, opacity: 1, meta: { animation: { fps: 24 } } },
+    { id: 'c1', parentId: 'f', layerType: 'raster', sortOrder: 1, isVisible: true, opacity: 1, name: '1', meta: { cel: { hold: 2, mark: 'key', note: '  眨眼起點  ' } } },
+    { id: 'c2', parentId: 'f', layerType: 'raster', sortOrder: 2, isVisible: true, opacity: 1, name: '2', meta: { cel: { mark: 'inbetween', note: '   ' } } },
+    { id: 'c3', parentId: 'f', layerType: 'raster', sortOrder: 3, isVisible: true, opacity: 1, name: '3', meta: { cel: { mark: 'bogus' as unknown as 'key' } } },
+  ], 'f');
+  assert.equal(entries[0].mark, 'key');
+  assert.equal(entries[0].note, '眨眼起點', 'Note is trimmed');
+  assert.equal(entries[1].mark, 'inbetween');
+  assert.equal(entries[1].note, undefined, 'Whitespace-only note is omitted');
+  assert.equal(entries[2].mark, undefined, 'Unknown mark values are ignored');
+
+  let labels = normalizeTimelineLabels([
+    { frame: 10, text: '台詞' },
+    { frame: 2, text: '  眨眼  ' },
+    { frame: 10, text: '改名' },
+    { frame: -1, text: '無效' },
+    { frame: 5, text: '   ' },
+  ]);
+  assert.deepEqual(labels, [{ frame: 2, text: '眨眼' }, { frame: 10, text: '改名' }], 'Labels sorted, trimmed, deduplicated');
+  labels = upsertTimelineLabel(labels, 6, '轉頭');
+  assert.deepEqual(labels.map((l) => l.frame), [2, 6, 10]);
+  labels = upsertTimelineLabel(labels, 6, '  ');
+  assert.deepEqual(labels.map((l) => l.frame), [2, 10], 'Empty upsert removes label');
+  labels = removeTimelineLabel(labels, 2);
+  assert.deepEqual(labels, [{ frame: 10, text: '改名' }]);
+}
+
+// Animation Phase B3 & B4: repeat cels & sequential cel renaming
+{
+  const cels = celEntriesOf([
+    { id: 'f', parentId: null, layerType: 'group', sortOrder: 10, isVisible: true, opacity: 1, meta: { animation: { fps: 12 } } },
+    { id: 'c1', parentId: 'f', layerType: 'raster', sortOrder: 1, isVisible: true, opacity: 1, name: 'A', ownerId: 'u1', meta: { cel: { hold: 1 } } },
+    { id: 'c2', parentId: 'f', layerType: 'group', sortOrder: 2, isVisible: true, opacity: 1, name: 'B', ownerId: 'u2', meta: { cel: { hold: 1 } } },
+    { id: 'c3', parentId: 'f', layerType: 'raster', sortOrder: 3, isVisible: true, opacity: 1, name: 'C', ownerId: 'u1', meta: { cel: { hold: 1 } } },
+    { id: 'c4', parentId: 'f', layerType: 'group', sortOrder: 4, isVisible: true, opacity: 1, name: '×', ownerId: 'u1', meta: { cel: { hold: 1, ref: '' } } },
+  ], 'f');
+  // 1-4 cels repeated 3 times -> 12 total frames (8 extra ref/blank items)
+  const rep3 = planRepeatCels(cels, ['c1', 'c2', 'c3', 'c4'], { mode: 'count', count: 3 });
+  assert.equal(rep3.totalFrames, 12);
+  assert.equal(rep3.addedFrames, 8);
+  assert.equal(rep3.items.length, 8);
+  assert.equal(rep3.items[0].ref, 'c1');
+  assert.equal(rep3.items[3].ref, '', 'Blank frames repeat as blank frames');
+  assert.equal(rep3.items[3].blank, true);
+
+  // Fill to end trims last hold cleanly
+  const held = [
+    { id: 'h1', label: '1', hold: 3, ownerId: 'u1', isGroup: false },
+    { id: 'h2', label: '2', hold: 2, ownerId: 'u1', isGroup: false },
+  ];
+  const toEnd = planRepeatCels(held, ['h1', 'h2'], { mode: 'toEnd', targetEndFrame: 12 });
+  assert.equal(toEnd.totalFrames, 12);
+  assert.deepEqual(toEnd.items.map((x) => [x.ref, x.hold]), [['h1', 3], ['h2', 2], ['h1', 2]]);
+
+  // Sequential rename skips other painters' cels and includes folder cels
+  const shuffled = celEntriesOf([
+    { id: 'f', parentId: null, layerType: 'group', sortOrder: 10, isVisible: true, opacity: 1, meta: { animation: { fps: 12 } } },
+    { id: 'c3', parentId: 'f', layerType: 'raster', sortOrder: 1, isVisible: true, opacity: 1, name: '3', ownerId: 'u1' },
+    { id: 'c2', parentId: 'f', layerType: 'group', sortOrder: 2, isVisible: true, opacity: 1, name: 'Other', ownerId: 'u2' },
+    { id: 'c1', parentId: 'f', layerType: 'group', sortOrder: 3, isVisible: true, opacity: 1, name: 'FolderCel', ownerId: 'u1' },
+    { id: 'r1', parentId: 'f', layerType: 'group', sortOrder: 4, isVisible: true, opacity: 1, name: '↻ 3', ownerId: 'u1', meta: { cel: { ref: 'c3' } } },
+  ], 'f');
+  const ren = planSequentialCelRenames(shuffled, (id) => shuffled.find((x) => x.id === id)?.ownerId === 'u1');
+  assert.equal(ren.skippedOthers, 1);
+  assert.deepEqual(ren.renames, [
+    { id: 'c3', name: '1' },
+    { id: 'c1', name: '3' },
+    { id: 'r1', name: '↻ 1' },
+  ]);
+}
+
+// Animation Phase B5, B6 & B7: jump frame/keyframe, flipbook, and shortcut conflict check
+{
+  const kfs = [
+    { frame: 2, x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 0, pivotY: 0, easing: 'linear' as const },
+    { frame: 10, x: 10, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 0, pivotY: 0, easing: 'linear' as const },
+    { frame: 18, x: 20, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 0, pivotY: 0, easing: 'linear' as const },
+  ];
+  assert.equal(adjacentKeyframeFrame(kfs, 10, -1), 2);
+  assert.equal(adjacentKeyframeFrame(kfs, 10, 1), 18);
+  assert.equal(adjacentKeyframeFrame(kfs, 2, -1), null);
+  assert.equal(adjacentKeyframeFrame(kfs, 18, 1), null);
+  assert.equal(adjacentKeyframeFrame(kfs, 7, 1), 10);
+  assert.equal(adjacentKeyframeFrame(kfs, 7, -1), 2);
+  assert.equal(
+    findAdjacentKeyframe([
+      { id: 'a', parentId: null, layerType: 'raster', sortOrder: 1, isVisible: true, opacity: 1, meta: {} },
+      { id: 'b', parentId: null, layerType: 'raster', sortOrder: 2, isVisible: true, opacity: 1, meta: { keyframes: kfs } },
+    ], 'a', 5, 1),
+    10,
+    'Falls back to other keyed layers when active layer has no keyframes',
+  );
+  // parseTimecode for B5 ("1+5" at 24fps = frame 28, "29" = frame 28, invalid = null)
+  assert.equal(parseTimecode('1+5', 24), 28);
+  assert.equal(parseTimecode('29', 24), 28);
+  assert.equal(parseTimecode('bad', 24), null);
+
+  // Flipbook: flip peeks nearby frames and endFlip returns to origin
+  const eng = new AnimationEngine();
+  eng.setLength(20);
+  eng.goTo(8);
+  eng.flip(-2);
+  assert.equal(eng.getTime(), 6);
+  assert.equal(eng.isFlipping(), true);
+  eng.flip(3);
+  assert.equal(eng.getTime(), 11);
+  eng.endFlip();
+  assert.equal(eng.getTime(), 8, 'endFlip returns playhead to origin');
+  assert.equal(eng.isFlipping(), false);
+  eng.destroy();
+
+  // B7: every new animation shortcut exists and no defaultCombo collides across all shortcuts
+  const mgr = ShortcutManager.getInstance();
+  const all = mgr.getShortcuts();
+  const required = [
+    'action_anim_add_cel',
+    'action_anim_add_blank',
+    'action_anim_first_frame',
+    'action_anim_last_frame',
+    'action_anim_prev_keyframe',
+    'action_anim_next_keyframe',
+    'action_anim_flip',
+  ];
+  for (const id of required) {
+    const item = all.find((s) => s.id === id);
+    assert.ok(item && item.defaultCombo.length > 0, `Shortcut ${id} must have a default combo`);
+  }
+  const seen = new Map<string, string>();
+  for (const s of all) {
+    if (!s.defaultCombo) continue;
+    assert.equal(seen.has(s.defaultCombo), false, `Duplicate defaultCombo ${s.defaultCombo} (${seen.get(s.defaultCombo)} vs ${s.id})`);
+    seen.set(s.defaultCombo, s.id);
+  }
 }
 console.log('ui-logic checks passed');

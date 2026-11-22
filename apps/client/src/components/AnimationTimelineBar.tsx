@@ -1,21 +1,24 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import {
-  AnimationEngine, AnimationTrack, MAX_HOLD, MAX_ONION, MAX_TIMELINE_FRAMES, ONION_MODES, OnionSkinConfig, TIMELINE_SLACK, celLayerOf, entryIndexAt, entryStart,
-  formatTimecode, parseTimecode, trackLength, upsertTransformKeyframe, removeTransformKeyframe, type OnionMode, type TimecodeMode,
+  AnimationEngine, AnimationTrack, MAX_FLIP_SPAN, MAX_HOLD, MAX_ONION, MAX_TIMELINE_FRAMES, ONION_MODES, OnionSkinConfig, TIMELINE_SLACK, celLayerOf, entryIndexAt, entryStart,
+  formatTimecode, parseTimecode, planRepeatCels, removeTimelineLabel, trackLength, upsertTimelineLabel, upsertTransformKeyframe, removeTransformKeyframe, type OnionMode, type TimecodeMode,
 } from '../engine/AnimationEngine';
 import { clearLightTable, lightTableHas, toggleLightCel, type LightTableScope, type LightTableState } from '../engine/lightTable';
 import {
   evaluateTransformKeyframes,
+  type CelMark,
   type KeyframeEasing,
   type LayerModel,
+  type TimelineLabel,
   type TransformKeyframe,
 } from '@atelier/shared';
 import {
-  ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Eye, Film, Folder, Lamp, Loader2, Minus, Pause, Play, Plus,
-  Repeat, Repeat2, SkipBack, SkipForward, Trash2, Users, X,
+  ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Eye, Film, Folder, Lamp, ListOrdered, Loader2, MessageSquare, Minus, Pause, Play, Plus,
+  Repeat, Repeat2, SkipBack, SkipForward, SlidersHorizontal, Tag, Trash2, Users, X,
 } from 'lucide-react';
 import { AtelierModal, modalButton } from './AtelierModal';
 import { OverlayPresence } from './OverlayPresence';
+import { usePhoneLayout } from './workspace/dockStore';
 import { getUserColor } from '../utils/userColors';
 import {
   computeVideoExportDimensionsForResolution,
@@ -94,6 +97,16 @@ interface AnimationTimelineBarProps {
   onDeleteFrame: () => void;
   onMoveFrame: (direction: -1 | 1) => void;
   onSetHold: (hold: number) => void;
+  /** Update ○/● mark or short memo on a cel */
+  onUpdateCelMeta: (entryId: string, patch: { mark?: CelMark | null; note?: string | null }) => void;
+  /** Save timeline frame labels on the edited folder */
+  onUpdateLabels: (labels: TimelineLabel[]) => void;
+  /** Repeat selected cels using ref entries (returns true if created) */
+  onRepeatEntries: (folderId: string, entryIds: string[], opts: { mode: 'count' | 'toEnd'; count: number }) => Promise<boolean>;
+  /** Rename cels in timeline appearance order (1, 2, 3...) */
+  onRenameInOrder: (folderId: string) => void;
+  /** Jump to previous (-1) or next (+1) transform keyframe */
+  onJumpKeyframe?: (direction: -1 | 1) => void;
   onToggleShared: () => void;
   onFpsChange: (fps: number) => void;
   /** A click on a track: that folder becomes the edited one, at that frame */
@@ -144,12 +157,15 @@ const AnimThumbImg: React.FC<{
 
 export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   engine, isOpen, onClose, tracks, activeFolderId, thumbnails = EMPTY_THUMBS, subscribeThumbnails, getThumbnailsSnapshot, ownerNames, can,
-  onCreateFolder, onAddFrame, onDuplicateFrame, onReuseCel, onAddBlank, onKeyframePanelChange, onDeleteFrame, onMoveFrame, onSetHold, onToggleShared, onFpsChange,
+  onCreateFolder, onAddFrame, onDuplicateFrame, onReuseCel, onAddBlank, onKeyframePanelChange, onDeleteFrame, onMoveFrame, onSetHold, onUpdateCelMeta, onUpdateLabels, onRepeatEntries, onRenameInOrder, onJumpKeyframe, onToggleShared, onFpsChange,
   onSelectCell, planExport, onPlaceEntries, onCopyEntries, onPasteEntries, onSetEntryHold, ripple, onToggleRipple,
   timelineLength, lengthIsSet, onSetLength, lightTable, onUpdateLightTable,
   activeLayer, canvasWidth = 1920, canvasHeight = 1080, onUpdateLayerKeyframes,
 }) => {
   const { t } = useI18n();
+  const isPhone = usePhoneLayout();
+  const trackLabelWidth = isPhone ? 72 : TRACK_LABEL_WIDTH;
+  const [phoneDrawerOpen, setPhoneDrawerOpen] = useState(false);
   // Drag a cel (or the selected cels) to other frames or another track, or its right edge to change how long it stays
   const [drag, setDrag] = useState<null | {
     entryId: string; ids: string[]; fromFolderId: string; mode: 'move' | 'hold'; startX: number; startY: number; started: boolean;
@@ -222,10 +238,17 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
     try { localStorage.setItem('atelier_anim_timecode', next); } catch { /* kept for this session */ }
   };
   const [lengthDraft, setLengthDraft] = useState<string | null>(null);
+  const [jumpDraft, setJumpDraft] = useState<string | null>(null);
+  const [flipSpan, setFlipSpan] = useState(() => engine.getFlipSpan());
+  const [flipping, setFlipping] = useState(false);
   const [lightKind, setLightKind] = useState<LightTableScope['kind']>('cel');
   const [bezierDragIdx, setBezierDragIdx] = useState<null | 1 | 2>(null);
   const [gridViewport, setGridViewport] = useState({ left: 0, width: 960 });
   const [showExportModal, setShowExportModal] = useState(false);
+  const [celMenu, setCelMenu] = useState<{ entryId: string; x: number; y: number } | null>(null);
+  const [noteModal, setNoteModal] = useState<{ entryId: string; label: string; text: string } | null>(null);
+  const [labelModal, setLabelModal] = useState<{ frame: number; text: string; existing: boolean } | null>(null);
+  const [repeatModal, setRepeatModal] = useState<{ folderId: string; entryIds: string[]; mode: 'count' | 'toEnd'; count: number; busy: boolean } | null>(null);
   const [exportFormat, setExportFormat] = useState<'gif' | 'mp4'>('gif');
   const [exportResolution, setExportResolution] = useState<VideoExportResolution>('4k');
   const [exportScope, setExportScope] = useState<AnimationExportScope>('folder');
@@ -240,6 +263,8 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
     setIsPlaying(engine.getIsPlaying());
     const unsubFrame = engine.onFrameChange((t) => {
       setTime(t);
+      setFlipSpan(engine.getFlipSpan());
+      setFlipping(engine.isFlipping());
       const nextRange = engine.getRange();
       setRange((prev) => (prev?.start === nextRange?.start && prev?.end === nextRange?.end ? prev : nextRange));
       const nextOnion = engine.getOnionSkinConfig();
@@ -284,11 +309,13 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
     if (!isOpen) return;
     const el = gridRef.current;
     if (!el) return;
-    const x = TRACK_LABEL_WIDTH + time * CELL;
-    if (x < el.scrollLeft + TRACK_LABEL_WIDTH || x + CELL > el.scrollLeft + el.clientWidth) el.scrollLeft = Math.max(0, x - TRACK_LABEL_WIDTH - CELL * 2);
-  }, [time, isOpen]);
+    const x = trackLabelWidth + time * CELL;
+    if (x < el.scrollLeft + trackLabelWidth || x + CELL > el.scrollLeft + el.clientWidth) el.scrollLeft = Math.max(0, x - trackLabelWidth - CELL * 2);
+  }, [time, isOpen, trackLabelWidth]);
 
   // While dragging: follow the pointer over the tracks; drop moves the cel or sets its hold
+  const activeLabels = tracks.find((tr) => tr.folderId === activeFolderId)?.labels ?? [];
+  const showLabelRow = activeLabels.length > 0;
   const activeKfs = activeLayer?.meta?.keyframes ?? [];
   const showKfRow = Boolean(activeLayer && (panel === 'keyframes' || activeKfs.length > 0));
   const dragging = Boolean(drag);
@@ -297,8 +324,8 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
     const at = (e: PointerEvent) => {
       const el = gridRef.current!;
       const r = el.getBoundingClientRect();
-      const trackTop = RULER_HEIGHT * (showKfRow ? 2 : 1);
-      return { t: (e.clientX - r.left + el.scrollLeft - TRACK_LABEL_WIDTH) / CELL, row: Math.floor((e.clientY - r.top + el.scrollTop - trackTop) / ROW) };
+      const trackTop = RULER_HEIGHT * (1 + (showLabelRow ? 1 : 0) + (showKfRow ? 1 : 0));
+      return { t: (e.clientX - r.left + el.scrollLeft - trackLabelWidth) / CELL, row: Math.floor((e.clientY - r.top + el.scrollTop - trackTop) / ROW) };
     };
     const onMove = (e: PointerEvent) => {
       const d = dragRef.current;
@@ -310,7 +337,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
         const el = gridRef.current!;
         const r = el.getBoundingClientRect();
         if (e.clientX > r.right - 28) el.scrollLeft += CELL;
-        else if (e.clientX < r.left + TRACK_LABEL_WIDTH + 28) el.scrollLeft = Math.max(0, el.scrollLeft - CELL);
+        else if (e.clientX < r.left + trackLabelWidth + 28) el.scrollLeft = Math.max(0, el.scrollLeft - CELL);
         setDrag({ ...d, started: true, hold: Math.max(1, Math.min(MAX_HOLD, Math.round(t - d.origStart))) });
         return;
       }
@@ -347,7 +374,25 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
       window.removeEventListener('pointerup', onUp);
       window.removeEventListener('pointercancel', onUp);
     };
-  }, [dragging, tracks, can.addableFolderIds, onPlaceEntries, onSetEntryHold, showKfRow]);
+  }, [dragging, tracks, can.addableFolderIds, onPlaceEntries, onSetEntryHold, showLabelRow, showKfRow, trackLabelWidth]);
+
+  // Dismiss cel context menu on outside click or Escape
+  useEffect(() => {
+    if (!celMenu) return;
+    const onDown = (ev: PointerEvent) => {
+      if ((ev.target as HTMLElement | null)?.closest('[data-cel-menu]')) return;
+      setCelMenu(null);
+    };
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') setCelMenu(null);
+    };
+    window.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [celMenu]);
 
   // A selection whose cels are gone (deleted, moved by someone) shrinks with them
   useEffect(() => {
@@ -369,7 +414,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
       ? track.entries.filter((x) => selection.ids.has(x.id)).map((x) => x.id)
       : [entry.id];
     const grid = gridRef.current;
-    const downFrame = grid ? Math.floor((e.clientX - grid.getBoundingClientRect().left + grid.scrollLeft - TRACK_LABEL_WIDTH) / CELL) : entryStart(track.entries, index);
+    const downFrame = grid ? Math.floor((e.clientX - grid.getBoundingClientRect().left + grid.scrollLeft - trackLabelWidth) / CELL) : entryStart(track.entries, index);
     setDrag({
       entryId: entry.id, ids: group, fromFolderId: track.folderId, folderId: track.folderId, delta: 0, downFrame,
       mode, startX: e.clientX, startY: e.clientY, started: false,
@@ -509,8 +554,8 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   };
 
   if (!isOpen && !retained) return null;
-  const iconBtn = 'flex h-7 min-w-7 shrink-0 items-center justify-center gap-0.5 rounded px-1 text-neutral-300 hover:bg-neutral-800 hover:text-white disabled:opacity-35 disabled:hover:bg-transparent';
-  const chip = (on: boolean) => `flex h-7 shrink-0 items-center gap-1 rounded-lg border px-2 text-[11px] font-bold disabled:opacity-40 ${on ? 'border-amber-500/60 bg-amber-500/15 text-amber-300' : 'border-neutral-700/70 text-neutral-300 hover:bg-neutral-800'}`;
+  const iconBtn = 'flex h-7 min-w-7 shrink-0 whitespace-nowrap items-center justify-center gap-0.5 rounded px-1 text-neutral-300 hover:bg-neutral-800 hover:text-white disabled:opacity-35 disabled:hover:bg-transparent';
+  const chip = (on: boolean) => `flex h-7 shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border px-2 text-[11px] font-bold disabled:opacity-40 ${on ? 'border-amber-500/60 bg-amber-500/15 text-amber-300' : 'border-neutral-700/70 text-neutral-300 hover:bg-neutral-800'}`;
   const stepper = (label: string, value: number, set: (n: number) => void, min: number, max: number) => (
     <span className="flex shrink-0 items-center gap-0.5 text-[11px] text-neutral-400">
       {label}
@@ -555,26 +600,119 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
     setLengthDraft(null);
     if (frame !== null) onSetLength(Math.min(MAX_TIMELINE_FRAMES, frame + 1));
   };
+  const commitJump = () => {
+    if (jumpDraft === null) return;
+    const target = parseTimecode(jumpDraft, fps);
+    setJumpDraft(null);
+    if (target !== null) engine.goTo(target);
+  };
+  const startHoldFlip = () => {
+    engine.startFlipLoop();
+    setFlipping(engine.isFlipping());
+  };
+  const stopHoldFlip = () => {
+    engine.endFlip();
+    setFlipping(false);
+  };
   const exportFrames = exportRangeOnly && range ? range.end - range.start + 1 : length;
 
   return (
-    <div ref={rootRef} tabIndex={-1} onKeyDown={onTimelineKey} data-anim-timeline data-phase={isOpen ? 'open' : 'closing'} style={{ touchAction: 'none' }}
-      className={`atelier-timeline relative z-10 flex shrink-0 flex-col overflow-hidden border-t border-neutral-800 bg-neutral-950/95 outline-none transition-all duration-200 ${isCollapsed ? 'h-10' : 'h-52 sm:h-56'} ${isOpen ? '' : 'pointer-events-none'}`}>
+    <div ref={rootRef} tabIndex={-1} onKeyDown={onTimelineKey} data-anim-timeline data-phone={isPhone ? '1' : undefined} data-phase={isOpen ? 'open' : 'closing'} style={{ touchAction: 'none' }}
+      className={`atelier-timeline relative z-10 flex shrink-0 flex-col overflow-hidden border-t border-neutral-800 bg-neutral-950/95 outline-none transition-all duration-200 ${
+        isCollapsed ? 'h-10' : isPhone ? 'h-40 max-h-[44vh]' : 'h-52 sm:h-56'
+      } ${isOpen ? '' : 'pointer-events-none'}`}>
       {/* Transport */}
       <div style={{ touchAction: 'pan-x' }} role="toolbar" aria-label={t.animation.timeline}
-        className="no-scrollbar flex h-10 shrink-0 items-center gap-1.5 overflow-x-auto border-b border-neutral-800/80 bg-neutral-900/90 px-2 text-xs text-neutral-300">
-        <div className="flex shrink-0 items-center gap-1.5 border-r border-neutral-800 pr-2 font-bold text-white">
-          <Film className="h-4 w-4 text-rose-400" />
-          <span className="max-w-[8rem] truncate" title={active?.name}>{active?.name ?? t.animation.timeline}</span>
-          {active?.shared && <span title={t.animation.sharedFolderTooltip} className="rounded bg-sky-500/20 px-1 text-[9px] text-sky-300">{t.animation.trackShared}</span>}
-        </div>
-        {tracks.length > 0 && (
+        className="no-scrollbar flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b border-neutral-800/80 bg-neutral-900/90 px-2 text-xs text-neutral-300">
+        {!isPhone && (
+          <div className="flex shrink-0 items-center gap-1.5 border-r border-neutral-800 pr-2 font-bold text-white">
+            <Film className="h-4 w-4 text-rose-400" />
+            <span className="max-w-[8rem] truncate" title={active?.name}>{active?.name ?? t.animation.timeline}</span>
+            {active?.shared && <span title={t.animation.sharedFolderTooltip} className="rounded bg-sky-500/20 px-1 text-[9px] text-sky-300">{t.animation.trackShared}</span>}
+          </div>
+        )}
+        {tracks.length > 0 && isPhone && (
+          <>
+            <button type="button" onClick={() => engine.goToPrevFrame()} title={t.animation.prevCel} aria-label={t.animation.prevCel} className={`${iconBtn} h-8 min-w-8`}><ChevronLeft className="h-4 w-4" /></button>
+            <button type="button" onClick={() => engine.togglePlay()} disabled={(range ? range.end - range.start + 1 : length) < 2}
+              title={isPlaying ? t.animation.pause : t.animation.play} aria-label={isPlaying ? t.animation.pause : t.animation.play}
+              className={`flex h-8 shrink-0 items-center justify-center rounded-lg px-2.5 text-xs font-bold text-white shadow disabled:opacity-40 ${isPlaying ? 'bg-amber-600' : 'bg-rose-600'}`}>
+              {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+            </button>
+            <button type="button" onClick={() => engine.goToNextFrame()} title={t.animation.nextCel} aria-label={t.animation.nextCel} className={`${iconBtn} h-8 min-w-8`}><ChevronRight className="h-4 w-4" /></button>
+            <span className="flex shrink-0 items-center font-mono text-[11px] text-neutral-400">
+              {jumpDraft !== null ? (
+                <input
+                  autoFocus
+                  data-jump-input
+                  aria-label={t.animation.jumpToFrame}
+                  placeholder={t.animation.jumpToFramePlaceholder}
+                  value={jumpDraft}
+                  onFocus={(e) => e.currentTarget.select()}
+                  onChange={(e) => setJumpDraft(e.target.value)}
+                  onBlur={commitJump}
+                  onKeyDown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === 'Enter') e.currentTarget.blur();
+                    if (e.key === 'Escape') {
+                      setJumpDraft(null);
+                      e.currentTarget.blur();
+                    }
+                  }}
+                  className="atelier-field h-7 w-14 px-1 text-center font-mono text-[11px] text-white"
+                />
+              ) : (
+                <button
+                  type="button"
+                  data-jump-trigger
+                  onClick={() => setJumpDraft(formatTimecode(time, fps, timecode))}
+                  title={t.animation.jumpToFrame}
+                  aria-label={t.animation.jumpToFrame}
+                  className="rounded px-1 font-mono text-[11px] text-neutral-200 hover:bg-neutral-800"
+                >
+                  {formatTimecode(time, fps, timecode)}
+                </button>
+              )}
+            </span>
+            <button type="button" data-phone-add-cel onClick={onAddFrame} disabled={!can.addCel} title={t.animation.addCel} aria-label={t.animation.addCel}
+              className="flex h-8 shrink-0 items-center gap-0.5 rounded-lg border border-indigo-500/50 bg-indigo-500/20 px-2 text-[11px] font-bold text-indigo-200 disabled:opacity-40">
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+            <button type="button" data-phone-onion-toggle onClick={() => updateOnion({ enabled: !onionSkin.enabled })} aria-pressed={onionSkin.enabled}
+              title={t.animation.onionSkin} aria-label={t.animation.onionSkin} className={`${chip(onionSkin.enabled)} h-8 px-2`}>
+              <Eye className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              data-flip-btn
+              disabled={length < 2}
+              aria-pressed={flipping}
+              title={t.animation.flipbookTooltip}
+              onPointerDown={(e) => {
+                if (e.button > 0) return;
+                e.preventDefault();
+                startHoldFlip();
+              }}
+              onPointerUp={stopHoldFlip}
+              onPointerLeave={stopHoldFlip}
+              onPointerCancel={stopHoldFlip}
+              className={`${chip(flipping)} h-8 px-2`}
+            >
+              {t.animation.flipbook}
+            </button>
+            <button type="button" data-phone-more onClick={() => setPhoneDrawerOpen(true)} title={t.animation.moreOptions} aria-label={t.animation.moreOptions}
+              className={`${iconBtn} ml-auto h-8 px-2 border border-neutral-700/70 rounded-lg text-[11px]`}>
+              <SlidersHorizontal className="h-3.5 w-3.5" />
+            </button>
+          </>
+        )}
+        {tracks.length > 0 && !isPhone && (
           <>
             <button type="button" onClick={() => engine.goToStart()} title={t.animation.firstCel} aria-label={t.animation.firstCel} className={iconBtn}><SkipBack className="h-3.5 w-3.5" /></button>
             <button type="button" onClick={() => engine.goToPrevFrame()} title={t.animation.prevCel} aria-label={t.animation.prevCel} className={iconBtn}><ChevronLeft className="h-4 w-4" /></button>
             <button type="button" onClick={() => engine.togglePlay()} disabled={(range ? range.end - range.start + 1 : length) < 2}
               title={isPlaying ? t.animation.pause : t.animation.play}
-              className={`flex shrink-0 items-center gap-1 rounded-lg px-3 py-1 text-xs font-bold text-white shadow disabled:opacity-40 ${isPlaying ? 'bg-amber-600 hover:bg-amber-500' : 'bg-rose-600 hover:bg-rose-500'}`}>
+              className={`flex shrink-0 whitespace-nowrap items-center gap-1 rounded-lg px-3 py-1 text-xs font-bold text-white shadow disabled:opacity-40 ${isPlaying ? 'bg-amber-600 hover:bg-amber-500' : 'bg-rose-600 hover:bg-rose-500'}`}>
               {isPlaying ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
               <span>{isPlaying ? t.animation.pause : t.animation.play}</span>
             </button>
@@ -582,9 +720,66 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
             <button type="button" onClick={() => engine.goToEnd()} title={t.animation.lastCel} aria-label={t.animation.lastCel} className={iconBtn}><SkipForward className="h-3.5 w-3.5" /></button>
             <button type="button" onClick={() => engine.setLoop(!loop)} aria-pressed={loop} title={t.animation.loop} aria-label={t.animation.loop}
               className={`${iconBtn} ${loop ? 'bg-amber-500/15 !text-amber-300' : ''}`}><Repeat2 className="h-3.5 w-3.5" /></button>
-            <button type="button" onClick={toggleTimecode} title={t.animation.timecodeToggle} aria-label={t.animation.currentFrame}
-              className="shrink-0 rounded px-1 font-mono text-[11px] text-neutral-400 hover:bg-neutral-800 hover:text-white">
-              {formatTimecode(time, fps, timecode)}/{formatTimecode(length - 1, fps, timecode)}
+            <span className="flex shrink-0 items-center font-mono text-[11px] text-neutral-400">
+              {jumpDraft !== null ? (
+                <input
+                  autoFocus
+                  data-jump-input
+                  aria-label={t.animation.jumpToFrame}
+                  placeholder={t.animation.jumpToFramePlaceholder}
+                  value={jumpDraft}
+                  onFocus={(e) => e.currentTarget.select()}
+                  onChange={(e) => setJumpDraft(e.target.value)}
+                  onBlur={commitJump}
+                  onKeyDown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === 'Enter') e.currentTarget.blur();
+                    if (e.key === 'Escape') {
+                      setJumpDraft(null);
+                      e.currentTarget.blur();
+                    }
+                  }}
+                  className="atelier-field h-6 w-16 px-1 text-center font-mono text-[11px] text-white"
+                />
+              ) : (
+                <button
+                  type="button"
+                  data-jump-trigger
+                  onClick={() => setJumpDraft(formatTimecode(time, fps, timecode))}
+                  title={t.animation.jumpToFrame}
+                  aria-label={t.animation.jumpToFrame}
+                  className="rounded px-1 font-mono text-[11px] text-neutral-200 hover:bg-neutral-800 hover:text-white"
+                >
+                  {formatTimecode(time, fps, timecode)}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={toggleTimecode}
+                title={t.animation.timecodeToggle}
+                aria-label={t.animation.timecodeToggle}
+                className="rounded px-0.5 font-mono text-[11px] text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+              >
+                /{formatTimecode(length - 1, fps, timecode)}
+              </button>
+            </span>
+            <button
+              type="button"
+              data-flip-btn
+              disabled={length < 2}
+              aria-pressed={flipping}
+              title={t.animation.flipbookTooltip}
+              onPointerDown={(e) => {
+                if (e.button > 0) return;
+                e.preventDefault();
+                startHoldFlip();
+              }}
+              onPointerUp={stopHoldFlip}
+              onPointerLeave={stopHoldFlip}
+              onPointerCancel={stopHoldFlip}
+              className={chip(flipping)}
+            >
+              {t.animation.flipbook} ±{flipSpan}
             </button>
             <label className="ml-1 flex shrink-0 items-center gap-1 border-l border-neutral-800 pl-2" title={t.animation.fpsTooltip}>
               <span className="text-[10px] font-bold text-neutral-500">FPS</span>
@@ -617,7 +812,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
               )}
             </button>
             <button type="button" onClick={() => setShowExportModal(true)} title={t.animation.exportModalTitle}
-              className="ml-auto flex h-7 shrink-0 items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-600/20 px-2 text-[11px] font-bold text-emerald-300 hover:bg-emerald-600/30">
+              className="ml-auto flex h-7 shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-600/20 px-2 text-[11px] font-bold text-emerald-300 hover:bg-emerald-600/30">
               <Download className="h-3 w-3" /><span className="hidden sm:inline">{t.common.export}</span>
             </button>
           </>
@@ -642,7 +837,8 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
 
       {!isCollapsed && tracks.length > 0 && (
         <>
-          {/* Edit row, or the settings panel that is open */}
+          {/* Edit row, or the settings panel that is open (hidden on phone unless a sub-panel is active) */}
+          {(!isPhone || panel !== null) && (
           <div key={panel ?? 'edit'} style={{ touchAction: 'pan-x' }}
             className={`atelier-tl-row no-scrollbar relative flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-neutral-800/60 px-2 text-[11px] text-neutral-300 ${panelLeaving ? 'is-leaving' : ''}`}>
             {panel === 'onion' && (
@@ -674,6 +870,11 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 <label className="flex shrink-0 items-center gap-1 text-neutral-400">{t.animation.onionSkinNext}
                   <input type="color" value={onionSkin.nextColor} onChange={(e) => updateOnion({ nextColor: e.target.value })} aria-label={t.animation.onionSkinNext} className="h-5 w-5 cursor-pointer rounded" />
                 </label>
+                <span className="mx-1 h-4 w-px shrink-0 bg-neutral-800" />
+                {stepper(t.animation.flipbookSpan, flipSpan, (n) => {
+                  engine.setFlipSpan(n);
+                  setFlipSpan(engine.getFlipSpan());
+                }, 1, MAX_FLIP_SPAN)}
                 <button type="button" onClick={() => setPanel(null)} className={`${iconBtn} ml-auto`}>{t.common.done}</button>
               </>
             )}
@@ -788,6 +989,12 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
               return (
                 <>
                   <span className="shrink-0 truncate max-w-[84px] text-[10px] font-semibold text-indigo-300">{activeLayer.name}</span>
+                  {onJumpKeyframe && (
+                    <>
+                      <button type="button" onClick={() => onJumpKeyframe(-1)} title={t.animation.prevKeyframe} aria-label={t.animation.prevKeyframe} className={iconBtn}>◀◆</button>
+                      <button type="button" onClick={() => onJumpKeyframe(1)} title={t.animation.nextKeyframe} aria-label={t.animation.nextKeyframe} className={iconBtn}>◆▶</button>
+                    </>
+                  )}
                   <button type="button" onClick={() => commitKf({})} className={chip(Boolean(exactKf))}>
                     ◆ {t.animation.keyframeAdd}
                   </button>
@@ -866,6 +1073,31 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 <button type="button" onClick={onAddBlank} disabled={!can.addCel} title={t.animation.blankFrame} className={iconBtn}>
                   <span aria-hidden className="text-sm leading-none text-neutral-400">×</span>{t.animation.blankFrame}
                 </button>
+                <button
+                  type="button"
+                  disabled={!can.addCel || (!selection && !current)}
+                  title={t.animation.repeatModalTitle}
+                  onClick={() => {
+                    const folderId = selection?.folderId ?? activeFolderId;
+                    const ids = selection && selection.ids.size > 0
+                      ? (tracks.find((tr) => tr.folderId === selection.folderId)?.entries.filter((x) => selection.ids.has(x.id)).map((x) => x.id) ?? [])
+                      : current ? [current.id] : [];
+                    if (!folderId || ids.length === 0) return;
+                    setRepeatModal({ folderId, entryIds: ids, mode: 'count', count: 2, busy: false });
+                  }}
+                  className={iconBtn}
+                >
+                  <Repeat2 className="h-3.5 w-3.5" />{t.animation.repeatCels}
+                </button>
+                <button
+                  type="button"
+                  disabled={!activeFolderId || realCels.length === 0}
+                  title={t.animation.renameInOrderTooltip}
+                  onClick={() => activeFolderId && onRenameInOrder(activeFolderId)}
+                  className={iconBtn}
+                >
+                  <ListOrdered className="h-3.5 w-3.5" />{t.animation.renameInOrder}
+                </button>
                 <span className="mx-1 h-4 w-px shrink-0 bg-neutral-800" />
                 {current
                   ? holdStepper(t.animation.celHoldFrames, current.hold, (n) => onSetHold(Math.max(1, Math.min(MAX_HOLD, n))), canEditEntry)
@@ -873,6 +1105,34 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 <button type="button" onClick={() => onMoveFrame(-1)} disabled={!canEditEntry || currentIdx <= 0} title={t.animation.prevCel} aria-label={t.animation.prevCel} className={iconBtn}>◀</button>
                 <button type="button" onClick={() => onMoveFrame(1)} disabled={!canEditEntry || currentIdx < 0 || currentIdx >= entries.length - 1} title={t.animation.nextCel} aria-label={t.animation.nextCel} className={iconBtn}>▶</button>
                 <button type="button" onClick={onDeleteFrame} disabled={!canEditEntry || entries.length <= 1} title={t.animation.deleteCel} aria-label={t.animation.deleteCel} className={`${iconBtn} hover:!text-rose-400`}><Trash2 className="h-3.5 w-3.5" /></button>
+                <span className="mx-1 h-4 w-px shrink-0 bg-neutral-800" />
+                <button type="button"
+                  disabled={!canEditEntry || !current}
+                  aria-pressed={current?.mark === 'key'}
+                  title={t.animation.celMarkKey}
+                  onClick={() => current && onUpdateCelMeta(current.id, { mark: current.mark === 'key' ? null : 'key' })}
+                  className={chip(current?.mark === 'key')}>○</button>
+                <button type="button"
+                  disabled={!canEditEntry || !current}
+                  aria-pressed={current?.mark === 'inbetween'}
+                  title={t.animation.celMarkInbetween}
+                  onClick={() => current && onUpdateCelMeta(current.id, { mark: current.mark === 'inbetween' ? null : 'inbetween' })}
+                  className={chip(current?.mark === 'inbetween')}>●</button>
+                <button type="button"
+                  disabled={!canEditEntry || !current}
+                  aria-pressed={Boolean(current?.note)}
+                  title={current?.note ? `${t.animation.celNote}: ${current.note}` : t.animation.celNote}
+                  onClick={() => current && setNoteModal({ entryId: current.id, label: current.blank ? t.animation.blankFrame : current.label, text: current.note ?? '' })}
+                  className={chip(Boolean(current?.note))}><MessageSquare className="h-3.5 w-3.5" /></button>
+                <button type="button"
+                  disabled={!can.editFolder}
+                  aria-pressed={activeLabels.some((l) => l.frame === time)}
+                  title={t.animation.timelineLabelAdd}
+                  onClick={() => {
+                    const existing = activeLabels.find((l) => l.frame === time);
+                    setLabelModal({ frame: time, text: existing?.text ?? '', existing: Boolean(existing) });
+                  }}
+                  className={chip(activeLabels.some((l) => l.frame === time))}><Tag className="h-3.5 w-3.5" />{t.animation.timelineLabel}</button>
                 {can.editFolder && (
                   <button type="button" onClick={onToggleShared} aria-pressed={Boolean(active?.shared)}
                     title={t.animation.sharedFolderTooltip}
@@ -884,11 +1144,12 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
               </>
             )}
           </div>
+          )}
 
           {/* Tracks (horizontally virtualized so 10,000+ frames stay <100 DOM nodes) */}
           {(() => {
-            const visFrameStart = Math.max(0, Math.floor((gridViewport.left - TRACK_LABEL_WIDTH) / CELL) - 4);
-            const visFrameEnd = Math.min(shownLength - 1, Math.ceil((gridViewport.left - TRACK_LABEL_WIDTH + gridViewport.width) / CELL) + 4);
+            const visFrameStart = Math.max(0, Math.floor((gridViewport.left - trackLabelWidth) / CELL) - 4);
+            const visFrameEnd = Math.min(shownLength - 1, Math.ceil((gridViewport.left - trackLabelWidth + gridViewport.width) / CELL) + 4);
             const visFrames: number[] = [];
             for (let f = visFrameStart; f <= visFrameEnd; f++) visFrames.push(f);
             return (
@@ -900,12 +1161,25 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
               setGridViewport((prev) => (prev.left === bucketLeft && prev.width === w ? prev : { left: bucketLeft, width: w }));
             }}
             onPointerDown={() => rootRef.current?.focus({ preventScroll: true })}>
-            <div className="relative" style={{ width: TRACK_LABEL_WIDTH + shownLength * CELL, minWidth: '100%' }}>
+            <div className="relative" style={{ width: trackLabelWidth + shownLength * CELL, minWidth: '100%' }}>
               {/* Ruler */}
               <div className="sticky top-0 z-20 flex border-b border-neutral-800 bg-neutral-900" style={{ height: RULER_HEIGHT }}>
-                <div style={{ width: TRACK_LABEL_WIDTH }} className="sticky left-0 z-10 shrink-0 border-r border-neutral-800 bg-neutral-900 px-1 text-[10px] leading-5 text-neutral-500">{t.animation.framesHeader}</div>
+                <div style={{ width: trackLabelWidth }} className="sticky left-0 z-10 shrink-0 border-r border-neutral-800 bg-neutral-900 px-1 text-[10px] leading-5 text-neutral-500">{t.animation.framesHeader}</div>
                 <div role="slider" aria-label={t.animation.timeAria} aria-valuemin={1} aria-valuemax={shownLength} aria-valuenow={time + 1} tabIndex={0}
                   onClick={(e) => engine.goTo(timeAt(e))}
+                  onDoubleClick={(e) => {
+                    if (!can.editFolder) return;
+                    const f = timeAt(e);
+                    const existing = activeLabels.find((l) => l.frame === f);
+                    setLabelModal({ frame: f, text: existing?.text ?? '', existing: Boolean(existing) });
+                  }}
+                  onContextMenu={(e) => {
+                    if (!can.editFolder) return;
+                    e.preventDefault();
+                    const f = timeAt(e);
+                    const existing = activeLabels.find((l) => l.frame === f);
+                    setLabelModal({ frame: f, text: existing?.text ?? '', existing: Boolean(existing) });
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === 'ArrowRight') engine.goToNextFrame();
                     if (e.key === 'ArrowLeft') engine.goToPrevFrame();
@@ -926,6 +1200,49 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                   <div aria-hidden className="pointer-events-none absolute inset-y-0 w-0.5 bg-sky-500" style={{ left: length * CELL - 1 }} />
                 </div>
               </div>
+              {/* Timeline Labels Lane */}
+              {showLabelRow && (
+                <div data-timeline-labels className="sticky z-20 flex border-b border-neutral-800/80 bg-neutral-950/90" style={{ top: RULER_HEIGHT, height: RULER_HEIGHT }}>
+                  <div style={{ width: trackLabelWidth }} className="sticky left-0 z-10 flex shrink-0 items-center gap-1 border-r border-neutral-800 bg-neutral-900 px-1.5 text-[9px] font-semibold text-sky-300 truncate">
+                    <Tag className="h-2.5 w-2.5 shrink-0" /><span className="truncate">{t.animation.timelineLabel}</span>
+                  </div>
+                  <div className="relative" style={{ width: shownLength * CELL }}>
+                    {activeLabels
+                      .filter((lbl) => lbl.frame >= visFrameStart - 6 && lbl.frame <= visFrameEnd + 2)
+                      .map((lbl) => (
+                        <button
+                          key={lbl.frame}
+                          type="button"
+                          data-timeline-label={lbl.frame}
+                          onClick={(ev) => {
+                            ev.stopPropagation();
+                            engine.goTo(lbl.frame);
+                          }}
+                          onContextMenu={(ev) => {
+                            if (!can.editFolder) return;
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            setLabelModal({ frame: lbl.frame, text: lbl.text, existing: true });
+                          }}
+                          onDoubleClick={(ev) => {
+                            if (!can.editFolder) return;
+                            ev.stopPropagation();
+                            setLabelModal({ frame: lbl.frame, text: lbl.text, existing: true });
+                          }}
+                          title={`${t.animation.timelineLabelFrame.replace('{frame}', String(lbl.frame + 1))}: ${lbl.text}`}
+                          style={{ left: lbl.frame * CELL + 1 }}
+                          className={`absolute top-0.5 z-10 flex h-4 max-w-[132px] items-center gap-0.5 truncate rounded px-1.5 text-[9px] font-semibold leading-none transition-colors ${
+                            lbl.frame === time
+                              ? 'border border-sky-400/80 bg-sky-500/30 text-sky-100'
+                              : 'border border-sky-500/40 bg-sky-950/80 text-sky-300 hover:bg-sky-900/80 hover:text-white'
+                          }`}
+                        >
+                          <span className="truncate">{lbl.text}</span>
+                        </button>
+                      ))}
+                  </div>
+                </div>
+              )}
               {/* Active Layer Transform Keyframes Lane */}
               {showKfRow && (
                 <div className="flex border-b border-neutral-800/80 bg-neutral-950/80" style={{ height: RULER_HEIGHT }}>
@@ -934,7 +1251,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                     onClick={() => setPanel(panel === 'keyframes' ? null : 'keyframes')}
                     className="sticky left-0 z-10 flex shrink-0 items-center gap-1 border-r border-neutral-800 bg-neutral-900 px-1.5 text-[9px] font-semibold text-amber-300 truncate"
                     title={t.animation.keyframeSection}
-                    style={{ width: TRACK_LABEL_WIDTH }}
+                    style={{ width: trackLabelWidth }}
                   >
                     <span>◆</span><span className="truncate">{activeLayer!.name}</span>
                   </button>
@@ -973,7 +1290,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                     <button type="button" onClick={() => onSelectCell(track.folderId, time)} aria-pressed={isActive}
                       aria-label={`${track.name} (${owner}${track.shared ? ` · ${t.animation.trackShared}` : ''})`}
                       className={`sticky left-0 z-10 flex shrink-0 flex-col justify-center border-r border-l-2 border-neutral-800 bg-neutral-950 px-1.5 text-left ${isActive ? 'text-white' : 'text-neutral-400'}`}
-                      style={{ width: TRACK_LABEL_WIDTH, borderLeftColor: color }}>
+                      style={{ width: trackLabelWidth, borderLeftColor: color }}>
                       <span className="truncate text-[11px] font-bold">{track.name}</span>
                       <span className="truncate text-[9px] text-neutral-500">{owner}{track.shared ? `・${t.animation.trackShared}` : ''}・{trackLength(track.entries)}</span>
                     </button>
@@ -1007,19 +1324,33 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                         const isSelected = selection?.folderId === track.folderId && selection.ids.has(e.id);
                         // A reuse whose drawing was deleted shows nothing too, but by accident: it is flagged
                         const broken = e.ref === '' && !e.blank;
+                        const tooltipParts: string[] = [];
+                        if (e.mark === 'key') tooltipParts.push(t.animation.celMarkKey);
+                        else if (e.mark === 'inbetween') tooltipParts.push(t.animation.celMarkInbetween);
+                        if (e.note) tooltipParts.push(e.note);
+                        if (broken) tooltipParts.push(t.animation.missingCel);
+                        const celTooltip = tooltipParts.length > 0 ? tooltipParts.join(' · ') : undefined;
                         return (
-                          <div key={e.id} data-entry data-blank={e.blank ? '' : undefined} onPointerDown={(ev) => startDrag(ev, track, i)}
+                          <div key={e.id} data-entry data-entry-id={e.id} data-blank={e.blank ? '' : undefined} data-mark={e.mark ?? undefined} onPointerDown={(ev) => startDrag(ev, track, i)}
                             onClick={(ev) => { if (!suppressClickRef.current && pickForSelection(ev, track, e.id)) ev.stopPropagation(); }}
+                            onContextMenu={(ev) => {
+                              ev.preventDefault();
+                              ev.stopPropagation();
+                              onSelectCell(track.folderId, start);
+                              setCelMenu({ entryId: e.id, x: ev.clientX, y: ev.clientY });
+                            }}
                             aria-selected={isSelected}
-                            aria-label={`${track.name} #${start + 1}: ${e.blank ? t.animation.blankFrame : broken ? t.animation.missingCel : e.label} (${e.hold})`}
-                            title={broken ? t.animation.missingCel : undefined}
+                            aria-label={`${track.name} #${start + 1}: ${e.blank ? t.animation.blankFrame : broken ? t.animation.missingCel : e.label} (${e.hold})${e.mark === 'key' ? ` ${t.animation.celMarkKey}` : e.mark === 'inbetween' ? ` ${t.animation.celMarkInbetween}` : ''}${e.note ? ` · ${e.note}` : ''}`}
+                            title={celTooltip}
                             className={`absolute top-1 bottom-1 flex flex-col overflow-hidden rounded-md border ${
                               isSelected ? 'border-sky-400 ring-2 ring-sky-400/70' : isCurrent ? 'border-rose-400 ring-2 ring-rose-500/70' : broken ? 'border-amber-500/80' : onion === 'prev' ? 'border-red-500/70' : onion === 'next' ? 'border-emerald-500/70' : 'border-neutral-700'
                             } ${e.blank ? 'atelier-blank-cel border-dashed' : e.ref !== undefined ? 'border-dashed bg-neutral-800/60' : 'bg-neutral-900'} ${editable ? 'cursor-grab' : ''} ${isDragged && drag.mode === 'move' ? 'opacity-40' : ''}`}
                             style={{ left: start * CELL + 1, width: hold * CELL - 2 }}>
                             {editable && (
                               <span data-hold-handle title={t.animation.celHoldFrames} aria-hidden style={{ touchAction: 'none' }}
-                                className="absolute inset-y-0 right-0 z-10 w-2 cursor-ew-resize bg-white/0 hover:bg-amber-400/40" />
+                                className={`absolute inset-y-0 right-0 z-10 cursor-ew-resize hover:bg-amber-400/40 ${
+                                  isPhone ? 'w-3.5 bg-white/10 border-l border-white/15' : 'w-2 bg-white/0'
+                                }`} />
                             )}
                             {isDragged && drag.mode === 'hold' && (
                               <span className="absolute right-2 top-3.5 z-10 rounded bg-amber-500 px-1 font-mono text-[9px] font-bold text-black">{hold}</span>
@@ -1030,7 +1361,18 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                               {e.isGroup && e.ref === undefined && <Folder className="h-2.5 w-2.5 shrink-0" />}
                               {isActive && lightTable.enabled && shownId && lightNow.has(shownId) && <Lamp aria-label={t.animation.lightTable} className="h-2.5 w-2.5 shrink-0 text-amber-300" />}
                               <span className="truncate">{e.blank ? '' : e.ref !== undefined ? (track.entries.find((x) => x.id === e.ref)?.label ?? '—') : e.label}</span>
+                              {e.mark && (
+                                <span
+                                  aria-hidden
+                                  className={`ml-auto shrink-0 pr-0.5 text-[10px] leading-none ${e.mark === 'key' ? 'text-amber-300' : 'text-sky-300'}`}
+                                >
+                                  {e.mark === 'key' ? '○' : '●'}
+                                </span>
+                              )}
                             </span>
+                            {e.note && (
+                              <span aria-hidden className="pointer-events-none absolute bottom-1.5 right-1.5 z-10 h-1.5 w-1.5 rounded-full bg-amber-400 ring-1 ring-neutral-950" />
+                            )}
                             {e.blank ? (
                               <span aria-hidden className="atelier-blank-mark mx-0.5 flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-sm text-lg font-light leading-none">×</span>
                             ) : (
@@ -1047,13 +1389,443 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 );
               })}
               {/* Playhead */}
-              <div data-playhead className="pointer-events-none absolute top-0 bottom-0 z-10 border-x border-rose-500/80 bg-rose-500/10" style={{ left: TRACK_LABEL_WIDTH + time * CELL, width: CELL }} />
+              <div data-playhead className="pointer-events-none absolute top-0 bottom-0 z-10 border-x border-rose-500/80 bg-rose-500/10" style={{ left: trackLabelWidth + time * CELL, width: CELL }} />
             </div>
           </div>
             );
           })()}
         </>
       )}
+
+      <OverlayPresence open={Boolean(celMenu)}>
+        {(() => {
+          if (!celMenu) return null;
+          const menuEntry = tracks.flatMap((tr) => tr.entries).find((x) => x.id === celMenu.entryId);
+          if (!menuEntry) return null;
+          const menuEditable = can.editableEntryIds.has(menuEntry.id);
+          const left = typeof window !== 'undefined' ? Math.min(window.innerWidth - 184, Math.max(8, celMenu.x)) : celMenu.x;
+          const top = typeof window !== 'undefined' ? Math.min(window.innerHeight - 196, Math.max(8, celMenu.y)) : celMenu.y;
+          const itemCls = 'flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs text-neutral-200 hover:bg-neutral-800 disabled:opacity-40 disabled:hover:bg-transparent';
+          return (
+            <div
+              data-cel-menu
+              role="menu"
+              style={{ left, top }}
+              className="atelier-tl-row fixed z-50 w-44 rounded-xl border border-neutral-700/90 bg-neutral-900/95 p-1 shadow-2xl backdrop-blur"
+            >
+              <button type="button" role="menuitem" disabled={!menuEditable} className={itemCls}
+                onClick={() => {
+                  onUpdateCelMeta(menuEntry.id, { mark: menuEntry.mark === 'key' ? null : 'key' });
+                  setCelMenu(null);
+                }}>
+                <span className="w-4 text-center text-amber-300">○</span>
+                <span className="flex-1 truncate">{t.animation.celMarkKey}</span>
+                {menuEntry.mark === 'key' && <span className="text-[10px] text-amber-300">✓</span>}
+              </button>
+              <button type="button" role="menuitem" disabled={!menuEditable} className={itemCls}
+                onClick={() => {
+                  onUpdateCelMeta(menuEntry.id, { mark: menuEntry.mark === 'inbetween' ? null : 'inbetween' });
+                  setCelMenu(null);
+                }}>
+                <span className="w-4 text-center text-sky-300">●</span>
+                <span className="flex-1 truncate">{t.animation.celMarkInbetween}</span>
+                {menuEntry.mark === 'inbetween' && <span className="text-[10px] text-sky-300">✓</span>}
+              </button>
+              {menuEntry.mark && (
+                <button type="button" role="menuitem" disabled={!menuEditable} className={itemCls}
+                  onClick={() => {
+                    onUpdateCelMeta(menuEntry.id, { mark: null });
+                    setCelMenu(null);
+                  }}>
+                  <span className="w-4 text-center text-neutral-500">×</span>
+                  <span className="flex-1 truncate">{t.animation.celMarkClear}</span>
+                </button>
+              )}
+              <div className="my-1 h-px bg-neutral-800" />
+              <button type="button" role="menuitem" disabled={!menuEditable} className={itemCls}
+                onClick={() => {
+                  setNoteModal({ entryId: menuEntry.id, label: menuEntry.blank ? t.animation.blankFrame : menuEntry.label, text: menuEntry.note ?? '' });
+                  setCelMenu(null);
+                }}>
+                <MessageSquare className="h-3.5 w-3.5 shrink-0 text-neutral-400" />
+                <span className="flex-1 truncate">{t.animation.celNote}</span>
+              </button>
+              <button type="button" role="menuitem" disabled={!can.addCel || !menuEditable} className={itemCls}
+                onClick={() => {
+                  const menuTrack = tracks.find((tr) => tr.entries.some((x) => x.id === menuEntry.id));
+                  if (menuTrack) {
+                    const useSelection = selection?.folderId === menuTrack.folderId && selection.ids.has(menuEntry.id) && selection.ids.size > 0;
+                    const ids = useSelection
+                      ? menuTrack.entries.filter((x) => selection!.ids.has(x.id)).map((x) => x.id)
+                      : [menuEntry.id];
+                    setRepeatModal({ folderId: menuTrack.folderId, entryIds: ids, mode: 'count', count: 2, busy: false });
+                  }
+                  setCelMenu(null);
+                }}>
+                <Repeat2 className="h-3.5 w-3.5 shrink-0 text-neutral-400" />
+                <span className="flex-1 truncate">{t.animation.repeatCels}</span>
+              </button>
+            </div>
+          );
+        })()}
+      </OverlayPresence>
+
+      <OverlayPresence open={Boolean(noteModal)}>
+        {noteModal && (
+          <AtelierModal
+            title={`${t.animation.celNote} · ${noteModal.label}`}
+            icon={<MessageSquare />}
+            width="sm"
+            onClose={() => setNoteModal(null)}
+            footer={
+              <>
+                {noteModal.text.trim() && (
+                  <button
+                    type="button"
+                    className={`${modalButton.secondary} mr-auto`}
+                    onClick={() => {
+                      onUpdateCelMeta(noteModal.entryId, { note: null });
+                      setNoteModal(null);
+                    }}
+                  >
+                    {t.animation.celNoteClear}
+                  </button>
+                )}
+                <button type="button" className={modalButton.secondary} onClick={() => setNoteModal(null)}>{t.common.cancel}</button>
+                <button
+                  type="button"
+                  className={modalButton.primary}
+                  onClick={() => {
+                    onUpdateCelMeta(noteModal.entryId, { note: noteModal.text.trim() || null });
+                    setNoteModal(null);
+                  }}
+                >
+                  {t.common.confirm}
+                </button>
+              </>
+            }
+          >
+            <input
+              autoFocus
+              maxLength={120}
+              value={noteModal.text}
+              placeholder={t.animation.celNotePlaceholder}
+              onChange={(e) => setNoteModal({ ...noteModal, text: e.target.value })}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter') {
+                  onUpdateCelMeta(noteModal.entryId, { note: noteModal.text.trim() || null });
+                  setNoteModal(null);
+                }
+              }}
+              className="atelier-field w-full px-3 py-2 text-xs text-white"
+            />
+          </AtelierModal>
+        )}
+      </OverlayPresence>
+
+      <OverlayPresence open={Boolean(labelModal)}>
+        {labelModal && (
+          <AtelierModal
+            title={`${t.animation.timelineLabel} · ${t.animation.timelineLabelFrame.replace('{frame}', String(labelModal.frame + 1))}`}
+            icon={<Tag />}
+            width="sm"
+            onClose={() => setLabelModal(null)}
+            footer={
+              <>
+                {labelModal.existing && (
+                  <button
+                    type="button"
+                    className={`${modalButton.danger} mr-auto`}
+                    onClick={() => {
+                      onUpdateLabels(removeTimelineLabel(activeLabels, labelModal.frame));
+                      setLabelModal(null);
+                    }}
+                  >
+                    {t.animation.timelineLabelDelete}
+                  </button>
+                )}
+                <button type="button" className={modalButton.secondary} onClick={() => setLabelModal(null)}>{t.common.cancel}</button>
+                <button
+                  type="button"
+                  className={modalButton.primary}
+                  onClick={() => {
+                    onUpdateLabels(upsertTimelineLabel(activeLabels, labelModal.frame, labelModal.text));
+                    setLabelModal(null);
+                  }}
+                >
+                  {t.common.confirm}
+                </button>
+              </>
+            }
+          >
+            <input
+              autoFocus
+              maxLength={40}
+              value={labelModal.text}
+              placeholder={t.animation.timelineLabelPlaceholder}
+              onChange={(e) => setLabelModal({ ...labelModal, text: e.target.value })}
+              onKeyDown={(e) => {
+                e.stopPropagation();
+                if (e.key === 'Enter') {
+                  onUpdateLabels(upsertTimelineLabel(activeLabels, labelModal.frame, labelModal.text));
+                  setLabelModal(null);
+                }
+              }}
+              className="atelier-field w-full px-3 py-2 text-xs text-white"
+            />
+          </AtelierModal>
+        )}
+      </OverlayPresence>
+
+      <OverlayPresence open={Boolean(repeatModal)}>
+        {repeatModal && (() => {
+          const targetTrack = tracks.find((tr) => tr.folderId === repeatModal.folderId);
+          const preview = targetTrack
+            ? planRepeatCels(targetTrack.entries, repeatModal.entryIds, {
+                mode: repeatModal.mode,
+                count: repeatModal.count,
+                targetEndFrame: length,
+              })
+            : { items: [], totalFrames: 0, addedFrames: 0, capped: false };
+          const canApply = !repeatModal.busy && preview.items.length > 0;
+          const submitRepeat = async () => {
+            if (!canApply) return;
+            setRepeatModal((prev) => (prev ? { ...prev, busy: true } : null));
+            const ok = await onRepeatEntries(repeatModal.folderId, repeatModal.entryIds, {
+              mode: repeatModal.mode,
+              count: repeatModal.count,
+            });
+            setRepeatModal((prev) => (ok ? null : prev ? { ...prev, busy: false } : null));
+          };
+          return (
+            <AtelierModal
+              title={t.animation.repeatModalTitle}
+              icon={<Repeat2 />}
+              width="sm"
+              onClose={() => !repeatModal.busy && setRepeatModal(null)}
+              footer={
+                <>
+                  <button type="button" className={modalButton.secondary} disabled={repeatModal.busy} onClick={() => setRepeatModal(null)}>{t.common.cancel}</button>
+                  <button type="button" className={modalButton.primary} disabled={!canApply} onClick={() => void submitRepeat()}>
+                    {repeatModal.busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    {t.common.confirm}
+                  </button>
+                </>
+              }
+            >
+              <div className="space-y-3">
+                <div role="radiogroup" className="grid grid-cols-2 gap-2">
+                  {([
+                    ['count', t.animation.repeatModeCount],
+                    ['toEnd', t.animation.repeatModeToEnd],
+                  ] as const).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      role="radio"
+                      aria-checked={repeatModal.mode === mode}
+                      onClick={() => setRepeatModal({ ...repeatModal, mode })}
+                      className={`atelier-tl-row rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+                        repeatModal.mode === mode
+                          ? 'border-indigo-400 bg-indigo-500/20 text-white'
+                          : 'border-neutral-800 bg-neutral-900/60 text-neutral-400 hover:bg-neutral-800'
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {repeatModal.mode === 'count' && (
+                  <label className="flex items-center justify-between gap-2 text-xs text-neutral-300">
+                    <span>{t.animation.repeatCountLabel}</span>
+                    <input
+                      type="number"
+                      min={2}
+                      max={100}
+                      value={repeatModal.count}
+                      onChange={(e) => {
+                        const n = Math.max(2, Math.min(100, Math.round(Number(e.target.value) || 2)));
+                        setRepeatModal({ ...repeatModal, count: n });
+                      }}
+                      onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === 'Enter') void submitRepeat();
+                      }}
+                      className="atelier-field h-8 w-20 px-2 text-center font-mono text-xs font-bold text-white"
+                    />
+                  </label>
+                )}
+                <p className="text-[11px] text-neutral-400">
+                  {preview.items.length > 0
+                    ? t.animation.repeatSummary
+                        .replace('{total}', String(preview.totalFrames))
+                        .replace('{added}', String(preview.items.length))
+                    : t.animation.repeatNoRoom}
+                </p>
+              </div>
+            </AtelierModal>
+          );
+        })()}
+      </OverlayPresence>
+
+      <OverlayPresence open={phoneDrawerOpen}>
+        <AtelierModal
+          title={active?.name ?? t.animation.timeline}
+          icon={<SlidersHorizontal />}
+          width="md"
+          onClose={() => setPhoneDrawerOpen(false)}
+          footer={
+            <button type="button" className={modalButton.primary} onClick={() => setPhoneDrawerOpen(false)}>{t.common.done}</button>
+          }
+        >
+          <div data-phone-drawer className="space-y-4 text-xs text-neutral-200">
+            {/* Cel actions */}
+            <section className="space-y-2">
+              <div className="text-[11px] font-bold text-neutral-400">{t.animation.celActions}</div>
+              <div className="flex flex-wrap gap-1.5">
+                <button type="button" onClick={() => { onAddFrame(); setPhoneDrawerOpen(false); }} disabled={!can.addCel} className={chip(false)}>
+                  <Plus className="h-3.5 w-3.5" />{t.animation.addCel}
+                </button>
+                <button type="button" onClick={() => { onDuplicateFrame(); setPhoneDrawerOpen(false); }} disabled={!can.addCel || !current || current.ref !== undefined || current.isGroup} className={chip(false)}>
+                  <Copy className="h-3.5 w-3.5" />{t.animation.duplicateCel}
+                </button>
+                <button type="button" onClick={() => { onAddBlank(); setPhoneDrawerOpen(false); }} disabled={!can.addCel} className={chip(false)}>
+                  <span>×</span>{t.animation.blankFrame}
+                </button>
+                <button type="button" onClick={() => { setPhoneDrawerOpen(false); setPanel('reuse'); }} disabled={!can.addCel || realCels.length === 0} className={chip(false)}>
+                  <Repeat className="h-3.5 w-3.5" />{t.animation.cel}
+                </button>
+                <button
+                  type="button"
+                  disabled={!can.addCel || (!selection && !current)}
+                  onClick={() => {
+                    const folderId = selection?.folderId ?? activeFolderId;
+                    const ids = selection && selection.ids.size > 0
+                      ? (tracks.find((tr) => tr.folderId === selection.folderId)?.entries.filter((x) => selection.ids.has(x.id)).map((x) => x.id) ?? [])
+                      : current ? [current.id] : [];
+                    if (!folderId || ids.length === 0) return;
+                    setPhoneDrawerOpen(false);
+                    setRepeatModal({ folderId, entryIds: ids, mode: 'count', count: 2, busy: false });
+                  }}
+                  className={chip(false)}
+                >
+                  <Repeat2 className="h-3.5 w-3.5" />{t.animation.repeatCels}
+                </button>
+                <button type="button" onClick={() => { if (activeFolderId) onRenameInOrder(activeFolderId); setPhoneDrawerOpen(false); }} disabled={!activeFolderId || realCels.length === 0} className={chip(false)}>
+                  <ListOrdered className="h-3.5 w-3.5" />{t.animation.renameInOrder}
+                </button>
+                <button type="button" onClick={() => { onMoveFrame(-1); }} disabled={!canEditEntry || currentIdx <= 0} className={chip(false)}>◀ {t.animation.prevCel}</button>
+                <button type="button" onClick={() => { onMoveFrame(1); }} disabled={!canEditEntry || currentIdx < 0 || currentIdx >= entries.length - 1} className={chip(false)}>{t.animation.nextCel} ▶</button>
+                <button type="button" onClick={() => { onDeleteFrame(); setPhoneDrawerOpen(false); }} disabled={!canEditEntry || entries.length <= 1} className={`${chip(false)} !text-rose-300 border-rose-500/40`}>
+                  <Trash2 className="h-3.5 w-3.5" />{t.animation.deleteCel}
+                </button>
+                <button type="button" onClick={() => setMultiMode((v) => !v)} aria-pressed={multiMode} className={chip(multiMode)}>
+                  {t.animation.multiSelect}
+                </button>
+                <button type="button" onClick={() => { onCreateFolder(); setPhoneDrawerOpen(false); }} disabled={!can.createFolder} className={chip(false)}>
+                  <Folder className="h-3.5 w-3.5" />{t.animation.newTrack}
+                </button>
+              </div>
+              {current && (
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  {holdStepper(t.animation.celHoldFrames, current.hold, (n) => onSetHold(Math.max(1, Math.min(MAX_HOLD, n))), canEditEntry)}
+                </div>
+              )}
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                <button type="button" disabled={!canEditEntry || !current} aria-pressed={current?.mark === 'key'}
+                  onClick={() => current && onUpdateCelMeta(current.id, { mark: current.mark === 'key' ? null : 'key' })}
+                  className={chip(current?.mark === 'key')}>{t.animation.celMarkKey}</button>
+                <button type="button" disabled={!canEditEntry || !current} aria-pressed={current?.mark === 'inbetween'}
+                  onClick={() => current && onUpdateCelMeta(current.id, { mark: current.mark === 'inbetween' ? null : 'inbetween' })}
+                  className={chip(current?.mark === 'inbetween')}>{t.animation.celMarkInbetween}</button>
+                <button type="button" disabled={!canEditEntry || !current} aria-pressed={Boolean(current?.note)}
+                  onClick={() => {
+                    if (!current) return;
+                    setPhoneDrawerOpen(false);
+                    setNoteModal({ entryId: current.id, label: current.blank ? t.animation.blankFrame : current.label, text: current.note ?? '' });
+                  }}
+                  className={chip(Boolean(current?.note))}><MessageSquare className="h-3.5 w-3.5" />{t.animation.celNote}</button>
+                <button type="button" disabled={!can.editFolder} aria-pressed={activeLabels.some((l) => l.frame === time)}
+                  onClick={() => {
+                    const existing = activeLabels.find((l) => l.frame === time);
+                    setPhoneDrawerOpen(false);
+                    setLabelModal({ frame: time, text: existing?.text ?? '', existing: Boolean(existing) });
+                  }}
+                  className={chip(activeLabels.some((l) => l.frame === time))}><Tag className="h-3.5 w-3.5" />{t.animation.timelineLabel}</button>
+              </div>
+            </section>
+
+            {/* Onion skin & flipbook */}
+            <section className="space-y-2 border-t border-neutral-800 pt-3">
+              <div className="text-[11px] font-bold text-neutral-400">{t.animation.onionSkin} · {t.animation.flipbook}</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button type="button" onClick={() => updateOnion({ enabled: !onionSkin.enabled })} aria-pressed={onionSkin.enabled} className={chip(onionSkin.enabled)}>
+                  <Eye className="h-3.5 w-3.5" />{onionSkin.enabled ? t.animation.onionSkinOn : t.animation.onionSkinOff}
+                </button>
+                {stepper(t.animation.onionPrev, onionSkin.prevFramesCount, (n) => updateOnion({ prevFramesCount: n }), 0, MAX_ONION)}
+                {stepper(t.animation.onionNext, onionSkin.nextFramesCount, (n) => updateOnion({ nextFramesCount: n }), 0, MAX_ONION)}
+                {stepper(t.animation.flipbookSpan, flipSpan, (n) => { engine.setFlipSpan(n); setFlipSpan(engine.getFlipSpan()); }, 1, MAX_FLIP_SPAN)}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span role="radiogroup" aria-label={t.animation.onionMode} className="flex overflow-hidden rounded-lg border border-neutral-700/70">
+                  {ONION_MODES.map((m) => {
+                    const on = (onionSkin.mode ?? 'tint') === m;
+                    return (
+                      <button key={m} type="button" role="radio" aria-checked={on} onClick={() => updateOnion({ mode: m })}
+                        className={`flex h-7 items-center gap-1 px-2 text-[11px] font-bold ${on ? 'bg-amber-500/15 text-amber-300' : 'text-neutral-300 hover:bg-neutral-800'}`}>
+                        <span aria-hidden className="atelier-onion-swatch h-3 w-3 shrink-0 rounded-[3px]" style={{ background: onionSwatch(m, onionSkin.prevColor) }} />
+                        {onionModeLabel(m)}
+                      </button>
+                    );
+                  })}
+                </span>
+                <label className="flex items-center gap-1.5 text-[11px] text-neutral-400">
+                  {t.animation.onionSkinOpacity}
+                  <input type="range" min="0.05" max="0.9" step="0.05" value={onionSkin.opacity}
+                    onChange={(e) => updateOnion({ opacity: parseFloat(e.target.value) })} className="h-1 w-20 accent-amber-500" />
+                </label>
+              </div>
+            </section>
+
+            {/* Playback & tools */}
+            <section className="space-y-2 border-t border-neutral-800 pt-3">
+              <div className="text-[11px] font-bold text-neutral-400">{t.animation.playbackAndExport}</div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button type="button" onClick={() => engine.goToStart()} className={chip(false)}><SkipBack className="h-3.5 w-3.5" />{t.animation.firstCel}</button>
+                <button type="button" onClick={() => engine.goToEnd()} className={chip(false)}><SkipForward className="h-3.5 w-3.5" />{t.animation.lastCel}</button>
+                <button type="button" onClick={() => engine.setLoop(!loop)} aria-pressed={loop} className={chip(loop)}><Repeat2 className="h-3.5 w-3.5" />{t.animation.loop}</button>
+                <button type="button" onClick={toggleTimecode} className={chip(false)}>{formatTimecode(time, fps, timecode)}/{formatTimecode(length - 1, fps, timecode)}</button>
+                <label className="flex items-center gap-1 text-[11px] text-neutral-400">
+                  <span>FPS</span>
+                  <select value={fps} disabled={!can.editFolder} onChange={(e) => onFpsChange(Number(e.target.value))} aria-label={t.animation.fpsAria}
+                    className="atelier-field h-7 px-1.5 text-xs">
+                    {[6, 8, 12, 15, 24, 30].map((f) => <option key={f} value={f}>{f}</option>)}
+                  </select>
+                </label>
+                <button type="button" onClick={() => { setPhoneDrawerOpen(false); setPanel('range'); }} className={chip(Boolean(range))}>
+                  <Repeat className="h-3.5 w-3.5" />{t.animation.range}
+                </button>
+                <button type="button" onClick={() => { setPhoneDrawerOpen(false); setPanel('light'); }} className={chip(lightTable.enabled && lightCount > 0)}>
+                  <Lamp className="h-3.5 w-3.5" />{t.animation.lightTable}
+                </button>
+                <button type="button" disabled={!activeLayer || !onUpdateLayerKeyframes} onClick={() => { setPhoneDrawerOpen(false); setPanel('keyframes'); }} className={chip(Boolean(activeLayer?.meta?.keyframes?.length))}>
+                  ◆ {t.animation.keyframeSection}
+                </button>
+                {can.editFolder && (
+                  <button type="button" onClick={onToggleShared} aria-pressed={Boolean(active?.shared)} className={chip(Boolean(active?.shared))}>
+                    <Users className="h-3.5 w-3.5" />{t.animation.trackShared}
+                  </button>
+                )}
+                <button type="button" onClick={() => { setPhoneDrawerOpen(false); setShowExportModal(true); }}
+                  className="flex h-7 items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-600/20 px-2.5 text-[11px] font-bold text-emerald-300">
+                  <Download className="h-3.5 w-3.5" />{t.common.export}
+                </button>
+              </div>
+            </section>
+          </div>
+        </AtelierModal>
+      </OverlayPresence>
 
       <OverlayPresence open={showExportModal}>
         <AtelierModal title={t.animation.exportModalTitle} icon={<Film />} onClose={() => !exportProgress && setShowExportModal(false)}

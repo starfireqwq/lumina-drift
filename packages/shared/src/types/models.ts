@@ -32,6 +32,14 @@ export interface LayerTextMeta {
 import type { TransformKeyframe } from '../animation/keyframes';
 import type { CanvasUnit } from '../canvas/canvas-units';
 
+export type CelMark = 'key' | 'inbetween';
+
+export interface TimelineLabel {
+  /** Zero-based frame index on the timeline */
+  frame: number;
+  text: string;
+}
+
 export interface LayerMeta {
   originalAuthor?: string;
   /**
@@ -39,12 +47,13 @@ export interface LayerMeta {
    * shared: other painters can see the track. Adding cels requires the owner's approval.
    */
   /** length: timeline length in frames set by the painter (none = up to the end of the longest track) */
-  animation?: { fps: number; shared?: boolean; length?: number };
+  animation?: { fps: number; shared?: boolean; length?: number; labels?: TimelineLabel[] };
   /**
    * On a cel (a child of an animation folder): how many timeline frames it stays on screen, and
    * ref = the cel it shows instead of itself (reusing one drawing; such entries are empty groups).
+   * mark = key (○) / inbetween (●) cel badge; note = short per-cel memo shown in tooltips.
    */
-  cel?: { hold?: number; ref?: string };
+  cel?: { hold?: number; ref?: string; mark?: CelMark; note?: string };
   /** Non-destructive keyframe transform track (supports interpolation & joint pivot) */
   keyframes?: TransformKeyframe[];
   /** On a mask layer: white hides and black shows */
