@@ -31,7 +31,7 @@ export const KeyframeMotionPathOverlay: React.FC<KeyframeMotionPathOverlayProps>
 
   return (
     <div
-      className="pointer-events-none absolute inset-0 z-[19] select-none overflow-hidden"
+      className="pointer-events-none absolute inset-0 z-[21] select-none overflow-hidden"
       data-testid="keyframe-motion-path-overlay"
     >
       <svg className="h-full w-full overflow-visible">
@@ -74,24 +74,25 @@ export const KeyframeMotionPathOverlay: React.FC<KeyframeMotionPathOverlayProps>
             )
           )}
 
-        {/* Keyframe diamond nodes (clickable to jump directly to that frame) */}
+        {/* Keyframe diamond nodes (non-current nodes sit above transform quad for direct click-to-jump) */}
         {screenKeys.map((kp) => {
           const isCur = Math.round(kp.frame) === Math.round(currentFrame);
           const size = isCur ? 6.5 : 5;
+          const clickable = Boolean(onSelectFrame) && !isCur;
           return (
             <g
               key={`k-${kp.frame}`}
               transform={`translate(${kp.x}, ${kp.y})`}
               data-testid={`motion-path-key-${kp.frame}`}
-              className={onSelectFrame ? 'pointer-events-auto cursor-pointer touch-none' : undefined}
+              className={clickable ? 'pointer-events-auto cursor-pointer touch-none' : 'pointer-events-none'}
               onPointerDown={(e) => {
-                if (!onSelectFrame) return;
+                if (!clickable || !onSelectFrame) return;
                 e.stopPropagation();
                 e.preventDefault();
                 onSelectFrame(kp.frame);
               }}
             >
-              <circle r={14} fill="transparent" />
+              {clickable && <circle r={12} fill="transparent" />}
               <polygon
                 points={`0,${-size} ${size},0 0,${size} ${-size},0`}
                 fill={isCur ? '#fbbf24' : '#818cf8'}
