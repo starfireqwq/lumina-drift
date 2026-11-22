@@ -71,6 +71,8 @@ export interface AnimationExportModalProps {
   canvasHeight: number;
   /** Optional D3 camera crop rect (reserved for Phase E1; null = full canvas) */
   cameraCropRect?: ExportCropRect | null;
+  /** Phase E1: active 2D camera frame output dimensions when a visible camera layer exists */
+  cameraFrameSize?: { width: number; height: number } | null;
   planExport: (opts: AnimationExportPlanRequest) => AnimationExportPlan | null;
   planCelExport?: (opts: { folderIds: string[] }) => AnimationCelExportPlan | null;
 }
@@ -87,6 +89,7 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
   canvasWidth,
   canvasHeight,
   cameraCropRect = null,
+  cameraFrameSize = null,
   planExport,
   planCelExport,
 }) => {
@@ -105,6 +108,7 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
   const [mode, setMode] = useState<AnimationExportMode>('mp4');
   const [videoResolution, setVideoResolution] = useState<VideoExportResolution>('4k');
   const [scope, setScope] = useState<AnimationExportScope>('folder');
+  const [useCameraFrame, setUseCameraFrame] = useState<boolean>(Boolean(cameraFrameSize));
   const [rangeMode, setRangeMode] = useState<ExportRangeMode>('all');
   const [customStartText, setCustomStartText] = useState('1');
   const [customEndText, setCustomEndText] = useState('1');
@@ -144,18 +148,23 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
   useEffect(() => {
     if (!open) return;
     setStatusNotice(null);
+    setUseCameraFrame(Boolean(cameraFrameSize));
     const len = Math.max(1, timelineLength);
     setCustomStartText(formatTimecode(playbackRange?.start ?? 0, fps, timecodeMode));
     setCustomEndText(formatTimecode(playbackRange?.end ?? len - 1, fps, timecodeMode));
     if (selectedFolderIds.length === 0 || !selectedFolderIds.some((id) => tracks.some((tr) => tr.folderId === id))) {
       setSelectedFolderIds(activeFolderId ? [activeFolderId] : tracks.map((tr) => tr.folderId));
     }
-  }, [open, activeFolderId, tracks, timelineLength, playbackRange, fps, timecodeMode]);
+  }, [open, activeFolderId, tracks, timelineLength, playbackRange, fps, timecodeMode, cameraFrameSize]);
 
   const activeTrack = tracks.find((tr) => tr.folderId === activeFolderId) ?? tracks[0];
+  const applyingCamera = Boolean(cameraFrameSize) && useCameraFrame && mode !== 'cels';
   const exportRegion = useMemo(
-    () => resolveExportRegion(canvasWidth, canvasHeight, cameraCropRect),
-    [canvasWidth, canvasHeight, cameraCropRect]
+    () =>
+      applyingCamera && cameraFrameSize
+        ? { x: 0, y: 0, width: cameraFrameSize.width, height: cameraFrameSize.height }
+        : resolveExportRegion(canvasWidth, canvasHeight, cameraCropRect),
+    [applyingCamera, cameraFrameSize, canvasWidth, canvasHeight, cameraCropRect]
   );
 
   const scaledDims = useMemo(
@@ -278,6 +287,7 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
           useRange: rangeMode === 'playback',
           range: { start: resolvedRange.start, end: resolvedRange.end },
           transparent: false,
+          useCamera: applyingCamera,
         });
         if (!plan || plan.segments.length === 0) {
           setStatusNotice({ kind: 'error', text: t.animation.noFramesToExport });
@@ -293,10 +303,11 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
             return { canvas: plan.render(plan.segments[i].time), hold: plan.segments[i].hold };
           };
           let blob: Blob;
+          const effectiveCrop = applyingCamera ? null : cameraCropRect;
           if (mode === 'gif') {
             blob = await ExportEngine.exportGifAnimation(next, total, plan.width, plan.height, fps, {
               signal: controller.signal,
-              cropRegion: cameraCropRect,
+              cropRegion: effectiveCrop,
             });
           } else {
             blob = await ExportEngine.exportVideoAnimation(
@@ -309,7 +320,7 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
               videoResolution,
               {
                 signal: controller.signal,
-                cropRegion: cameraCropRect,
+                cropRegion: effectiveCrop,
                 onProgress: ({ currentFrame, totalFrames }) => {
                   setProgressText(
                     t.animation.exportEncodingFrame
@@ -337,6 +348,7 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
           useRange: rangeMode === 'playback',
           range: { start: resolvedRange.start, end: resolvedRange.end },
           transparent: seqTransparent,
+          useCamera: applyingCamera,
         });
         if (!plan || plan.segments.length === 0) {
           setStatusNotice({ kind: 'error', text: t.animation.noFramesToExport });
@@ -350,7 +362,7 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
             srcHeight: plan.height,
             targetWidth: scaledDims.width,
             targetHeight: scaledDims.height,
-            cropRegion: cameraCropRect,
+            cropRegion: applyingCamera ? null : cameraCropRect,
             transparent: seqTransparent,
             bgColor: plan.bgColor,
             frameMode: seqFrameMode,
@@ -493,7 +505,7 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
         footer={
           <div className="flex w-full flex-wrap items-center justify-between gap-2">
             <span className="min-w-0 truncate text-[11px] text-neutral-400">
-              {t.animation.exportRegionFull} ·{' '}
+              {applyingCamera ? t.animation.exportRegionCamera : t.animation.exportRegionFull} ·{' '}
               {mode === 'sequence' || mode === 'cels'
                 ? `${scaledDims.width}×${scaledDims.height}`
                 : `${exportRegion.width}×${exportRegion.height}`}
@@ -617,6 +629,47 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
                     })}
                   </select>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* Phase E1: Camera framing region toggle when a visible camera layer exists */}
+          {mode !== 'cels' && cameraFrameSize && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-sky-500/30 bg-sky-500/10 px-2.5 py-2">
+              <span className="text-[11px] font-medium text-sky-200">
+                {t.animation.camera} ({cameraFrameSize.width}×{cameraFrameSize.height})
+              </span>
+              <div className="flex items-center gap-1" role="radiogroup" aria-label={t.animation.camera}>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={useCameraFrame}
+                  disabled={busy}
+                  data-testid="anim-export-region-camera"
+                  onClick={() => setUseCameraFrame(true)}
+                  className={`rounded-lg border px-2 py-1 text-[11px] font-medium transition ${
+                    useCameraFrame
+                      ? 'border-sky-400/80 bg-sky-500/25 text-white'
+                      : 'border-neutral-700 bg-neutral-900/70 text-neutral-400 hover:text-neutral-200'
+                  }`}
+                >
+                  {t.animation.exportRegionCamera}
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={!useCameraFrame}
+                  disabled={busy}
+                  data-testid="anim-export-region-full"
+                  onClick={() => setUseCameraFrame(false)}
+                  className={`rounded-lg border px-2 py-1 text-[11px] font-medium transition ${
+                    !useCameraFrame
+                      ? 'border-indigo-400/80 bg-indigo-500/25 text-white'
+                      : 'border-neutral-700 bg-neutral-900/70 text-neutral-400 hover:text-neutral-200'
+                  }`}
+                >
+                  {t.animation.exportRegionFull}
+                </button>
               </div>
             </div>
           )}

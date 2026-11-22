@@ -37,6 +37,8 @@ export interface AnimationExportPlanRequest {
   range?: { start: number; end: number } | null;
   /** Leave background transparent instead of filling canvas paper color */
   transparent?: boolean;
+  /** Apply active 2D camera frame crop/transform per frame (Phase E1) */
+  useCamera?: boolean;
 }
 
 /** Frames to encode: each segment is one distinct picture shown for `hold` frames */
