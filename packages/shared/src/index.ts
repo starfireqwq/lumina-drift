@@ -8,6 +8,7 @@ export * from './tiles/tile-math';
 export * from './tiles/tile-compress';
 export * from './tiles/undo-merge';
 export * from './permissions/layer-acl';
+export * from './permissions/member-role';
 export * from './protocol/msgpack';
 
 // Phase 4: Color, Brush, Selection, Filters & Blend Modes

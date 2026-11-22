@@ -9,6 +9,7 @@ import {
   LayerModel,
   LayerPermissionModel,
   LayerType,
+  ServerRole,
 } from './models';
 import type { CanvasUnit } from '../canvas/canvas-units';
 
@@ -95,4 +96,30 @@ export interface SetLayerPermissionDto {
 
 export interface LayerWithPermissions extends LayerModel {
   permissions?: LayerPermissionModel[];
+}
+
+export type AssignableCanvasRole = Exclude<CanvasRole, 'owner'>;
+
+export interface UpdateCanvasMemberRoleDto {
+  role: AssignableCanvasRole;
+}
+
+export interface CanvasMemberInfo extends CanvasMemberModel {
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+  serverRole: ServerRole;
+  isOnline?: boolean;
+  lastSeenAt?: number | null;
+  drawTimeMs?: number;
+}
+
+export interface CanvasMembersResponse {
+  canvasId: string;
+  ownerId: string;
+  members: CanvasMemberInfo[];
+}
+
+export interface UpdateCanvasMemberRoleResponse {
+  member: CanvasMemberModel;
 }
