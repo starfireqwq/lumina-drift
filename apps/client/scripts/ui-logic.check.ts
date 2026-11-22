@@ -68,6 +68,9 @@ import {
   BUILTIN_FILTERS, FILTER_DRAFT, FILTER_GROUPS, defaultFilterValues, filterDraftFactor, filterFitsLayer, filterGroupsInUse, filterPointParam, getFilter,
   normalizeFilterValues, paramShown, snapRange,
 } from '../src/utils/filterRegistry';
+import { COLOR_ADJUST_PRESETS, matchColorPreset } from '../src/utils/filterPresets';
+import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../src/utils/filterMemoryGuard';
+import { BUILTIN_LIBRARY_CARDS, createFavoriteCard, parseFavoriteCards, scaleFilterValuesForThumbnail } from '../src/utils/filterLibrary';
 
 const hex = (channels: string) => `#${channels.split(' ').map((n) => Number(n).toString(16).padStart(2, '0')).join('')}`;
 
@@ -1067,7 +1070,7 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
       if (param.kind === 'range') assert.ok(param.min <= param.initial && param.initial <= param.max, `${def.id}.${param.key} default is in range`);
     }
   }
-  assert.deepEqual(filterGroupsInUse(), ['color', 'lineart', 'effect', 'blur', 'distort', 'sharpen'], 'Groups with no filters yet stay out of the menu');
+  assert.deepEqual(filterGroupsInUse(), ['color', 'library', 'lineart', 'render', 'effect', 'blur', 'distort', 'sharpen'], 'All 8 filter groups are active');
   assert.equal(filterFitsLayer(getFilter('despeckle')!, 'mask'), false, 'Line-art fixes stay off masks');
   assert.equal(filterFitsLayer(getFilter('despeckle')!, 'raster'), true);
 
@@ -1394,6 +1397,174 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
   for (let i = 0; i < fringe.length; i += 4) {
     assert.ok(fringe[i] <= fringe[i + 3] && fringe[i + 1] <= fringe[i + 3] && fringe[i + 2] <= fringe[i + 3], 'Sharpened colour never exceeds alpha');
   }
+}
+
+// 濾鏡 F3 Batch 1: 單色著色、平滑鋸齒、柏林雜訊、格線、集中線
+{
+  // monoTint: colorOnly keeps alpha & clear pixels, shifts midtones to chosen tint
+  assert.deepEqual(filterPixel('monoTint', { color: '#ff8040', strength: 100, preserveLuma: true }, [0, 0, 0, 0]), [0, 0, 0, 0], 'MonoTint leaves clear pixels clear');
+  const tintedMid = filterPixel('monoTint', { color: '#ff8040', strength: 100, preserveLuma: true }, [128, 128, 128, 255]);
+  assert.ok(tintedMid[0] > tintedMid[1] && tintedMid[1] > tintedMid[2] && tintedMid[3] === 255, 'MonoTint tints midtones toward chosen hue');
+  const tintedSemi = filterPixel('monoTint', { color: '#0080ff', strength: 100, preserveLuma: false }, [64, 64, 64, 128]);
+  assert.equal(tintedSemi[3], 128, 'MonoTint keeps semi-transparent alpha intact');
+  assert.ok(tintedSemi[2] > tintedSemi[0], 'MonoTint shifts blue channel higher for blue tint');
+
+  // smoothJaggies: softens diagonal staircase corners while keeping flat & vertical lines sharp
+  const W = 12, H = 12;
+  const diag = picture(W, H, (x, y) => (x === y ? [0, 0, 0, 255] : null));
+  const smoothed = runPixelFilter(PIXEL_FILTER_RUNNERS.smoothJaggies, diag, W, H, { strength: 80 });
+  assert.ok(alphaAt(smoothed, W, 5, 4) > 0 && alphaAt(smoothed, W, 4, 5) > 0, 'SmoothJaggies softens diagonal staircase corners');
+  const vert = picture(W, H, (x) => (x === 6 ? [0, 0, 0, 255] : null));
+  assert.deepEqual(runPixelFilter(PIXEL_FILTER_RUNNERS.smoothJaggies, vert, W, H, { strength: 80 }), vert, 'SmoothJaggies leaves straight vertical strokes sharp');
+
+  // perlinNoise: deterministic non-flat opaque greyscale
+  const blank = new Uint8Array(24 * 24 * 4);
+  const p1 = runPixelFilter(PIXEL_FILTER_RUNNERS.perlinNoise, blank, 24, 24, { scale: 12, amplitude: 80, persistence: 0.5, octaves: 4, offsetX: 0, offsetY: 0 });
+  const p2 = runPixelFilter(PIXEL_FILTER_RUNNERS.perlinNoise, blank, 24, 24, { scale: 12, amplitude: 80, persistence: 0.5, octaves: 4, offsetX: 0, offsetY: 0 });
+  assert.deepEqual(p1, p2, 'PerlinNoise is deterministic between preview and apply');
+  let pMin = 255, pMax = 0;
+  for (let i = 0; i < p1.length; i += 4) {
+    assert.equal(p1[i + 3], 255, 'PerlinNoise output is opaque');
+    assert.ok(p1[i] === p1[i + 1] && p1[i + 1] === p1[i + 2], 'PerlinNoise is greyscale');
+    if (p1[i] < pMin) pMin = p1[i];
+    if (p1[i] > pMax) pMax = p1[i];
+  }
+  assert.ok(pMax - pMin > 40, 'PerlinNoise produces varied values');
+
+  // gridPattern: draws grid lines on cell intervals and leaves interior clear on blank layer
+  const gridded = runPixelFilter(PIXEL_FILTER_RUNNERS.gridPattern, blank, 24, 24, { cell: 8, lineWidth: 1, color: '#ff0000', opacity: 100, offsetX: 0, offsetY: 0 });
+  assert.equal(alphaAt(gridded, 24, 0, 4), 255, 'Grid line at x=0 is drawn');
+  assert.equal(alphaAt(gridded, 24, 8, 4), 255, 'Grid line at x=8 is drawn');
+  assert.equal(alphaAt(gridded, 24, 4, 4), 0, 'Interior cell stays transparent');
+
+  // focusLines: clear center stays transparent, outer ring receives rays
+  const focused = runPixelFilter(PIXEL_FILTER_RUNNERS.focusLines, new Uint8Array(40 * 40 * 4), 40, 40,
+    { density: 48, lineWidth: 3, innerRadius: 40, jitter: 20, color: '#000000', center: { x: 20, y: 20 } });
+  assert.equal(alphaAt(focused, 40, 20, 20), 0, 'FocusLines keeps the inner center clear');
+  let outerHits = 0;
+  for (let x = 0; x < 40; x++) {
+    if (alphaAt(focused, 40, x, 1) > 0) outerHits++;
+  }
+  assert.ok(outerHits > 0, 'FocusLines draws rays toward the outer edge');
+}
+
+// 濾鏡 F3 Batch 2: 浮雕、投影、邊緣轉線稿、極座標、鋸齒波紋、捏合、高反差保留
+{
+  const W = 16, H = 16;
+  const run = (id: string, values: FilterValues, pixels: Uint8Array) => runPixelFilter(PIXEL_FILTER_RUNNERS[id], pixels, W, H, values);
+  const split = picture(W, H, (x) => (x < 8 ? [40, 40, 40, 255] : [220, 220, 220, 255]));
+  const box = picture(W, H, (x, y) => (x >= 5 && x <= 10 && y >= 5 && y <= 10 ? [200, 80, 60, 255] : null));
+
+  // emboss: colorOnly preserves alpha & clear pixels, neutral 128 on flat regions, bevel at step
+  const emb = run('emboss', { angle: 0, height: 1, amount: 150, keepColor: false }, split);
+  assert.deepEqual([...emb.slice((8 * W + 2) * 4, (8 * W + 2) * 4 + 4)], [128, 128, 128, 255], 'Emboss turns flat area to neutral grey');
+  assert.ok(emb[(8 * W + 8) * 4] > 128, 'Emboss highlights lit edge');
+  const embClear = run('emboss', { angle: 135, height: 1, amount: 120, keepColor: false }, box);
+  assert.equal(alphaAt(embClear, W, 0, 0), 0, 'Emboss leaves clear pixels clear');
+  assert.equal(alphaAt(embClear, W, 7, 7), 255, 'Emboss keeps opaque alpha intact');
+
+  // dropShadow: casts coloured shadow into shifted transparent area; shadowOnly hides original
+  const sh = run('dropShadow', { offsetX: 3, offsetY: 3, radius: 2, opacity: 80, color: '#000000', shadowOnly: false }, box);
+  assert.equal(alphaAt(sh, W, 7, 7), 255, 'DropShadow keeps original object opaque');
+  assert.ok(alphaAt(sh, W, 12, 12) > 0, 'DropShadow casts shadow offset down-right');
+  assert.equal(alphaAt(sh, W, 1, 1), 0, 'DropShadow leaves far opposite corner clear');
+  const shOnly = run('dropShadow', { offsetX: 4, offsetY: 4, radius: 0, opacity: 100, color: '#000000', shadowOnly: true }, box);
+  assert.equal(alphaAt(shOnly, W, 5, 5), 0, 'Shadow-only omits unshifted original corner');
+  assert.equal(alphaAt(shOnly, W, 12, 12), 255, 'Shadow-only keeps shifted silhouette');
+
+  // edgeToLineart: draws edge pixels at step, transparent elsewhere when whiteBg=false
+  const edges = run('edgeToLineart', { sensitivity: 60, thickness: 1, keepColor: false, whiteBg: false }, split);
+  assert.ok(alphaAt(edges, W, 7, 8) > 120 && alphaAt(edges, W, 8, 8) > 120, 'EdgeToLineart detects vertical contrast edge');
+  assert.equal(alphaAt(edges, W, 1, 8), 0, 'EdgeToLineart keeps flat area transparent');
+  const edgesWhite = run('edgeToLineart', { sensitivity: 60, thickness: 1, keepColor: false, whiteBg: true }, split);
+  assert.deepEqual([...edgesWhite.slice((8 * W + 1) * 4, (8 * W + 1) * 4 + 4)], [255, 255, 255, 255], 'White background fills flat area with white');
+
+  // polarCoords: both modes run cleanly and alter geometry
+  const r2p = run('polarCoords', { mode: 'rectToPolar' }, split);
+  assert.equal(alphaAt(r2p, W, 0, 0), 0, 'Rect-to-polar corners outside unit circle turn clear');
+  assert.notDeepEqual(r2p, split, 'Rect-to-polar remaps pixels');
+  const p2r = run('polarCoords', { mode: 'polarToRect' }, box);
+  assert.notDeepEqual(p2r, box, 'Polar-to-rect remaps pixels');
+
+  // zigzagRipple: alters interior, keeps outside circle untouched, amount=0 is identity
+  const gridImg = picture(W, H, (x, y) => (x % 3 === 0 || y % 3 === 0 ? [30, 60, 90, 255] : null));
+  assert.deepEqual(run('zigzagRipple', { style: 'pond', amount: 0, ridges: 4, center: { x: 8, y: 8 } }, gridImg), gridImg, 'Zero ripple is identity');
+  const rip = run('zigzagRipple', { style: 'pond', amount: 60, ridges: 3, center: { x: 8, y: 8 } }, gridImg);
+  assert.notDeepEqual(rip, gridImg, 'Pond ripple distorts interior');
+  const ripRad = run('zigzagRipple', { style: 'radial', amount: 60, ridges: 3, center: { x: 8, y: 8 } }, gridImg);
+  assert.notDeepEqual(ripRad, gridImg, 'Radial ripple distorts interior');
+
+  // pinch: alters pixels within radius, leaves corners outside radius untouched
+  const pinched = run('pinch', { strength: 70, radius: 5, center: { x: 8, y: 8 } }, gridImg);
+  assert.notDeepEqual(pinched, gridImg, 'Pinch distorts inside radius');
+  assert.deepEqual([...pinched.slice(0, 4)], [...gridImg.slice(0, 4)], 'Pinch leaves pixels outside radius intact');
+  assert.deepEqual(run('pinch', { strength: 0, radius: 5, center: { x: 8, y: 8 } }, gridImg), gridImg, 'Zero pinch is identity');
+
+  // highPass: colorOnly preserves alpha, turns flat region to neutral 128, highlights edges
+  const hp = run('highPass', { radius: 2 }, split);
+  assert.deepEqual([...hp.slice((8 * W + 1) * 4, (8 * W + 1) * 4 + 4)], [128, 128, 128, 255], 'HighPass turns flat area to neutral 128 grey');
+  assert.ok(hp[(8 * W + 7) * 4] < 128 && hp[(8 * W + 8) * 4] > 128, 'HighPass preserves high-frequency edge contrast');
+  const hpBox = run('highPass', { radius: 1 }, box);
+  assert.equal(alphaAt(hpBox, W, 0, 0), 0, 'HighPass leaves transparent pixels transparent');
+
+  // Color Adjust preset cards: all presets stay within parameter bounds and round-trip matchColorPreset
+  const colorDef = getFilter('colorAdjust')!;
+  assert.equal(matchColorPreset(defaultFilterValues(colorDef)), 'original', 'Default colorAdjust matches original preset');
+  for (const preset of COLOR_ADJUST_PRESETS) {
+    assert.deepEqual(normalizeFilterValues(colorDef, preset.values), preset.values, `Color preset ${preset.id} fits slider bounds`);
+    assert.equal(matchColorPreset(preset.values), preset.id, `matchColorPreset identifies ${preset.id}`);
+  }
+  assert.equal(matchColorPreset({ ...COLOR_ADJUST_PRESETS[1].values, brightness: 99 }), null, 'Tweaked preset becomes custom (null)');
+
+  // Apply-to-new-layer memory guard, sparse tile pruning, and above-active placement
+  assert.equal(assessFilterCompositeMemory(2000, 2000, false).tier, 'ok', '2000×2000 desktop composite is ok');
+  assert.equal(assessFilterCompositeMemory(5000, 4000, false).tier, 'warn', '20M px desktop composite warns & forces draft');
+  assert.equal(assessFilterCompositeMemory(10000, 8000, false).tier, 'confirm', '80M px desktop composite asks confirmation');
+  assert.equal(assessFilterCompositeMemory(2000, 2000, true).tier, 'ok', '4M px touch composite is ok');
+  assert.equal(assessFilterCompositeMemory(3000, 2000, true).tier, 'warn', '6M px touch composite warns');
+  assert.equal(assessFilterCompositeMemory(4000, 3500, true).tier, 'confirm', '14M px touch composite asks confirmation');
+  assert.equal(assessFilterCompositeMemory(5000, 4000, true).tier, 'block', '20M px touch composite is blocked to prevent OOM');
+
+  const sparse = new Uint8Array(512 * 256 * 4);
+  sparse[(10 * 512 + 300) * 4 + 3] = 200; // only tile (col=1, row=0) has alpha > 0
+  const pruned = filterNonEmptyTileCoords(sparse, 512, 256, 256, [{ col: 0, row: 0 }, { col: 1, row: 0 }]);
+  assert.deepEqual(pruned, [{ col: 1, row: 0 }], 'Empty tiles are pruned when writing to a new filtered layer');
+
+  const sampleLayers = [
+    { id: 'bg', layerType: 'raster', parentId: null, sortOrder: 1 },
+    { id: 'grp', layerType: 'group', parentId: null, sortOrder: 2 },
+    { id: 'child', layerType: 'raster', parentId: 'grp', sortOrder: 3 },
+    { id: 'msk', layerType: 'mask', parentId: 'child', sortOrder: 4 },
+    { id: 'top', layerType: 'raster', parentId: null, sortOrder: 5 },
+  ];
+  const pRaster = filterNewLayerPlacement(sampleLayers[0], sampleLayers);
+  assert.equal(pRaster.afterLayerId, 'bg', 'New layer inserts directly above active raster layer');
+  assert.equal(pRaster.overlayZIndex, 1.5, 'Preview overlay sits directly above active layer');
+  const pMask = filterNewLayerPlacement(sampleLayers[3], sampleLayers);
+  assert.equal(pMask.afterLayerId, 'child', 'Active mask places new layer above its host layer');
+  assert.equal(pMask.parentId, 'grp', 'and keeps host layer parent');
+  const pGroup = filterNewLayerPlacement(sampleLayers[1], sampleLayers);
+  assert.equal(pGroup.afterLayerId, 'grp', 'Active group places new layer above the group');
+  assert.equal(pGroup.parentId, null, 'as a sibling of the group');
+  assert.equal(pGroup.overlayZIndex, 4.5, 'and preview sits above all group descendants');
+
+  // Filter Library cards, thumbnail scaling, and favorite card validation
+  assert.equal(new Set(BUILTIN_LIBRARY_CARDS.map((c) => c.id)).size, BUILTIN_LIBRARY_CARDS.length, 'Library card ids are unique');
+  for (const card of BUILTIN_LIBRARY_CARDS) {
+    const def = getFilter(card.filterId);
+    assert.ok(def && PIXEL_FILTER_RUNNERS[card.filterId], `Library card ${card.id} targets a runnable filter`);
+    const scaled = scaleFilterValuesForThumbnail(def, card.values, 2000, 2000, 96, 96);
+    const sampleThumb = runPixelFilter(PIXEL_FILTER_RUNNERS[card.filterId], box, W, H, scaled);
+    assert.equal(sampleThumb.length, box.length, `Library card ${card.id} renders cleanly at thumbnail size`);
+  }
+  const scaledGlow = scaleFilterValuesForThumbnail(getFilter('glow')!, { radius: 40, strength: 100, threshold: 140 }, 1000, 1000, 100, 100);
+  assert.equal(scaledGlow.radius, 4, 'Thumbnail scaling shrinks pixel radii proportionally');
+  assert.equal(scaledGlow.strength, 100, 'Thumbnail scaling keeps percentage strength unchanged');
+  const createdFav = createFavoriteCard('  我的柔和發光  ', 'glow', { radius: 24, strength: 999, threshold: 140 });
+  assert.ok(createdFav && createdFav.name === '我的柔和發光', 'createFavoriteCard trims name');
+  assert.equal(createdFav.values.strength, 200, 'createFavoriteCard clamps out-of-range values');
+  const parsedFavs = parseFavoriteCards([createdFav, { id: 'bad', name: 'x', filterId: 'unknown', values: {} }, null]);
+  assert.equal(parsedFavs.length, 1, 'parseFavoriteCards filters out invalid entries safely');
 }
 
 // 對齊 L1: basis, whole-pixel offsets, off-canvas parts, and a pixel-level run of the move

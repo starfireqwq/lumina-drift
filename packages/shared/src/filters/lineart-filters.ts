@@ -283,3 +283,71 @@ export function recolorLines(pixels: Uint8Array | Uint8ClampedArray, hex: string
   }
   return output;
 }
+
+/**
+ * 平滑鋸齒 (premultiplied RGBA): softens staircase jaggies along diagonal and curved edges while
+ * keeping flat regions and crisp horizontal/vertical strokes sharp.
+ */
+export function smoothJaggies(pixels: Uint8Array | Uint8ClampedArray, width: number, height: number, strength: number) {
+  const amt = Math.min(1, Math.max(0, strength / 100));
+  if (amt <= 0 || width < 3 || height < 3) return new Uint8Array(pixels);
+  const passes = amt > 0.45 ? 2 : 1;
+  const passAmt = passes === 2 ? amt * 0.72 : amt;
+  let src: Uint8Array | Uint8ClampedArray = pixels;
+  let dst = new Uint8Array(pixels.length);
+
+  // Per-pixel combined ink/luma scalar for Sobel edge direction detection
+  const scalar = new Float32Array(width * height);
+  const fillScalar = (buf: Uint8Array | Uint8ClampedArray) => {
+    for (let p = 0, i = 0; p < scalar.length; p++, i += 4) {
+      const a = buf[i + 3];
+      // Distinguishes both ink-on-transparent (alpha contrast) and ink-on-white (luma contrast)
+      scalar[p] = a * 0.65 + (0.299 * buf[i] + 0.587 * buf[i + 1] + 0.114 * buf[i + 2]) * 0.35;
+    }
+  };
+
+  for (let pass = 0; pass < passes; pass++) {
+    fillScalar(src);
+    dst.set(src);
+    for (let y = 1; y < height - 1; y++) {
+      const row = y * width;
+      for (let x = 1; x < width - 1; x++) {
+        const p = row + x;
+        const nw = scalar[p - width - 1], n = scalar[p - width], ne = scalar[p - width + 1];
+        const w = scalar[p - 1], c = scalar[p], e = scalar[p + 1];
+        const sw = scalar[p + width - 1], s = scalar[p + width], se = scalar[p + width + 1];
+        const gx = Math.abs((ne + 2 * e + se) - (nw + 2 * w + sw));
+        const gy = Math.abs((sw + 2 * s + se) - (nw + 2 * n + ne));
+        const maxG = gx > gy ? gx : gy;
+        if (maxG < 28) continue;
+        const minG = gx < gy ? gx : gy;
+        // Pure horizontal or vertical edges have minG == 0 and no staircase jaggies
+        const diag = Math.min(1, (minG / maxG) * 1.85);
+        if (diag <= 0.05) continue;
+        // Also measure local jump so faint gradients stay clean
+        const localMax = Math.max(Math.abs(n - c), Math.abs(s - c), Math.abs(w - c), Math.abs(e - c));
+        const edgeFactor = Math.min(1, Math.max(localMax, maxG * 0.25) / 80);
+        const mix = passAmt * diag * edgeFactor * 0.75;
+        if (mix <= 0.01) continue;
+        const keep = 1 - mix;
+        const i = p * 4;
+        const iN = (p - width) * 4, iS = (p + width) * 4, iW = (p - 1) * 4, iE = (p + 1) * 4;
+        const iNW = (p - width - 1) * 4, iNE = (p - width + 1) * 4;
+        const iSW = (p + width - 1) * 4, iSE = (p + width + 1) * 4;
+        for (let k = 0; k < 4; k++) {
+          const smooth = (
+            src[i + k] * 4 +
+            (src[iN + k] + src[iS + k] + src[iW + k] + src[iE + k]) * 2 +
+            (src[iNW + k] + src[iNE + k] + src[iSW + k] + src[iSE + k])
+          ) / 16;
+          dst[i + k] = Math.round(src[i + k] * keep + smooth * mix);
+        }
+      }
+    }
+    if (pass + 1 < passes) {
+      src = dst;
+      dst = new Uint8Array(pixels.length);
+    }
+  }
+  return dst;
+}

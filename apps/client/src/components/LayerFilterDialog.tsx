@@ -1,11 +1,15 @@
 import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
-import { ArrowLeft, ArrowUpRight, Check, ChevronDown, Crosshair, RotateCcw, SlidersHorizontal } from 'lucide-react';
+import { ArrowLeft, ArrowUpRight, Check, ChevronDown, Crosshair, RotateCcw, SlidersHorizontal, Star, X } from 'lucide-react';
 import type { FilterValues } from '@atelier/shared';
 import {
   defaultFilterValues, filterFitsLayer, filterGroupLabel, filterGroupsInUse, filterLabel, filterParamLabel, filterPointParam, filtersInGroup,
-  getFilter, loadFilterValues, paramShown, saveFilterValues, snapRange, type FilterDef, type FilterGroup, type FilterParam,
+  getFilter, loadFilterValues, paramShown, saveFilterValues, snapRange, type FilterDef, type FilterGroup, type FilterJob, type FilterParam,
 } from '../utils/filterRegistry';
 import { filterPoint } from '../utils/filterPoint';
+import { COLOR_ADJUST_PRESETS, matchColorPreset } from '../utils/filterPresets';
+import { createFavoriteCard, loadFavoriteFilters, saveFavoriteFilters, type FavoriteFilterCard } from '../utils/filterLibrary';
+import { FilterLibraryView, type FilterThumbSource } from './FilterLibraryView';
+import { FilterTargetBar, type FilterTargetOptions } from './FilterTargetBar';
 import { ToolWindow } from './workspace/ToolWindow';
 import { usePhoneLayout } from './workspace/dockStore';
 import { useI18n } from '../context/I18nContext';
@@ -20,10 +24,20 @@ interface Props {
   busy: boolean;
   /** The preview is still being worked out (a quick draft shows meanwhile on a big layer) */
   refining?: boolean;
+  /** Options for applying the filter onto a new composited layer above the active layer */
+  target?: FilterTargetOptions;
+  /** Reads a tiny <= 96px thumbnail buffer for the Filter Library cards */
+  onReadThumbnail?: () => Promise<FilterThumbSource | null>;
+  /** Starts or clears the canvas point handle when picking a point-based Filter Library card */
+  onStartPoint?: (filterId: string | null) => void;
   onChoose: (id: string) => void;
   onBack: () => void;
   onPreview: (values: FilterValues | null) => void;
+  /** Previews an arbitrary filter job (used by the Filter Library card browser) */
+  onPreviewJob?: (job: FilterJob | null) => void;
   onApply: (values: FilterValues) => Promise<boolean>;
+  /** Applies an arbitrary filter job (used by the Filter Library card browser) */
+  onApplyJob?: (job: FilterJob) => Promise<boolean>;
   onClose: () => void;
 }
 
@@ -38,7 +52,10 @@ const readGroup = (groups: FilterGroup[]) => {
   }
 };
 
-export function LayerFilterDialog({ filterId, layerName, layerType, histogram, busy, refining = false, onChoose, onBack, onPreview, onApply, onClose }: Props) {
+export function LayerFilterDialog({
+  filterId, layerName, layerType, histogram, busy, refining = false, target,
+  onReadThumbnail, onStartPoint, onChoose, onBack, onPreview, onPreviewJob, onApply, onApplyJob, onClose,
+}: Props) {
   const { t } = useI18n();
   const phone = usePhoneLayout();
   const definition = getFilter(filterId);
@@ -46,36 +63,126 @@ export function LayerFilterDialog({ filterId, layerName, layerType, histogram, b
   const [group, setGroup] = useState<FilterGroup>(() => readGroup(groups));
   const [values, setValues] = useState<FilterValues>(() => definition ? loadFilterValues(definition) : {});
   const [preview, setPreview] = useState(true);
+  const [favorites, setFavorites] = useState<FavoriteFilterCard[]>(loadFavoriteFilters);
+  const [libraryPick, setLibraryPick] = useState<{ key: string; filterId: string; values: FilterValues } | null>(null);
+  const [thumbSource, setThumbSource] = useState<FilterThumbSource | null>(null);
+  const [favFormOpen, setFavFormOpen] = useState(false);
+  const [favName, setFavName] = useState('');
+  const [favJustSaved, setFavJustSaved] = useState(false);
+
+  const inLibrary = !definition && group === 'library';
+  const activeDef = definition ?? (inLibrary && libraryPick ? getFilter(libraryPick.filterId) : null);
+  const activeValues = definition ? values : (libraryPick?.values ?? {});
+
+  // Load a tiny <= 96px thumbnail snapshot whenever the Library group opens or target source changes
+  useEffect(() => {
+    if (!inLibrary || !onReadThumbnail) return;
+    let alive = true;
+    void onReadThumbnail().then((src) => {
+      if (alive && src) setThumbSource(src);
+    });
+    return () => { alive = false; };
+  }, [inLibrary, onReadThumbnail, target?.applyToNewLayer, target?.includeBackground]);
 
   // The centre lives outside the settings (the canvas handle moves it too) and joins them for each run
-  const pointParam = filterPointParam(definition);
+  const pointParam = filterPointParam(activeDef);
   const point = useSyncExternalStore(filterPoint.subscribe, filterPoint.get, filterPoint.get);
   const px = point?.x;
   const py = point?.y;
   const jobValues = useMemo<FilterValues>(
-    () => pointParam && px !== undefined && py !== undefined ? { ...values, [pointParam.key]: { x: px, y: py } } : values,
-    [values, pointParam, px, py],
+    () => pointParam && px !== undefined && py !== undefined ? { ...activeValues, [pointParam.key]: { x: px, y: py } } : activeValues,
+    [activeValues, pointParam, px, py],
   );
-  const pointShown = pointParam ? paramShown(pointParam, values) : false;
-  const radius = definition?.pointRadius ? values[definition.pointRadius] : null;
+  const pointShown = pointParam ? paramShown(pointParam, activeValues) : false;
+  const radius = activeDef?.pointRadius ? activeValues[activeDef.pointRadius] : null;
   const hasPoint = point !== null;
   useEffect(() => {
     if (hasPoint) filterPoint.show(pointShown, typeof radius === 'number' ? radius : null);
   }, [hasPoint, pointShown, radius]);
 
   useEffect(() => {
-    if (!definition || !preview || busy) return;
-    const timer = setTimeout(() => onPreview(jobValues), 160);
+    if (!activeDef || !preview || busy) return;
+    const timer = setTimeout(() => {
+      if (definition) onPreview(jobValues);
+      else onPreviewJob?.({ id: activeDef.id, values: jobValues });
+    }, 160);
     return () => clearTimeout(timer);
-  }, [definition, preview, jobValues, onPreview, busy]);
+  }, [definition, activeDef, preview, jobValues, onPreview, onPreviewJob, busy, target?.applyToNewLayer, target?.includeBackground]);
 
   const pickGroup = (next: FilterGroup) => {
+    if (group === 'library' && next !== 'library' && libraryPick) {
+      setLibraryPick(null);
+      setFavFormOpen(false);
+      onStartPoint?.(null);
+      onPreviewJob?.(null);
+    }
     setGroup(next);
     try { localStorage.setItem(GROUP_KEY, next); } catch { /* the first group shows next time */ }
   };
 
+  const updateActiveValue = (key: string, nextVal: number | string | boolean) => {
+    if (definition) {
+      setValues((current) => ({ ...current, [key]: nextVal }));
+    } else if (libraryPick) {
+      setLibraryPick((current) => current ? { ...current, values: { ...current.values, [key]: nextVal } } : null);
+    }
+  };
+
+  const resetActiveValues = () => {
+    if (!activeDef) return;
+    const defaults = defaultFilterValues(activeDef);
+    if (definition) setValues(defaults);
+    else if (libraryPick) setLibraryPick({ ...libraryPick, values: defaults });
+  };
+
+  const openSaveFavorite = () => {
+    if (!activeDef) return;
+    setFavName(filterLabel(activeDef, t));
+    setFavFormOpen((open) => !open);
+  };
+
+  const commitSaveFavorite = () => {
+    if (!activeDef) return;
+    const card = createFavoriteCard(favName || filterLabel(activeDef, t), activeDef.id, activeValues);
+    if (!card) return;
+    const next = [card, ...favorites];
+    setFavorites(next);
+    saveFavoriteFilters(next);
+    setFavFormOpen(false);
+    setFavJustSaved(true);
+    setTimeout(() => setFavJustSaved(false), 1800);
+  };
+
+  const renameFavorite = (id: string, nextName: string) => {
+    const clean = nextName.trim().slice(0, 40);
+    if (!clean) return;
+    const next = favorites.map((c) => (c.id === id ? { ...c, name: clean } : c));
+    setFavorites(next);
+    saveFavoriteFilters(next);
+  };
+
+  const removeFavorite = (id: string) => {
+    const next = favorites.filter((c) => c.id !== id);
+    setFavorites(next);
+    saveFavoriteFilters(next);
+    if (libraryPick?.key === `fav:${id}`) {
+      setLibraryPick(null);
+      onStartPoint?.(null);
+      onPreviewJob?.(null);
+    }
+  };
+
+  const selectLibraryCard = (key: string, nextFilterId: string, cardValues: FilterValues) => {
+    const def = getFilter(nextFilterId);
+    if (!def) return;
+    const merged = { ...defaultFilterValues(def), ...cardValues };
+    setLibraryPick({ key, filterId: def.id, values: merged });
+    setFavFormOpen(false);
+    onStartPoint?.(filterPointParam(def) ? def.id : null);
+  };
+
   const item = (def: FilterDef, index: number) => {
-    const fits = filterFitsLayer(def, layerType);
+    const fits = Boolean(target?.applyToNewLayer) || filterFitsLayer(def, layerType);
     return (
       <button type="button" key={def.id} disabled={!fits} onClick={() => onChoose(def.id)}
         title={!fits ? t.filters.lineartNotOnMask : def.tool ? t.filters.opensTool : undefined}
@@ -85,6 +192,72 @@ export function LayerFilterDialog({ filterId, layerName, layerType, histogram, b
       </button>
     );
   };
+
+  const librarySection = (
+    <div className="space-y-3">
+      <FilterLibraryView
+        phone={phone}
+        busy={busy}
+        layerType={layerType}
+        applyToNewLayer={Boolean(target?.applyToNewLayer)}
+        source={thumbSource}
+        favorites={favorites}
+        selectedKey={libraryPick?.key ?? null}
+        onSelectCard={selectLibraryCard}
+        onRenameFavorite={renameFavorite}
+        onRemoveFavorite={removeFavorite}
+      />
+      {inLibrary && activeDef && (
+        <div className="space-y-2.5 border-t border-neutral-800 pt-2.5" aria-busy={refining && preview}>
+          <div className="flex items-center justify-between gap-2">
+            <span className="truncate text-xs font-semibold text-white">{filterLabel(activeDef, t)}</span>
+            <div className="flex items-center gap-1">
+              {activeDef.params.length > 0 && (
+                <button type="button" disabled={busy} onClick={resetActiveValues}
+                  aria-label={t.filters.resetParams} title={t.filters.resetParams} className="atelier-icon-btn h-6 w-6">
+                  <RotateCcw className="h-3.5 w-3.5" />
+                </button>
+              )}
+              <button type="button" disabled={busy} onClick={openSaveFavorite}
+                aria-label={t.filters.saveFavorite} title={t.filters.saveFavorite}
+                className={`atelier-icon-btn h-6 w-6 ${favFormOpen || favJustSaved ? '!text-amber-300' : ''}`}>
+                <Star className="h-3.5 w-3.5" fill={favJustSaved ? 'currentColor' : 'none'} />
+              </button>
+            </div>
+          </div>
+          {favFormOpen && (
+            <div className="flex items-center gap-1.5 rounded-lg border border-indigo-500/35 bg-neutral-950/80 p-1.5">
+              <input type="text" autoFocus maxLength={40} value={favName} onChange={(e) => setFavName(e.target.value)}
+                placeholder={t.filters.favoriteNamePlaceholder}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); commitSaveFavorite(); }
+                  if (e.key === 'Escape') { e.preventDefault(); setFavFormOpen(false); }
+                }}
+                className="atelier-field h-7 min-w-0 flex-1 px-2 text-xs" />
+              <button type="button" onClick={commitSaveFavorite} className="atelier-btn atelier-btn--primary !h-7 !px-2.5 text-[11px]">
+                <Check className="h-3.5 w-3.5" />
+              </button>
+              <button type="button" onClick={() => setFavFormOpen(false)} aria-label={t.common.cancel} className="atelier-icon-btn h-7 w-7">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+          {activeDef.params.filter((param) => paramShown(param, activeValues)).map((param, index, shown) => (
+            <div key={param.key} className="space-y-1.5">
+              {param.section && param.section !== shown[index - 1]?.section && (
+                <p className={`atelier-filter-item text-[11px] font-medium text-neutral-500 ${index > 0 ? 'pt-1' : ''}`} style={{ '--i': index } as CSSProperties}>
+                  {t.filters.sections[param.section]}
+                </p>
+              )}
+              <ParamControl param={param} index={index} label={filterParamLabel(param, t)} busy={busy}
+                value={activeValues[param.key]} onChange={(value) => updateActiveValue(param.key, value)} />
+            </div>
+          ))}
+          <FilterTargetBar target={target} busy={busy} />
+        </div>
+      )}
+    </div>
+  );
 
   const menu = phone ? (
     <div role="group" aria-label={t.filters.groupsAria} className="flex flex-col gap-1">
@@ -97,13 +270,17 @@ export function LayerFilterDialog({ filterId, layerName, layerType, histogram, b
               {filterGroupLabel(g, t)}
               <ChevronDown aria-hidden className={`h-4 w-4 transition-transform ${open ? 'rotate-180' : ''}`} />
             </button>
-            {open && <div className="grid grid-cols-2 gap-1.5 px-1 py-1.5">{filtersInGroup(g).map(item)}</div>}
+            {open && (
+              g === 'library'
+                ? <div className="px-0.5 py-2">{librarySection}</div>
+                : <div className="grid grid-cols-2 gap-1.5 px-1 py-1.5">{filtersInGroup(g).map(item)}</div>
+            )}
           </div>
         );
       })}
     </div>
   ) : (
-    <div className="grid grid-cols-[minmax(0,7rem)_minmax(0,1fr)] gap-2">
+    <div className="grid grid-cols-[minmax(0,6.5rem)_minmax(0,1fr)] gap-2">
       <div role="group" aria-label={t.filters.groupsAria} className="flex flex-col gap-0.5 border-r border-neutral-800 pr-2">
         {groups.map((g) => (
           <button type="button" key={g} aria-pressed={g === group} onClick={() => pickGroup(g)}
@@ -112,7 +289,9 @@ export function LayerFilterDialog({ filterId, layerName, layerType, histogram, b
           </button>
         ))}
       </div>
-      <div key={group} className="flex flex-col gap-1">{filtersInGroup(group).map(item)}</div>
+      <div key={group} className="min-w-0 flex flex-col gap-1">
+        {group === 'library' ? librarySection : filtersInGroup(group).map(item)}
+      </div>
     </div>
   );
 
@@ -122,9 +301,16 @@ export function LayerFilterDialog({ filterId, layerName, layerType, histogram, b
         <ArrowLeft className="h-4 w-4" />
       </button>
       {definition.params.length > 0 && (
-        <button type="button" disabled={busy} onClick={() => setValues(defaultFilterValues(definition))}
+        <button type="button" disabled={busy} onClick={resetActiveValues}
           aria-label={t.filters.resetParams} title={t.filters.resetParams} className="atelier-icon-btn h-7 w-7">
           <RotateCcw className="h-3.5 w-3.5" />
+        </button>
+      )}
+      {!definition.tool && !definition.dialog && (
+        <button type="button" disabled={busy} onClick={openSaveFavorite}
+          aria-label={t.filters.saveFavorite} title={favJustSaved ? t.filters.favoriteSaved : t.filters.saveFavorite}
+          className={`atelier-icon-btn h-7 w-7 ${favFormOpen || favJustSaved ? '!text-amber-300' : ''}`}>
+          <Star className="h-3.5 w-3.5" fill={favJustSaved ? 'currentColor' : 'none'} />
         </button>
       )}
     </>
@@ -133,19 +319,25 @@ export function LayerFilterDialog({ filterId, layerName, layerType, histogram, b
   return (
     <ToolWindow id="layer-filter" icon={<SlidersHorizontal />}
       title={<>{definition ? filterLabel(definition, t) : t.filters.title}<span className="ml-1.5 font-normal text-neutral-500">{layerName}</span></>}
-      actions={actions} onClose={onClose} initial={{ x: -332, y: 96, w: 320, h: 0 }} minW={260}
-      footer={definition ? (
+      actions={actions} onClose={onClose} initial={{ x: -352, y: 96, w: 340, h: 0 }} minW={270}
+      footer={activeDef ? (
         <>
           <label className="mr-auto flex cursor-pointer items-center gap-1.5 text-[11px] text-neutral-300">
             <input type="checkbox" disabled={busy} checked={preview} onChange={(event) => {
               setPreview(event.target.checked);
-              if (!event.target.checked) onPreview(null);
+              if (!event.target.checked) {
+                if (definition) onPreview(null);
+                else onPreviewJob?.(null);
+              }
             }} />{t.filters.preview}
           </label>
           <button type="button" onClick={onClose} className="atelier-btn atelier-btn--ghost">{t.common.cancel}</button>
           <button type="button" disabled={busy} className="atelier-btn atelier-btn--primary" onClick={async () => {
-            if (await onApply(jobValues)) {
-              saveFilterValues(definition, values);
+            const ok = definition
+              ? await onApply(jobValues)
+              : await (onApplyJob?.({ id: activeDef.id, values: jobValues }) ?? Promise.resolve(false));
+            if (ok) {
+              saveFilterValues(activeDef, activeValues);
               onClose();
             }
           }}>
@@ -153,11 +345,34 @@ export function LayerFilterDialog({ filterId, layerName, layerType, histogram, b
           </button>
         </>
       ) : undefined}>
-      {!definition ? menu : (<>
+      {!definition ? (<>
+        {inLibrary && activeDef && <div aria-hidden className="atelier-filter-refine" data-on={refining && preview} />}
+        {menu}
+      </>) : (<>
         {/* A streak of light keeps running under the header while the preview is being worked out */}
         <div aria-hidden className="atelier-filter-refine" data-on={refining && preview} />
         <div className="space-y-3" aria-busy={refining && preview}>
+          {favFormOpen && (
+            <div className="flex items-center gap-1.5 rounded-lg border border-indigo-500/35 bg-neutral-950/80 p-1.5">
+              <input type="text" autoFocus maxLength={40} value={favName} onChange={(e) => setFavName(e.target.value)}
+                placeholder={t.filters.favoriteNamePlaceholder}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); commitSaveFavorite(); }
+                  if (e.key === 'Escape') { e.preventDefault(); setFavFormOpen(false); }
+                }}
+                className="atelier-field h-7 min-w-0 flex-1 px-2 text-xs" />
+              <button type="button" onClick={commitSaveFavorite} className="atelier-btn atelier-btn--primary !h-7 !px-2.5 text-[11px]">
+                <Check className="h-3.5 w-3.5" />
+              </button>
+              <button type="button" onClick={() => setFavFormOpen(false)} aria-label={t.common.cancel} className="atelier-icon-btn h-7 w-7">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
           {definition.hint && <p className="text-neutral-300">{t.filters[definition.hint]}</p>}
+          {definition.id === 'colorAdjust' && (
+            <ColorPresetStrip values={values} busy={busy} phone={phone} onPick={(next) => setValues((current) => ({ ...current, ...next }))} />
+          )}
           {definition.histogram && <ToneHistogram data={histogram ?? null} values={values} />}
           {definition.params.filter((param) => paramShown(param, values)).map((param, index, shown) => (
             <div key={param.key} className="space-y-1.5">
@@ -167,9 +382,10 @@ export function LayerFilterDialog({ filterId, layerName, layerType, histogram, b
                 </p>
               )}
               <ParamControl param={param} index={index} label={filterParamLabel(param, t)} busy={busy}
-                value={values[param.key]} onChange={(value) => setValues((current) => ({ ...current, [param.key]: value }))} />
+                value={values[param.key]} onChange={(value) => updateActiveValue(param.key, value)} />
             </div>
           ))}
+          <FilterTargetBar target={target} busy={busy} />
         </div>
       </>)}
     </ToolWindow>
@@ -221,6 +437,53 @@ function ParamControl({ param, index, label, value, busy, onChange }: {
 }
 
 const numberOr = (value: unknown, fallback: number) => (typeof value === 'number' && Number.isFinite(value) ? value : fallback);
+
+/** Lumina Drift original preset cards shown above the six colour adjustment sliders */
+function ColorPresetStrip({ values, busy, phone, onPick }: {
+  values: FilterValues;
+  busy: boolean;
+  phone: boolean;
+  onPick: (next: FilterValues) => void;
+}) {
+  const { t } = useI18n();
+  const activeId = matchColorPreset(values);
+  return (
+    <div className="space-y-1.5" role="group" aria-label={t.filters.presetsTitle}>
+      <p className="text-[11px] font-medium text-neutral-500">{t.filters.presetsTitle}</p>
+      <div className={`grid gap-1.5 ${phone ? 'grid-cols-2' : 'grid-cols-2'}`}>
+        {COLOR_ADJUST_PRESETS.map((preset, index) => {
+          const active = activeId === preset.id;
+          const label = t.filters.colorPresets[preset.id];
+          return (
+            <button
+              key={preset.id}
+              type="button"
+              disabled={busy}
+              aria-pressed={active}
+              title={label}
+              onClick={() => onPick(preset.values)}
+              style={{ '--i': index } as CSSProperties}
+              className={`atelier-filter-card atelier-filter-item flex items-center gap-2 rounded-lg border px-2 text-left text-[11px] transition-colors ${
+                phone ? 'h-9' : 'h-7'
+              } ${
+                active
+                  ? 'border-indigo-400/70 bg-indigo-500/20 font-medium text-white'
+                  : 'border-neutral-800 bg-neutral-900/75 text-neutral-300 hover:border-neutral-700 hover:bg-neutral-800/80 hover:text-white'
+              } disabled:opacity-45`}
+            >
+              <span
+                aria-hidden
+                className="h-3.5 w-3.5 shrink-0 rounded-full border border-white/15"
+                style={{ background: `linear-gradient(135deg, ${preset.swatch[0]}, ${preset.swatch[1]} 55%, ${preset.swatch[2]})` }}
+              />
+              <span className="min-w-0 flex-1 truncate">{label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 /**
  * The layer's tones (levels window): bars on a square-root scale so thin line art still shows,

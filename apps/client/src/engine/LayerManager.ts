@@ -2658,6 +2658,140 @@ export class LayerManager {
 
   private compositeRT: RenderTexture | null = null;
   private compositeUsed = 0;
+  /** Temporary overlay sprite shown during "Apply Filter to New Layer" live preview */
+  private filterOverlaySprite: Sprite | null = null;
+
+  public setFilterOverlay(texture: RenderTexture | null, zIndex = 1e6) {
+    if (!texture) {
+      if (this.filterOverlaySprite) {
+        this.layersContainer.removeChild(this.filterOverlaySprite);
+        this.filterOverlaySprite.destroy();
+        this.filterOverlaySprite = null;
+        this.onStageChange?.();
+      }
+      return;
+    }
+    if (!this.filterOverlaySprite) {
+      this.filterOverlaySprite = new Sprite(texture);
+      this.layersContainer.addChild(this.filterOverlaySprite);
+    } else if (this.filterOverlaySprite.texture !== texture) {
+      this.filterOverlaySprite.texture = texture;
+    }
+    this.filterOverlaySprite.visible = true;
+    this.filterOverlaySprite.zIndex = zIndex;
+    this.layersContainer.sortChildren();
+    this.onStageChange?.();
+  }
+
+  /** Lightweight fingerprint of all visible layers' pixel versions & display props, for filter source caching */
+  public getVisibleCompositeVersion(): string {
+    let acc = this.lastBgColor;
+    for (const item of this.layersMap.values()) {
+      if (!item.shown && item.model.layerType !== 'mask') continue;
+      acc += `|${item.model.id}:${item.version}:${item.model.sortOrder}:${item.display.alpha}:${item.model.blendMode}`;
+    }
+    return acc;
+  }
+
+  private parseCssColorRgba(color: string): [number, number, number, number] {
+    const clean = color.trim();
+    if (/^#[0-9a-f]{6}$/i.test(clean)) {
+      const n = parseInt(clean.slice(1), 16);
+      return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255, 1];
+    }
+    if (/^#[0-9a-f]{3}$/i.test(clean)) {
+      const r = parseInt(clean[1] + clean[1], 16) / 255;
+      const g = parseInt(clean[2] + clean[2], 16) / 255;
+      const b = parseInt(clean[3] + clean[3], 16) / 255;
+      return [r, g, b, 1];
+    }
+    return [1, 1, 1, 1];
+  }
+
+  /**
+   * Reads all visible layers composited into a single premultiplied RGBA Uint8Array, without
+   * creating redundant full-size 2D canvas copies when WebGL PBO readback is available.
+   */
+  public async readVisibleCompositeAsync(includeBackground = false, releaseCompositeAfter = false): Promise<Uint8Array> {
+    const w = this.canvasWidth;
+    const h = this.canvasHeight;
+    let totalCold = 0;
+    for (const item of this.layersMap.values()) {
+      if (item.shown || item.model.layerType === 'mask') totalCold += item.coldTiles.size;
+    }
+
+    const overlayPrev = this.filterOverlaySprite?.visible ?? false;
+    if (this.filterOverlaySprite) this.filterOverlaySprite.visible = false;
+    const previewVisible = this.previewContainer.visible;
+    this.previewContainer.visible = false;
+
+    try {
+      if (totalCold <= 2400 && this.reader) {
+        const rt = this.ensureComposite();
+        const clearColor = includeBackground ? this.parseCssColorRgba(this.lastBgColor) : [0, 0, 0, 0];
+        this.withAllTilesVisible(() => {
+          this.renderer.render({ container: this.layersContainer, target: rt, clear: true, clearColor });
+        }, true);
+        this.pendingReadCount++;
+        try {
+          const [pixels] = await this.reader(rt, [{ x: 0, y: 0, w, h }]);
+          return pixels;
+        } finally {
+          this.pendingReadCount = Math.max(0, this.pendingReadCount - 1);
+          if (releaseCompositeAfter && this.compositeRT === rt) {
+            this.compositeRT.destroy(true);
+            this.compositeRT = null;
+          }
+        }
+      }
+
+      // Massive multi-layer fallback: 2D offscreen composite, premultiply straight RGBA, and immediately free canvas
+      const out = document.createElement('canvas');
+      out.width = w;
+      out.height = h;
+      const ctx = out.getContext('2d')!;
+      if (includeBackground) {
+        ctx.fillStyle = this.lastBgColor;
+        ctx.fillRect(0, 0, w, h);
+      }
+      const ordered = [...this.layersMap.values()]
+        .filter((i) => i.shown && i.model.layerType !== 'group' && i.model.layerType !== 'mask')
+        .sort((a, b) => a.model.sortOrder - b.model.sortOrder);
+      for (const item of ordered) {
+        const lc = this.layerToCanvas(item.model.id);
+        if (!lc) continue;
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, Math.min(1, item.display.alpha));
+        const rt = (item.model as LayerModel & { renderTransform?: Affine2D }).renderTransform;
+        if (rt && !rt.isIdentity) ctx.transform(rt.a, rt.b, rt.c, rt.d, rt.tx, rt.ty);
+        ctx.drawImage(lc, 0, 0);
+        ctx.restore();
+      }
+      const raw = ctx.getImageData(0, 0, w, h).data;
+      out.width = 0;
+      out.height = 0;
+      const premul = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i += 4) {
+        const a = raw[i + 3];
+        if (!a) continue;
+        if (a === 255) {
+          premul[i] = raw[i];
+          premul[i + 1] = raw[i + 1];
+          premul[i + 2] = raw[i + 2];
+          premul[i + 3] = 255;
+        } else {
+          premul[i] = ((raw[i] * a + 127) / 255) | 0;
+          premul[i + 1] = ((raw[i + 1] * a + 127) / 255) | 0;
+          premul[i + 2] = ((raw[i + 2] * a + 127) / 255) | 0;
+          premul[i + 3] = a;
+        }
+      }
+      return premul;
+    } finally {
+      this.previewContainer.visible = previewVisible;
+      if (this.filterOverlaySprite) this.filterOverlaySprite.visible = overlayPrev;
+    }
+  }
 
   private ensureComposite(): RenderTexture {
     const w = this.canvasWidth;
@@ -2677,7 +2811,9 @@ export class LayerManager {
   public getCompositeTexture(includeBackground = false): RenderTexture {
     const target = this.ensureComposite();
     const previewVisible = this.previewContainer.visible;
+    const overlayVisible = this.filterOverlaySprite?.visible ?? false;
     this.previewContainer.visible = false;
+    if (this.filterOverlaySprite) this.filterOverlaySprite.visible = false;
     this.withAllTilesVisible(() => {
       this.renderer.render({
         container: includeBackground ? this.rootContainer : this.layersContainer,
@@ -2687,6 +2823,7 @@ export class LayerManager {
       });
     }, true);
     this.previewContainer.visible = previewVisible;
+    if (this.filterOverlaySprite) this.filterOverlaySprite.visible = overlayVisible;
     return target;
   }
 
@@ -3161,6 +3298,80 @@ export class LayerManager {
     }
   }
 
+  /**
+   * Low-resolution premultiplied RGBA pixels of either one layer or the visible composite,
+   * drawn directly at thumbnail scale (<= 96×96 ≈ 36 KB) so the Filter Library never allocates
+   * a full-canvas buffer even on 10000×8000 canvases.
+   */
+  public async readFilterThumbnailPixels(
+    layerId: string | null,
+    includeBackground = false,
+    maxSide = 96,
+  ): Promise<{ pixels: Uint8Array; width: number; height: number; origWidth: number; origHeight: number } | null> {
+    const w = this.canvasWidth;
+    const h = this.canvasHeight;
+    if (w <= 0 || h <= 0) return null;
+    const scale = Math.min(1, maxSide / Math.max(w, h));
+    const tw = Math.max(1, Math.round(w * scale));
+    const th = Math.max(1, Math.round(h * scale));
+    const small = RenderTexture.create({ width: tw, height: th, resolution: 1 });
+    const previewVisible = this.previewContainer.visible;
+    const overlayVisible = this.filterOverlaySprite?.visible ?? false;
+    this.previewContainer.visible = false;
+    if (this.filterOverlaySprite) this.filterOverlaySprite.visible = false;
+    try {
+      const clearColor = includeBackground ? this.parseCssColorRgba(this.lastBgColor) : [0, 0, 0, 0];
+      const item = layerId ? this.layersMap.get(layerId) : null;
+      if (item) {
+        const holder = new Container();
+        const temporary: Texture[] = [];
+        this.populateThumbContainer(item, holder, temporary, tw, th);
+        this.renderer.render({ container: holder, target: small, clear: true, clearColor });
+        holder.destroy({ children: true });
+        temporary.forEach((t) => t.destroy(true));
+      } else {
+        this.withAllTilesVisible(() => {
+          this.renderer.render({
+            container: this.layersContainer,
+            target: small,
+            clear: true,
+            clearColor,
+            transform: new Matrix().scale(scale, scale),
+          });
+        });
+      }
+      if (this.reader) {
+        const [pixels] = await this.reader(small, [{ x: 0, y: 0, w: tw, h: th }]);
+        return { pixels, width: tw, height: th, origWidth: w, origHeight: h };
+      }
+      const extracted = this.renderer.extract.canvas({ target: small }) as HTMLCanvasElement;
+      const ctx = extracted.getContext('2d');
+      if (!ctx) return null;
+      const raw = ctx.getImageData(0, 0, tw, th).data;
+      const premul = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i += 4) {
+        const a = raw[i + 3];
+        if (!a) continue;
+        if (a === 255) {
+          premul[i] = raw[i]; premul[i + 1] = raw[i + 1]; premul[i + 2] = raw[i + 2]; premul[i + 3] = 255;
+        } else {
+          premul[i] = ((raw[i] * a + 127) / 255) | 0;
+          premul[i + 1] = ((raw[i + 1] * a + 127) / 255) | 0;
+          premul[i + 2] = ((raw[i + 2] * a + 127) / 255) | 0;
+          premul[i + 3] = a;
+        }
+      }
+      return { pixels: premul, width: tw, height: th, origWidth: w, origHeight: h };
+    } catch (err) {
+      console.warn('[LayerManager] Filter thumbnail read failed:', err);
+      return null;
+    } finally {
+      this.previewContainer.visible = previewVisible;
+      if (this.filterOverlaySprite) this.filterOverlaySprite.visible = overlayVisible;
+      small.destroy(true);
+    }
+  }
+
   /** Full-size picture as shown (background, masks, current animation frames), for GIF / video frames */
   public renderCompositeCanvas(): HTMLCanvasElement {
     const w = this.canvasWidth;
@@ -3195,10 +3406,13 @@ export class LayerManager {
     }
 
     const rt = this.ensureComposite();
+    const overlayVisible = this.filterOverlaySprite?.visible ?? false;
+    if (this.filterOverlaySprite) this.filterOverlaySprite.visible = false;
     // Layers only: the paper graphic carries a shadow and a border line that are not the picture
     this.withAllTilesVisible(() => {
       this.renderer.render({ container: this.layersContainer, target: rt, clear: true, clearColor: [0, 0, 0, 0] });
     }, true);
+    if (this.filterOverlaySprite) this.filterOverlaySprite.visible = overlayVisible;
     const layersCanvas = this.renderer.extract.canvas({ target: rt }) as HTMLCanvasElement;
     ctx.drawImage(layersCanvas, 0, 0);
     return out;
@@ -3245,6 +3459,7 @@ export class LayerManager {
     for (const url of this.thumbBlobUrls) URL.revokeObjectURL(url);
     this.thumbBlobUrls.clear();
     this.abortJob();
+    this.setFilterOverlay(null);
     this.compositeRT?.destroy(true);
     this.compositeRT = null;
     this.thumbRT?.destroy(true);

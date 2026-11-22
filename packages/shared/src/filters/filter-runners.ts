@@ -8,10 +8,11 @@ import {
   applyHalftoneDot, applyNoiseGrain, applyTwirlDistortion,
   type ColorCurvesOptions, type FilterContext, type GradientStop,
 } from './pixel-filters';
-import { adjustColor, grayscalePixels, levelsLut, mapChannels, thresholdPixels } from './color-filters';
-import { changeLineWidth, despeckle, extractLines, recolorLines } from './lineart-filters';
-import { boxBlur, glow, mosaic, outline, radialChromatic } from './effect-filters';
-import { motionBlur, soften, spherize, unsharpMask, wave, zoomBlur } from './blur-distort-filters';
+import { adjustColor, grayscalePixels, levelsLut, mapChannels, monoTintPixels, thresholdPixels } from './color-filters';
+import { changeLineWidth, despeckle, extractLines, recolorLines, smoothJaggies } from './lineart-filters';
+import { boxBlur, dropShadow, edgeToLineart, emboss, glow, mosaic, outline, radialChromatic } from './effect-filters';
+import { highPass, motionBlur, pinch, polarCoords, soften, spherize, unsharpMask, wave, zigzagRipple, zoomBlur } from './blur-distort-filters';
+import { focusLines, gridPattern, perlinNoise } from './render-filters';
 import { downscale, upscale } from './resample';
 
 /** A '#rrggbb' setting, or the fallback */
@@ -137,6 +138,32 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
     run: ({ pixels, width, height }, v) =>
       unsharpMask(pixels, width, height, filterNumber(v, 'radius', 2), filterNumber(v, 'amount', 100), filterNumber(v, 'threshold', 0)),
   },
+  highPass: {
+    colorOnly: true,
+    run: ({ pixels, width, height }, v) => highPass(pixels, width, height, filterNumber(v, 'radius', 4)),
+  },
+  polarCoords: {
+    draft: {},
+    run: ({ pixels, width, height }, v) =>
+      polarCoords(pixels, width, height, filterChoice(v, 'mode', ['rectToPolar', 'polarToRect'] as const)),
+  },
+  zigzagRipple: {
+    draft: { points: ['center'] },
+    run: ({ pixels, width, height }, v) => {
+      const c = filterPoint(v, 'center', width, height);
+      return zigzagRipple(
+        pixels, width, height, c.x, c.y,
+        filterChoice(v, 'style', ['pond', 'radial'] as const),
+        filterNumber(v, 'amount', 30), filterNumber(v, 'ridges', 5),
+      );
+    },
+  },
+  pinch: {
+    run: ({ pixels, width, height }, v) => {
+      const c = filterPoint(v, 'center', width, height);
+      return pinch(pixels, width, height, c.x, c.y, filterNumber(v, 'strength', 50), filterNumber(v, 'radius', 300));
+    },
+  },
   gaussian: { draft: { lengths: ['radius'] }, run: (ctx, v) => applyGaussianBlur(ctx, filterNumber(v, 'radius', 8)) },
   spin: {
     draft: { points: ['center'] },
@@ -185,6 +212,10 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
     )),
   },
   grayscale: { colorOnly: true, run: ({ pixels }) => grayscalePixels(pixels) },
+  monoTint: {
+    colorOnly: true,
+    run: ({ pixels }, v) => monoTintPixels(pixels, filterColor(v, 'color', '#9a6b4c'), filterNumber(v, 'strength', 100), v.preserveLuma !== false),
+  },
   threshold: {
     run: ({ pixels }, v) => thresholdPixels(pixels, filterNumber(v, 'threshold', 128), filterChoice(v, 'target', ['color', 'alpha', 'both'] as const)),
   },
@@ -199,6 +230,35 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
   lineColor: {
     colorOnly: true,
     run: ({ pixels }, v) => recolorLines(pixels, v.useCurrent === false ? filterColor(v, 'color', '#000000') : currentColor(v)),
+  },
+  smoothJaggies: {
+    run: ({ pixels, width, height }, v) => smoothJaggies(pixels, width, height, filterNumber(v, 'strength', 50)),
+  },
+  perlinNoise: {
+    draft: { lengths: ['scale', 'offsetX', 'offsetY'] },
+    run: ({ width, height }, v) => perlinNoise(
+      width, height,
+      filterNumber(v, 'scale', 48), filterNumber(v, 'amplitude', 80), filterNumber(v, 'persistence', 0.5),
+      filterNumber(v, 'octaves', 4), filterNumber(v, 'offsetX', 0), filterNumber(v, 'offsetY', 0),
+    ),
+  },
+  gridPattern: {
+    run: ({ pixels, width, height }, v) => gridPattern(
+      pixels, width, height,
+      filterNumber(v, 'cell', 32), filterNumber(v, 'lineWidth', 1), filterColor(v, 'color', '#6366f1'),
+      filterNumber(v, 'opacity', 70), filterNumber(v, 'offsetX', 0), filterNumber(v, 'offsetY', 0),
+    ),
+  },
+  focusLines: {
+    draft: { points: ['center'] },
+    run: ({ pixels, width, height }, v) => {
+      const c = filterPoint(v, 'center', width, height);
+      return focusLines(
+        pixels, width, height, c.x, c.y,
+        filterNumber(v, 'density', 60), filterNumber(v, 'lineWidth', 3),
+        filterNumber(v, 'innerRadius', 28), filterNumber(v, 'jitter', 40), filterColor(v, 'color', '#111111'),
+      );
+    },
   },
   noise: { colorOnly: true, run: (ctx, v) => applyNoiseGrain(ctx, filterNumber(v, 'amount', 25) / 100, filterNumber(v, 'grain', 1)) },
   chromatic: {
@@ -221,6 +281,27 @@ export const PIXEL_FILTER_RUNNERS: Readonly<Record<string, PixelFilterRunner>> =
     draft: { lengths: ['size'] },
     run: ({ pixels, width, height }, v) => outline(pixels, width, height, filterNumber(v, 'size', 3), filterColor(v, 'color', '#ffffff'),
       filterChoice(v, 'position', ['outside', 'inside', 'center'] as const)),
+  },
+  emboss: {
+    colorOnly: true,
+    run: ({ pixels, width, height }, v) => emboss(
+      pixels, width, height,
+      filterNumber(v, 'angle', 135), filterNumber(v, 'height', 2), filterNumber(v, 'amount', 120), v.keepColor === true,
+    ),
+  },
+  dropShadow: {
+    draft: { lengths: ['offsetX', 'offsetY', 'radius'] },
+    run: ({ pixels, width, height }, v) => dropShadow(
+      pixels, width, height,
+      filterNumber(v, 'offsetX', 8), filterNumber(v, 'offsetY', 8), filterNumber(v, 'radius', 12),
+      filterNumber(v, 'opacity', 55), filterColor(v, 'color', '#0f172a'), v.shadowOnly === true,
+    ),
+  },
+  edgeToLineart: {
+    run: ({ pixels, width, height }, v) => edgeToLineart(
+      pixels, width, height,
+      filterNumber(v, 'sensitivity', 50), filterNumber(v, 'thickness', 1), v.keepColor === true, v.whiteBg === true,
+    ),
   },
   halftone: {
     colorOnly: true,

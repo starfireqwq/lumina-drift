@@ -709,6 +709,48 @@ export interface Translations {
     histogramAria: string;
     softenHint: string;
     sharpenHint: string;
+    presetsTitle: string;
+    applyToNewLayer: string;
+    includeBackground: string;
+    newLayerBadge: string;
+    newLayerForcedHint: string;
+    newLayerMemoryHint: string;
+    newLayerBlocked: string;
+    newLayerConfirmTitle: string;
+    newLayerConfirmBody: string;
+    stayCurrentLayer: string;
+    continueNewLayer: string;
+    libraryFeatured: string;
+    libraryFavorites: string;
+    libraryEmptyFavs: string;
+    saveFavorite: string;
+    favoriteNamePlaceholder: string;
+    favoriteSaved: string;
+    renameFavorite: string;
+    libraryCards: {
+      softGlow: string;
+      retroMono: string;
+      mangaTone: string;
+      prismSplit: string;
+      inkSketch: string;
+      pixelBlock: string;
+      stoneRelief: string;
+      dreamBlur: string;
+      posterPop: string;
+      speedFocus: string;
+      filmGrain: string;
+      crispDetail: string;
+    };
+    colorPresets: {
+      original: string;
+      morningGlow: string;
+      twilightMist: string;
+      softPastel: string;
+      vividPop: string;
+      retroFilm: string;
+      coolAqua: string;
+      dramaticNoir: string;
+    };
     /** Small headings inside a filter's parameters */
     sections: {
       tone: string;
@@ -758,6 +800,18 @@ export interface Translations {
       spherize: string;
       sharpen: string;
       unsharp: string;
+      monoTint: string;
+      smoothJaggies: string;
+      perlinNoise: string;
+      gridPattern: string;
+      focusLines: string;
+      emboss: string;
+      dropShadow: string;
+      edgeToLineart: string;
+      polarCoords: string;
+      zigzagRipple: string;
+      pinch: string;
+      highPass: string;
     };
     /** Parameter names; a select's option names share this table */
     params: {
@@ -819,6 +873,25 @@ export interface Translations {
       amplitude: string;
       wavelength: string;
       squash: string;
+      preserveLuma: string;
+      scale: string;
+      persistence: string;
+      octaves: string;
+      opacity: string;
+      innerRadius: string;
+      jitter: string;
+      height: string;
+      keepOriginalColor: string;
+      shadowOnly: string;
+      sensitivity: string;
+      thickness: string;
+      whiteBg: string;
+      polarRectToPolar: string;
+      polarToRect: string;
+      rippleStyle: string;
+      ripplePond: string;
+      rippleRadial: string;
+      ridges: string;
     };
   };
 

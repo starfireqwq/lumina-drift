@@ -161,7 +161,7 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
       role="dialog"
       aria-labelledby={titleId}
       data-tool-window={id}
-      style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h || undefined, maxHeight: rect.h ? undefined : 'calc(100dvh - 4rem)' }}
+      style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h || undefined, maxHeight: rect.h ? undefined : `max(12rem, calc(100dvh - ${rect.y + 12}px))` }}
       className="atelier-popover atelier-window atelier-menu-in fixed z-[70] flex select-none flex-col"
     >
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[inherit]">{body}</div>

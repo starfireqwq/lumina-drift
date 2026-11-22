@@ -81,6 +81,11 @@ export const BUILTIN_FILTERS: readonly FilterDef[] = [
   { id: 'curves', group: 'color', label: 'curves', source: 'builtin', params: [], dialog: 'curves' },
   { id: 'gradient', group: 'color', label: 'gradient', source: 'builtin', params: [], dialog: 'gradient' },
   { id: 'grayscale', group: 'color', label: 'grayscale', source: 'builtin', params: [], hint: 'grayscaleHint' },
+  { id: 'monoTint', group: 'color', label: 'monoTint', source: 'builtin', params: [
+    { kind: 'color', key: 'color', label: 'inkColor', initial: '#9a6b4c' },
+    range('strength', 'amount', 100, 0, 100),
+    toggle('preserveLuma', 'preserveLuma', true),
+  ] },
   { id: 'threshold', group: 'color', label: 'threshold', source: 'builtin',
     params: [range('threshold', 'threshold', 128, 1, 255), choice('target', 'target', [['color', 'targetColor'], ['alpha', 'targetAlpha'], ['both', 'targetBoth']])] },
   { id: 'invert', group: 'color', label: 'invert', source: 'builtin', params: [], hint: 'invertHint' },
@@ -96,6 +101,31 @@ export const BUILTIN_FILTERS: readonly FilterDef[] = [
   { id: 'lineColor', group: 'lineart', label: 'lineColor', source: 'builtin', params: [
     toggle('useCurrent', 'useCurrent', true),
     { kind: 'color', key: 'color', label: 'inkColor', initial: '#000000', when: { key: 'useCurrent', is: [false] } },
+  ] },
+  { id: 'smoothJaggies', group: 'lineart', label: 'smoothJaggies', source: 'builtin', params: [range('strength', 'amount', 50, 1, 100)] },
+  { id: 'perlinNoise', group: 'render', label: 'perlinNoise', source: 'builtin', draft: true, params: [
+    range('scale', 'scale', 48, 4, 256),
+    range('amplitude', 'amount', 80, 0, 100),
+    range('persistence', 'persistence', 0.5, 0.1, 0.9, 0.05),
+    range('octaves', 'octaves', 4, 1, 6),
+    range('offsetX', 'offsetX', 0, -500, 500),
+    range('offsetY', 'offsetY', 0, -500, 500),
+  ] },
+  { id: 'gridPattern', group: 'render', label: 'gridPattern', source: 'builtin', params: [
+    range('cell', 'cellSize', 32, 4, 256),
+    range('lineWidth', 'outlineWidth', 1, 1, 16),
+    { kind: 'color', key: 'color', label: 'inkColor', initial: '#6366f1' },
+    range('opacity', 'opacity', 70, 5, 100),
+    range('offsetX', 'offsetX', 0, 0, 256),
+    range('offsetY', 'offsetY', 0, 0, 256),
+  ] },
+  { id: 'focusLines', group: 'render', label: 'focusLines', source: 'builtin', draft: true, params: [
+    range('density', 'density', 60, 12, 180),
+    range('lineWidth', 'outlineWidth', 3, 1, 12),
+    range('innerRadius', 'innerRadius', 28, 0, 100),
+    range('jitter', 'jitter', 40, 0, 100),
+    { kind: 'color', key: 'color', label: 'inkColor', initial: '#111111' },
+    center(),
   ] },
   { id: 'noise', group: 'effect', label: 'noise', source: 'builtin', params: [range('amount', 'amount', 25, 0, 100), range('grain', 'grain', 1, 1, 16)] },
   { id: 'halftone', group: 'effect', label: 'halftone', source: 'builtin',
@@ -114,6 +144,26 @@ export const BUILTIN_FILTERS: readonly FilterDef[] = [
     range('size', 'outlineWidth', 3, 1, 50),
     { kind: 'color', key: 'color', label: 'inkColor', initial: '#ffffff' },
     choice('position', 'position', [['outside', 'positionOutside'], ['inside', 'positionInside'], ['center', 'positionCenter']]),
+  ] },
+  { id: 'emboss', group: 'effect', label: 'emboss', source: 'builtin', params: [
+    range('angle', 'angle', 135, -180, 180),
+    range('height', 'height', 2, 1, 16),
+    range('amount', 'amount', 120, 10, 300),
+    toggle('keepColor', 'keepOriginalColor', false),
+  ] },
+  { id: 'dropShadow', group: 'effect', label: 'dropShadow', source: 'builtin', draft: true, params: [
+    range('offsetX', 'offsetX', 8, -200, 200),
+    range('offsetY', 'offsetY', 8, -200, 200),
+    range('radius', 'radius', 12, 0, 64),
+    range('opacity', 'opacity', 55, 5, 100),
+    { kind: 'color', key: 'color', label: 'inkColor', initial: '#0f172a' },
+    toggle('shadowOnly', 'shadowOnly', false),
+  ] },
+  { id: 'edgeToLineart', group: 'effect', label: 'edgeToLineart', source: 'builtin', params: [
+    range('sensitivity', 'sensitivity', 50, 1, 100),
+    range('thickness', 'thickness', 1, 1, 5),
+    toggle('keepColor', 'keepOriginalColor', false),
+    toggle('whiteBg', 'whiteBg', false),
   ] },
   { id: 'box', group: 'blur', label: 'box', source: 'builtin', params: [range('radius', 'radius', 4, 1, 32)] },
   { id: 'gaussian', group: 'blur', label: 'gaussian', source: 'builtin', draft: true, params: [range('radius', 'radius', 8, 1, 32)] },
@@ -137,16 +187,32 @@ export const BUILTIN_FILTERS: readonly FilterDef[] = [
   { id: 'spherize', group: 'distort', label: 'spherize', source: 'builtin', pointRadius: 'radius', params: [
     range('strength', 'amount', 50, -100, 100), range('radius', 'radius', 300, 10, 4000), range('squash', 'squash', 0, -90, 90), center(),
   ] },
+  { id: 'polarCoords', group: 'distort', label: 'polarCoords', source: 'builtin', draft: true, params: [
+    choice('mode', 'mode', [['rectToPolar', 'polarRectToPolar'], ['polarToRect', 'polarToRect']]),
+  ] },
+  { id: 'zigzagRipple', group: 'distort', label: 'zigzagRipple', source: 'builtin', draft: true, params: [
+    choice('style', 'rippleStyle', [['pond', 'ripplePond'], ['radial', 'rippleRadial']]),
+    range('amount', 'amount', 30, -100, 100),
+    range('ridges', 'ridges', 5, 1, 20),
+    center(),
+  ] },
+  { id: 'pinch', group: 'distort', label: 'pinch', source: 'builtin', pointRadius: 'radius', params: [
+    range('strength', 'amount', 50, -100, 100),
+    range('radius', 'radius', 300, 10, 4000),
+    center(),
+  ] },
   { id: 'liquify', group: 'distort', label: 'liquify', source: 'builtin', params: [], tool: 'liquify' },
   { id: 'meshWarp', group: 'distort', label: 'meshWarp', source: 'builtin', params: [], tool: 'mesh' },
   { id: 'sharpen', group: 'sharpen', label: 'sharpen', source: 'builtin', params: [], hint: 'sharpenHint' },
   { id: 'unsharp', group: 'sharpen', label: 'unsharp', source: 'builtin',
     params: [range('radius', 'radius', 2, 1, 50), range('amount', 'amount', 100, 0, 500), range('threshold', 'threshold', 0, 0, 255)] },
+  { id: 'highPass', group: 'sharpen', label: 'highPass', source: 'builtin',
+    params: [range('radius', 'radius', 4, 0.5, 64, 0.5)] },
 ];
 
 export const getFilter = (id: string | null | undefined) => BUILTIN_FILTERS.find((def) => def.id === id) ?? null;
 export const filtersInGroup = (group: FilterGroup) => BUILTIN_FILTERS.filter((def) => def.group === group);
-export const filterGroupsInUse = () => FILTER_GROUPS.filter((group) => filtersInGroup(group).length > 0);
+export const filterGroupsInUse = () => FILTER_GROUPS.filter((group) => group === 'library' || filtersInGroup(group).length > 0);
 
 export const filterLabel = (def: FilterDef, t: Translations) => t.filters.items[def.label];
 export const filterParamLabel = (param: Pick<FilterParam, 'label'>, t: Translations) => t.filters.params[param.label];

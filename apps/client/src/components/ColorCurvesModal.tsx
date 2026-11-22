@@ -6,11 +6,13 @@ import {
 } from '@atelier/shared';
 import { Sliders, Check, RotateCcw, Eye } from 'lucide-react';
 import { ToolWindow } from './workspace/ToolWindow';
+import { FilterTargetBar, type FilterTargetOptions } from './FilterTargetBar';
 import { useI18n } from '../context/I18nContext';
 
 interface ColorCurvesModalProps {
   isOpen: boolean;
   busy: boolean;
+  target?: FilterTargetOptions;
   onClose: () => void;
   onApply: (options: ColorCurvesOptions) => Promise<boolean>;
   onPreview?: (options: ColorCurvesOptions | null) => void;
@@ -21,6 +23,7 @@ type ChannelType = 'master' | 'red' | 'green' | 'blue';
 export const ColorCurvesModal: React.FC<ColorCurvesModalProps> = ({
   isOpen,
   busy,
+  target,
   onClose,
   onApply,
   onPreview,
@@ -97,7 +100,7 @@ export const ColorCurvesModal: React.FC<ColorCurvesModalProps> = ({
     } else if (onPreview) {
       onPreview(null);
     }
-  }, [isOpen, busy, livePreview, masterCurve, redCurve, greenCurve, blueCurve, onPreview]);
+  }, [isOpen, busy, livePreview, masterCurve, redCurve, greenCurve, blueCurve, onPreview, target?.applyToNewLayer, target?.includeBackground]);
 
   if (!isOpen) return null;
 
@@ -333,6 +336,7 @@ export const ColorCurvesModal: React.FC<ColorCurvesModalProps> = ({
               <Eye className="h-3.5 w-3.5 text-neutral-400" />{t.common.preview}
             </label>
           </div>
+          <FilterTargetBar target={target} busy={busy} />
         </div>
     </ToolWindow>
   );
