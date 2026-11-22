@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Compass, RotateCw, Trash2 } from 'lucide-react';
+import { Compass, Lock, RotateCw, Trash2, Unlock, X } from 'lucide-react';
 import { RulerMode } from '@atelier/shared';
 import { RulerManager, RulerState } from '../engine/RulerManager';
 import { ToolWindow } from './workspace/ToolWindow';
@@ -70,10 +70,29 @@ export const RulerControlsModal: React.FC<RulerControlsModalProps> = ({
   if (!isOpen) return null;
 
   const axes = state.symmetry.axesCount || 2;
+  const guides = state.guides;
+
+  const addQuickGuide = (axis: 'x' | 'y') => {
+    const limit = axis === 'x' ? canvasWidth : canvasHeight;
+    const sameAxis = guides.items.filter((g) => g.axis === axis);
+    let pos = Math.round(limit / 2);
+    if (sameAxis.length > 0) {
+      const step = Math.max(32, Math.round(limit / 8));
+      const existing = new Set(sameAxis.map((g) => Math.round(g.position)));
+      for (let i = 1; i <= 16; i++) {
+        const candidate = Math.max(0, Math.min(limit, pos + (i % 2 === 1 ? 1 : -1) * Math.ceil(i / 2) * step));
+        if (!existing.has(candidate)) {
+          pos = candidate;
+          break;
+        }
+      }
+    }
+    rulerMgr.addGuide(axis, pos);
+  };
 
   return (
     <ToolWindow id="rulers" title={t.rulers.title} icon={<Compass />} onClose={onClose}
-      initial={{ x: -332, y: 96, w: 320, h: 0 }} minW={280}
+      initial={{ x: 84, y: 96, w: 312, h: 0 }} minW={280}
       footer={state.mode !== 'off' ? (
         <>
           <button type="button" onClick={() => rulerMgr.initDimensions(canvasWidth, canvasHeight)} className="atelier-btn atelier-btn--ghost mr-auto">
@@ -150,6 +169,123 @@ export const RulerControlsModal: React.FC<RulerControlsModalProps> = ({
               onChange={(e) => rulerMgr.updateConcentric({ stepRadius: parseInt(e.target.value, 10) })} />
           </Row>
         )}
+
+        {/* Horizontal & vertical canvas guides for alignment / distribution */}
+        <div className="space-y-2 border-t border-neutral-800 pt-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-medium text-neutral-300">{t.rulers.guidesTitle}</span>
+            <div className="flex items-center gap-2">
+              <label className="flex cursor-pointer items-center gap-1 text-[11px] text-neutral-400">
+                <input
+                  type="checkbox"
+                  checked={guides.visible}
+                  onChange={(e) => rulerMgr.setGuidesVisible(e.target.checked)}
+                />
+                <span>{t.rulers.guidesShow}</span>
+              </label>
+              {guides.items.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => rulerMgr.clearGuides()}
+                  title={t.rulers.clearGuides}
+                  aria-label={t.rulers.clearGuides}
+                  className="atelier-btn atelier-btn--ghost atelier-btn--danger !h-6 !px-1.5 text-[11px]"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              type="button"
+              data-testid="add-vertical-guide"
+              onClick={() => addQuickGuide('x')}
+              className="atelier-btn !h-7 justify-center text-[11px]"
+            >
+              {t.rulers.addVerticalGuide}
+            </button>
+            <button
+              type="button"
+              data-testid="add-horizontal-guide"
+              onClick={() => addQuickGuide('y')}
+              className="atelier-btn !h-7 justify-center text-[11px]"
+            >
+              {t.rulers.addHorizontalGuide}
+            </button>
+          </div>
+
+          {guides.items.length === 0 ? (
+            <p className="text-[11px] leading-snug text-neutral-500">{t.rulers.guidesEmpty}</p>
+          ) : (
+            <div className="max-h-36 space-y-1 overflow-y-auto pr-0.5">
+              {guides.items.map((g) => {
+                const selected = guides.selectedIds.includes(g.id);
+                const maxCoord = g.axis === 'x' ? canvasWidth : canvasHeight;
+                return (
+                  <div
+                    key={g.id}
+                    data-testid={`guide-row-${g.id}`}
+                    className={`flex items-center gap-1.5 rounded-md border px-1.5 py-1 text-[11px] ${
+                      selected
+                        ? 'border-indigo-400/70 bg-indigo-500/15 text-indigo-100'
+                        : 'border-neutral-800 bg-neutral-950/50 text-neutral-200'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      aria-pressed={selected}
+                      onClick={(e) => rulerMgr.toggleGuideSelected(g.id, e.shiftKey || e.ctrlKey || e.metaKey)}
+                      className={`h-5 w-6 shrink-0 rounded font-mono text-[10px] font-semibold transition ${
+                        selected ? 'bg-indigo-500 text-white' : 'bg-neutral-800 text-sky-300 hover:bg-neutral-700'
+                      }`}
+                    >
+                      {g.axis === 'x' ? 'X' : 'Y'}
+                    </button>
+                    <input
+                      type="number"
+                      min={0}
+                      max={maxCoord}
+                      step={1}
+                      value={Math.round(g.position)}
+                      disabled={Boolean(g.locked)}
+                      aria-label={`${g.axis === 'x' ? 'X' : 'Y'} px`}
+                      onChange={(e) => {
+                        const v = Number(e.target.value);
+                        if (Number.isFinite(v)) {
+                          rulerMgr.updateGuide(g.id, { position: Math.max(0, Math.min(maxCoord, Math.round(v))) });
+                        }
+                      }}
+                      className="atelier-field !h-5 min-w-0 flex-1 px-1.5 font-mono text-[11px] tabular-nums"
+                    />
+                    <span className="shrink-0 text-[10px] text-neutral-500">px</span>
+                    <button
+                      type="button"
+                      aria-pressed={Boolean(g.locked)}
+                      title={t.rulers.guideLock}
+                      aria-label={t.rulers.guideLock}
+                      onClick={() => rulerMgr.updateGuide(g.id, { locked: !g.locked })}
+                      className="atelier-icon-btn !h-5 !w-5 shrink-0"
+                    >
+                      {g.locked ? <Lock className="h-3 w-3 text-amber-300" /> : <Unlock className="h-3 w-3 text-neutral-400" />}
+                    </button>
+                    <button
+                      type="button"
+                      title={t.rulers.guideDelete}
+                      aria-label={t.rulers.guideDelete}
+                      onClick={() => rulerMgr.removeGuide(g.id)}
+                      className="atelier-icon-btn !h-5 !w-5 shrink-0 text-neutral-400 hover:text-rose-300"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {guides.items.length > 0 && <Hint>{t.rulers.guideSelectHint}</Hint>}
+        </div>
       </div>
     </ToolWindow>
   );

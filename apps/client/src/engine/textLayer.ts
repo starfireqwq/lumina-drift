@@ -175,3 +175,27 @@ export function textBounds(meta: LayerTextMeta) {
   const r = renderText(meta);
   return { x: r.x, y: r.y, width: r.canvas.width, height: r.canvas.height };
 }
+
+/**
+ * The editable text box frame in canvas coordinates (matching the frame shown by TextCanvasEditor,
+ * without outline padding): top-left at (meta.x, meta.y), sized by line metrics / column advance.
+ */
+export function textBoxRect(meta: LayerTextMeta): { x: number; y: number; w: number; h: number } {
+  const size = Math.max(4, meta.fontSize);
+  const font = `${size}px ${meta.fontFamily}`;
+  const lines = (meta.content || ' ').split('\n');
+  const advance = size * Math.max(0.5, meta.lineHeight);
+  const measure = document.createElement('canvas').getContext('2d')!;
+  measure.font = font;
+  const longest = (fn: (line: string) => number) => Math.max(1, ...lines.map(fn));
+  const runLength = (r: VerticalRun) => (r.kind === 'sideways' ? Math.max(size * 0.5, measure.measureText(r.text).width) : size);
+  const columns = meta.vertical ? lines.map((l) => verticalRuns(l)) : [];
+  const w = meta.vertical ? lines.length * advance : longest((l) => measure.measureText(l).width);
+  const h = meta.vertical ? Math.max(1, ...columns.map((runs) => runs.reduce((n, r) => n + runLength(r), 0))) : lines.length * advance;
+  return {
+    x: Math.round(meta.x),
+    y: Math.round(meta.y),
+    w: Math.max(1, Math.ceil(w)),
+    h: Math.max(1, Math.ceil(h)),
+  };
+}

@@ -27,6 +27,11 @@ interface ToolWindowProps {
 }
 
 const KEY = (id: string) => `atelier_toolwin_${id}`;
+let nextToolWindowZ = 60;
+const claimTopZ = () => {
+  nextToolWindowZ = nextToolWindowZ >= 78 ? 61 : nextToolWindowZ + 1;
+  return nextToolWindowZ;
+};
 
 const loadRect = (id: string, initial: Rect): Rect => {
   const ui = getUiScale();
@@ -49,7 +54,7 @@ const loadRect = (id: string, initial: Rect): Rect => {
   return { x, y: Math.round(initial.y * ui), w, h };
 };
 
-const clampTo = (r: Rect, minW: number, minH: number): Rect => {
+const clampTo = (r: Rect, minW: number, minH: number, keepInside = false): Rect => {
   const ui = getUiScale();
   const vw = window.innerWidth;
   const vh = window.innerHeight;
@@ -58,7 +63,9 @@ const clampTo = (r: Rect, minW: number, minH: number): Rect => {
   const minHScaled = Math.min(Math.round(minH * ui), Math.max(80, vh - topBar - 8));
   const w = Math.max(minWScaled, Math.min(r.w, vw - 16));
   const h = r.h ? Math.max(minHScaled, Math.min(r.h, vh - topBar - 8)) : 0;
-  return { x: Math.max(8 - w + 96, Math.min(vw - 96, r.x)), y: Math.max(topBar, Math.min(vh - 44, r.y)), w, h };
+  const minX = keepInside ? 8 : 8 - w + 96;
+  const maxX = keepInside ? Math.max(8, vw - w - 8) : vw - 96;
+  return { x: Math.max(minX, Math.min(maxX, r.x)), y: Math.max(topBar, Math.min(vh - 44, r.y)), w, h };
 };
 
 /**
@@ -71,7 +78,9 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
 }) => {
   const phone = usePhoneLayout();
   const titleId = useId();
-  const [rect, setRect] = useState<Rect>(() => clampTo(loadRect(id, initial), minW, minH));
+  const [zIndex, setZIndex] = useState<number>(() => claimTopZ());
+  const [rect, setRect] = useState<Rect>(() => clampTo(loadRect(id, initial), minW, minH, true));
+  const bringToFront = () => setZIndex(claimTopZ());
   const rectRef = useRef(rect);
   rectRef.current = rect;
   const boxRef = useRef<HTMLElement>(null);
@@ -90,7 +99,7 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
   }, [closeOnEsc]);
 
   useEffect(() => {
-    const onResize = () => setRect((r) => clampTo(r, minW, minH));
+    const onResize = () => setRect((r) => clampTo(r, minW, minH, true));
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, [minW, minH]);
@@ -101,7 +110,7 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
         ...r,
         w: Math.round(r.w * factor),
         h: r.h ? Math.round(r.h * factor) : 0,
-      }, minW, minH));
+      }, minW, minH, true));
     });
     return () => { unsub(); };
   }, [minW, minH]);
@@ -149,7 +158,9 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
   if (phone) {
     return (
       <section role="dialog" aria-labelledby={titleId} data-tool-window={id}
-        className="atelier-popover atelier-menu-in fixed inset-x-0 bottom-0 z-[70] flex max-h-[72dvh] flex-col overflow-hidden rounded-b-none pb-[env(safe-area-inset-bottom)]">
+        onPointerDown={bringToFront}
+        style={{ zIndex }}
+        className="atelier-popover atelier-menu-in fixed inset-x-0 bottom-0 flex max-h-[72dvh] flex-col overflow-hidden rounded-b-none pb-[env(safe-area-inset-bottom)]">
         {body}
       </section>
     );
@@ -161,8 +172,9 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
       role="dialog"
       aria-labelledby={titleId}
       data-tool-window={id}
-      style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h || undefined, maxHeight: rect.h ? undefined : `max(12rem, calc(100dvh - ${rect.y + 12}px))` }}
-      className="atelier-popover atelier-window atelier-menu-in fixed z-[70] flex select-none flex-col"
+      onPointerDown={bringToFront}
+      style={{ zIndex, left: rect.x, top: rect.y, width: rect.w, height: rect.h || undefined, maxHeight: rect.h ? undefined : `max(12rem, calc(100dvh - ${rect.y + 12}px))` }}
+      className="atelier-popover atelier-window atelier-menu-in fixed flex select-none flex-col"
     >
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[inherit]">{body}</div>
       {EDGE_HANDLES.map((h) => (

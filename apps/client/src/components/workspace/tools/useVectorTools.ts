@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { evaluatePressureCurve, hitTestVectorStroke, LayerModel, TileData, ToolType, VectorEraserMode, VectorStroke, VectorWidthMode } from '@atelier/shared';
 import { VectorEditResult } from '../../../engine/VectorEngine';
 import type { PixiLayerItem } from '../../../engine/LayerManager';
@@ -54,9 +54,18 @@ export function useVectorTools(ctx: ToolContext) {
   const lastPenClickRef = useRef<{ t: number; x: number; y: number } | null>(null);
   const [penHover, setPenHover] = useState<Point | null>(null);
   const [vectorSel, setVectorSel] = useState<{ strokeId: string; index: number } | null>(null);
+  const [selectedStrokeIds, setSelectedStrokeIds] = useState<string[]>([]);
+  const selectedStrokeIdsRef = useRef<string[]>([]);
+  selectedStrokeIdsRef.current = selectedStrokeIds;
   const vectorDragRef = useRef<{ hit: VectorHit; original: VectorStroke; moved: boolean } | null>(null);
   const [vectorPreview, setVectorPreview] = useState<VectorStroke | null>(null);
   const lastVectorClickRef = useRef<{ t: number; strokeId: string; index: number } | null>(null);
+
+  useEffect(() => {
+    setVectorSel(null);
+    setSelectedStrokeIds([]);
+    setVectorPreview(null);
+  }, [ctx.activeLayer?.id]);
   // One undo step per vector-editing drag (the eraser / reshape commit on every move)
   const vectorGestureRef = useRef<{
     layerId: string;
@@ -76,7 +85,15 @@ export function useVectorTools(ctx: ToolContext) {
     const removed = Array.isArray(payload.vectorRemovedIds) ? payload.vectorRemovedIds : undefined;
     if (!added && !removed) return;
     engine.applyDelta(layerId, removed, added);
-    if (activeLayerRef.current?.id === layerId) setVectorStrokesList(engine.getStrokes(layerId));
+    if (activeLayerRef.current?.id === layerId) {
+      const nextList = engine.getStrokes(layerId);
+      setVectorStrokesList(nextList);
+      if (selectedStrokeIdsRef.current.length > 0) {
+        const valid = new Set(nextList.map((s) => s.id));
+        const filtered = selectedStrokeIdsRef.current.filter((id) => valid.has(id));
+        if (filtered.length !== selectedStrokeIdsRef.current.length) setSelectedStrokeIds(filtered);
+      }
+    }
   };
 
   /** Sends one vector edit and folds it into the current drag's undo step. */
@@ -212,13 +229,22 @@ export function useVectorTools(ctx: ToolContext) {
     finishVectorGesture();
   };
 
-  const vectorEditPointerDown = (local: { x: number; y: number }, layer: LayerModel) => {
+  const vectorEditPointerDown = (local: { x: number; y: number }, layer: LayerModel, additive = false) => {
     const engine = vectorEngineRef.current;
     if (!engine || !editableVectorTarget(layer)) return;
     const zoom = viewportRef.current?.getState().zoom || 1;
     const strokes = engine.getStrokes(layer.id);
     const hit = hitTestNodes(strokes, local, 9 / zoom, vectorSel?.strokeId ?? null);
     if (hit) {
+      if (additive) {
+        const prev = selectedStrokeIdsRef.current;
+        const exists = prev.includes(hit.strokeId);
+        const next = exists ? prev.filter((id) => id !== hit.strokeId) : [...prev, hit.strokeId];
+        setSelectedStrokeIds(next);
+        setVectorSel(exists ? (next.length > 0 ? { strokeId: next[next.length - 1], index: -1 } : null) : { strokeId: hit.strokeId, index: hit.index });
+        setVectorPreview(null);
+        return;
+      }
       const now = Date.now();
       const last = lastVectorClickRef.current;
       lastVectorClickRef.current = { t: now, strokeId: hit.strokeId, index: hit.index };
@@ -228,13 +254,28 @@ export function useVectorTools(ctx: ToolContext) {
         replaceVectorStroke(layer, stroke.id, toggleCorner(stroke, hit.index), '切換尖角／平滑');
         return;
       }
+      setSelectedStrokeIds([hit.strokeId]);
       setVectorSel({ strokeId: hit.strokeId, index: hit.index });
       vectorDragRef.current = { hit, original: stroke, moved: false };
       return;
     }
-    // Clicking a line selects it (shows its handles); empty space clears the selection
+    // Clicking a line selects it (Shift toggles multi-selection); empty space clears selection
     const onLine = strokes.find((s) => hitTestVectorStrokeAt(s, local, 6 / zoom));
-    setVectorSel(onLine ? { strokeId: onLine.id, index: -1 } : null);
+    if (onLine) {
+      if (additive) {
+        const prev = selectedStrokeIdsRef.current;
+        const exists = prev.includes(onLine.id);
+        const next = exists ? prev.filter((id) => id !== onLine.id) : [...prev, onLine.id];
+        setSelectedStrokeIds(next);
+        setVectorSel(next.length > 0 ? { strokeId: next[next.length - 1], index: -1 } : null);
+      } else {
+        setSelectedStrokeIds([onLine.id]);
+        setVectorSel({ strokeId: onLine.id, index: -1 });
+      }
+    } else if (!additive) {
+      setSelectedStrokeIds([]);
+      setVectorSel(null);
+    }
     setVectorPreview(null);
   };
 
@@ -294,8 +335,9 @@ export function useVectorTools(ctx: ToolContext) {
       deleteSelectedAnchor();
       return true;
     }
-    if (tool === 'vector_edit' && ev.key === 'Escape' && vectorSel) {
+    if (tool === 'vector_edit' && ev.key === 'Escape' && (vectorSel || selectedStrokeIdsRef.current.length > 0)) {
       setVectorSel(null);
+      setSelectedStrokeIds([]);
       return true;
     }
     return false;
@@ -474,6 +516,8 @@ export function useVectorTools(ctx: ToolContext) {
   /** Another canvas (or the engine rebuilt): no strokes, no cursor, no drag */
   const resetForCanvas = () => {
     setVectorStrokesList([]);
+    setVectorSel(null);
+    setSelectedStrokeIds([]);
     cancelDrag();
   };
 
@@ -491,6 +535,9 @@ export function useVectorTools(ctx: ToolContext) {
     bezierMode, setBezierMode,
     penPoints,
     vectorSel,
+    selectedStrokeIds,
+    selectedStrokeIdsRef,
+    setSelectedStrokeIds,
     vectorPreview,
     penPreview,
     selectedAnchorExists,

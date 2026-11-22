@@ -118,9 +118,10 @@ import { useBrushTool } from './workspace/tools/useBrushTool';
 import { useTransformTool } from './workspace/tools/useTransformTool';
 import { readContent, useLayerAlign } from './workspace/tools/useLayerAlign';
 import {
-  alignTargetsBlocker, resolveAlignTargets, selectionFrame,
+  alignTargetsBlocker, resolveAlignTargets, selectionFrame, summarizeGuides,
   type AlignBasis, type AlignX, type AlignY, type DistributeMode,
 } from '../utils/layerAlign';
+import type { AlignUiOptions } from './LayerAlignWindow';
 import { useCanvasPointer } from './workspace/tools/useCanvasPointer';
 import { findContentBounds } from '../utils/pixelBounds';
 import { VectorEditResult } from '../engine/VectorEngine';
@@ -1198,7 +1199,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const vector = useVectorTools(toolCtx);
   const {
     vectorEraserMode, setVectorEraserMode, vectorWidthMode, setVectorWidthMode, vectorStrokesList, setVectorStrokesList,
-    bezierMode, setBezierMode, penPoints, vectorSel, vectorPreview, penPreview, selectedAnchorExists,
+    bezierMode, setBezierMode, penPoints, vectorSel, selectedStrokeIds, selectedStrokeIdsRef, setSelectedStrokeIds, vectorPreview, penPreview, selectedAnchorExists,
     applyVectorPayload, finishPenPath, toggleSelectedAnchorCorner, deleteSelectedAnchor, handleVectorKey,
   } = vector;
   const brush = useBrushTool(toolCtx);
@@ -1211,13 +1212,24 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     isTransformActive, transformPreviewUrl, transformBox, setTransformBox, distortMode, setDistortMode, isMeshWarpActive,
     transformLayerIdRef, transformSourceCanvasRef, meshWarpInitialBoundsRef, startTransformMode, startFloatingPaste, applyTransform, cancelTransform, applyMeshWarp,
   } = transform;
-  // 對齊・均分: layers/groups (with their masks) align to objects/canvas/selection or distribute evenly
+  // 對齊・均分: layers/groups, vector strokes, text bounds, and canvas guides
   const { alignTargets, distributeTargets } = useLayerAlign(toolCtx, {
     layersRef,
     applyVectorPayload,
     updateLayerMeta: (layerId, meta) => { void onUpdateLayerProps?.(layerId, { meta }); },
+    onVectorStrokesChanged: (layerId) => {
+      if (activeLayerRef.current?.id === layerId) {
+        setVectorStrokesList(vectorEngineRef.current?.getStrokes(layerId) ?? []);
+      }
+    },
   });
   const [alignOpen, setAlignOpen] = useState(false);
+  const [alignGuidesVersion, setAlignGuidesVersion] = useState(0);
+  useEffect(() => {
+    if (!alignOpen) return;
+    setAlignGuidesVersion((v) => v + 1);
+    return RulerManager.getInstance().subscribe(() => setAlignGuidesVersion((v) => v + 1));
+  }, [alignOpen]);
   const {
     liquifyEngineRef,
     blurSmudgeEngineRef,
@@ -1688,6 +1700,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       // Test hooks: the undo history (ops carry their foreign-pixel masks) lets browser checks explain an undo
       (window as any).__debugPixi = {
         app, viewport, layerManager, tileEngine, selectionEngine, vectorEngine, animationEngine: timeline,
+        rulerManager: RulerManager.getInstance(),
         undo: scopedUndoRef.current, tileToRgba,
         get filterWorker() { return filterWorkerRef.current; },
         get pluginFilterWorker() { return pluginFilterWorkerRef.current; },
@@ -5837,13 +5850,54 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     });
     return blocked ? null : targets;
   };
-  const runAlign = (x: AlignX | null, y: AlignY | null, basis: AlignBasis, allowCrop?: boolean) => {
-    const targets = liveAlignTargets();
-    return targets ? alignTargets(targets, x, y, basis, allowCrop) : Promise.resolve('failed' as const);
+  const liveGuideSummary = () => {
+    const mgr = RulerManager.getInstance();
+    return summarizeGuides(mgr.getActiveGuides(), mgr.state.guides.selectedIds);
   };
-  const runDistribute = (mode: DistributeMode, basis: AlignBasis, allowCrop?: boolean) => {
+  const alignGuideSummary = useMemo(
+    () => {
+      void alignGuidesVersion;
+      return liveGuideSummary();
+    },
+    [alignGuidesVersion],
+  );
+  const alignHasVectorTarget = useMemo(
+    () => alignTargetsList.some((u) => u.members.some((m) => m.layerType === 'vector')),
+    [alignTargetsList],
+  );
+  const alignHasTextTarget = useMemo(
+    () => alignTargetsList.some((u) => u.members.some((m) => m.layerType === 'text')),
+    [alignTargetsList],
+  );
+  const alignSingleVectorRoot =
+    alignTargetsList.length === 1 && !alignTargetsList[0].isGroup && alignTargetsList[0].root.layerType === 'vector'
+      ? alignTargetsList[0].root
+      : null;
+  const alignSingleVectorStrokes = alignSingleVectorRoot
+    ? (vectorEngineRef.current?.getStrokes(alignSingleVectorRoot.id) ?? (activeLayer?.id === alignSingleVectorRoot.id ? vectorStrokesList : []))
+    : [];
+  const alignVectorStrokeCount = alignSingleVectorStrokes.length;
+  const alignSelectedVectorStrokeCount = alignSingleVectorRoot && activeLayer?.id === alignSingleVectorRoot.id
+    ? selectedStrokeIds.filter((id) => alignSingleVectorStrokes.some((s) => s.id === id)).length
+    : 0;
+  const alignCanTargetVectorStrokes = Boolean(alignSingleVectorRoot && alignVectorStrokeCount > 0);
+  const runAlign = (x: AlignX | null, y: AlignY | null, basis: AlignBasis, allowCrop?: boolean, options?: AlignUiOptions) => {
     const targets = liveAlignTargets();
-    return targets ? distributeTargets(targets, mode, basis, allowCrop) : Promise.resolve('failed' as const);
+    if (!targets) return Promise.resolve('failed' as const);
+    return alignTargets(targets, x, y, basis, allowCrop, {
+      ...options,
+      guideSummary: liveGuideSummary(),
+      selectedStrokeIds: selectedStrokeIdsRef.current,
+    });
+  };
+  const runDistribute = (mode: DistributeMode, basis: AlignBasis, allowCrop?: boolean, options?: AlignUiOptions) => {
+    const targets = liveAlignTargets();
+    if (!targets) return Promise.resolve('failed' as const);
+    return distributeTargets(targets, mode, basis, allowCrop, {
+      ...options,
+      guideSummary: liveGuideSummary(),
+      selectedStrokeIds: selectedStrokeIdsRef.current,
+    });
   };
   const openAlign = (layerId?: string) => {
     if (layerId && !selectedLayerIdsRef.current.has(layerId)) {
@@ -6639,6 +6693,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                   currentTool={currentTool}
                   isVectorLayer={activeLayer?.layerType === 'vector' || currentTool.startsWith('vector')}
                   selectedStrokeId={vectorSel?.strokeId ?? null}
+                  selectedStrokeIds={selectedStrokeIds}
                   selectedAnchorIndex={vectorSel?.index ?? -1}
                   previewStroke={vectorPreview ?? penPreview}
                   penPoints={currentTool === 'vector_bezier' ? penPoints : []}
@@ -6883,6 +6938,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       <OverlayPresence open={alignOpen && Boolean(canvas)} kind="popover">
         <Suspense fallback={null}><LayerAlignWindow targetLabel={alignTargetLabel} targetCount={alignTargetsList.length}
           blocker={alignBlockReason} hasSelection={hasSelectionState}
+          guideSummary={alignGuideSummary}
+          hasVectorTarget={alignHasVectorTarget}
+          canTargetVectorStrokes={alignCanTargetVectorStrokes}
+          vectorStrokeCount={alignVectorStrokeCount}
+          selectedVectorStrokeCount={alignSelectedVectorStrokeCount}
+          hasTextTarget={alignHasTextTarget}
+          onOpenGuides={() => setIsRulerModalOpen(true)}
           onAlign={runAlign} onDistribute={runDistribute} onClose={() => setAlignOpen(false)} /></Suspense>
       </OverlayPresence>
       <OverlayPresence open={filterMenuOpen} kind="popover">
