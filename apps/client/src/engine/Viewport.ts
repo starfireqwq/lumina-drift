@@ -50,6 +50,17 @@ export class CanvasViewport {
     return { ...this.state };
   }
 
+  public setState(next: Partial<ViewportState>) {
+    if (next.zoom !== undefined && Number.isFinite(next.zoom)) {
+      this.state.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, next.zoom));
+    }
+    if (next.panX !== undefined && Number.isFinite(next.panX)) this.state.panX = next.panX;
+    if (next.panY !== undefined && Number.isFinite(next.panY)) this.state.panY = next.panY;
+    if (next.rotation !== undefined && Number.isFinite(next.rotation)) this.state.rotation = next.rotation;
+    if (next.mirrorX !== undefined) this.state.mirrorX = Boolean(next.mirrorX);
+    this.updateTransform();
+  }
+
   public setCanvasDimensions(width: number, height: number) {
     this.canvasWidth = width;
     this.canvasHeight = height;

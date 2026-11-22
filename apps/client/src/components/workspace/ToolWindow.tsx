@@ -90,8 +90,12 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
   useEffect(() => {
     if (!closeOnEsc) return;
     const onKey = (e: KeyboardEvent) => {
-      // A dialog or open dropdown menu above this window handles its own Esc
-      if (e.key !== 'Escape' || document.querySelector('[aria-modal="true"], [role="menu"]')) return;
+      // A live dialog or open dropdown menu above this window handles its own Esc (ignore closing animations)
+      if (e.key !== 'Escape') return;
+      const blockers = document.querySelectorAll('[aria-modal="true"], [role="menu"]');
+      for (const el of blockers) {
+        if (!el.closest('[data-phase="closing"], .pointer-events-none')) return;
+      }
       onCloseRef.current();
     };
     window.addEventListener('keydown', onKey);

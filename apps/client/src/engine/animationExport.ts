@@ -1,3 +1,4 @@
+import type { Affine2D } from '@atelier/shared';
 import { parseTimecode } from './AnimationEngine';
 
 /**
@@ -200,6 +201,44 @@ export function cropAndScaleCanvas(
       clipH * scaleY
     );
   }
+  return out;
+}
+
+/**
+ * Phase E1: Renders a full canvas frame through a 2D camera affine matrix (position, scale, rotation)
+ * into a new output canvas of `(targetWidth, targetHeight)`.
+ * `cameraMatrix` is produced by `computeCameraCanvasToOutputMatrix(...)`.
+ */
+export function renderCameraFrameCanvas(
+  source: HTMLCanvasElement,
+  cameraMatrix: Affine2D,
+  targetWidth: number,
+  targetHeight: number,
+  bgColor: string | null = null
+): HTMLCanvasElement {
+  const w = Math.max(1, Math.min(MAX_EXPORT_DIM, Math.round(targetWidth) || 1));
+  const h = Math.max(1, Math.min(MAX_EXPORT_DIM, Math.round(targetHeight) || 1));
+  const out = document.createElement('canvas');
+  out.width = w;
+  out.height = h;
+  const ctx = out.getContext('2d')!;
+  if (bgColor) {
+    ctx.fillStyle = bgColor;
+    ctx.fillRect(0, 0, w, h);
+  }
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.setTransform(
+    cameraMatrix.a,
+    cameraMatrix.b,
+    cameraMatrix.c,
+    cameraMatrix.d,
+    cameraMatrix.tx,
+    cameraMatrix.ty
+  );
+  ctx.drawImage(source, 0, 0);
+  ctx.restore();
   return out;
 }
 

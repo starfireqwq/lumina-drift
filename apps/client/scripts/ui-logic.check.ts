@@ -29,19 +29,31 @@ import {
   applyAffinePoint,
   BEZIER_PRESETS,
   canManageCanvasMemberRole,
+  computeCameraCanvasToOutputMatrix,
+  computeCameraPreviewViewport,
+  computeAudioPlaybackWindow,
   computeSmartEncloseFillMask,
+  computeWaveformPeaks,
   DynamicStabilizer,
   clampDpi,
+  evaluateCameraFrame,
   evaluateEasing,
   evaluateTransformKeyframes,
+  findCameraLayer,
   formatCanvasDimensions,
   getCanvasRoleCapabilities,
   invertAffine,
   isAssignableCanvasRole,
+  isAudioLayer,
+  isCameraLayer,
   matchBezierPreset,
   MAX_STABILIZER_LEVEL,
   multiplyAffine,
+  normalizeAudioTrackMeta,
+  normalizeCameraMeta,
   pixelsToUnit,
+  resolveAudioClipFrameRange,
+  sampleCameraMotionPath,
   STABILIZER_LEVEL_STEP,
   tileToRgba,
   type ScopedUndoOp,
@@ -96,7 +108,22 @@ import {
   buildInitialPanelValues,
   isPluginPanelFieldVisible,
 } from '../src/components/PluginPanelWindow';
-import { cleanLightTable, clearLightTable, emptyLightTable, lightIdsFor, toggleLightCel } from '../src/engine/lightTable';
+import {
+  addExternalLightRef,
+  cleanLightTable,
+  clearLightTable,
+  emptyLightTable,
+  externalRefsFor,
+  getLightTableTransform,
+  lightIdsFor,
+  lightTableTransformToAffine,
+  removeExternalLightRef,
+  resetLightTableTransform,
+  resolveLightTableTargetCel,
+  setPinnedLightTarget,
+  toggleLightCel,
+  updateLightTableTransform,
+} from '../src/engine/lightTable';
 import { nextGroupName } from '../src/utils/canvasName';
 import {
   PLUGIN_LIMITS,
@@ -852,7 +879,15 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
     s = clearLightTable(s, { kind: 'cel', id: 'c5' });
     assert.equal(s.cels.c5, undefined);
     const cleaned = cleanLightTable({ enabled: 0, opacity: 9, cels: { x: ['a', 'a', 7, 'b'] }, tracks: [] });
-    assert.deepEqual(cleaned, { enabled: false, opacity: 1, cels: { x: ['a', 'b'] }, tracks: {} });
+    assert.deepEqual(cleaned, {
+      enabled: false,
+      opacity: 1,
+      cels: { x: ['a', 'b'] },
+      tracks: {},
+      transforms: {},
+      externalRefs: [],
+      pinnedTargetId: null,
+    });
     assert.deepEqual(cleanLightTable('junk'), emptyLightTable());
   }
 }
@@ -4941,5 +4976,163 @@ await (async () => {
   const layerUnion = computeVectorLayerAlignRect([curvedStroke, shifted], 'path')!;
   assert.equal(layerUnion.x, 100);
   assert.equal(layerUnion.x + layerUnion.w, 235);
+}
+
+// Animation Phase E1 (2D Camera), E2 (Light Table v2), E3 (Local Audio Track metadata)
+{
+  // E1: 2D Camera normalization, evaluation, export matrix inverse mapping, preview viewport, and motion path
+  const camMeta = normalizeCameraMeta({ width: 1280, height: 720, showSafeArea: true }, 1920, 1080);
+  assert.deepEqual(camMeta, { width: 1280, height: 720, showSafeArea: true });
+  const camKfs = [
+    { frame: 0, x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 960, pivotY: 540, opacity: 1, easing: 'linear' as const },
+    { frame: 10, x: 200, y: -100, scaleX: 0.5, scaleY: 0.5, rotation: Math.PI / 2, pivotX: 960, pivotY: 540, opacity: 1, easing: 'linear' as const },
+  ];
+  const camMid = evaluateCameraFrame(camMeta, camKfs, 5, 1920, 1080);
+  assert.ok(Math.abs(camMid.centerX - 1060) < 1e-4, `mid centerX expected 1060, got ${camMid.centerX}`);
+  assert.ok(Math.abs(camMid.centerY - 490) < 1e-4, `mid centerY expected 490, got ${camMid.centerY}`);
+  assert.ok(Math.abs(camMid.scaleX - 0.75) < 1e-4);
+  assert.ok(Math.abs(camMid.rotation - Math.PI / 4) < 1e-4);
+
+  // Camera export matrix maps camera center -> output center and top-left corner -> (0, 0)
+  const camEnd = evaluateCameraFrame(camMeta, camKfs, 10, 1920, 1080);
+  const outMat = computeCameraCanvasToOutputMatrix(camEnd, 1920, 1080, 1280, 720);
+  const mappedCenter = applyAffinePoint(outMat, camEnd.centerX, camEnd.centerY);
+  assert.ok(Math.abs(mappedCenter.x - 640) < 1e-3 && Math.abs(mappedCenter.y - 360) < 1e-3, 'camera center maps to output center');
+  const mappedTL = applyAffinePoint(outMat, camEnd.corners[0].x, camEnd.corners[0].y);
+  assert.ok(Math.abs(mappedTL.x) < 1e-3 && Math.abs(mappedTL.y) < 1e-3, 'camera top-left corner maps to (0,0)');
+  const mappedBR = applyAffinePoint(outMat, camEnd.corners[2].x, camEnd.corners[2].y);
+  assert.ok(Math.abs(mappedBR.x - 1280) < 1e-3 && Math.abs(mappedBR.y - 720) < 1e-3, 'camera bottom-right corner maps to (1280,720)');
+
+  // Preview viewport aligns camera center upright in screen center
+  const pv = computeCameraPreviewViewport(camEnd, 1920, 1080, 1000, 600, 20);
+  assert.ok(Math.abs(pv.rotation - -camEnd.rotation) < 1e-6);
+  const cos = Math.cos(pv.rotation);
+  const sin = Math.sin(pv.rotation);
+  const dx = camEnd.centerX - 960;
+  const dy = camEnd.centerY - 540;
+  const screenCenterX = pv.panX + pv.zoom * (dx * cos - dy * sin);
+  const screenCenterY = pv.panY + pv.zoom * (dx * sin + dy * cos);
+  assert.ok(Math.abs(screenCenterX - 500) < 1e-3 && Math.abs(screenCenterY - 300) < 1e-3);
+
+  const camSamples = sampleCameraMotionPath(camMeta, camKfs, 1920, 1080);
+  assert.equal(camSamples.length, 11);
+  assert.equal(camSamples.filter((s) => s.isKey).length, 2);
+
+  // Camera keyframes force distinct export segments even when cel stays held
+  const camLayers = [
+    { id: 'f1', name: 'Anim', layerType: 'group', parentId: null, sortOrder: 0, isVisible: true, opacity: 1, meta: { animation: { fps: 12 } } },
+    { id: 'c1', name: '1', layerType: 'raster', parentId: 'f1', sortOrder: 1, isVisible: true, opacity: 1, meta: { cel: { hold: 6 } } },
+    { id: 'cam1', name: 'Camera', layerType: 'group', parentId: null, sortOrder: 2, isVisible: true, opacity: 1, meta: { camera: camMeta, keyframes: camKfs } },
+  ];
+  assert.equal(isCameraLayer(camLayers[2]), true);
+  assert.equal(findCameraLayer(camLayers)?.id, 'cam1');
+  const camSegs = exportSegments(camLayers, 0, 5, null, 1920, 1080);
+  assert.equal(camSegs.length, 6, 'moving camera splits held cel into per-frame export segments');
+  assert.equal(nextGroupName(camLayers), '圖層組 1', 'camera group excluded from plain group numbering');
+
+  // E2: Light Table v2 per-reference transforms, tinting, external refs, and pinned edit target lock
+  let lt = emptyLightTable();
+  lt = toggleLightCel(lt, { kind: 'cel', id: 'c1' }, 'c2');
+  lt = updateLightTableTransform(lt, 'c2', {
+    x: 40,
+    y: -20,
+    scale: 1.5,
+    rotation: 90,
+    flipX: true,
+    opacity: 0.6,
+    tint: '#38bdf8',
+    tintMode: 'shade',
+  });
+  const trC2 = getLightTableTransform(lt, 'c2');
+  assert.equal(trC2.x, 40);
+  assert.equal(trC2.flipX, true);
+  assert.equal(trC2.tintMode, 'shade');
+  const affC2 = lightTableTransformToAffine(trC2, 1000, 800);
+  assert.equal(affC2.isIdentity, false);
+  const affCenter = applyAffinePoint(affC2, 500, 400);
+  assert.ok(Math.abs(affCenter.x - 540) < 1e-4 && Math.abs(affCenter.y - 380) < 1e-4);
+
+  // Pinned edit target keeps c1's light table active when inspecting c3
+  lt = setPinnedLightTarget(lt, 'c1');
+  assert.equal(resolveLightTableTargetCel(lt, 'c3'), 'c1');
+  assert.deepEqual([...lightIdsFor(lt, 'f1', 'c3')], ['c2']);
+
+  // External local reference image scope & visibility
+  lt = addExternalLightRef(lt, { id: 'ext1', name: 'ref.png', width: 640, height: 480, scopeKind: 'track', scopeId: 'f1' });
+  assert.equal(externalRefsFor(lt, 'f1', 'c3', { visibleOnly: true }).length, 1);
+  lt = updateLightTableTransform(lt, 'ext1', { visible: false });
+  assert.equal(externalRefsFor(lt, 'f1', 'c3', { visibleOnly: true }).length, 0);
+  lt = removeExternalLightRef(lt, 'ext1');
+  assert.equal(lt.externalRefs.length, 0);
+
+  // animationDisplay applies per-cel light-table transform, opacity multiplier, and shade tint
+  const ltDisplayLayers = [
+    { id: 'f1', name: 'Anim', layerType: 'group', parentId: null, sortOrder: 0, isVisible: true, opacity: 1, meta: { animation: { fps: 12 } } },
+    { id: 'c1', name: '1', layerType: 'raster', parentId: 'f1', sortOrder: 1, isVisible: true, opacity: 1, meta: null },
+    { id: 'c2', name: '2', layerType: 'raster', parentId: 'f1', sortOrder: 2, isVisible: true, opacity: 1, meta: null },
+  ];
+  const disp = animationDisplay(
+    ltDisplayLayers,
+    {
+      time: 0,
+      activeFolderId: 'f1',
+      onion: null,
+      light: {
+        opacity: 0.5,
+        ids: new Set(['c2']),
+        items: new Map([['c2', { opacity: 0.6, transform: affC2, tint: 0x38bdf8, tintMode: 'shade' }]]),
+      },
+    },
+    1000,
+    800
+  );
+  const c2Out = disp.find((l) => l.id === 'c2')!;
+  assert.ok(Math.abs(c2Out.opacity - 0.3) < 1e-6);
+  assert.equal(c2Out.onionTint, 0x38bdf8);
+  assert.equal(c2Out.onionMode, 'shade');
+  assert.ok(c2Out.renderTransform && !c2Out.renderTransform.isIdentity);
+  lt = resetLightTableTransform(lt, 'c2');
+  assert.equal(getLightTableTransform(lt, 'c2').x, 0);
+
+  // E3: Local Audio Track metadata normalization, frame span, playback scheduling window, and waveform peaks
+  const audMeta = normalizeAudioTrackMeta({
+    localAssetId: 'aud_01',
+    fileName: 'dialogue.wav',
+    durationSec: 2.5,
+    startFrame: 6,
+    volume: 0.8,
+    muted: false,
+  });
+  assert.equal(isAudioLayer({ id: 'a1', layerType: 'group', meta: { audio: audMeta } }), true);
+  assert.equal(nextGroupName([{ id: 'a1', name: 'Audio', layerType: 'group', parentId: null, meta: { audio: audMeta } }]), '圖層組 1');
+
+  const audRange = resolveAudioClipFrameRange(audMeta, 12);
+  assert.equal(audRange.startFrame, 6);
+  assert.equal(audRange.endFrame, 35); // 2.5s * 12fps = 30 frames -> [6..35]
+  assert.equal(audRange.frameCount, 30);
+
+  // Before clip start: scheduled with positive delay
+  const winBefore = computeAudioPlaybackWindow(audMeta, 0, 12)!;
+  assert.ok(Math.abs(winBefore.delaySec - 0.5) < 1e-6);
+  assert.equal(winBefore.bufferOffsetSec, 0);
+  assert.ok(Math.abs(winBefore.playDurationSec - 2.5) < 1e-6);
+  assert.equal(winBefore.gain, 0.8);
+
+  // Inside clip: zero delay with offset into buffer
+  const winMid = computeAudioPlaybackWindow(audMeta, 18, 12)!;
+  assert.equal(winMid.delaySec, 0);
+  assert.ok(Math.abs(winMid.bufferOffsetSec - 1.0) < 1e-6);
+  assert.ok(Math.abs(winMid.playDurationSec - 1.5) < 1e-6);
+
+  // Muted or past end returns null
+  assert.equal(computeAudioPlaybackWindow({ ...audMeta, muted: true }, 18, 12), null);
+  assert.equal(computeAudioPlaybackWindow(audMeta, 40, 12), null);
+
+  // Waveform peak extraction normalizes max peak to 1
+  const peaks = computeWaveformPeaks([0, 0.25, -0.5, 0.1, 0, -0.25, 0.25, 0], 8);
+  assert.equal(peaks.length, 8);
+  assert.equal(peaks[2], 1);
+  assert.equal(peaks[1], 0.5);
+  assert.equal(peaks[0], 0);
 }
 console.log('ui-logic checks passed');
