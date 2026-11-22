@@ -4690,6 +4690,107 @@ await (async () => {
     assert.equal(host.undoMgr.undoGroup('u_owner', () => true).length, 1);
   }
 
+  // 9. Validate shipped official v2.5 sample plugin (lumina-motion-atelier.lumina-plugin) end-to-end
+  {
+    const samplePath = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      '../public/plugins/lumina-motion-atelier.lumina-plugin',
+    );
+    const rawSample = JSON.parse(readFileSync(samplePath, 'utf-8'));
+    const sample = parsePlugin(rawSample) as PluginManifestV2;
+    assert.equal(sample.apiVersion, 2);
+    assert.equal(sample.id, 'lumina.motion-atelier');
+    assert.equal(sample.tools?.length, 1);
+    assert.equal(sample.tools?.[0].id, 'starlight-ribbon');
+    assert.equal(sample.commands.length, 2);
+    assert.equal(sample.panels.length, 1);
+
+    const host = buildV25Host('owner', 'u_owner');
+
+    // Run command: apply-bounce-keyframes
+    const tx1 = new PluginCanvasTransaction(host.adapter, { pluginId: sample.id });
+    const res1 = await startPluginV2Direct(
+      sample,
+      { kind: 'command', commandId: 'apply-bounce-keyframes' },
+      { width: 64, height: 64, dpi: 300 },
+      tx1.createRpcHandler(),
+    ).promise;
+    tx1.commit('Plugin: Lumina Motion Atelier');
+    assert.ok(res1.notice?.includes('Bounce keyframes'));
+    assert.equal(host.layers[1].meta?.keyframes?.length, 3);
+    assert.equal(host.layers[0].meta?.animation?.labels?.[0]?.text, 'Apex');
+
+    // Run command: apply-watercolor-v2
+    const tx2 = new PluginCanvasTransaction(host.adapter, { pluginId: sample.id });
+    const res2 = await startPluginV2Direct(
+      sample,
+      { kind: 'command', commandId: 'apply-watercolor-v2' },
+      { width: 64, height: 64, dpi: 300 },
+      tx2.createRpcHandler(),
+    ).promise;
+    tx2.commit('Plugin: Lumina Motion Atelier');
+    assert.ok(res2.notice?.includes('dilute'));
+    assert.equal(host.getBrushState().mixMode, 'dilute');
+    assert.equal(host.getBrushState().wetEdges, true);
+
+    // Run panel action: inspect-timeline
+    const tx3 = new PluginCanvasTransaction(host.adapter, { pluginId: sample.id });
+    const res3 = await startPluginV2Direct(
+      sample,
+      { kind: 'panel', panelId: 'motion-director', actionId: 'inspect-timeline', values: {} },
+      { width: 64, height: 64, dpi: 300 },
+      tx3.createRpcHandler(),
+    ).promise;
+    tx3.commit('Plugin: Lumina Motion Atelier');
+    assert.ok(res3.statusText?.includes('12 FPS'));
+
+    // Run custom tool: starlight-ribbon Down -> Move -> Up
+    const tx4 = new PluginCanvasTransaction(host.adapter, { pluginId: sample.id });
+    const session = startPluginToolDirect(
+      sample,
+      'starlight-ribbon',
+      { width: 64, height: 64, dpi: 300 },
+      tx4.createRpcHandler(),
+    );
+    const toolOpts = buildInitialToolOptions(sample.tools![0]);
+    const mkSampleEv = (phase: 'down' | 'move' | 'up', x: number, y: number) => ({
+      phase,
+      x,
+      y,
+      startX: 12,
+      startY: 12,
+      deltaX: 0,
+      deltaY: 0,
+      pressure: 0.9,
+      tiltX: 0,
+      tiltY: 0,
+      pointerType: 'pen' as const,
+      buttons: phase === 'up' ? 0 : 1,
+      shiftKey: false,
+      ctrlKey: false,
+      altKey: false,
+      metaKey: false,
+      timestamp: 16,
+      options: toolOpts,
+    });
+    await session.dispatchEvent('down', mkSampleEv('down', 12, 12));
+    tx4.flushPreview();
+    await session.dispatchEvent('move', mkSampleEv('move', 36, 28));
+    tx4.flushPreview();
+    const upRes = await session.dispatchEvent('up', mkSampleEv('up', 48, 36));
+    session.dispose();
+    tx4.commit('Plugin Tool: Starlight Ribbon');
+    assert.ok(upRes.notice?.includes('Starlight Ribbon'));
+    // Verify pixels were actually painted onto cel_own
+    const paintedTile = host.tileStore.get('cel_own');
+    assert.ok(paintedTile, 'Starlight ribbon should paint pixels onto active layer');
+    let nonZeroAlpha = 0;
+    for (let i = 3; i < paintedTile.length; i += 4) {
+      if (paintedTile[i] > 0) nonZeroAlpha += 1;
+    }
+    assert.ok(nonZeroAlpha > 50, `Expected >50 painted pixels from starlight ribbon, got ${nonZeroAlpha}`);
+  }
+
   resetPluginEasingsForTests();
 })();
 console.log('ui-logic checks passed');

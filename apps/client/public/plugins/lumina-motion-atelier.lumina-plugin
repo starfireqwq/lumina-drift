@@ -1,0 +1,189 @@
+{
+  "apiVersion": 2,
+  "id": "lumina.motion-atelier",
+  "name": "Lumina Motion Atelier",
+  "version": "2.5.0",
+  "author": "Lumina Drift",
+  "description": "Official API v2.5 showcase: custom starlight ribbon tool, bounce keyframes with custom bezier easing, and brush engine v2 dynamics preset.",
+  "i18n": {
+    "zh-TW": {
+      "name": "流光動態工坊",
+      "description": "官方 API v2.5 原創套件：星芒流帶自訂工具、自訂貝茲彈跳關鍵影格，以及筆刷引擎 v2 濕染動態預設。"
+    },
+    "zh-CN": {
+      "name": "流光动态工坊",
+      "description": "官方 API v2.5 原创套件：星芒流带自定义工具、自定义贝塞尔弹跳关键帧，以及画笔引擎 v2 湿染动态预设。"
+    },
+    "ja-JP": {
+      "name": "流光モーション工房",
+      "description": "公式 API v2.5 サンプル：スターライトリボン独自ツール、カスタムベジェ弾みキーフレーム、ブラシエンジン v2 プリセット。"
+    }
+  },
+  "permissions": [
+    "timeline:read",
+    "timeline:write",
+    "tools",
+    "input",
+    "layers:read",
+    "pixels:read",
+    "pixels:write",
+    "brush",
+    "commands",
+    "ui:panel"
+  ],
+  "tools": [
+    {
+      "id": "starlight-ribbon",
+      "label": "Starlight Ribbon",
+      "i18nLabel": {
+        "zh-TW": "星芒流帶筆",
+        "zh-CN": "星芒流带笔",
+        "ja-JP": "スターライトリボン"
+      },
+      "hint": "Drag across the canvas to paint a glowing ribbon with pressure scaling and single-step undo.",
+      "i18nHint": {
+        "zh-TW": "在畫布上拖曳繪製流光星芒光帶，支援感壓縮放與單步復原。",
+        "zh-CN": "在画布上拖动绘制流光星芒光带，支持压感缩放与单步撤销。",
+        "ja-JP": "キャンバス上をドラッグして発光リボンを描画（筆圧サイズ・一括元に戻す対応）。"
+      },
+      "icon": "sparkles",
+      "cursor": "crosshair",
+      "suggestedShortcut": "Alt+Shift+KeyR",
+      "throttleMs": 24,
+      "options": [
+        {
+          "kind": "range",
+          "key": "radius",
+          "label": "Radius",
+          "i18nLabel": { "zh-TW": "半徑", "zh-CN": "半径", "ja-JP": "半径" },
+          "initial": 12,
+          "min": 4,
+          "max": 36,
+          "step": 1,
+          "unit": "px"
+        },
+        {
+          "kind": "color",
+          "key": "color",
+          "label": "Glow Color",
+          "i18nLabel": { "zh-TW": "光帶色", "zh-CN": "光带色", "ja-JP": "発光色" },
+          "initial": "#38bdf8"
+        },
+        {
+          "kind": "toggle",
+          "key": "softHalo",
+          "label": "Soft Halo",
+          "i18nLabel": { "zh-TW": "柔光光暈", "zh-CN": "柔光光晕", "ja-JP": "ソフトハロー" },
+          "initial": true
+        }
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "id": "apply-bounce-keyframes",
+      "label": "Apply Bounce Keyframes",
+      "i18nLabel": {
+        "zh-TW": "建立彈跳關鍵影格",
+        "zh-CN": "创建弹跳关键帧",
+        "ja-JP": "弾みキーフレームを作成"
+      },
+      "group": "Motion",
+      "suggestedShortcut": "Alt+Shift+KeyK"
+    },
+    {
+      "id": "apply-watercolor-v2",
+      "label": "Apply Wet Dilute Brush v2",
+      "i18nLabel": {
+        "zh-TW": "套用濕染動態筆刷 v2",
+        "zh-CN": "应用湿染动态画笔 v2",
+        "ja-JP": "ウェットにじみブラシ v2 を適用"
+      },
+      "group": "Brush",
+      "suggestedShortcut": "Alt+Shift+KeyW"
+    }
+  ],
+  "filters": [],
+  "panels": [
+    {
+      "id": "motion-director",
+      "title": "Motion Director",
+      "i18nTitle": {
+        "zh-TW": "流光動態控制台",
+        "zh-CN": "流光动态控制台",
+        "ja-JP": "モーションディレクター"
+      },
+      "icon": "sparkles",
+      "defaultWidth": 290,
+      "fields": [
+        {
+          "kind": "section",
+          "key": "secMotion",
+          "label": "Bounce Keyframes",
+          "i18nLabel": { "zh-TW": "彈跳關鍵影格", "zh-CN": "弹跳关键帧", "ja-JP": "弾みキーフレーム" }
+        },
+        {
+          "kind": "range",
+          "key": "height",
+          "label": "Jump Height",
+          "i18nLabel": { "zh-TW": "起跳高度", "zh-CN": "起跳高度", "ja-JP": "ジャンプ高さ" },
+          "initial": 64,
+          "min": 8,
+          "max": 240,
+          "step": 4,
+          "unit": "px"
+        },
+        {
+          "kind": "range",
+          "key": "span",
+          "label": "Frame Span",
+          "i18nLabel": { "zh-TW": "總幀數", "zh-CN": "总帧数", "ja-JP": "フレーム幅" },
+          "initial": 16,
+          "min": 4,
+          "max": 60,
+          "step": 2,
+          "unit": "f"
+        },
+        {
+          "kind": "range",
+          "key": "overshoot",
+          "label": "Overshoot",
+          "i18nLabel": { "zh-TW": "過衝彈性", "zh-CN": "过冲弹性", "ja-JP": "オーバーシュート" },
+          "initial": 1.45,
+          "min": 1.0,
+          "max": 1.8,
+          "step": 0.05
+        },
+        {
+          "kind": "input",
+          "key": "labelText",
+          "label": "Apex Label",
+          "i18nLabel": { "zh-TW": "頂點標籤", "zh-CN": "顶点标签", "ja-JP": "頂点ラベル" },
+          "initial": "Apex",
+          "maxLength": 32
+        }
+      ],
+      "actions": [
+        {
+          "id": "apply-bounce",
+          "label": "Create Bounce",
+          "i18nLabel": { "zh-TW": "套用彈跳關鍵影格", "zh-CN": "应用弹跳关键帧", "ja-JP": "キーフレーム適用" },
+          "variant": "primary"
+        },
+        {
+          "id": "inspect-timeline",
+          "label": "Inspect Timeline",
+          "i18nLabel": { "zh-TW": "讀取時間軸狀態", "zh-CN": "读取时间轴状态", "ja-JP": "タイムライン確認" },
+          "variant": "secondary"
+        },
+        {
+          "id": "apply-brush",
+          "label": "Wet Brush v2",
+          "i18nLabel": { "zh-TW": "套用濕染 v2", "zh-CN": "应用湿染 v2", "ja-JP": "湿潤ブラシ v2" },
+          "variant": "secondary"
+        }
+      ]
+    }
+  ],
+  "script": "function __hexToRgb(hex) {\n  const h = String(hex || '#38bdf8').replace('#', '');\n  return [\n    parseInt(h.slice(0, 2), 16) || 56,\n    parseInt(h.slice(2, 4), 16) || 189,\n    parseInt(h.slice(4, 6), 16) || 248,\n  ];\n}\n\nlet __lastPt = null;\nlet __activeLayerId = null;\nlet __stampCount = 0;\n\nasync function __stampDab(cx, cy, radius, rgb, softHalo, api) {\n  const r = Math.max(2, Math.min(40, Math.round(radius)));\n  const x0 = Math.max(0, Math.floor(cx - r));\n  const y0 = Math.max(0, Math.floor(cy - r));\n  const x1 = Math.min(api.canvas.width, Math.ceil(cx + r));\n  const y1 = Math.min(api.canvas.height, Math.ceil(cy + r));\n  const w = x1 - x0;\n  const h = y1 - y0;\n  if (w <= 0 || h <= 0) return;\n\n  const existing = await api.pixels.read(__activeLayerId, { x: x0, y: y0, width: w, height: h });\n  const buf = existing.data;\n  for (let py = 0; py < h; py++) {\n    const dy = y0 + py + 0.5 - cy;\n    for (let px = 0; px < w; px++) {\n      const dx = x0 + px + 0.5 - cx;\n      const dist = Math.hypot(dx, dy);\n      if (dist > r) continue;\n      const norm = 1 - dist / r;\n      const core = norm > 0.65 ? 1 : 0;\n      const falloff = softHalo ? norm * norm : (norm > 0.25 ? 1 : norm * 4);\n      const srcA = Math.min(1, falloff * 0.85);\n      if (srcA <= 0.005) continue;\n      const sr = core ? Math.min(255, rgb[0] + 75) : rgb[0];\n      const sg = core ? Math.min(255, rgb[1] + 75) : rgb[1];\n      const sb = core ? Math.min(255, rgb[2] + 75) : rgb[2];\n      const idx = (py * w + px) * 4;\n      const dstA = buf[idx + 3] / 255;\n      const outA = srcA + dstA * (1 - srcA);\n      if (outA > 0) {\n        buf[idx] = Math.round((sr * srcA + buf[idx] * dstA * (1 - srcA)) / outA);\n        buf[idx + 1] = Math.round((sg * srcA + buf[idx + 1] * dstA * (1 - srcA)) / outA);\n        buf[idx + 2] = Math.round((sb * srcA + buf[idx + 2] * dstA * (1 - srcA)) / outA);\n        buf[idx + 3] = Math.round(outA * 255);\n      }\n    }\n  }\n  await api.pixels.write(__activeLayerId, { x: x0, y: y0, width: w, height: h, data: buf });\n  __stampCount += 1;\n}\n\nasync function onPointerDown(toolId, ev, api) {\n  if (toolId !== 'starlight-ribbon') return;\n  const active = await api.layers.getActive();\n  if (!active || !active.canEditPixels) throw new Error('Select an editable raster layer first.');\n  __activeLayerId = active.id;\n  __lastPt = { x: ev.x, y: ev.y };\n  __stampCount = 0;\n  const baseR = Number(ev.options.radius || 12);\n  const r = baseR * (0.45 + 0.55 * Math.max(0.1, ev.pressure || 1));\n  await __stampDab(ev.x, ev.y, r, __hexToRgb(ev.options.color), Boolean(ev.options.softHalo), api);\n}\n\nasync function onPointerMove(toolId, ev, api) {\n  if (toolId !== 'starlight-ribbon' || !__activeLayerId || !__lastPt) return;\n  const baseR = Number(ev.options.radius || 12);\n  const r = baseR * (0.45 + 0.55 * Math.max(0.1, ev.pressure || 1));\n  const rgb = __hexToRgb(ev.options.color);\n  const softHalo = Boolean(ev.options.softHalo);\n  const dist = Math.hypot(ev.x - __lastPt.x, ev.y - __lastPt.y);\n  const step = Math.max(4, r * 0.65);\n  const steps = Math.min(8, Math.max(1, Math.floor(dist / step)));\n  for (let i = 1; i <= steps; i++) {\n    const t = i / steps;\n    const ix = __lastPt.x + (ev.x - __lastPt.x) * t;\n    const iy = __lastPt.y + (ev.y - __lastPt.y) * t;\n    await __stampDab(ix, iy, r, rgb, softHalo, api);\n  }\n  __lastPt = { x: ev.x, y: ev.y };\n}\n\nasync function onPointerUp(toolId, ev, api) {\n  if (toolId !== 'starlight-ribbon') return;\n  if (__activeLayerId && __lastPt) {\n    const baseR = Number(ev.options.radius || 12);\n    const r = baseR * 0.6;\n    await __stampDab(ev.x, ev.y, r, __hexToRgb(ev.options.color), Boolean(ev.options.softHalo), api);\n  }\n  const total = __stampCount;\n  __lastPt = null;\n  __activeLayerId = null;\n  return { notice: 'Starlight Ribbon: ' + total + ' glow stamps' };\n}\n\nfunction onCancel() {\n  __lastPt = null;\n  __activeLayerId = null;\n}\n\nasync function __createBounce(height, span, overshoot, labelText, api) {\n  const active = await api.layers.getActive();\n  if (!active) throw new Error('No active layer selected.');\n  const state = await api.timeline.getState();\n  const start = state.currentFrame || 0;\n  const mid = start + Math.max(2, Math.round(span / 2));\n  const end = start + Math.max(4, Math.round(span));\n  await api.easing.register('lumina-spring', [0.34, overshoot, 0.64, 1], 'Lumina Spring');\n  await api.keyframes.setBatch([\n    {\n      layerId: active.id,\n      keyframes: [\n        { frame: start, x: 0, y: 0, scaleX: 1, scaleY: 1, opacity: 1, presetId: 'lumina-spring' },\n        { frame: mid, x: 0, y: -height, scaleX: 0.94, scaleY: 1.08, opacity: 1, easing: 'easeInOut' },\n        { frame: end, x: 0, y: 0, scaleX: 1, scaleY: 1, opacity: 1, easing: 'easeOut' }\n      ]\n    }\n  ]);\n  if (state.tracks.length > 0 && labelText) {\n    const writableTrack = state.tracks.find((tr) => tr.canManage);\n    if (writableTrack) {\n      await api.timeline.setLabel(mid, labelText, writableTrack.folderId);\n    }\n  }\n  return { start, mid, end, layerName: active.name };\n}\n\nasync function __applyWatercolorV2(api) {\n  const before = await api.brush.get();\n  await api.brush.set({\n    color: '#38bdf8',\n    secondaryColor: '#e0f2fe',\n    size: Math.max(18, Math.min(64, before.size || 28)),\n    mixMode: 'dilute',\n    colorMixing: 0.65,\n    paintAmount: 0.55,\n    colorStretch: 0.45,\n    fgBgMix: 0.35,\n    wetEdges: true,\n    dynamics: {\n      size: { pressure: true, tilt: false, velocity: false, velocityInvert: false, random: 0.05, min: 0.25 },\n      opacity: { pressure: true, tilt: false, velocity: true, velocityInvert: false, random: 0, min: 0.3 }\n    }\n  });\n  return await api.brush.get();\n}\n\nasync function onCommand(commandId, api) {\n  if (commandId === 'apply-bounce-keyframes') {\n    const res = await __createBounce(64, 16, 1.45, 'Apex', api);\n    return { notice: 'Bounce keyframes (' + res.start + '-' + res.end + ') on ' + res.layerName };\n  }\n  if (commandId === 'apply-watercolor-v2') {\n    const b = await __applyWatercolorV2(api);\n    return { notice: 'Brush v2 preset applied (' + b.mixMode + ', wetEdges=' + b.wetEdges + ')' };\n  }\n  throw new Error('Unknown command: ' + commandId);\n}\n\nasync function onPanelAction(panelId, actionId, values, api) {\n  if (panelId !== 'motion-director') return {};\n  if (actionId === 'apply-bounce') {\n    const res = await __createBounce(\n      Number(values.height || 64),\n      Number(values.span || 16),\n      Number(values.overshoot || 1.45),\n      String(values.labelText || ''),\n      api\n    );\n    return { statusText: 'Created 3 keyframes (' + res.start + ' -> ' + res.mid + ' -> ' + res.end + ')', notice: 'Bounce keyframes applied' };\n  }\n  if (actionId === 'inspect-timeline') {\n    const state = await api.timeline.getState();\n    const presets = await api.easing.listPresets();\n    return {\n      statusText: state.fps + ' FPS · Frame ' + (state.currentFrame + 1) + '/' + state.length + ' · ' + presets.length + ' easings'\n    };\n  }\n  if (actionId === 'apply-brush') {\n    const b = await __applyWatercolorV2(api);\n    return { statusText: 'Brush v2: ' + b.mixMode + ' · size ' + b.size + ' · wetEdges ' + (b.wetEdges ? 'ON' : 'OFF') };\n  }\n  return {};\n}\n"
+}
