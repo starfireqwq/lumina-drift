@@ -78,8 +78,14 @@ import {
   ShortcutManager,
   makePluginCommandShortcutId,
   makePluginPanelShortcutId,
+  makePluginToolShortcutId,
   parsePluginShortcutId,
 } from '../src/engine/ShortcutManager';
+import {
+  buildInitialToolOptions,
+  collectEnabledPluginTools,
+  PluginToolPointerController,
+} from '../src/plugins/pluginTools';
 import {
   applyPanelPatchValues,
   buildInitialPanelValues,
@@ -4581,6 +4587,107 @@ await (async () => {
     await badTx.rollback();
     // After rollback, previewed pixel MUST be reverted to 0!
     assert.equal(badHost.tileStore.get('cel_own')?.[(2 * 64 + 2) * 4 + 3], 0);
+  }
+
+  // 8. PluginToolPointerController throttling/coalescing + tool shortcut parsing
+  {
+    const toolShortcutId = makePluginToolShortcutId('lumina.motion', 'starlight-ribbon');
+    assert.deepEqual(parsePluginShortcutId(toolShortcutId), {
+      kind: 'tool',
+      pluginId: 'lumina.motion',
+      toolId: 'starlight-ribbon',
+    });
+
+    const host = buildV25Host('owner', 'u_owner');
+    const throttlePlugin = parsePlugin({
+      apiVersion: 2,
+      id: 'lumina.v25-throttle-test',
+      name: 'Throttle Test',
+      version: '2.5.0',
+      author: 'Lumina',
+      description: 'Verifies move coalescing and single stroke commit.',
+      permissions: ['tools', 'input', 'layers:read', 'pixels:write'],
+      tools: [
+        {
+          id: 'ribbon',
+          label: 'Ribbon',
+          throttleMs: 30,
+          options: [{ kind: 'range', key: 'size', label: 'Size', initial: 2, min: 1, max: 8 }],
+        },
+      ],
+      script: `
+        let moves = 0;
+        async function dot(x, y, api) {
+          const active = await api.layers.getActive();
+          const px = Math.max(0, Math.min(62, Math.floor(x)));
+          const py = Math.max(0, Math.min(62, Math.floor(y)));
+          const d = new Uint8Array(4);
+          d[0] = 255; d[1] = 200; d[2] = 60; d[3] = 255;
+          await api.pixels.write(active.id, { x: px, y: py, width: 1, height: 1, data: d });
+        }
+        async function onPointerDown(toolId, ev, api) {
+          moves = 0;
+          await dot(ev.x, ev.y, api);
+        }
+        async function onPointerMove(toolId, ev, api) {
+          moves += 1;
+          await dot(ev.x, ev.y, api);
+        }
+        async function onPointerUp(toolId, ev, api) {
+          await dot(ev.x, ev.y, api);
+          return { notice: 'moves:' + moves + ':opt:' + ev.options.size };
+        }
+      `,
+    }) as PluginManifestV2;
+
+    const registered = collectEnabledPluginTools([{ manifest: throttlePlugin, enabled: true }]);
+    assert.equal(registered.length, 1);
+    assert.equal(registered[0].hasInputPermission, true);
+    const initialOpts = buildInitialToolOptions(registered[0].tool);
+    assert.equal(initialOpts.size, 2);
+
+    const ctrl = new PluginToolPointerController();
+    let finalNotice = '';
+    const sample = (x: number, y: number) => ({
+      x,
+      y,
+      pressure: 1,
+      tiltX: 0,
+      tiltY: 0,
+      pointerType: 'mouse' as const,
+      buttons: 1,
+      shiftKey: false,
+      ctrlKey: false,
+      altKey: false,
+      metaKey: false,
+    });
+    assert.equal(
+      ctrl.startStroke(1, sample(4, 4), registered[0], initialOpts, {
+        createTransaction: (p, gid) => new PluginCanvasTransaction(host.adapter, { pluginId: p.id, groupId: gid }),
+        createSession: (p, tid, tx) =>
+          startPluginToolDirect(p, tid, { width: 64, height: 64, dpi: 300 }, tx.createRpcHandler()),
+        onNotice: (n) => { finalNotice = n; },
+        onError: (err) => { throw new Error(err); },
+      }),
+      true,
+    );
+    // Rapid burst of 15 moves should coalesce without queueing 15 invocations
+    for (let i = 1; i <= 15; i++) {
+      ctrl.moveStroke(1, sample(4 + i * 2, 4 + i));
+    }
+    await new Promise((r) => setTimeout(r, 80));
+    ctrl.endStroke(1, sample(40, 24), false);
+    // Wait for async finish
+    for (let i = 0; i < 40 && ctrl.isStrokeActive(); i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.equal(ctrl.isStrokeActive(), false);
+    assert.ok(finalNotice.startsWith('moves:'), `Expected notice from onPointerUp, got "${finalNotice}"`);
+    assert.ok(finalNotice.endsWith(':opt:2'));
+    const moveCount = Number(finalNotice.split(':')[1]);
+    assert.ok(moveCount <= 4, `Expected throttled/coalesced moves <= 4, got ${moveCount}`);
+    // Single grouped undo entry for entire drag
+    assert.equal(host.undoMgr.undoGroup('u_owner', () => true).length, 1);
   }
 
   resetPluginEasingsForTests();

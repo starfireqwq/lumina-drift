@@ -51,8 +51,11 @@ import type { InstalledPlugin } from '../plugins/pluginStore';
 import {
   makePluginCommandShortcutId,
   makePluginPanelShortcutId,
+  makePluginToolShortcutId,
   ShortcutManager,
 } from '../engine/ShortcutManager';
+import { getPluginToolIcon } from './workspace/pluginToolIcons';
+import { makePluginToolKey } from '../plugins/pluginTools';
 import { getUserColor } from '../utils/userColors';
 import { dockActions, PANEL_IDS, PANEL_TITLES, PanelId, useDesktopModeAvailable, useDockLayout, usePhoneLayout } from './workspace/dockStore';
 import { useAnchoredPopover } from '../utils/popoverPosition';
@@ -93,9 +96,11 @@ interface TopNavbarProps {
   onShowStorage?: () => void;
   plugins: InstalledPlugin[];
   openPluginPanels?: readonly string[];
+  activePluginToolKey?: string | null;
   onManagePlugins: () => void;
   onRunPlugin: (pluginId: string, commandId: string) => void;
   onTogglePluginPanel?: (pluginId: string, panelId: string) => void;
+  onSelectPluginTool?: (pluginId: string, toolId: string) => void;
 }
 
 type MenuItem =
@@ -202,9 +207,11 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   onShowStorage,
   plugins,
   openPluginPanels = [],
+  activePluginToolKey = null,
   onManagePlugins,
   onRunPlugin,
   onTogglePluginPanel,
+  onSelectPluginTool,
 }) => {
   const { t, language } = useI18n();
   const pluginText = getPluginLabels(language);
@@ -295,12 +302,32 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   for (const { manifest } of enabledPlugins) {
     const panels =
       manifest.apiVersion === 2 && manifest.permissions.includes('ui:panel') ? manifest.panels : [];
+    const tools =
+      manifest.apiVersion === 2 && manifest.permissions.includes('tools') ? (manifest.tools ?? []) : [];
     const commands =
       manifest.apiVersion === 1 || manifest.permissions.includes('commands') ? manifest.commands : [];
-    if (!panels.length && !commands.length) continue;
+    if (!panels.length && !tools.length && !commands.length) continue;
 
     if (pluginSectionItems.length > 0) pluginSectionItems.push({ kind: 'sep' });
     pluginSectionItems.push({ kind: 'title', label: resolvePluginName(manifest, language) });
+
+    for (const tool of tools) {
+      const ToolIcon = getPluginToolIcon(tool.icon);
+      const toolCombo = shortcutMgr.getComboForAction(makePluginToolShortcutId(manifest.id, tool.id));
+      const toolKey = makePluginToolKey(manifest.id, tool.id);
+      pluginSectionItems.push({
+        kind: 'item',
+        label: resolvePluginText(tool.label, tool.i18nLabel, language),
+        icon: <ToolIcon />,
+        checked: activePluginToolKey === toolKey,
+        hint: toolCombo ? shortcutMgr.getDisplayLabel(toolCombo) : undefined,
+        onSelect: () => onSelectPluginTool?.(manifest.id, tool.id),
+      });
+    }
+
+    if (tools.length > 0 && (panels.length > 0 || commands.length > 0)) {
+      pluginSectionItems.push({ kind: 'sep' });
+    }
 
     for (const panel of panels) {
       const panelCombo = shortcutMgr.getComboForAction(makePluginPanelShortcutId(manifest.id, panel.id));

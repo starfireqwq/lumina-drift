@@ -1,8 +1,25 @@
 import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import type { PluginAction, PluginManifestV2 } from '../plugins/pluginApi';
 import type { PluginV2Result } from '../plugins/pluginRpc';
-import { PluginCanvasTransaction, type PluginCanvasHostAdapter } from '../plugins/pluginCanvasBridge';
+import {
+  PluginCanvasTransaction,
+  type PluginBrushPatch,
+  type PluginBrushState,
+  type PluginCanvasHostAdapter,
+  type PluginTimelineBridge,
+} from '../plugins/pluginCanvasBridge';
 import { createSelectionEngineBridge } from '../plugins/pluginSelectionBridge';
+import { getPluginLabels } from '../plugins/pluginLabels';
+import { getPlugins, subscribePlugins } from '../plugins/pluginStore';
+import {
+  buildInitialToolOptions,
+  collectEnabledPluginTools,
+  makePluginToolKey,
+  PluginToolPointerController,
+  type RawPointerSample,
+  type RegisteredPluginTool,
+} from '../plugins/pluginTools';
+import { startPluginToolSessionInWorker } from '../plugins/runPlugin';
 import { Application, Container, type Filter, Graphics, MaskFilter, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
 
 function parseWorkspaceBgColor(cssColor: string, fallback = 0x0d0e12): number {
@@ -319,6 +336,8 @@ export interface CanvasPluginAccess {
     values: Record<string, unknown>,
     options?: { onSlowStart?: () => void; signal?: AbortSignal },
   ): Promise<PluginV2Result>;
+  selectPluginTool(pluginId: string, toolId: string): void;
+  clearPluginTool(): void;
 }
 
 interface CanvasWorkspaceProps {
@@ -356,6 +375,7 @@ interface CanvasWorkspaceProps {
   onUpdateLayerProps?: (layerId: string, props: Partial<LayerModel>) => void | Promise<void>;
   onRegisterGetLayerCanvases?: (access: CanvasProjectAccess | null) => void;
   onRegisterPluginAccess?: (access: CanvasPluginAccess | null) => void;
+  onActivePluginToolChange?: (toolKey: string | null) => void;
   onRegisterBakeScreentone?: (fn: (layerId: string, params: { density: number; angleRad: number; dotScale: number }) => void) => void;
   onQuickEnterCanvas?: () => void;
   onQuickCreateCanvas?: () => void;
@@ -373,6 +393,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   resizeRequest = 0,
   importImagesRequest = null,
   onRegisterPluginAccess,
+  onActivePluginToolChange,
   onRequestCreateMyLayer,
   onSelectLayer,
   onCreateLayer,
@@ -862,6 +883,63 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const currentToolRef = useRef(currentTool);
   currentToolRef.current = currentTool;
 
+  // Plugin API v2.5: enabled custom tools, active tool selection, per-tool options, and pointer stroke controller
+  const installedPlugins = useSyncExternalStore(subscribePlugins, getPlugins, getPlugins);
+  const pluginTools = useMemo(() => collectEnabledPluginTools(installedPlugins), [installedPlugins]);
+  const [activePluginToolKey, setActivePluginToolKey] = useState<string | null>(null);
+  const activePluginTool = useMemo<RegisteredPluginTool | null>(
+    () => (activePluginToolKey ? pluginTools.find((item) => item.key === activePluginToolKey) ?? null : null),
+    [pluginTools, activePluginToolKey],
+  );
+  const activePluginToolRef = useRef<RegisteredPluginTool | null>(null);
+  activePluginToolRef.current = activePluginTool;
+  const [pluginToolOptionsByKey, setPluginToolOptionsByKey] = useState<
+    Record<string, Record<string, string | number | boolean>>
+  >({});
+  const pluginToolOptionsRef = useRef(pluginToolOptionsByKey);
+  pluginToolOptionsRef.current = pluginToolOptionsByKey;
+  const pluginToolControllerRef = useRef<PluginToolPointerController>(new PluginToolPointerController());
+
+  const clearPluginTool = useCallback(() => {
+    pluginToolControllerRef.current.cancelStroke();
+    setActivePluginToolKey(null);
+  }, []);
+
+  const selectPluginTool = useCallback(
+    (pluginId: string, toolId: string) => {
+      const key = makePluginToolKey(pluginId, toolId);
+      const found = pluginTools.find((item) => item.key === key);
+      if (!found) return;
+      pluginToolControllerRef.current.cancelStroke();
+      if (transformLayerIdRef.current) cancelTransform();
+      setActivePluginToolKey((prev) => (prev === key ? null : key));
+      setPluginToolOptionsByKey((prev) =>
+        prev[key] ? prev : { ...prev, [key]: buildInitialToolOptions(found.tool) },
+      );
+    },
+    [pluginTools],
+  );
+
+  // If the active plugin tool is disabled/removed, cleanly return to built-in tool
+  useEffect(() => {
+    if (activePluginToolKey && !pluginTools.some((item) => item.key === activePluginToolKey)) {
+      pluginToolControllerRef.current.cancelStroke();
+      setActivePluginToolKey(null);
+    }
+  }, [activePluginToolKey, pluginTools]);
+
+  // Notify App/TopNavbar when the active custom plugin tool changes
+  useEffect(() => {
+    onActivePluginToolChange?.(activePluginTool?.key ?? null);
+  }, [activePluginTool?.key, onActivePluginToolChange]);
+
+  // Cancel any in-flight custom plugin stroke when canvas switches or unmounts
+  useEffect(() => {
+    return () => {
+      pluginToolControllerRef.current.cancelStroke();
+    };
+  }, [canvas?.id]);
+
   const [isResizeModalOpen, setIsResizeModalOpen] = useState<boolean>(false);
   const resizeModalOpenRef = useRef<boolean>(false);
   resizeModalOpenRef.current = isResizeModalOpen;
@@ -1171,7 +1249,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     : currentTool === 'liquify' ? liquifyRadius * 2
     : currentTool === 'blur' || currentTool === 'smudge' || vectorCursorClass ? brushProps.size * 2
     : brushProps.size;
-  const showBrushCursor = eraserHover || Boolean(vectorCursorClass) || ['brush', 'pencil', 'eraser', 'liquify', 'blur', 'smudge', 'select_brush', 'select_eraser'].includes(currentTool);
+  const showBrushCursor = !activePluginTool && (eraserHover || Boolean(vectorCursorClass) || ['brush', 'pencil', 'eraser', 'liquify', 'blur', 'smudge', 'select_brush', 'select_eraser'].includes(currentTool));
 
   // The number the options bar / [ ] keys edit: liquify keeps its own radius, the rest the brush size
   const sizeValue = currentTool === 'liquify' ? liquifyRadius : brushProps.size;
@@ -2238,6 +2316,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
 
   const handleSelectTool = (tool: ToolType, preset?: BrushProperties) => {
+    if (activePluginToolRef.current) {
+      pluginToolControllerRef.current.cancelStroke();
+      setActivePluginToolKey(null);
+    }
     const previousTool = currentToolRef.current;
     if (isBrushTool(previousTool)) saveBrushTool(previousTool, brushProps);
     if (transformLayerIdRef.current) cancelTransform();
@@ -5128,13 +5210,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const pluginActionRef = useRef(applyPluginAction);
   pluginActionRef.current = applyPluginAction;
 
-  const runPluginV2 = async (
-    plugin: PluginManifestV2,
-    invocation:
-      | { kind: 'command'; commandId: string }
-      | { kind: 'panel'; panelId: string; actionId: string; values: Record<string, unknown> },
-    options?: { onSlowStart?: () => void; signal?: AbortSignal },
-  ): Promise<PluginV2Result> => {
+  const createPluginHostAdapter = (): { adapter: PluginCanvasHostAdapter; manager: LayerManager } => {
     const manager = layerManagerRef.current;
     const tileEngine = tileEngineRef.current;
     if (!canvas || !manager || !tileEngine || transformLayerIdRef.current || textEdit || importingRef.current) {
@@ -5168,6 +5244,73 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         }
       : null;
 
+    const timelineBridge: PluginTimelineBridge = {
+      getFps: () => animEngineRef.current?.getFps() ?? animFolder?.meta?.animation?.fps ?? 12,
+      getLength: () => animEngineRef.current?.getLength() ?? animTimelineLength,
+      getCurrentFrame: () => animEngineRef.current?.getTime() ?? animFrame,
+      getIsPlaying: () => animEngineRef.current?.getIsPlaying() ?? animPlaying,
+      getLoop: () => animEngineRef.current?.getLoop() ?? true,
+      getRange: () => animEngineRef.current?.getRange() ?? null,
+      setCurrentFrame: (frame) => {
+        const engine = animEngineRef.current;
+        if (engine) {
+          engine.goTo(frame);
+        } else {
+          setAnimFrame(frame);
+        }
+      },
+      setLoop: (loop) => {
+        animEngineRef.current?.setLoop(loop);
+      },
+      setRange: (range) => {
+        animEngineRef.current?.setRange(range);
+      },
+    };
+
+    const readBrushState = (): PluginBrushState => {
+      const b = brushPropsRef.current ?? brushProps;
+      return {
+        color: b.color,
+        ...(b.secondaryColor !== undefined ? { secondaryColor: b.secondaryColor } : {}),
+        size: b.size,
+        minSize: b.minSize,
+        opacity: b.opacity,
+        flow: b.flow,
+        hardness: b.hardness,
+        spacing: b.spacing,
+        scatter: b.scatter,
+        ...(b.roundness !== undefined ? { roundness: b.roundness } : {}),
+        ...(b.tipAngle !== undefined ? { tipAngle: b.tipAngle } : {}),
+        ...(b.angleMode !== undefined ? { angleMode: b.angleMode } : {}),
+        ...(b.tiltSize !== undefined ? { tiltSize: b.tiltSize } : {}),
+        isEraser: b.isEraser,
+        ...(b.mixMode !== undefined ? { mixMode: b.mixMode } : {}),
+        ...(b.colorMixing !== undefined ? { colorMixing: b.colorMixing } : {}),
+        ...(b.paintAmount !== undefined ? { paintAmount: b.paintAmount } : {}),
+        ...(b.colorStretch !== undefined ? { colorStretch: b.colorStretch } : {}),
+        ...(b.fgBgMix !== undefined ? { fgBgMix: b.fgBgMix } : {}),
+        ...(b.wetEdges !== undefined ? { wetEdges: b.wetEdges } : {}),
+        ...(b.hueJitter !== undefined ? { hueJitter: b.hueJitter } : {}),
+        ...(b.satJitter !== undefined ? { satJitter: b.satJitter } : {}),
+        ...(b.valJitter !== undefined ? { valJitter: b.valJitter } : {}),
+        ...(b.textureDensity !== undefined ? { textureDensity: b.textureDensity } : {}),
+        ...(b.textureScale !== undefined ? { textureScale: b.textureScale } : {}),
+        ...(b.textureInvert !== undefined ? { textureInvert: b.textureInvert } : {}),
+        ...(b.textureBlendMode !== undefined ? { textureBlendMode: b.textureBlendMode } : {}),
+        ...(b.dualBrush !== undefined ? { dualBrush: b.dualBrush } : {}),
+        ...(b.dualSize !== undefined ? { dualSize: b.dualSize } : {}),
+        ...(b.dualScatter !== undefined ? { dualScatter: b.dualScatter } : {}),
+        ...(b.dualBlendMode !== undefined ? { dualBlendMode: b.dualBlendMode } : {}),
+        ...(b.dynamics !== undefined ? { dynamics: structuredClone(b.dynamics) } : {}),
+      };
+    };
+
+    const applyBrushPatch = (patch: PluginBrushPatch) => {
+      const safePatch: Partial<BrushProperties> = { ...patch };
+      delete (safePatch as Partial<BrushProperties>).stabilizerLevel;
+      handleBrushPropsChange(safePatch);
+    };
+
     const adapter: PluginCanvasHostAdapter = {
       canvasWidth: canvas.width,
       canvasHeight: canvas.height,
@@ -5182,16 +5325,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       setActiveLayer: (layerId) => {
         onSelectLayer?.(layerId);
       },
-      getBrush: () => ({
-        color: brushPropsRef.current?.color ?? brushProps.color,
-        size: brushPropsRef.current?.size ?? brushProps.size,
-      }),
-      setBrush: (patch) => {
-        handleBrushPropsChange({
-          ...(patch.color !== undefined ? { color: patch.color } : {}),
-          ...(patch.size !== undefined ? { size: patch.size } : {}),
-        });
-      },
+      getBrush: readBrushState,
+      setBrush: applyBrushPatch,
       createLayer: async (opts) => {
         if (!onCreateLayer) return null;
         const created = await onCreateLayer(
@@ -5279,14 +5414,27 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       selection: selectionEngineRef.current
         ? createSelectionEngineBridge(selectionEngineRef.current, () => selection.refreshSelection())
         : undefined,
+      timeline: timelineBridge,
     };
 
-    const tx = new PluginCanvasTransaction(adapter);
+    return { adapter, manager };
+  };
+
+  const runPluginV2 = async (
+    plugin: PluginManifestV2,
+    invocation:
+      | { kind: 'command'; commandId: string }
+      | { kind: 'panel'; panelId: string; actionId: string; values: Record<string, unknown> },
+    options?: { onSlowStart?: () => void; signal?: AbortSignal },
+  ): Promise<PluginV2Result> => {
+    const { adapter, manager } = createPluginHostAdapter();
+
+    const tx = new PluginCanvasTransaction(adapter, { pluginId: plugin.id });
     const { startPluginCommandV2, startPluginPanelActionV2 } = await import('../plugins/runPlugin');
     const ctx = {
-      width: canvas.width,
-      height: canvas.height,
-      dpi: clampDpi(canvas.dpi ?? 300),
+      width: canvas!.width,
+      height: canvas!.height,
+      dpi: clampDpi(canvas!.dpi ?? 300),
       tileSize: DEFAULT_TILE_SIZE,
     };
 
@@ -5309,6 +5457,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
   const runPluginV2Ref = useRef(runPluginV2);
   runPluginV2Ref.current = runPluginV2;
+  const selectPluginToolRef = useRef(selectPluginTool);
+  selectPluginToolRef.current = selectPluginTool;
+  const clearPluginToolRef = useRef(clearPluginTool);
+  clearPluginToolRef.current = clearPluginTool;
 
   useLayoutEffect(() => {
     if (!canvas?.id || !isCanvasPresented || !isEngineReady || !onRegisterPluginAccess) return;
@@ -5319,6 +5471,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         runPluginV2Ref.current(plugin, { kind: 'command', commandId }, options),
       runV2PanelAction: (plugin, panelId, actionId, values, options) =>
         runPluginV2Ref.current(plugin, { kind: 'panel', panelId, actionId, values }, options),
+      selectPluginTool: (pluginId, toolId) => selectPluginToolRef.current(pluginId, toolId),
+      clearPluginTool: () => clearPluginToolRef.current(),
     });
     return () => onRegisterPluginAccess(null);
   }, [canvas?.id, isCanvasPresented, isEngineReady, onRegisterPluginAccess]);
@@ -5702,6 +5856,20 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     ? t.align.targetCount.replace('{count}', String(alignTargetsList.length))
     : (alignTargetsList[0]?.root.name ?? null);
 
+  const toRawPointerSample = (e: PointerEvent, local: { x: number; y: number }): RawPointerSample => ({
+    x: local.x,
+    y: local.y,
+    pressure: e.pointerType === 'pen' || e.pointerType === 'touch' ? Math.max(0, Math.min(1, e.pressure || 0.5)) : (e.buttons & 1 ? 1 : 0),
+    tiltX: Number.isFinite(e.tiltX) ? e.tiltX : 0,
+    tiltY: Number.isFinite(e.tiltY) ? e.tiltY : 0,
+    pointerType: e.pointerType === 'pen' ? 'pen' : e.pointerType === 'touch' ? 'touch' : 'mouse',
+    buttons: e.buttons,
+    shiftKey: e.shiftKey,
+    ctrlKey: e.ctrlKey,
+    altKey: e.altKey,
+    metaKey: e.metaKey,
+  });
+
   // Pointer & touch input: layer checks, tool routing and navigation gestures (workspace/tools/useCanvasPointer)
   const pointer = useCanvasPointer(toolCtx, { brush, liquify, shapes, selection, fill, vector, transform }, {
     setEraserHover,
@@ -5723,6 +5891,51 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     onSelectLayer,
     onRequestCreateMyLayer,
     onTextTool: (local) => handleTextTool(local),
+    pluginTool: {
+      isActive: () => Boolean(activePluginToolRef.current),
+      onDown: (e, local) => {
+        const reg = activePluginToolRef.current;
+        if (!reg || !canvas) return false;
+        const labels = getPluginLabels(language);
+        if (!reg.hasInputPermission) {
+          warn(labels.toolNeedsInputPerm, 3000);
+          return true;
+        }
+        const ctx = {
+          width: canvas.width,
+          height: canvas.height,
+          dpi: clampDpi(canvas.dpi ?? 300),
+          tileSize: DEFAULT_TILE_SIZE,
+        };
+        const opts = pluginToolOptionsRef.current[reg.key] ?? buildInitialToolOptions(reg.tool);
+        return pluginToolControllerRef.current.startStroke(
+          e.pointerId,
+          toRawPointerSample(e, local),
+          reg,
+          opts,
+          {
+            createTransaction: (plugin, groupId) => {
+              const { adapter } = createPluginHostAdapter();
+              return new PluginCanvasTransaction(adapter, { pluginId: plugin.id, groupId });
+            },
+            createSession: (plugin, toolId, tx) =>
+              startPluginToolSessionInWorker(plugin, toolId, ctx, tx.createRpcHandler()),
+            onNotice: (text) => warn(text, 2400),
+            onError: (msg) => {
+              warn(/timed out|time limit/i.test(msg) ? labels.toolTimedOut : msg, 3200);
+            },
+          },
+        );
+      },
+      onMove: (e, local) => pluginToolControllerRef.current.moveStroke(e.pointerId, toRawPointerSample(e, local)),
+      onUp: (e, local, cancelled) =>
+        pluginToolControllerRef.current.endStroke(
+          e.pointerId,
+          local ? toRawPointerSample(e, local) : null,
+          cancelled,
+        ),
+      onCancel: () => pluginToolControllerRef.current.cancelStroke(),
+    },
   });
   const { handlePointerDown, handlePointerMove, handlePointerUp } = pointer;
 
@@ -6083,6 +6296,20 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         onStartTransform={() => startTransformMode()}
         isTransformActive={isTransformActive}
         onOpenBrushSettings={() => setIsBrushSettingsOpen(true)}
+        activePluginTool={activePluginTool}
+        pluginToolOptions={activePluginTool ? (pluginToolOptionsByKey[activePluginTool.key] ?? buildInitialToolOptions(activePluginTool.tool)) : undefined}
+        onPluginToolOptionChange={(key, value) => {
+          const cur = activePluginToolRef.current;
+          if (!cur) return;
+          setPluginToolOptionsByKey((prev) => ({
+            ...prev,
+            [cur.key]: {
+              ...(prev[cur.key] ?? buildInitialToolOptions(cur.tool)),
+              [key]: value,
+            },
+          }));
+        }}
+        onExitPluginTool={clearPluginTool}
       />
 
       <div className="flex min-h-0 min-w-0 flex-1" data-dock-root="">
@@ -6091,7 +6318,19 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           className={`flex min-h-0 shrink-0 ${railRight ? 'order-last flex-row-reverse [&>[role=group]]:border-l [&>[role=group]]:border-r-0' : ''}`}>
           <BrushSideSliders size={sizeValue} onSize={setSizeValue} opacity={brushProps.opacity} onOpacity={(opacity) => handleBrushPropsChange({ opacity })}
             color={brushProps.color} onSizeDrag={setSizeDragging} width={dockLayout.slidersWidth} side={railRight ? 'right' : 'left'} onResizeWidth={dockActions.setSlidersWidth} />
-          {!isPhone && <ToolRail orientation="vertical" side={railRight ? 'right' : 'left'} width={dockLayout.toolRailWidth} onResizeWidth={dockActions.setToolRailWidth} currentTool={currentTool} onSelectTool={handleSelectTool} />}
+          {!isPhone && (
+            <ToolRail
+              orientation="vertical"
+              side={railRight ? 'right' : 'left'}
+              width={dockLayout.toolRailWidth}
+              onResizeWidth={dockActions.setToolRailWidth}
+              currentTool={currentTool}
+              onSelectTool={handleSelectTool}
+              pluginTools={pluginTools}
+              activePluginToolKey={activePluginTool?.key ?? null}
+              onSelectPluginTool={selectPluginTool}
+            />
+          )}
         </div>
         {!isPhone && <DockColumn side="left" panels={panelDefs} />}
 
@@ -6159,8 +6398,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 setRadialMenuPos({ x: event.clientX, y: event.clientY });
                 setIsRadialMenuOpen(true);
               }}
-              style={{ touchAction: 'none' }}
-              className={`atelier-canvas-viewport relative min-h-0 min-w-0 flex-1 overflow-hidden ${currentTool === 'hand' ? 'cursor-grab' : 'cursor-crosshair'}`}
+              style={{
+                touchAction: 'none',
+                ...(activePluginTool?.tool.cursor ? { cursor: activePluginTool.tool.cursor } : {}),
+              }}
+              className={`atelier-canvas-viewport relative min-h-0 min-w-0 flex-1 overflow-hidden ${!activePluginTool && currentTool === 'hand' ? 'cursor-grab' : 'cursor-crosshair'}`}
             >
               {/* Dedicated Pixi Canvas Host Layer (isolated from React DOM reconciler) */}
               <div ref={canvasMountRef} data-canvas-presented={isCanvasPresented}
@@ -6529,7 +6771,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       {isPhone && (
         <div data-workspace-entry="mobile-tools" className="flex shrink-0 items-stretch">
           <div className="min-w-0 flex-1">
-            <ToolRail orientation="horizontal" currentTool={currentTool} onSelectTool={handleSelectTool} />
+            <ToolRail
+              orientation="horizontal"
+              currentTool={currentTool}
+              onSelectTool={handleSelectTool}
+              pluginTools={pluginTools}
+              activePluginToolKey={activePluginTool?.key ?? null}
+              onSelectPluginTool={selectPluginTool}
+            />
           </div>
           <div className="atelier-chrome flex shrink-0 items-center gap-1 overflow-x-auto border-l border-t px-1.5 no-scrollbar">
             <button type="button" onClick={() => openMobileSheet('color')} aria-label="色彩" className="atelier-icon-btn h-10 w-10 shrink-0">
