@@ -32,3 +32,5 @@ apps/client/resources/cloudflared*
 apps/client/resources/LuminaThumbProvider.*
 out
 .turbo
+# Local third-party reference assets (screenshots/recordings): never commit to public repo.
+docs/csp-reference/
