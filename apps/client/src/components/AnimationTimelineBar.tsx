@@ -21,15 +21,10 @@ import {
   Repeat, Repeat2, SkipBack, SkipForward, SlidersHorizontal, Tag, Trash2, Users, X,
 } from 'lucide-react';
 import { AtelierModal, modalButton } from './AtelierModal';
+import { AnimationExportModal } from './AnimationExportModal';
 import { OverlayPresence } from './OverlayPresence';
 import { usePhoneLayout } from './workspace/dockStore';
 import { getUserColor } from '../utils/userColors';
-import {
-  computeVideoExportDimensionsForResolution,
-  getVideoExtensionFromBlob,
-  unwrapMediaRecorderError,
-  type VideoExportResolution,
-} from '../engine/videoExport';
 import { useI18n } from '../context/I18nContext';
 
 /** What to put in a GIF / video / sequence: one folder (solo), every animation folder (team), or the whole picture */
@@ -194,7 +189,7 @@ const AnimThumbImg: React.FC<{
 export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   engine, isOpen, onClose, tracks, activeFolderId, thumbnails = EMPTY_THUMBS, subscribeThumbnails, getThumbnailsSnapshot, ownerNames, can,
   onCreateFolder, onAddFrame, onDuplicateFrame, onReuseCel, onAddBlank, onKeyframePanelChange, onDeleteFrame, onMoveFrame, onSetHold, onUpdateCelMeta, onUpdateLabels, onRepeatEntries, onRenameInOrder, onJumpKeyframe, onToggleShared, onFpsChange,
-  onSelectCell, planExport, onPlaceEntries, onCopyEntries, onPasteEntries, onSetEntryHold, ripple, onToggleRipple,
+  onSelectCell, planExport, planCelExport, onPlaceEntries, onCopyEntries, onPasteEntries, onSetEntryHold, ripple, onToggleRipple,
   timelineLength, lengthIsSet, onSetLength, lightTable, onUpdateLightTable,
   activeLayer, canvasWidth = 1920, canvasHeight = 1080, onUpdateLayerKeyframes,
   liveKeyframeEval, showKeyframeHandles, onToggleKeyframeHandles, showMotionPath, onToggleMotionPath,
@@ -214,8 +209,6 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   const [selection, setSelection] = useState<{ folderId: string; ids: Set<string> } | null>(null);
   const [multiMode, setMultiMode] = useState(false);
   const lastPickRef = useRef<string | null>(null);
-  const mp4Supported = typeof MediaRecorder !== 'undefined' && (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1') || MediaRecorder.isTypeSupported('video/mp4'));
-  const canRecord = typeof MediaRecorder !== 'undefined';
   const dragRef = useRef(drag);
   dragRef.current = drag;
   const suppressClickRef = useRef(false);
@@ -286,11 +279,6 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   const [noteModal, setNoteModal] = useState<{ entryId: string; label: string; text: string } | null>(null);
   const [labelModal, setLabelModal] = useState<{ frame: number; text: string; existing: boolean } | null>(null);
   const [repeatModal, setRepeatModal] = useState<{ folderId: string; entryIds: string[]; mode: 'count' | 'toEnd'; count: number; busy: boolean } | null>(null);
-  const [exportFormat, setExportFormat] = useState<'gif' | 'mp4'>('gif');
-  const [exportResolution, setExportResolution] = useState<VideoExportResolution>('4k');
-  const [exportScope, setExportScope] = useState<AnimationExportScope>('folder');
-  const [exportRangeOnly, setExportRangeOnly] = useState(false);
-  const [exportProgress, setExportProgress] = useState<string | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const fps = engine.getFps();
 
@@ -548,48 +536,6 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
     return Math.max(0, Math.min(shownLength - 1, Math.floor((e.clientX - rect.left) / CELL)));
   };
 
-  const handleExportAnimation = async () => {
-    const plan = planExport({ scope: exportScope, useRange: exportRangeOnly && Boolean(range) });
-    if (!plan || plan.segments.length === 0) {
-      alert(t.animation.noFramesToExport);
-      return;
-    }
-    try {
-      setExportProgress(t.animation.preparing);
-      const { ExportEngine } = await import('../engine/ExportEngine');
-      const total = plan.segments.length;
-      // Frames are rendered one at a time; the GIF encoder takes each as it comes
-      const next = async (i: number) => {
-        setExportProgress(t.animation.renderingFrame.replace('{current}', String(i + 1)).replace('{total}', String(total)));
-        await new Promise((r) => setTimeout(r, 0)); // let the progress paint
-        return { canvas: plan.render(plan.segments[i].time), hold: plan.segments[i].hold };
-      };
-      let blob: Blob;
-      if (exportFormat === 'gif') {
-        blob = await ExportEngine.exportGifAnimation(next, total, plan.width, plan.height, fps);
-      } else {
-        setExportProgress(t.animation.recordingVideo);
-        blob = await ExportEngine.exportVideoAnimation(
-          next,
-          total,
-          plan.width,
-          plan.height,
-          fps,
-          'mp4',
-          exportResolution
-        );
-      }
-      const ext = exportFormat === 'gif' ? 'gif' : getVideoExtensionFromBlob(blob, 'mp4');
-      ExportEngine.downloadBlob(blob, `animation_${Date.now()}.${ext}`);
-      setShowExportModal(false);
-    } catch (err: unknown) {
-      alert(`${t.animation.exportFailed}: ${unwrapMediaRecorderError(err).message}`);
-    } finally {
-      plan.done();
-      setExportProgress(null);
-    }
-  };
-
   if (!isOpen && !retained) return null;
   const iconBtn = 'flex h-7 min-w-7 shrink-0 whitespace-nowrap items-center justify-center gap-0.5 rounded px-1 text-neutral-300 hover:bg-neutral-800 hover:text-white disabled:opacity-35 disabled:hover:bg-transparent';
   const chip = (on: boolean) => `flex h-7 shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border px-2 text-[11px] font-bold disabled:opacity-40 ${on ? 'border-amber-500/60 bg-amber-500/15 text-amber-300' : 'border-neutral-700/70 text-neutral-300 hover:bg-neutral-800'}`;
@@ -651,7 +597,6 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
     engine.endFlip();
     setFlipping(false);
   };
-  const exportFrames = exportRangeOnly && range ? range.end - range.start + 1 : length;
 
   return (
     <div ref={rootRef} tabIndex={-1} onKeyDown={onTimelineKey} data-anim-timeline data-phone={isPhone ? '1' : undefined} data-phase={isOpen ? 'open' : 'closing'} style={{ touchAction: 'none' }}
@@ -1944,70 +1889,20 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
         </AtelierModal>
       </OverlayPresence>
 
-      <OverlayPresence open={showExportModal}>
-        <AtelierModal title={t.animation.exportModalTitle} icon={<Film />} onClose={() => !exportProgress && setShowExportModal(false)}
-          footer={
-            <>
-              <button type="button" className={modalButton.secondary} disabled={Boolean(exportProgress)} onClick={() => setShowExportModal(false)}>{t.common.cancel}</button>
-              <button type="button" className={modalButton.primary} onClick={handleExportAnimation} disabled={Boolean(exportProgress) || (exportFormat === 'mp4' && !canRecord)}>
-                {exportProgress ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
-                {exportProgress ?? (exportFormat === 'mp4' && !mp4Supported && canRecord ? t.animation.exportWebm : t.animation.exportDownload)}
-              </button>
-            </>
-          }>
-          <div className="space-y-3">
-            <div role="radiogroup" aria-label={t.animation.exportFormat} className="grid grid-cols-2 gap-2">
-              {([['gif', t.animation.exportGif, 'GIF'], ['mp4', t.animation.exportMp4, 'MP4 / WebM']] as const).map(([id, label, hint]) => (
-                <button key={id} type="button" role="radio" aria-checked={exportFormat === id} onClick={() => setExportFormat(id)}
-                  className={`flex flex-col gap-0.5 rounded-xl border p-3 text-left ${exportFormat === id ? 'border-emerald-500 bg-emerald-600/20 text-white' : 'border-neutral-800 text-neutral-400 hover:bg-neutral-800'}`}>
-                  <span className="text-xs font-bold">{label}</span>
-                  <span className="text-[10px] text-neutral-500">{hint}</span>
-                </button>
-              ))}
-            </div>
-            {exportFormat === 'mp4' && (
-              <div className="flex items-center justify-between gap-2 rounded-xl border border-neutral-800 bg-neutral-900/60 px-3 py-2">
-                <span className="text-xs text-neutral-300">{t.replay.resolution}</span>
-                <select
-                  aria-label={t.replay.resolution}
-                  value={exportResolution}
-                  onChange={(e) => setExportResolution(e.target.value as VideoExportResolution)}
-                  disabled={Boolean(exportProgress)}
-                  className="rounded-lg border border-neutral-700 bg-neutral-800 px-2 py-1 font-mono text-xs text-neutral-200 outline-none"
-                >
-                  {(['1080p', '2k', '4k'] as const).map((tier) => {
-                    const dims = computeVideoExportDimensionsForResolution(canvasWidth, canvasHeight, tier);
-                    const label = tier === '1080p' ? '1080p' : tier.toUpperCase();
-                    return (
-                      <option key={tier} value={tier}>
-                        {label} ({dims.width}×{dims.height})
-                      </option>
-                    );
-                  })}
-                </select>
-              </div>
-            )}
-            <div role="radiogroup" aria-label={t.animation.exportContent} className="space-y-1.5">
-              {([
-                ['folder', active?.name ?? t.animation.timeline, '1'],
-                ['folders', `${t.animation.timeline} (${tracks.length})`, String(tracks.length)],
-                ['all', t.animation.rangeAll, 'All'],
-              ] as const).map(([id, label, hint]) => (
-                <button key={id} type="button" role="radio" aria-checked={exportScope === id} onClick={() => setExportScope(id)}
-                  className={`flex w-full flex-col gap-0.5 rounded-xl border px-3 py-2 text-left ${exportScope === id ? 'border-emerald-500 bg-emerald-600/20 text-white' : 'border-neutral-800 text-neutral-400 hover:bg-neutral-800'}`}>
-                  <span className="text-xs font-bold">{label}</span>
-                  <span className="text-[10px] text-neutral-500">{hint}</span>
-                </button>
-              ))}
-            </div>
-            <label className={`flex items-center gap-2 text-xs ${range ? 'text-neutral-300' : 'text-neutral-600'}`}>
-              <input type="checkbox" checked={exportRangeOnly && Boolean(range)} disabled={!range} onChange={(e) => setExportRangeOnly(e.target.checked)} />
-              {t.animation.rangePresetText.replace('{range}', range ? t.animation.rangeFrameText.replace('{start}', String(range.start + 1)).replace('{end}', String(range.end + 1)) : t.animation.rangeNotSet)}
-            </label>
-            <p className="text-[11px] text-neutral-400">{exportFrames} · {fps} FPS · {(exportFrames / fps).toFixed(1)} {t.common.seconds}</p>
-          </div>
-        </AtelierModal>
-      </OverlayPresence>
+      <AnimationExportModal
+        open={showExportModal}
+        onClose={() => setShowExportModal(false)}
+        tracks={tracks}
+        activeFolderId={activeFolderId}
+        fps={fps}
+        timelineLength={length}
+        playbackRange={range}
+        timecodeMode={timecode}
+        canvasWidth={canvasWidth}
+        canvasHeight={canvasHeight}
+        planExport={planExport}
+        planCelExport={planCelExport}
+      />
     </div>
   );
 };
