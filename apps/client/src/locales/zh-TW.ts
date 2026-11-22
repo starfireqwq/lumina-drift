@@ -747,6 +747,7 @@ export const zhTW: Translations = {
       blur: '模糊',
       distort: '變形',
       sharpen: '銳化',
+      plugin: '插件',
     },
     items: {
       box: '模糊',
@@ -1311,6 +1312,8 @@ export const zhTW: Translations = {
     shortcutCatAssistStudio: '輔助與工作室',
     shortcutCatEdit: '編輯',
     shortcutCatViewVoice: '畫面與語音',
+    shortcutCatPlugins: '插件指令與面板',
+    shortcutClear: '清除快捷鍵',
     shortcutNotSet: '未設定',
     shortcutBrowserReserved: '瀏覽器占用這組按鍵，網頁收不到',
     shortcutBrowserReservedHint: '被瀏覽器占用，換一組',

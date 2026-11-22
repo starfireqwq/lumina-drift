@@ -3,6 +3,9 @@
  * Run: npx tsx apps/client/scripts/ui-logic.check.ts   (from the repo root; exits non-zero on failure)
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { FLOATS_PER_DAB, StrokeWorkerEngine, type WorkerBrushConfig } from '../src/workers/stroke.worker';
 import { contrastRatio, resolveTheme, THEME_PRESETS, DEFAULT_CUSTOM_THEME } from '../src/theme/themes';
 import { nextSizeStep } from '../src/components/workspace/toolCatalog';
@@ -40,9 +43,45 @@ import {
   normalizeTimelineLabels, parseTimecode, placeEntries, planRepeatCels, planSequentialCelRenames, playbackFrame, removeTimelineLabel, removeTransformKeyframe,
   timeOfCel, trackLength, upsertTimelineLabel, upsertTransformKeyframe,
 } from '../src/engine/AnimationEngine';
-import { ShortcutManager } from '../src/engine/ShortcutManager';
+import {
+  ShortcutManager,
+  makePluginCommandShortcutId,
+  makePluginPanelShortcutId,
+  parsePluginShortcutId,
+} from '../src/engine/ShortcutManager';
+import {
+  applyPanelPatchValues,
+  buildInitialPanelValues,
+  isPluginPanelFieldVisible,
+} from '../src/components/PluginPanelWindow';
 import { cleanLightTable, clearLightTable, emptyLightTable, lightIdsFor, toggleLightCel } from '../src/engine/lightTable';
 import { nextGroupName } from '../src/utils/canvasName';
+import {
+  PLUGIN_LIMITS,
+  PLUGIN_PERMISSIONS_V2_CORE,
+  parsePlugin,
+  parsePluginAction,
+  resolvePluginDescription,
+  resolvePluginName,
+  resolvePluginText,
+  type PluginManifestV2,
+} from '../src/plugins/pluginApi';
+import {
+  createPluginStore,
+  PLUGIN_STORAGE_KEY_V1,
+  PLUGIN_STORAGE_KEY_V2,
+  type PluginStorageBackend,
+} from '../src/plugins/pluginStore';
+import { executePluginV1 } from '../src/plugins/pluginSandboxCore';
+import { startPluginV2Direct } from '../src/plugins/pluginHost';
+import {
+  PluginCanvasTransaction,
+  premultipliedToStraight,
+  straightToPremultiplied,
+  type PluginCanvasHostAdapter,
+} from '../src/plugins/pluginCanvasBridge';
+import { createHeadlessSelectionBridge } from '../src/plugins/pluginSelectionBridge';
+import type { LayerModel } from '@atelier/shared';
 import { verticalRuns } from '../src/engine/textLayer';
 import { deleteAnchor, isCornerAnchor, moveHandle, penPointsToAnchors, toggleCorner } from '../src/engine/vectorEditing';
 import {
@@ -65,9 +104,11 @@ import {
   type CanvasModel, type FilterValues,
 } from '@atelier/shared';
 import {
-  BUILTIN_FILTERS, FILTER_DRAFT, FILTER_GROUPS, defaultFilterValues, filterDraftFactor, filterFitsLayer, filterGroupsInUse, filterPointParam, getFilter,
-  normalizeFilterValues, paramShown, snapRange,
+  BUILTIN_FILTERS, FILTER_DRAFT, FILTER_GROUPS, defaultFilterValues, filterDraftFactor, filterFitsLayer, filterGroupsInUse, filterLabel,
+  filterParamLabel, filterPointParam, filtersInGroup, getFilter, makePluginFilterId, normalizeFilterValues, paramShown, snapRange,
+  syncPluginFilters,
 } from '../src/utils/filterRegistry';
+import { runPluginFilterTiled } from '../src/plugins/pluginFilterCore';
 import { COLOR_ADJUST_PRESETS, matchColorPreset } from '../src/utils/filterPresets';
 import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../src/utils/filterMemoryGuard';
 import { BUILTIN_LIBRARY_CARDS, createFavoriteCard, parseFavoriteCards, scaleFilterValuesForThumbnail } from '../src/utils/filterLibrary';
@@ -2039,4 +2080,1381 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
     seen.set(s.defaultCombo, s.id);
   }
 }
+
+// Plugin API v2.0 Batch 1: Manifest v1/v2 parsing, permissions, limits, and store migration
+{
+  assert.equal(PLUGIN_PERMISSIONS_V2_CORE.length, 8);
+  assert.equal(PLUGIN_LIMITS.maxPackageBytesV1, 128 * 1024);
+  assert.equal(PLUGIN_LIMITS.maxPackageBytesV2, 256 * 1024);
+  assert.equal(PLUGIN_LIMITS.maxInstalledPlugins, 24);
+
+  // v1 backward compatibility
+  const v1Raw = {
+    apiVersion: 1,
+    id: 'studio.v1-sample',
+    name: 'Studio V1',
+    version: '1.0.0',
+    author: 'Tester',
+    description: 'Legacy plugin',
+    permissions: ['brush', 'layers', 'artwork'],
+    commands: [{ id: 'hello', label: 'Hello' }],
+    script: 'function run() { return { kind: "message", text: "hi" }; }',
+  };
+  const v1 = parsePlugin(v1Raw);
+  assert.equal(v1.apiVersion, 1);
+  assert.equal(v1.commands.length, 1);
+  assert.equal(parsePluginAction({ kind: 'brush', color: '#112233', size: 12 }, v1).kind, 'brush');
+
+  // v1 must reject v2 permissions & oversized >128 KiB scripts
+  assert.throws(() => parsePlugin({ ...v1Raw, permissions: ['layers:read'] }));
+  assert.throws(() => parsePlugin({ ...v1Raw, script: 'x'.repeat(PLUGIN_LIMITS.maxPackageBytesV1 + 1) }));
+
+  // v2 full manifest parsing
+  const v2Raw = {
+    apiVersion: 2,
+    id: 'lumina.edge-glow-kit',
+    name: 'Edge Glow Kit',
+    version: '2.0.0',
+    author: 'Lumina Drift',
+    description: 'Custom filter, command, and panel.',
+    i18n: {
+      'zh-TW': { name: '邊緣流光套件', description: '自訂濾鏡與面板。' },
+    },
+    permissions: [
+      'layers:read', 'layers:write', 'pixels:read', 'pixels:write',
+      'selection', 'filters', 'commands', 'ui:panel', 'brush',
+    ],
+    commands: [
+      {
+        id: 'outline-selection',
+        label: 'Outline Selection',
+        i18nLabel: { 'zh-TW': '選區描邊' },
+        group: 'Generate',
+        suggestedShortcut: 'Alt+Shift+KeyG',
+      },
+    ],
+    filters: [
+      {
+        id: 'duotone-glow',
+        label: 'Duotone Glow',
+        i18nLabel: { 'zh-TW': '雙色流光' },
+        group: 'plugin',
+        tilePadding: 4,
+        draft: true,
+        params: [
+          { kind: 'color', key: 'shadow', label: 'Shadow', initial: '#1a2240' },
+          { kind: 'range', key: 'mix', label: 'Intensity', initial: 80, min: 0, max: 100, step: 1, unit: '%' },
+          { kind: 'toggle', key: 'invert', label: 'Invert', initial: false },
+          {
+            kind: 'select', key: 'mode', label: 'Mode', initial: 'soft',
+            when: { key: 'invert', is: [false] },
+            options: [{ value: 'soft', label: 'Soft' }, { value: 'hard', label: 'Hard' }],
+          },
+        ],
+      },
+    ],
+    panels: [
+      {
+        id: 'glow-panel',
+        title: 'Edge Glow',
+        i18nTitle: { 'zh-TW': '邊緣流光' },
+        icon: 'sparkles',
+        defaultWidth: 280,
+        fields: [
+          { kind: 'section', key: 'sec1', label: 'Options' },
+          { kind: 'text', key: 'info', text: 'Ready' },
+          { kind: 'layer', key: 'targetLayer', label: 'Target Layer' },
+          { kind: 'range', key: 'thickness', label: 'Thickness', initial: 4, min: 1, max: 32, step: 1, unit: 'px', live: true },
+          { kind: 'number', key: 'seed', label: 'Seed', initial: 7, min: 0, max: 999 },
+          { kind: 'color', key: 'color', label: 'Color', initial: '#62C5DF' },
+          { kind: 'toggle', key: 'newLayer', label: 'New Layer', initial: true },
+          { kind: 'select', key: 'style', label: 'Style', initial: 'outer', options: [{ value: 'outer', label: 'Outer' }, { value: 'inner', label: 'Inner' }] },
+          { kind: 'input', key: 'tag', label: 'Tag', initial: 'glow', maxLength: 40, when: { key: 'newLayer', is: [true] } },
+        ],
+        actions: [
+          { id: 'apply', label: 'Apply', i18nLabel: { 'zh-TW': '套用' }, variant: 'primary' },
+          { id: 'reset', label: 'Reset', variant: 'secondary' },
+        ],
+      },
+    ],
+    script: 'async function onCommand() { return { notice: "ok" }; }',
+  };
+
+  const v2 = parsePlugin(v2Raw) as PluginManifestV2;
+  assert.equal(v2.apiVersion, 2);
+  assert.equal(v2.commands.length, 1);
+  assert.equal(v2.filters.length, 1);
+  assert.equal(v2.filters[0].group, 'plugin');
+  assert.equal(v2.filters[0].tilePadding, 4);
+  assert.equal(v2.panels.length, 1);
+  assert.equal(v2.panels[0].fields.length, 9);
+  assert.equal(resolvePluginName(v2, 'zh-TW'), '邊緣流光套件');
+  assert.equal(resolvePluginName(v2, 'ja-JP'), 'Edge Glow Kit');
+  assert.equal(resolvePluginDescription(v2, 'zh-TW'), '自訂濾鏡與面板。');
+  assert.equal(resolvePluginText(v2.commands[0].label, v2.commands[0].i18nLabel, 'zh-TW'), '選區描邊');
+  assert.equal(resolvePluginText(v2.commands[0].label, v2.commands[0].i18nLabel, 'en-US'), 'Outline Selection');
+
+  // v2 accepts scripts up to 256 KiB and rejects > 256 KiB
+  const v2LargeScript = ' '.repeat(PLUGIN_LIMITS.maxPackageBytesV1 + 1024) + 'function onCommand(){}';
+  assert.equal(parsePlugin({ ...v2Raw, script: v2LargeScript }).apiVersion, 2);
+  assert.throws(() => parsePlugin({ ...v2Raw, script: 'x'.repeat(PLUGIN_LIMITS.maxPackageBytesV2 + 1) }));
+
+  // v2 strict validation edge cases
+  assert.throws(() => parsePlugin({ ...v2Raw, apiVersion: 3 }));
+  assert.throws(() => parsePlugin({ ...v2Raw, permissions: ['layers'] }), 'v2 must reject legacy layers permission');
+  assert.throws(() => parsePlugin({ ...v2Raw, permissions: ['artwork'] }), 'v2 must reject legacy artwork permission');
+  assert.throws(() => parsePlugin({ ...v2Raw, commands: [], filters: [], panels: [] }), 'v2 requires at least one contribution');
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, permissions: v2Raw.permissions.filter((p) => p !== 'commands') }),
+    'declaring commands without commands permission must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, permissions: v2Raw.permissions.filter((p) => p !== 'filters') }),
+    'declaring filters without filters permission must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, permissions: v2Raw.permissions.filter((p) => p !== 'ui:panel') }),
+    'declaring panels without ui:panel permission must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, permissions: v2Raw.permissions.filter((p) => p !== 'layers:read') }),
+    'panel layer field without layers:read permission must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, filters: [{ ...v2Raw.filters[0], tilePadding: 33 }] }),
+    'tilePadding > 32 must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, commands: [{ ...v2Raw.commands[0], suggestedShortcut: 'BadMod+KeyA' }] }),
+    'invalid shortcut modifier must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, filters: [{ ...v2Raw.filters[0], params: [{ kind: 'range', key: 'r', label: 'R', initial: 5, min: 10, max: 20 }] }] }),
+    'range initial outside min..max must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, filters: [{ ...v2Raw.filters[0], params: [{ kind: 'select', key: 's', label: 'S', initial: 'missing', options: [{ value: 'a', label: 'A' }] }] }] }),
+    'select initial not in options must fail',
+  );
+  assert.throws(
+    () => parsePlugin({ ...v2Raw, filters: [{ ...v2Raw.filters[0], params: [{ kind: 'toggle', key: 't', label: 'T', initial: true, when: { key: 'ghost', is: [true] } }] }] }),
+    'condition referencing unknown key must fail',
+  );
+
+  // pluginStore v1 -> v2 migration, damaged record tolerance, replacement disables, and 24-plugin cap
+  const mem = new Map<string, string>();
+  mem.set(PLUGIN_STORAGE_KEY_V1, JSON.stringify([
+    { manifest: v1, enabled: true },
+    { manifest: { apiVersion: 99, broken: true }, enabled: true },
+  ]));
+  const backend: PluginStorageBackend = {
+    storageKey: PLUGIN_STORAGE_KEY_V2,
+    legacyKeys: [PLUGIN_STORAGE_KEY_V1],
+    readRaw: () => mem.get(PLUGIN_STORAGE_KEY_V2) ?? null,
+    readLegacyRaw: (k) => mem.get(k) ?? null,
+    writeRaw: (s) => { mem.set(PLUGIN_STORAGE_KEY_V2, s); },
+  };
+  const store = createPluginStore(backend);
+  assert.equal(store.getPlugins().length, 1, 'Migrates valid v1 record and skips damaged one');
+  assert.equal(store.getPlugins()[0].manifest.id, v1.id);
+  assert.equal(store.getPlugins()[0].enabled, true);
+  assert.ok(mem.has(PLUGIN_STORAGE_KEY_V2), 'Migration persists to v2 storage key');
+
+  // Install v2, enable, then replace same id -> must reset enabled to false
+  store.installPlugin(v2);
+  assert.equal(store.getPlugins().find((p) => p.manifest.id === v2.id)?.enabled, false);
+  store.setPluginEnabled(v2.id, true);
+  assert.equal(store.getPlugins().find((p) => p.manifest.id === v2.id)?.enabled, true);
+  store.installPlugin({ ...v2, version: '2.0.1' });
+  assert.equal(store.getPlugins().find((p) => p.manifest.id === v2.id)?.enabled, false, 'Replacing plugin must reset enabled to false');
+  assert.equal(store.getPlugins().find((p) => p.manifest.id === v2.id)?.manifest.version, '2.0.1');
+
+  // Enforce 24-plugin capacity limit
+  for (let i = store.getPlugins().length; i < PLUGIN_LIMITS.maxInstalledPlugins; i++) {
+    store.installPlugin(parsePlugin({ ...v2Raw, id: `lumina.cap-test-${i}` }));
+  }
+  assert.equal(store.getPlugins().length, PLUGIN_LIMITS.maxInstalledPlugins);
+  assert.throws(
+    () => store.installPlugin(parsePlugin({ ...v2Raw, id: 'lumina.cap-overflow' })),
+    'Installing beyond maxInstalledPlugins (24) must throw',
+  );
+  store.dispose();
+}
+
+// Plugin API v2.0 Batch 2: QuickJS async RPC sandbox, CPU interrupt, wall timeout, abort, and quotas
+await (async () => {
+  // 1. v1 synchronous execution compatibility
+  const v1Res = await executePluginV1({
+    script: 'function run(cmd, ctx) { return { kind: "brush", color: "#336699", size: Math.min(20, ctx.width) }; }',
+    command: 'set-pen',
+    context: { width: 1024, height: 768, dpi: 300 },
+  });
+  assert.deepEqual(v1Res, { kind: 'brush', color: '#336699', size: 20 });
+
+  const makeV2Manifest = (script: string, permissions: PluginManifestV2['permissions']): PluginManifestV2 =>
+    parsePlugin({
+      apiVersion: 2,
+      id: 'lumina.sandbox-test',
+      name: 'Sandbox Test',
+      version: '1.0.0',
+      author: 'Test',
+      description: 'Batch 2 test',
+      permissions,
+      commands: [{ id: 'run-it', label: 'Run' }],
+      script,
+    }) as PluginManifestV2;
+
+  // 2. v2 async RPC with binary Uint8Array roundtrip & cumulative CPU time excluding async wait
+  const writtenBuffers: Uint8Array[] = [];
+  const binaryManifest = makeV2Manifest(
+    `async function onCommand(cmdId, api) {
+      const info = await api.layers.getActive();
+      const tile = await api.pixels.read(info.id, { x: 0, y: 0, width: 2, height: 1 });
+      const out = new Uint8Array(tile.data.length);
+      for (let i = 0; i < tile.data.length; i++) out[i] = 255 - tile.data[i];
+      await api.pixels.write(info.id, { x: 0, y: 0, width: 2, height: 1, data: out });
+      return { notice: cmdId + ':' + api.canvas.tileSize + ':' + out[0] };
+    }`,
+    ['commands', 'layers:read', 'pixels:read', 'pixels:write'],
+  );
+  const binRes = await startPluginV2Direct(
+    binaryManifest,
+    { kind: 'command', commandId: 'run-it' },
+    { width: 512, height: 512, dpi: 300 },
+    async (method, _params, buffer) => {
+      // Simulate async GPU read delay > cpuLimitMs to prove idle wait is not billed to CPU budget
+      await new Promise((r) => setTimeout(r, 45));
+      if (method === 'layers.getActive') return { result: { id: 'layer-1' } };
+      if (method === 'pixels.read') {
+        const src = new Uint8Array([10, 20, 30, 255, 100, 110, 120, 255]);
+        return { result: { x: 0, y: 0, width: 2, height: 1 }, buffer: src.buffer };
+      }
+      if (method === 'pixels.write') {
+        assert.ok(buffer instanceof ArrayBuffer);
+        writtenBuffers.push(new Uint8Array(buffer));
+        return { result: null };
+      }
+      throw new Error(`Unexpected RPC: ${method}`);
+    },
+    { cpuLimitMs: 80, wallLimitMs: 3000 },
+  ).promise;
+  assert.equal(binRes.notice, 'run-it:256:245');
+  assert.equal(writtenBuffers.length, 1);
+  assert.deepEqual([...writtenBuffers[0]], [245, 235, 225, 0, 155, 145, 135, 0]);
+
+  // 3. CPU interrupt handler stops infinite loops quickly
+  const loopManifest = makeV2Manifest(
+    'async function onCommand() { while (true) {} }',
+    ['commands'],
+  );
+  await assert.rejects(
+    startPluginV2Direct(
+      loopManifest,
+      { kind: 'command', commandId: 'run-it' },
+      { width: 256, height: 256, dpi: 300 },
+      async () => ({ result: null }),
+      { cpuLimitMs: 60, wallLimitMs: 3000 },
+    ).promise,
+    /CPU|limit|interrupted|Script failed/i,
+  );
+
+  // 4. Wall timeout aborts hanging RPC
+  const slowManifest = makeV2Manifest(
+    'async function onCommand(_id, api) { await api.layers.list(); }',
+    ['commands', 'layers:read'],
+  );
+  await assert.rejects(
+    startPluginV2Direct(
+      slowManifest,
+      { kind: 'command', commandId: 'run-it' },
+      { width: 256, height: 256, dpi: 300 },
+      () => new Promise(() => {}),
+      { wallLimitMs: 80 },
+    ).promise,
+    /timed out/i,
+  );
+
+  // 5. Manual abort via AbortController
+  const ac = new AbortController();
+  const abortHandle = startPluginV2Direct(
+    slowManifest,
+    { kind: 'command', commandId: 'run-it' },
+    { width: 256, height: 256, dpi: 300 },
+    () => new Promise(() => {}),
+    { wallLimitMs: 3000, signal: ac.signal },
+  );
+  setTimeout(() => ac.abort(), 30);
+  await assert.rejects(abortHandle.promise, /aborted/i);
+
+  // 6. Permission enforcement: missing permission & respectSelection: false without selection permission
+  const noSelManifest = makeV2Manifest(
+    `async function onCommand(_id, api) {
+      await api.pixels.write('l1', { x: 0, y: 0, width: 1, height: 1, data: new Uint8Array(4), respectSelection: false });
+    }`,
+    ['commands', 'pixels:write'],
+  );
+  await assert.rejects(
+    startPluginV2Direct(
+      noSelManifest,
+      { kind: 'command', commandId: 'run-it' },
+      { width: 256, height: 256, dpi: 300 },
+      async () => ({ result: null }),
+    ).promise,
+    /selection.*permission/i,
+  );
+
+  // 7. Quotas: RPC count, pixel bytes, layer creation
+  const quotaManifest = makeV2Manifest(
+    `async function onCommand(_id, api) {
+      for (let i = 0; i < 4; i++) await api.layers.list();
+    }`,
+    ['commands', 'layers:read'],
+  );
+  await assert.rejects(
+    startPluginV2Direct(
+      quotaManifest,
+      { kind: 'command', commandId: 'run-it' },
+      { width: 256, height: 256, dpi: 300 },
+      async () => ({ result: [] }),
+      { quota: { maxRpcCalls: 3 } },
+    ).promise,
+    /RPC quota exceeded/i,
+  );
+
+  const pixelQuotaManifest = makeV2Manifest(
+    `async function onCommand(_id, api) {
+      await api.pixels.write('l1', { x: 0, y: 0, width: 4, height: 4, data: new Uint8Array(64) });
+    }`,
+    ['commands', 'pixels:write'],
+  );
+  await assert.rejects(
+    startPluginV2Direct(
+      pixelQuotaManifest,
+      { kind: 'command', commandId: 'run-it' },
+      { width: 256, height: 256, dpi: 300 },
+      async () => ({ result: null }),
+      { quota: { maxPixelBytes: 32 } },
+    ).promise,
+    /Pixel I\/O quota exceeded/i,
+  );
+
+  // 8. Never-settling promise fails fast instead of hanging until wall timeout
+  const hangPromiseManifest = makeV2Manifest(
+    'function onCommand() { return new Promise(() => {}); }',
+    ['commands'],
+  );
+  await assert.rejects(
+    startPluginV2Direct(
+      hangPromiseManifest,
+      { kind: 'command', commandId: 'run-it' },
+      { width: 256, height: 256, dpi: 300 },
+      async () => ({ result: null }),
+      { wallLimitMs: 5000 },
+    ).promise,
+    /never settled/i,
+  );
+})();
+
+// Plugin API v2.0 Batch 3: Layer tree, tile pixel I/O, straight<->premul, ACL, groupId undo, and rollback
+await (async () => {
+  // 1. Straight <-> Premultiplied RGBA conversion accuracy (semi-transparent without dark fringing)
+  const straightIn = new Uint8Array([200, 100, 50, 128, 255, 0, 128, 0, 10, 20, 30, 255]);
+  const premul = straightToPremultiplied(straightIn);
+  assert.deepEqual([...premul], [100, 50, 25, 128, 0, 0, 0, 0, 10, 20, 30, 255]);
+  const straightBack = premultipliedToStraight(premul);
+  assert.ok(Math.abs(straightBack[0] - 200) <= 1 && Math.abs(straightBack[1] - 100) <= 1 && straightBack[3] === 128);
+  assert.deepEqual([...straightBack.subarray(4, 12)], [0, 0, 0, 0, 10, 20, 30, 255]);
+
+  // Helper: in-memory canvas adapter backed by 256x256 premultiplied tiles + ScopedUndoManager
+  const makeMockCanvas = (aclOverride?: Partial<PluginCanvasHostAdapter['acl']>) => {
+    const W = 512;
+    const H = 512;
+    const TS = 256;
+    const layers: LayerModel[] = [
+      {
+        id: 'l-own', canvasId: 'c1', ownerId: 'u1', parentId: null, name: 'My Layer',
+        layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+        alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+        sortOrder: 10, createdAt: 1, updatedAt: 1,
+      },
+      {
+        id: 'l-other', canvasId: 'c1', ownerId: 'u2', parentId: null, name: 'Other Layer',
+        layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+        alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+        sortOrder: 20, createdAt: 1, updatedAt: 1,
+      },
+      {
+        id: 'l-locked', canvasId: 'c1', ownerId: 'u1', parentId: null, name: 'Locked Layer',
+        layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: true,
+        alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+        sortOrder: 30, createdAt: 1, updatedAt: 1,
+      },
+      {
+        id: 'l-shared', canvasId: 'c1', ownerId: 'u2', parentId: null, name: 'Shared Layer',
+        layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+        alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'shared_all',
+        sortOrder: 40, createdAt: 1, updatedAt: 1,
+      },
+      {
+        id: 'l-alpha', canvasId: 'c1', ownerId: 'u1', parentId: null, name: 'Alpha Locked',
+        layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+        alphaLocked: true, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+        sortOrder: 50, createdAt: 1, updatedAt: 1,
+      },
+    ];
+    let activeId: string | null = 'l-own';
+    const tileStore = new Map<string, Map<string, Uint8Array>>();
+    const undo = new ScopedUndoManager();
+    const committedPatches: Array<{ layerId: string; count: number }> = [];
+    let createdSeq = 1;
+
+    const getTile = (layerId: string, col: number, row: number): Uint8Array => {
+      const lm = tileStore.get(layerId);
+      const t = lm?.get(`${col}_${row}`);
+      return t ? t.slice() : new Uint8Array(TS * TS * 4);
+    };
+    const setTile = (layerId: string, col: number, row: number, data: Uint8Array) => {
+      let lm = tileStore.get(layerId);
+      if (!lm) {
+        lm = new Map();
+        tileStore.set(layerId, lm);
+      }
+      lm.set(`${col}_${row}`, data.slice());
+    };
+
+    // Seed 1 pixel on l-alpha at (2, 2) with premultiplied RGBA (50, 50, 50, 128)
+    const alphaTile = new Uint8Array(TS * TS * 4);
+    const seedIdx = (2 * TS + 2) * 4;
+    alphaTile[seedIdx] = 50; alphaTile[seedIdx + 1] = 50; alphaTile[seedIdx + 2] = 50; alphaTile[seedIdx + 3] = 128;
+    setTile('l-alpha', 0, 0, alphaTile);
+
+    const adapter: PluginCanvasHostAdapter = {
+      canvasWidth: W,
+      canvasHeight: H,
+      tileSize: TS,
+      acl: {
+        user: { id: 'u1', username: 'alice', displayName: 'Alice', serverRole: 'user' },
+        isGuest: false,
+        canvasMember: null,
+        ...aclOverride,
+      },
+      getLayers: () => layers,
+      getActiveLayerId: () => activeId,
+      setActiveLayer: (id) => { activeId = id; },
+      createLayer: async (opts) => {
+        const model: LayerModel = {
+          id: `l-new-${createdSeq++}`,
+          canvasId: 'c1',
+          ownerId: aclOverride?.user?.id ?? 'u1',
+          parentId: opts.parentId,
+          name: opts.name,
+          layerType: opts.layerType,
+          blendMode: opts.blendMode,
+          opacity: opts.opacity,
+          isVisible: true,
+          isLocked: false,
+          alphaLocked: false,
+          clipToBelow: false,
+          isPublic: false,
+          aclMode: 'owner_only',
+          sortOrder: (layers.length + 1) * 10,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        layers.push(model);
+        if (opts.select) activeId = model.id;
+        return model;
+      },
+      updateLayerProps: async (layerId, patch) => {
+        const l = layers.find((x) => x.id === layerId);
+        if (l) Object.assign(l, patch);
+      },
+      reorderLayers: async (layerId, ascendingIds, parentIdPatch) => {
+        if (parentIdPatch !== undefined) {
+          const l = layers.find((x) => x.id === layerId);
+          if (l) l.parentId = parentIdPatch;
+        }
+        ascendingIds.forEach((id, idx) => {
+          const l = layers.find((x) => x.id === id);
+          if (l) l.sortOrder = (idx + 1) * 10;
+        });
+      },
+      deleteLayer: async (layerId) => {
+        const idx = layers.findIndex((x) => x.id === layerId);
+        if (idx < 0) return false;
+        layers.splice(idx, 1);
+        tileStore.delete(layerId);
+        return true;
+      },
+      restoreDeletedLayer: async (model, tiles) => {
+        layers.push({ ...model });
+        for (const t of tiles) setTile(model.id, t.col, t.row, t.data as Uint8Array);
+        return model;
+      },
+      getOccupiedTiles: (layerId) => {
+        const lm = tileStore.get(layerId);
+        if (!lm) return [];
+        return [...lm.keys()].map((k) => {
+          const [col, row] = k.split('_').map(Number);
+          return { col, row };
+        });
+      },
+      readLayerTile: async (layerId, col, row) => getTile(layerId, col, row),
+      readLayerRect: async (layerId, rect) => {
+        const out = new Uint8Array(rect.width * rect.height * 4);
+        for (let y = 0; y < rect.height; y++) {
+          for (let x = 0; x < rect.width; x++) {
+            const gx = rect.x + x;
+            const gy = rect.y + y;
+            const t = getTile(layerId, Math.floor(gx / TS), Math.floor(gy / TS));
+            const si = ((gy % TS) * TS + (gx % TS)) * 4;
+            const di = (y * rect.width + x) * 4;
+            out.set(t.subarray(si, si + 4), di);
+          }
+        }
+        return out;
+      },
+      readCompositeRect: async (rect) => new Uint8Array(rect.width * rect.height * 4),
+      applyLayerTiles: (layerId, tiles) => {
+        for (const t of tiles) setTile(layerId, t.col, t.row, t.data as Uint8Array);
+      },
+      commitTilePatch: (layerId, tiles) => {
+        committedPatches.push({ layerId, count: tiles.length });
+      },
+      pushUndoOp: (op) => undo.push(op),
+    };
+    return { adapter, layers, undo, getTile, committedPatches };
+  };
+
+  const makeManifest = (script: string, permissions: PluginManifestV2['permissions']): PluginManifestV2 =>
+    parsePlugin({
+      apiVersion: 2,
+      id: 'lumina.b3-test',
+      name: 'B3 Test',
+      version: '1.0.0',
+      author: 'Tester',
+      description: 'Batch 3 bridge tests',
+      permissions,
+      commands: [{ id: 'go', label: 'Go' }],
+      script,
+    }) as PluginManifestV2;
+
+  // 2. Multi-layer create + write + read-staged + alphaLock + sparse bounds + single groupId undo
+  {
+    const mock = makeMockCanvas();
+    const tx = new PluginCanvasTransaction(mock.adapter);
+    const manifest = makeManifest(
+      `async function onCommand(_id, api) {
+        const list = await api.layers.list();
+        const other = list.find(l => l.id === 'l-other');
+        const shared = list.find(l => l.id === 'l-shared');
+        const locked = list.find(l => l.id === 'l-locked');
+        if (other.canEditPixels !== false || other.canManage !== false) throw new Error('ACL mismatch on other');
+        if (locked.canEditPixels !== false || locked.canManage !== false) throw new Error('ACL mismatch on locked');
+        if (shared.canEditPixels !== true || shared.canManage !== false) throw new Error('ACL mismatch on shared');
+
+        // Write straight semi-transparent red into l-own at (10, 12)
+        const px = new Uint8Array([200, 40, 20, 128]);
+        await api.pixels.write('l-own', { x: 10, y: 12, width: 1, height: 1, data: px });
+        // Immediately read back staged pixel before commit
+        const readBack = await api.pixels.read('l-own', { x: 10, y: 12, width: 1, height: 1 });
+        if (Math.abs(readBack.data[0] - 200) > 1 || readBack.data[3] !== 128) throw new Error('Staged read failed');
+
+        // Sparse non-empty bounds should report exact 1x1 box at (10,12)
+        const bounds = await api.pixels.getNonEmptyBounds('l-own');
+        if (!bounds || bounds.x !== 10 || bounds.y !== 12 || bounds.width !== 1 || bounds.height !== 1) {
+          throw new Error('Bounds mismatch: ' + JSON.stringify(bounds));
+        }
+
+        // Alpha-locked write: (2,2) keeps alpha=128 with new color; (3,2) stays transparent
+        const aPatch = new Uint8Array([255, 0, 0, 255, 0, 255, 0, 255]);
+        await api.pixels.write('l-alpha', { x: 2, y: 2, width: 2, height: 1, data: aPatch });
+
+        // Create a new layer and draw a pixel into it
+        const created = await api.layers.create({ name: 'Generated Glow', blendMode: 'add', opacity: 0.75 });
+        await api.pixels.write(created.id, { x: 0, y: 0, width: 1, height: 1, data: new Uint8Array([0, 255, 255, 255]) });
+
+        return { notice: created.id };
+      }`,
+      ['commands', 'layers:read', 'layers:write', 'pixels:read', 'pixels:write'],
+    );
+    const res = await startPluginV2Direct(
+      manifest,
+      { kind: 'command', commandId: 'go' },
+      { width: 512, height: 512, dpi: 300 },
+      tx.createRpcHandler(),
+    ).promise;
+    // Before commit, l-own tile in canvas store is still untouched
+    assert.equal(mock.getTile('l-own', 0, 0)[(12 * 256 + 10) * 4 + 3], 0, 'Canvas pixels untouched before commit');
+    tx.commit('Plugin: B3 Test');
+
+    // After commit, l-own has premultiplied (100, 20, 10, 128)
+    const ownTile = mock.getTile('l-own', 0, 0);
+    const idx = (12 * 256 + 10) * 4;
+    assert.deepEqual([...ownTile.subarray(idx, idx + 4)], [100, 20, 10, 128]);
+
+    // Alpha-locked layer preserved original alpha=128 at (2,2) and kept (3,2) transparent
+    const aTile = mock.getTile('l-alpha', 0, 0);
+    const aIdx0 = (2 * 256 + 2) * 4;
+    const aIdx1 = (2 * 256 + 3) * 4;
+    assert.deepEqual([...aTile.subarray(aIdx0, aIdx0 + 4)], [128, 0, 0, 128]);
+    assert.deepEqual([...aTile.subarray(aIdx1, aIdx1 + 4)], [0, 0, 0, 0]);
+
+    // Single undoGroup pops ALL ops from this plugin run together (shared groupId)
+    const undoneOps = mock.undo.undoGroup('u1');
+    assert.equal(undoneOps.length, 3, 'Created layer + 2 modified layers share one undo group');
+    assert.equal(new Set(undoneOps.map((o) => o.groupId)).size, 1, 'All ops share identical groupId');
+    assert.ok(undoneOps.some((o) => o.layerCreated && o.layerId === res.notice));
+  }
+
+  // 3. Failure rollback: discards staged pixels, deletes created layer, restores updated props, pushes 0 undo ops
+  {
+    const mock = makeMockCanvas();
+    const tx = new PluginCanvasTransaction(mock.adapter);
+    const failManifest = makeManifest(
+      `async function onCommand(_id, api) {
+        await api.layers.update('l-own', { name: 'Renamed Before Crash', opacity: 0.25 });
+        const created = await api.layers.create({ name: 'Temp Layer' });
+        await api.pixels.write('l-own', { x: 1, y: 1, width: 1, height: 1, data: new Uint8Array([255, 255, 255, 255]) });
+        await api.pixels.write(created.id, { x: 0, y: 0, width: 1, height: 1, data: new Uint8Array([255, 0, 0, 255]) });
+        throw new Error('Intentional mid-run failure');
+      }`,
+      ['commands', 'layers:read', 'layers:write', 'pixels:write'],
+    );
+    await assert.rejects(
+      startPluginV2Direct(
+        failManifest,
+        { kind: 'command', commandId: 'go' },
+        { width: 512, height: 512, dpi: 300 },
+        tx.createRpcHandler(),
+      ).promise,
+      /Intentional mid-run failure/,
+    );
+    await tx.rollback();
+    assert.equal(mock.layers.find((l) => l.name === 'Temp Layer'), undefined, 'Created layer removed on rollback');
+    assert.equal(mock.layers.find((l) => l.id === 'l-own')?.name, 'My Layer', 'Layer name restored on rollback');
+    assert.equal(mock.layers.find((l) => l.id === 'l-own')?.opacity, 1, 'Layer opacity restored on rollback');
+    assert.equal(mock.getTile('l-own', 0, 0)[(1 * 256 + 1) * 4 + 3], 0, 'Staged pixels discarded on rollback');
+    assert.equal(mock.undo.canUndo('u1'), false, 'No undo ops pushed on rollback');
+  }
+
+  // 4. ACL enforcement & forbidden mutations (guest, viewer, other's layer, locked layer, forbidden props, >512px)
+  {
+    const mock = makeMockCanvas();
+    const tx = new PluginCanvasTransaction(mock.adapter);
+    const rpc = tx.createRpcHandler();
+    await assert.rejects(rpc('pixels.write', { layerId: 'l-other', patch: { x: 0, y: 0, width: 1, height: 1 } }, new Uint8Array(4).buffer));
+    await assert.rejects(rpc('pixels.write', { layerId: 'l-locked', patch: { x: 0, y: 0, width: 1, height: 1 } }, new Uint8Array(4).buffer));
+    await assert.rejects(rpc('layers.delete', { layerId: 'l-shared' }));
+    await assert.rejects(rpc('layers.update', { layerId: 'l-own', patch: { isLocked: true } }), /Disallowed layer property/);
+    await assert.rejects(rpc('layers.update', { layerId: 'l-own', patch: { aclMode: 'shared_all' } }), /Disallowed layer property/);
+    await assert.rejects(rpc('layers.update', { layerId: 'l-own', patch: { isPublic: true } }), /Disallowed layer property/);
+    await assert.rejects(rpc('pixels.read', { layerId: 'l-own', rect: { x: 0, y: 0, width: 513, height: 1 } }), /512/);
+    await tx.rollback();
+
+    const guestMock = makeMockCanvas({ isGuest: true, user: null });
+    const guestTx = new PluginCanvasTransaction(guestMock.adapter);
+    await assert.rejects(guestTx.createRpcHandler()('layers.create', { name: 'Guest Layer' }), /Guests/);
+    await guestTx.rollback();
+
+    const viewerMock = makeMockCanvas({
+      canvasMember: {
+        canvasId: 'c1', userId: 'u1', role: 'viewer',
+        canCreateLayer: false, canDeleteOtherLayer: false, canExport: false, canManageMembers: false, joinedAt: 0,
+      },
+    });
+    const viewerTx = new PluginCanvasTransaction(viewerMock.adapter);
+    await assert.rejects(viewerTx.createRpcHandler()('layers.create', { name: 'Viewer Layer' }), /Viewers/);
+    await viewerTx.rollback();
+  }
+})();
+
+// Plugin API v2.0 Batch 4: Selection API (geometry, mask tiles, expand/contract/feather/invert/clear) & respectSelection
+await (async () => {
+  const W = 64;
+  const H = 64;
+  const TS = 64;
+  const makeSelMock = () => {
+    const selection = createHeadlessSelectionBridge(W, H);
+    const layer: LayerModel = {
+      id: 'l1', canvasId: 'c1', ownerId: 'u1', parentId: null, name: 'Paint',
+      layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+      alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+      sortOrder: 10, createdAt: 1, updatedAt: 1,
+    };
+    let tile = new Uint8Array(TS * TS * 4);
+    const undo = new ScopedUndoManager();
+
+    const adapter: PluginCanvasHostAdapter = {
+      canvasWidth: W,
+      canvasHeight: H,
+      tileSize: TS,
+      acl: {
+        user: { id: 'u1', username: 'alice', displayName: 'Alice', serverRole: 'user' },
+        isGuest: false,
+        canvasMember: null,
+      },
+      getLayers: () => [layer],
+      getActiveLayerId: () => 'l1',
+      setActiveLayer: () => {},
+      createLayer: async () => null,
+      updateLayerProps: async () => {},
+      reorderLayers: async () => {},
+      deleteLayer: async () => false,
+      restoreDeletedLayer: async () => null,
+      getOccupiedTiles: () => [{ col: 0, row: 0 }],
+      readLayerTile: async () => tile.slice(),
+      readLayerRect: async (_id, rect) => {
+        const out = new Uint8Array(rect.width * rect.height * 4);
+        for (let y = 0; y < rect.height; y++) {
+          const src = ((rect.y + y) * TS + rect.x) * 4;
+          out.set(tile.subarray(src, src + rect.width * 4), y * rect.width * 4);
+        }
+        return out;
+      },
+      readCompositeRect: async (rect) => new Uint8Array(rect.width * rect.height * 4),
+      applyLayerTiles: (_id, tiles) => {
+        if (tiles[0]) tile = (tiles[0].data as Uint8Array).slice();
+      },
+      commitTilePatch: () => {},
+      pushUndoOp: (op) => undo.push(op),
+      selection,
+    };
+    return { adapter, selection, getTile: () => tile, undo };
+  };
+
+  const makeManifest = (script: string, permissions: PluginManifestV2['permissions']): PluginManifestV2 =>
+    parsePlugin({
+      apiVersion: 2,
+      id: 'lumina.b4-test',
+      name: 'B4 Test',
+      version: '1.0.0',
+      author: 'Tester',
+      description: 'Batch 4 selection tests',
+      permissions,
+      commands: [{ id: 'sel', label: 'Sel' }],
+      script,
+    }) as PluginManifestV2;
+
+  // 1. Geometry selections (rect, ellipse, polygon), tiled writeMask/readMask, expand/contract/feather/invert/clear
+  {
+    const mock = makeSelMock();
+    const tx = new PluginCanvasTransaction(mock.adapter);
+    const manifest = makeManifest(
+      `async function onCommand(_id, api) {
+        const init = await api.selection.getInfo();
+        if (init.hasSelection !== false || init.bounds !== null) throw new Error('Expected empty selection');
+
+        await api.selection.selectRect({ x: 10, y: 10, width: 10, height: 10 }, 'replace');
+        const info1 = await api.selection.getInfo();
+        if (!info1.hasSelection || info1.bounds.x !== 10 || info1.bounds.width !== 10) {
+          throw new Error('selectRect bounds mismatch');
+        }
+
+        // Subtract inner 4x4 hole
+        await api.selection.selectRect({ x: 13, y: 13, width: 4, height: 4 }, 'subtract');
+        const hole = await api.selection.readMask({ x: 13, y: 13, width: 1, height: 1 });
+        const rim = await api.selection.readMask({ x: 10, y: 10, width: 1, height: 1 });
+        if (hole.data[0] !== 0 || rim.data[0] !== 255) throw new Error('subtract failed');
+
+        // Expand & contract
+        await api.selection.selectRect({ x: 20, y: 20, width: 10, height: 10 }, 'replace');
+        await api.selection.expand(2);
+        const expInfo = await api.selection.getInfo();
+        if (expInfo.bounds.x !== 18 || expInfo.bounds.width !== 14) throw new Error('expand failed');
+        await api.selection.contract(2);
+        const conInfo = await api.selection.getInfo();
+        if (conInfo.bounds.x !== 20 || conInfo.bounds.width !== 10) throw new Error('contract failed');
+
+        // Ellipse & Polygon
+        await api.selection.selectEllipse({ x: 4, y: 4, width: 12, height: 12 }, 'replace');
+        const center = await api.selection.readMask({ x: 10, y: 10, width: 1, height: 1 });
+        const corner = await api.selection.readMask({ x: 4, y: 4, width: 1, height: 1 });
+        if (center.data[0] !== 255 || corner.data[0] !== 0) throw new Error('ellipse mask mismatch');
+
+        await api.selection.selectPolygon([{ x: 10, y: 10 }, { x: 20, y: 10 }, { x: 15, y: 20 }], 'replace');
+        const triCenter = await api.selection.readMask({ x: 15, y: 13, width: 1, height: 1 });
+        if (triCenter.data[0] !== 255) throw new Error('polygon mask mismatch');
+
+        // Invert & Clear
+        await api.selection.invert();
+        const invCorner = await api.selection.readMask({ x: 0, y: 0, width: 1, height: 1 });
+        if (invCorner.data[0] !== 255) throw new Error('invert failed');
+        await api.selection.clear();
+        if ((await api.selection.getInfo()).hasSelection) throw new Error('clear failed');
+
+        // Tiled writeMask + feather
+        await api.selection.writeMask({ x: 2, y: 2, width: 4, height: 4, data: new Uint8Array(16).fill(255) }, 'replace');
+        await api.selection.writeMask({ x: 6, y: 2, width: 4, height: 4, data: new Uint8Array(16).fill(128) }, 'replace');
+        const stitched = await api.selection.readMask({ x: 2, y: 2, width: 8, height: 1 });
+        if (stitched.data[0] !== 255 || stitched.data[4] !== 128) throw new Error('tiled writeMask failed');
+        await api.selection.feather(2);
+        const edge = await api.selection.readMask({ x: 1, y: 3, width: 1, height: 1 });
+        if (edge.data[0] <= 0 || edge.data[0] >= 255) throw new Error('feather did not soften edge: ' + edge.data[0]);
+
+        return { notice: 'sel-ok' };
+      }`,
+      ['commands', 'selection'],
+    );
+    const res = await startPluginV2Direct(
+      manifest,
+      { kind: 'command', commandId: 'sel' },
+      { width: W, height: H, dpi: 300 },
+      tx.createRpcHandler(),
+    ).promise;
+    assert.equal(res.notice, 'sel-ok');
+    tx.commit('Plugin: B4 Test');
+    const ops = mock.undo.undoGroup('u1');
+    assert.equal(ops.length, 1);
+    assert.equal(ops[0].opType, 'PLUGIN_SELECTION');
+    assert.equal(ops[0].selectionBefore, null);
+    assert.ok(ops[0].selectionAfter && ops[0].selectionAfter.activePixelCount > 0);
+  }
+
+  // 2. pixels.write respectSelection default (true) vs explicit false (requires selection permission) & feathered blend
+  {
+    const mock = makeSelMock();
+    // Create a 2x1 mask at (0,0): x=0 is 255, x=1 is 128; x=2 is outside selection (0)
+    mock.selection.writeMaskRect({ x: 0, y: 0, width: 2, height: 1 }, new Uint8Array([255, 128]), 'replace');
+
+    // Run A: pixels:write only (default respectSelection = true)
+    const txA = new PluginCanvasTransaction(mock.adapter);
+    const manifestA = makeManifest(
+      `async function onCommand(_id, api) {
+        const red = new Uint8Array([255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255]);
+        await api.pixels.write('l1', { x: 0, y: 0, width: 3, height: 1, data: red });
+      }`,
+      ['commands', 'pixels:write'],
+    );
+    await startPluginV2Direct(
+      manifestA,
+      { kind: 'command', commandId: 'sel' },
+      { width: W, height: H, dpi: 300 },
+      txA.createRpcHandler(),
+    ).promise;
+    txA.commit('Plugin: Respect Selection');
+    const tA = mock.getTile();
+    assert.deepEqual([...tA.subarray(0, 4)], [255, 0, 0, 255], 'Selected pixel (255) written fully');
+    assert.equal(tA[4], 128, 'Feathered selection pixel (128) blended half strength');
+    assert.equal(tA[7], 128, 'Feathered selection alpha blended half strength');
+    assert.deepEqual([...tA.subarray(8, 12)], [0, 0, 0, 0], 'Unselected pixel (0) left untouched');
+
+    // Run B: pixels:write + selection permission with explicit respectSelection: false overwrites x=2
+    const txB = new PluginCanvasTransaction(mock.adapter);
+    const manifestB = makeManifest(
+      `async function onCommand(_id, api) {
+        const blue = new Uint8Array([0, 0, 255, 255]);
+        await api.pixels.write('l1', { x: 2, y: 0, width: 1, height: 1, data: blue, respectSelection: false });
+      }`,
+      ['commands', 'pixels:write', 'selection'],
+    );
+    await startPluginV2Direct(
+      manifestB,
+      { kind: 'command', commandId: 'sel' },
+      { width: W, height: H, dpi: 300 },
+      txB.createRpcHandler(),
+    ).promise;
+    txB.commit('Plugin: Ignore Selection');
+    assert.deepEqual([...mock.getTile().subarray(8, 12)], [0, 0, 255, 255], 'Explicit respectSelection:false writes outside selection');
+  }
+
+  // 3. Rollback restores original selection snapshot on plugin failure & rejects invalid radius/polygon
+  {
+    const mock = makeSelMock();
+    mock.selection.selectRect({ x: 5, y: 5, width: 6, height: 6 }, 'replace');
+    const tx = new PluginCanvasTransaction(mock.adapter);
+    const failManifest = makeManifest(
+      `async function onCommand(_id, api) {
+        await api.selection.clear();
+        throw new Error('Abort after clearing selection');
+      }`,
+      ['commands', 'selection'],
+    );
+    await assert.rejects(
+      startPluginV2Direct(
+        failManifest,
+        { kind: 'command', commandId: 'sel' },
+        { width: W, height: H, dpi: 300 },
+        tx.createRpcHandler(),
+      ).promise,
+      /Abort after clearing selection/,
+    );
+    await tx.rollback();
+    const restored = mock.selection.getInfo();
+    assert.equal(restored.hasSelection, true, 'Rollback restores pre-existing selection');
+    assert.deepEqual(restored.bounds, { x: 5, y: 5, width: 6, height: 6 });
+
+    // Validation bounds: radius 0 or 129 rejected, polygon < 3 or > 4096 rejected
+    const tx2 = new PluginCanvasTransaction(mock.adapter);
+    const rpc = tx2.createRpcHandler();
+    await assert.rejects(rpc('selection.expand', { radius: 0 }), /1 and 128/);
+    await assert.rejects(rpc('selection.feather', { radius: 129 }), /1 and 128/);
+    await assert.rejects(rpc('selection.selectPolygon', { points: [{ x: 0, y: 0 }, { x: 1, y: 1 }] }), /between 3 and 4096/);
+    await tx2.rollback();
+  }
+})();
+
+// Plugin API v2.0 Batch 5: Plugin filters in F1 filterRegistry & isolated QuickJS tiled filter engine
+await (async () => {
+  // 1. Dynamic filterRegistry sync: 'plugin' group hidden when empty, visible when enabled, supports existing groups
+  syncPluginFilters([]);
+  assert.equal(filterGroupsInUse().includes('plugin'), false, 'plugin filter group hidden when no plugin filters active');
+
+  const filterPluginManifest = parsePlugin({
+    apiVersion: 2,
+    id: 'lumina.test-filter-kit',
+    name: 'Test Filter Kit',
+    version: '1.0.0',
+    author: 'Lumina Drift',
+    description: 'Test filter plugin.',
+    permissions: ['filters'],
+    filters: [
+      {
+        id: 'prism-tint',
+        label: 'Prism Tint',
+        i18nLabel: { 'zh-TW': '稜鏡著色' },
+        group: 'plugin',
+        tilePadding: 2,
+        draft: true,
+        params: [
+          { kind: 'range', key: 'boost', label: 'Boost', i18nLabel: { 'zh-TW': '增幅' }, initial: 40, min: 0, max: 100, step: 1, unit: '%' },
+        ],
+      },
+      {
+        id: 'warm-shift',
+        label: 'Warm Shift',
+        group: 'color',
+        tilePadding: 0,
+        params: [],
+      },
+    ],
+    script: `function onFilter(id, tile, params) { return tile.rgba; }`,
+  }) as PluginManifestV2;
+
+  syncPluginFilters([{ manifest: filterPluginManifest, enabled: true, installedAt: 1 }]);
+  assert.equal(filterGroupsInUse().includes('plugin'), true, 'plugin filter group shown when enabled');
+  const prismId = makePluginFilterId('lumina.test-filter-kit', 'prism-tint');
+  const warmId = makePluginFilterId('lumina.test-filter-kit', 'warm-shift');
+  const prismDef = getFilter(prismId);
+  const warmDef = getFilter(warmId);
+  assert.ok(prismDef && prismDef.source === 'plugin' && prismDef.group === 'plugin');
+  assert.ok(warmDef && warmDef.source === 'plugin' && warmDef.group === 'color');
+  assert.equal(filtersInGroup('color').some((d) => d.id === warmId), true, 'plugin filter can belong to existing group');
+  assert.equal(filterLabel(prismDef!, translations['zh-TW'], 'zh-TW'), '稜鏡著色');
+  assert.equal(filterLabel(prismDef!, translations['en-US'], 'en-US'), 'Prism Tint');
+  assert.equal(filterParamLabel(prismDef!.params[0], translations['zh-TW'], 'zh-TW'), '增幅');
+
+  // Disabling plugin removes filters and hides 'plugin' group again
+  syncPluginFilters([{ manifest: filterPluginManifest, enabled: false, installedAt: 1 }]);
+  assert.equal(getFilter(prismId), null);
+  assert.equal(filterGroupsInUse().includes('plugin'), false, 'plugin filter group hidden after disable');
+
+  // 2. Multi-tile (300x270 -> 4 tiles) execution with tilePadding clamp + premul<->straight roundtrip
+  {
+    const W = 300;
+    const H = 270;
+    const src = new Uint8Array(W * H * 4);
+    // Fill with premultiplied 50% alpha red (straight R=200, A=128 -> premul R=100, A=128)
+    for (let i = 0; i < src.length; i += 4) {
+      src[i] = 100;
+      src[i + 1] = 0;
+      src[i + 2] = 0;
+      src[i + 3] = 128;
+    }
+    const script = `
+      function onFilter(filterId, tile, params) {
+        if (filterId !== 'box-check') throw new Error('unexpected filterId');
+        // Verify halo padding dimensions match padLeft/padTop/padRight/padBottom
+        const expectedLen = tile.width * tile.height * 4;
+        if (tile.rgba.byteLength !== expectedLen) throw new Error('length mismatch');
+        const out = new Uint8Array(expectedLen);
+        const addG = params.addG || 0;
+        for (let y = tile.padTop; y < tile.height - tile.padBottom; y++) {
+          for (let x = tile.padLeft; x < tile.width - tile.padRight; x++) {
+            // Read left neighbor across padding boundary to prove clamped halo is populated
+            const leftIdx = (y * tile.width + (x - 1)) * 4;
+            const idx = (y * tile.width + x) * 4;
+            out[idx] = tile.rgba[leftIdx];
+            out[idx + 1] = Math.min(255, tile.rgba[idx + 1] + addG);
+            out[idx + 2] = tile.rgba[idx + 2];
+            out[idx + 3] = tile.rgba[idx + 3];
+          }
+        }
+        return out;
+      }
+    `;
+    const res = await runPluginFilterTiled({
+      script,
+      filterId: 'box-check',
+      pixels: src,
+      width: W,
+      height: H,
+      params: { addG: 100 },
+      tilePadding: 2,
+      previewOnly: true,
+    });
+    assert.equal(res.cancelled, false);
+    assert.equal(res.tilesProcessed, 4, '300x270 spans 2x2 tiles of 256x256');
+    assert.ok(res.output);
+    // Pixel (0,0) and cross-tile pixel (256, 256) should both have premul R~100, G~50 (100*128/255), A=128
+    for (const [px, py] of [[0, 0], [256, 256], [299, 269]]) {
+      const idx = (py * W + px) * 4;
+      assert.ok(Math.abs(res.output![idx] - 100) <= 1, `R preserved at (${px},${py})`);
+      assert.ok(Math.abs(res.output![idx + 1] - 50) <= 1, `G premultiplied at (${px},${py})`);
+      assert.equal(res.output![idx + 3], 128, `A preserved at (${px},${py})`);
+    }
+  }
+
+  // 3. Selection mask blending & draft downscale preview
+  {
+    const W = 16;
+    const H = 16;
+    const src = new Uint8Array(W * H * 4);
+    for (let i = 0; i < src.length; i += 4) {
+      src[i] = 20;
+      src[i + 1] = 20;
+      src[i + 2] = 20;
+      src[i + 3] = 255;
+    }
+    const mask = new Uint8Array(W * H);
+    mask[0] = 255; // fully selected
+    mask[1] = 128; // half feathered
+    mask[2] = 0;   // unselected
+    const invertScript = `
+      function onFilter(_id, tile) {
+        for (let i = 0; i < tile.rgba.length; i += 4) {
+          tile.rgba[i] = 220;
+          tile.rgba[i + 1] = 220;
+          tile.rgba[i + 2] = 220;
+        }
+      }
+    `;
+    const maskedRes = await runPluginFilterTiled({
+      script: invertScript,
+      filterId: 'fill',
+      pixels: src,
+      width: W,
+      height: H,
+      params: {},
+      mask,
+      draft: 2,
+      previewOnly: true,
+    });
+    assert.ok(maskedRes.output);
+    assert.equal(maskedRes.output![0], 220, 'Selected pixel receives filtered value even under draft');
+    assert.ok(Math.abs(maskedRes.output![4] - 120) <= 2, 'Feathered pixel blends original (20) and filtered (220)');
+    assert.equal(maskedRes.output![8], 20, 'Unselected pixel stays untouched');
+  }
+
+  // 4. Cancellation & per-tile CPU interrupt timeout
+  {
+    const src = new Uint8Array(32 * 32 * 4);
+    const cancelledRes = await runPluginFilterTiled({
+      script: `function onFilter(_id, tile) { return tile.rgba; }`,
+      filterId: 'noop',
+      pixels: src,
+      width: 32,
+      height: 32,
+      params: {},
+      isCancelled: () => true,
+    });
+    assert.equal(cancelledRes.cancelled, true);
+    assert.equal(cancelledRes.output, null);
+
+    await assert.rejects(
+      runPluginFilterTiled({
+        script: `function onFilter() { while (true) {} }`,
+        filterId: 'hang',
+        pixels: src,
+        width: 32,
+        height: 32,
+        params: {},
+        tileCpuLimitMs: 40,
+        totalCpuLimitMs: 120,
+      }),
+      /CPU limit/,
+    );
+  }
+})();
+
+// Plugin API v2.0 Batch 6: Plugin shortcuts (namespacing + anti-hijack) and declarative panel state helpers
+(() => {
+  const cmdKey = makePluginCommandShortcutId('lumina.edge-glow', 'outline-sel');
+  const panelKey = makePluginPanelShortcutId('lumina.edge-glow', 'glow-panel');
+  assert.deepEqual(parsePluginShortcutId(cmdKey), { kind: 'command', pluginId: 'lumina.edge-glow', commandId: 'outline-sel' });
+  assert.deepEqual(parsePluginShortcutId(panelKey), { kind: 'panel', pluginId: 'lumina.edge-glow', panelId: 'glow-panel' });
+  assert.equal(parsePluginShortcutId('tool_brush'), null);
+
+  const mgr = ShortcutManager.getInstance();
+  const pluginA = parsePlugin({
+    apiVersion: 2,
+    id: 'lumina.shortcut-a',
+    name: 'Shortcut A',
+    version: '1.0.0',
+    author: 'Lumina Drift',
+    description: 'Shortcut anti-hijack test A',
+    permissions: ['commands', 'ui:panel', 'layers:read'],
+    commands: [
+      { id: 'hijack-undo', label: 'Hijack Undo', suggestedShortcut: 'Ctrl+KeyZ' },
+      { id: 'hijack-browser', label: 'Hijack Close Tab', suggestedShortcut: 'Ctrl+KeyW' },
+      { id: 'safe-cmd', label: 'Safe Cmd', suggestedShortcut: 'Shift+Alt+KeyG' },
+    ],
+    panels: [
+      {
+        id: 'main-panel',
+        title: 'Main Panel',
+        fields: [
+          { kind: 'section', key: 'sec1', label: 'Setup' },
+          { kind: 'text', key: 'info', text: 'Ready' },
+          { kind: 'range', key: 'thickness', label: 'Thickness', initial: 4, min: 1, max: 32, step: 1, unit: 'px' },
+          { kind: 'number', key: 'seed', label: 'Seed', initial: 7, min: 0, max: 100 },
+          { kind: 'toggle', key: 'advanced', label: 'Advanced', initial: false },
+          { kind: 'select', key: 'mode', label: 'Mode', initial: 'soft', options: [{ value: 'soft', label: 'Soft' }, { value: 'hard', label: 'Hard' }] },
+          { kind: 'color', key: 'tint', label: 'Tint', initial: '#62c5df' },
+          { kind: 'layer', key: 'target', label: 'Target Layer' },
+          { kind: 'input', key: 'tag', label: 'Tag', initial: 'glow', maxLength: 10, when: { key: 'advanced', is: [true] } },
+        ],
+        actions: [{ id: 'apply', label: 'Apply', variant: 'primary' }],
+      },
+    ],
+    script: 'async function onCommand() {} async function onPanelAction() {}',
+  }) as PluginManifestV2;
+
+  const pluginB = parsePlugin({
+    apiVersion: 2,
+    id: 'lumina.shortcut-b',
+    name: 'Shortcut B',
+    version: '1.0.0',
+    author: 'Lumina Drift',
+    description: 'Shortcut anti-hijack test B',
+    permissions: ['commands'],
+    commands: [
+      { id: 'dup-cmd', label: 'Dup Cmd', suggestedShortcut: 'Alt+Shift+KeyG' },
+    ],
+    script: 'async function onCommand() {}',
+  }) as PluginManifestV2;
+
+  mgr.syncPluginShortcuts(
+    [
+      { manifest: pluginA, enabled: true, installedAt: 1 },
+      { manifest: pluginB, enabled: true, installedAt: 2 },
+    ],
+    'zh-TW',
+  );
+
+  // Built-in undo shortcut stays untouched; conflicting/reserved plugin suggestions degrade to unbound ''
+  assert.equal(mgr.getComboForAction('action_undo'), 'Control+KeyZ', 'Built-in undo shortcut must never be hijacked');
+  assert.equal(mgr.getComboForAction(makePluginCommandShortcutId('lumina.shortcut-a', 'hijack-undo')), '', 'Conflicting suggestedShortcut degrades to unbound');
+  assert.equal(mgr.getComboForAction(makePluginCommandShortcutId('lumina.shortcut-a', 'hijack-browser')), '', 'Browser-reserved suggestedShortcut degrades to unbound');
+  assert.equal(mgr.getComboForAction(makePluginCommandShortcutId('lumina.shortcut-a', 'safe-cmd')), 'Alt+Shift+KeyG', 'Non-conflicting suggestedShortcut accepted');
+  assert.equal(mgr.getComboForAction(makePluginCommandShortcutId('lumina.shortcut-b', 'dup-cmd')), '', 'Second plugin colliding with first degrades to unbound');
+
+  // User customization & explicit clear persist across disable/re-enable
+  const safeId = makePluginCommandShortcutId('lumina.shortcut-a', 'safe-cmd');
+  mgr.setShortcut(safeId, 'Alt+Shift+KeyQ');
+  assert.equal(mgr.getComboForAction(safeId), 'Alt+Shift+KeyQ');
+  mgr.syncPluginShortcuts([{ manifest: pluginA, enabled: false, installedAt: 1 }], 'zh-TW');
+  assert.equal(mgr.getPluginShortcuts().length, 0);
+  mgr.syncPluginShortcuts([{ manifest: pluginA, enabled: true, installedAt: 1 }], 'zh-TW');
+  assert.equal(mgr.getComboForAction(safeId), 'Alt+Shift+KeyQ', 'User custom plugin shortcut persists across re-enable');
+  mgr.setShortcut(safeId, '');
+  assert.equal(mgr.getComboForAction(safeId), '', 'User can clear a plugin shortcut');
+
+  // Cleanup plugin shortcuts so global singleton stays clean
+  mgr.syncPluginShortcuts([], 'zh-TW');
+
+  // Declarative panel values, layer skipping groups, when condition, and patchValues clamping
+  const panelDecl = pluginA.panels[0];
+  const sampleLayers: LayerModel[] = [
+    {
+      id: 'g1', canvasId: 'c1', ownerId: 'u1', parentId: null, name: 'Folder',
+      layerType: 'group', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+      alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+      sortOrder: 0, createdAt: 1, updatedAt: 1,
+    },
+    {
+      id: 'r1', canvasId: 'c1', ownerId: 'u1', parentId: null, name: 'Ink',
+      layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+      alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+      sortOrder: 1, createdAt: 1, updatedAt: 1,
+    },
+  ];
+  const initVals = buildInitialPanelValues(panelDecl, sampleLayers, 'g1');
+  assert.equal(initVals.target, 'r1', 'Layer field skips group layers when allowGroup is false');
+  assert.equal(initVals.thickness, 4);
+  const tagField = panelDecl.fields.find((f) => f.key === 'tag')!;
+  assert.equal(isPluginPanelFieldVisible(tagField, initVals), false, 'when condition hides field initially');
+  const patched = applyPanelPatchValues(panelDecl, initVals, {
+    thickness: 999,
+    seed: -5,
+    advanced: true,
+    mode: 'invalid_option',
+    tint: '#AABBCC',
+    tag: '0123456789ABCDEF',
+    unknownKey: 'ignored',
+  });
+  assert.equal(patched.thickness, 32, 'range patched value clamped to max');
+  assert.equal(patched.seed, 0, 'number patched value clamped to min');
+  assert.equal(patched.mode, 'soft', 'invalid select option rejected');
+  assert.equal(patched.tint, '#aabbcc', 'color normalized to lowercase');
+  assert.equal(patched.tag, '0123456789', 'input clamped to maxLength');
+  assert.equal('unknownKey' in patched, false, 'unknown patch key ignored');
+  assert.equal(isPluginPanelFieldVisible(tagField, patched), true, 'when condition reveals field after toggle');
+})();
+
+// Plugin API v2.0 Batch 7: Validate shipped original v2 sample plugin end-to-end
+await (async () => {
+  const scriptDir = dirname(fileURLToPath(import.meta.url));
+  const kitPath = resolve(scriptDir, '../public/plugins/lumina-drift-studio-kit.lumina-plugin');
+  const rawBytes = readFileSync(kitPath);
+  assert.ok(rawBytes.byteLength <= PLUGIN_LIMITS.maxPackageBytesV2, 'v2 sample kit must fit within 256 KiB limit');
+  const kit = parsePlugin(JSON.parse(rawBytes.toString('utf8'))) as PluginManifestV2;
+  assert.equal(kit.apiVersion, 2);
+  assert.equal(kit.id, 'lumina.drift-studio-kit');
+  assert.equal(kit.commands.length, 2);
+  assert.equal(kit.filters.length, 2);
+  assert.equal(kit.panels.length, 1);
+  assert.ok(kit.filters.some((f) => f.group === 'plugin'), 'v2 sample includes a dedicated plugin-group filter');
+  assert.ok(kit.filters.some((f) => f.group === 'color'), 'v2 sample includes an existing-group filter with puzzle badge');
+
+  // Execute both filters from the shipped kit in QuickJS tiled filter engine
+  const W = 64;
+  const H = 64;
+  const samplePixels = new Uint8Array(W * H * 4);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = (y * W + x) * 4;
+      samplePixels[i] = (x * 4) & 255;
+      samplePixels[i + 1] = (y * 4) & 255;
+      samplePixels[i + 2] = 180;
+      samplePixels[i + 3] = 255;
+    }
+  }
+  const prismRes = await runPluginFilterTiled({
+    script: kit.script,
+    filterId: 'drift-prism',
+    pixels: samplePixels,
+    width: W,
+    height: H,
+    params: { shift: 2, mix: 80 },
+    tilePadding: 4,
+    previewOnly: true,
+  });
+  assert.equal(prismRes.cancelled, false);
+  assert.ok(prismRes.output && prismRes.output.some((v, idx) => v !== samplePixels[idx]), 'drift-prism transforms pixels');
+
+  const auroraRes = await runPluginFilterTiled({
+    script: kit.script,
+    filterId: 'aurora-duotone',
+    pixels: samplePixels,
+    width: W,
+    height: H,
+    params: { shadow: '#1a2240', highlight: '#7ef9ff', mix: 80 },
+    tilePadding: 0,
+    previewOnly: false,
+  });
+  assert.equal(auroraRes.cancelled, false);
+  assert.ok(auroraRes.output && auroraRes.output.some((v, idx) => v !== samplePixels[idx]), 'aurora-duotone transforms pixels');
+
+  // Execute halo-frame command and panel reset/apply actions with single-groupId undo
+  const sel = createHeadlessSelectionBridge(W, H);
+  const layers: LayerModel[] = [
+    {
+      id: 'base', canvasId: 'c1', ownerId: 'u1', parentId: null, name: 'Paint',
+      layerType: 'raster', blendMode: 'normal', opacity: 1, isVisible: true, isLocked: false,
+      alphaLocked: false, clipToBelow: false, isPublic: false, aclMode: 'owner_only',
+      sortOrder: 0, createdAt: 1, updatedAt: 1,
+    },
+  ];
+  const tileStore = new Map<string, Uint8Array>([['base', new Uint8Array(W * H * 4)]]);
+  const undo = new ScopedUndoManager();
+  let seq = 1;
+  const adapter: PluginCanvasHostAdapter = {
+    canvasWidth: W,
+    canvasHeight: H,
+    tileSize: W,
+    acl: { user: { id: 'u1', username: 'u1', displayName: 'U1', serverRole: 'user' }, isGuest: false, canvasMember: null },
+    getLayers: () => [...layers],
+    getActiveLayerId: () => 'base',
+    setActiveLayer: () => {},
+    createLayer: async (opts) => {
+      const created: LayerModel = {
+        id: `gen-${seq++}`, canvasId: 'c1', ownerId: 'u1', parentId: opts.parentId ?? null,
+        name: opts.name, layerType: opts.layerType ?? 'raster', blendMode: opts.blendMode ?? 'normal',
+        opacity: opts.opacity ?? 1, isVisible: true, isLocked: false, alphaLocked: false,
+        clipToBelow: false, isPublic: false, aclMode: 'owner_only', sortOrder: layers.length,
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      layers.push(created);
+      tileStore.set(created.id, new Uint8Array(W * H * 4));
+      return created;
+    },
+    updateLayerProps: async () => {},
+    reorderLayers: async () => {},
+    deleteLayer: async (id) => {
+      const idx = layers.findIndex((l) => l.id === id);
+      if (idx === -1) return false;
+      layers.splice(idx, 1);
+      tileStore.delete(id);
+      return true;
+    },
+    restoreDeletedLayer: async (layer) => {
+      layers.push(layer);
+      tileStore.set(layer.id, new Uint8Array(W * H * 4));
+      return layer;
+    },
+    getOccupiedTiles: () => [{ col: 0, row: 0 }],
+    readLayerTile: async (id) => (tileStore.get(id) ?? new Uint8Array(W * H * 4)).slice(),
+    readLayerRect: async (id, rect) => {
+      const buf = tileStore.get(id) ?? new Uint8Array(W * H * 4);
+      const out = new Uint8Array(rect.width * rect.height * 4);
+      for (let y = 0; y < rect.height; y++) {
+        const src = ((rect.y + y) * W + rect.x) * 4;
+        out.set(buf.subarray(src, src + rect.width * 4), y * rect.width * 4);
+      }
+      return out;
+    },
+    readCompositeRect: async (rect) => new Uint8Array(rect.width * rect.height * 4),
+    applyLayerTiles: (id, tiles) => {
+      if (tiles[0]) tileStore.set(id, (tiles[0].data as Uint8Array).slice());
+    },
+    commitTilePatch: () => {},
+    pushUndoOp: (op) => undo.push(op),
+    selection: sel,
+  };
+
+  // Run panel reset action
+  const txReset = new PluginCanvasTransaction(adapter);
+  const resetOut = await startPluginV2Direct(
+    kit,
+    { kind: 'panel', panelId: 'drift-workshop', actionId: 'reset', values: {} },
+    { width: W, height: H, dpi: 300 },
+    txReset.createRpcHandler(),
+  ).promise;
+  assert.equal(resetOut.patchValues?.thickness, 6);
+  assert.ok(resetOut.statusText);
+  await txReset.rollback();
+
+  // Run panel apply action -> creates new glow layer + writes pixels + sets selection in one groupId
+  const txApply = new PluginCanvasTransaction(adapter);
+  const applyOut = await startPluginV2Direct(
+    kit,
+    {
+      kind: 'panel',
+      panelId: 'drift-workshop',
+      actionId: 'apply',
+      values: { targetLayer: 'base', thickness: 4, inset: 2, color: '#62c5df', style: 'soft', newLayer: true, layerName: 'My Glow' },
+    },
+    { width: W, height: H, dpi: 300 },
+    txApply.createRpcHandler(),
+  ).promise;
+  txApply.commit('Drift Glow Lab');
+  assert.ok(applyOut.notice);
+  assert.equal(layers.length, 2, 'Panel apply created new glow layer');
+  const glowBuf = tileStore.get(layers[1].id)!;
+  assert.ok(glowBuf.some((v) => v > 0), 'Glow frame pixels written');
+  const undoOps = undo.undoGroup('u1');
+  assert.ok(undoOps.length >= 2, 'Single undoGroup covers layer creation, pixels, and selection');
+  assert.ok(new Set(undoOps.map((o) => o.groupId)).size === 1, 'All ops share one groupId');
+})();
 console.log('ui-logic checks passed');

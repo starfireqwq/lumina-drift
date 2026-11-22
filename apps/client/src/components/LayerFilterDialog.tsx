@@ -1,9 +1,10 @@
 import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
-import { ArrowLeft, ArrowUpRight, Check, ChevronDown, Crosshair, RotateCcw, SlidersHorizontal, Star, X } from 'lucide-react';
+import { ArrowLeft, ArrowUpRight, Check, ChevronDown, Crosshair, Puzzle, RotateCcw, SlidersHorizontal, Star, X } from 'lucide-react';
 import type { FilterValues } from '@atelier/shared';
 import {
-  defaultFilterValues, filterFitsLayer, filterGroupLabel, filterGroupsInUse, filterLabel, filterParamLabel, filterPointParam, filtersInGroup,
-  getFilter, loadFilterValues, paramShown, saveFilterValues, snapRange, type FilterDef, type FilterGroup, type FilterJob, type FilterParam,
+  defaultFilterValues, filterFitsLayer, filterGroupLabel, filterGroupsInUse, filterLabel, filterParamLabel, filterPointParam,
+  filterSectionLabel, filtersInGroup, getFilter, getFilterRegistryVersion, loadFilterValues, paramShown, saveFilterValues, snapRange,
+  subscribeFilterRegistry, type FilterDef, type FilterGroup, type FilterJob, type FilterParam,
 } from '../utils/filterRegistry';
 import { filterPoint } from '../utils/filterPoint';
 import { COLOR_ADJUST_PRESETS, matchColorPreset } from '../utils/filterPresets';
@@ -56,11 +57,23 @@ export function LayerFilterDialog({
   filterId, layerName, layerType, histogram, busy, refining = false, target,
   onReadThumbnail, onStartPoint, onChoose, onBack, onPreview, onPreviewJob, onApply, onApplyJob, onClose,
 }: Props) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const phone = usePhoneLayout();
-  const definition = getFilter(filterId);
-  const groups = useMemo(filterGroupsInUse, []);
+  const registryVersion = useSyncExternalStore(subscribeFilterRegistry, getFilterRegistryVersion, getFilterRegistryVersion);
+  const definition = useMemo(() => getFilter(filterId), [filterId, registryVersion]);
+  const groups = useMemo(() => filterGroupsInUse(), [registryVersion]);
   const [group, setGroup] = useState<FilterGroup>(() => readGroup(groups));
+  useEffect(() => {
+    if (!groups.includes(group) && groups.length > 0) {
+      setGroup(groups[0]);
+    }
+  }, [groups, group]);
+  useEffect(() => {
+    // If an open plugin filter disappears (plugin disabled/removed), return to the menu
+    if (filterId && !definition) {
+      onBack();
+    }
+  }, [filterId, definition, onBack]);
   const [values, setValues] = useState<FilterValues>(() => definition ? loadFilterValues(definition) : {});
   const [preview, setPreview] = useState(true);
   const [favorites, setFavorites] = useState<FavoriteFilterCard[]>(loadFavoriteFilters);
@@ -137,13 +150,13 @@ export function LayerFilterDialog({
 
   const openSaveFavorite = () => {
     if (!activeDef) return;
-    setFavName(filterLabel(activeDef, t));
+    setFavName(filterLabel(activeDef, t, language));
     setFavFormOpen((open) => !open);
   };
 
   const commitSaveFavorite = () => {
     if (!activeDef) return;
-    const card = createFavoriteCard(favName || filterLabel(activeDef, t), activeDef.id, activeValues);
+    const card = createFavoriteCard(favName || filterLabel(activeDef, t, language), activeDef.id, activeValues);
     if (!card) return;
     const next = [card, ...favorites];
     setFavorites(next);
@@ -183,11 +196,21 @@ export function LayerFilterDialog({
 
   const item = (def: FilterDef, index: number) => {
     const fits = Boolean(target?.applyToNewLayer) || filterFitsLayer(def, layerType);
+    const showPluginBadge = def.source === 'plugin' && def.group !== 'plugin';
+    const badgeTitle = def.pluginName ? `${t.filters.groups.plugin}: ${def.pluginName}` : t.filters.groups.plugin;
     return (
       <button type="button" key={def.id} disabled={!fits} onClick={() => onChoose(def.id)}
-        title={!fits ? t.filters.lineartNotOnMask : def.tool ? t.filters.opensTool : undefined}
+        data-filter-id={def.id}
+        data-plugin-filter={def.source === 'plugin' ? 'true' : undefined}
+        title={!fits ? t.filters.lineartNotOnMask : def.tool ? t.filters.opensTool : showPluginBadge ? badgeTitle : undefined}
         className="atelier-btn atelier-filter-item !h-8 justify-start text-xs disabled:opacity-45" style={{ '--i': index } as CSSProperties}>
-        <span className="min-w-0 flex-1 truncate text-left">{filterLabel(def, t)}</span>
+        <span className="min-w-0 flex-1 truncate text-left">{filterLabel(def, t, language)}</span>
+        {showPluginBadge && (
+          <>
+            <Puzzle aria-hidden data-plugin-badge="true" className="!h-3.5 !w-3.5 shrink-0 text-cyan-300/80" />
+            <span className="sr-only">{t.filters.groups.plugin}</span>
+          </>
+        )}
         {def.tool && <><ArrowUpRight aria-hidden className="!h-3.5 !w-3.5 shrink-0 text-neutral-500" /><span className="sr-only">{t.filters.opensTool}</span></>}
       </button>
     );
@@ -210,7 +233,7 @@ export function LayerFilterDialog({
       {inLibrary && activeDef && (
         <div className="space-y-2.5 border-t border-neutral-800 pt-2.5" aria-busy={refining && preview}>
           <div className="flex items-center justify-between gap-2">
-            <span className="truncate text-xs font-semibold text-white">{filterLabel(activeDef, t)}</span>
+            <span className="truncate text-xs font-semibold text-white">{filterLabel(activeDef, t, language)}</span>
             <div className="flex items-center gap-1">
               {activeDef.params.length > 0 && (
                 <button type="button" disabled={busy} onClick={resetActiveValues}
@@ -242,17 +265,21 @@ export function LayerFilterDialog({
               </button>
             </div>
           )}
-          {activeDef.params.filter((param) => paramShown(param, activeValues)).map((param, index, shown) => (
-            <div key={param.key} className="space-y-1.5">
-              {param.section && param.section !== shown[index - 1]?.section && (
-                <p className={`atelier-filter-item text-[11px] font-medium text-neutral-500 ${index > 0 ? 'pt-1' : ''}`} style={{ '--i': index } as CSSProperties}>
-                  {t.filters.sections[param.section]}
-                </p>
-              )}
-              <ParamControl param={param} index={index} label={filterParamLabel(param, t)} busy={busy}
-                value={activeValues[param.key]} onChange={(value) => updateActiveValue(param.key, value)} />
-            </div>
-          ))}
+          {activeDef.params.filter((param) => paramShown(param, activeValues)).map((param, index, shown) => {
+            const sectionText = filterSectionLabel(param, t);
+            const prevSectionText = index > 0 ? filterSectionLabel(shown[index - 1], t) : '';
+            return (
+              <div key={param.key} className="space-y-1.5">
+                {sectionText && sectionText !== prevSectionText && (
+                  <p className={`atelier-filter-item text-[11px] font-medium text-neutral-500 ${index > 0 ? 'pt-1' : ''}`} style={{ '--i': index } as CSSProperties}>
+                    {sectionText}
+                  </p>
+                )}
+                <ParamControl param={param} index={index} label={filterParamLabel(param, t, language)} busy={busy}
+                  value={activeValues[param.key]} onChange={(value) => updateActiveValue(param.key, value)} />
+              </div>
+            );
+          })}
           <FilterTargetBar target={target} busy={busy} />
         </div>
       )}
@@ -318,7 +345,7 @@ export function LayerFilterDialog({
 
   return (
     <ToolWindow id="layer-filter" icon={<SlidersHorizontal />}
-      title={<>{definition ? filterLabel(definition, t) : t.filters.title}<span className="ml-1.5 font-normal text-neutral-500">{layerName}</span></>}
+      title={<>{definition ? filterLabel(definition, t, language) : t.filters.title}<span className="ml-1.5 font-normal text-neutral-500">{layerName}</span></>}
       actions={actions} onClose={onClose} initial={{ x: -352, y: 96, w: 340, h: 0 }} minW={270}
       footer={activeDef ? (
         <>
@@ -374,17 +401,21 @@ export function LayerFilterDialog({
             <ColorPresetStrip values={values} busy={busy} phone={phone} onPick={(next) => setValues((current) => ({ ...current, ...next }))} />
           )}
           {definition.histogram && <ToneHistogram data={histogram ?? null} values={values} />}
-          {definition.params.filter((param) => paramShown(param, values)).map((param, index, shown) => (
-            <div key={param.key} className="space-y-1.5">
-              {param.section && param.section !== shown[index - 1]?.section && (
-                <p className={`atelier-filter-item text-[11px] font-medium text-neutral-500 ${index > 0 ? 'pt-1' : ''}`} style={{ '--i': index } as CSSProperties}>
-                  {t.filters.sections[param.section]}
-                </p>
-              )}
-              <ParamControl param={param} index={index} label={filterParamLabel(param, t)} busy={busy}
-                value={values[param.key]} onChange={(value) => updateActiveValue(param.key, value)} />
-            </div>
-          ))}
+          {definition.params.filter((param) => paramShown(param, values)).map((param, index, shown) => {
+            const sectionText = filterSectionLabel(param, t);
+            const prevSectionText = index > 0 ? filterSectionLabel(shown[index - 1], t) : '';
+            return (
+              <div key={param.key} className="space-y-1.5">
+                {sectionText && sectionText !== prevSectionText && (
+                  <p className={`atelier-filter-item text-[11px] font-medium text-neutral-500 ${index > 0 ? 'pt-1' : ''}`} style={{ '--i': index } as CSSProperties}>
+                    {sectionText}
+                  </p>
+                )}
+                <ParamControl param={param} index={index} label={filterParamLabel(param, t, language)} busy={busy}
+                  value={values[param.key]} onChange={(value) => updateActiveValue(param.key, value)} />
+              </div>
+            );
+          })}
           <FilterTargetBar target={target} busy={busy} />
         </div>
       </>)}
@@ -401,7 +432,7 @@ function ParamControl({ param, index, label, value, busy, onChange }: {
   onChange: (value: number | string | boolean) => void;
 }) {
   const id = useId();
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const row = 'atelier-filter-item text-[11px] text-neutral-300';
   const style = { '--i': index } as CSSProperties;
   switch (param.kind) {
@@ -412,7 +443,7 @@ function ParamControl({ param, index, label, value, busy, onChange }: {
         <label className={`${row} flex items-center justify-between gap-2`} style={style}>
           <span>{label}</span>
           <select disabled={busy} className="atelier-field h-7 min-w-0 max-w-[62%] truncate px-2 text-xs" value={String(value ?? param.initial)} onChange={(event) => onChange(event.target.value)}>
-            {param.options.map((option) => <option key={option.value} value={option.value}>{filterParamLabel(option, t)}</option>)}
+            {param.options.map((option) => <option key={option.value} value={option.value}>{filterParamLabel(option, t, language)}</option>)}
           </select>
         </label>
       );
@@ -587,15 +618,18 @@ function RangeControl({ param, id, label, value, busy, onChange, className, styl
   return (
     <div className={`${className} grid grid-cols-[1fr_auto] items-center gap-x-2 gap-y-1`} style={style}>
       <label htmlFor={id}>{label}</label>
-      <input type="number" inputMode="decimal" disabled={busy} aria-label={label} min={param.min} max={param.max} step={step} value={draft}
-        className="atelier-field h-6 w-16 px-1.5 text-right font-mono text-[11px] tabular-nums"
-        onChange={(event) => {
-          setDraft(event.target.value);
-          const typed = Number(event.target.value);
-          if (event.target.value.trim() !== '' && typed >= param.min && typed <= param.max) onChange(snapRange(param, typed));
-        }}
-        onBlur={commit}
-        onKeyDown={(event) => { if (event.key === 'Enter') commit(); }} />
+      <div className="flex items-center gap-1">
+        <input type="number" inputMode="decimal" disabled={busy} aria-label={label} min={param.min} max={param.max} step={step} value={draft}
+          className="atelier-field h-6 w-16 px-1.5 text-right font-mono text-[11px] tabular-nums"
+          onChange={(event) => {
+            setDraft(event.target.value);
+            const typed = Number(event.target.value);
+            if (event.target.value.trim() !== '' && typed >= param.min && typed <= param.max) onChange(snapRange(param, typed));
+          }}
+          onBlur={commit}
+          onKeyDown={(event) => { if (event.key === 'Enter') commit(); }} />
+        {param.unit && <span className="text-[10px] text-neutral-400">{param.unit}</span>}
+      </div>
       <input id={id} disabled={busy} className={`col-span-2 w-full cursor-pointer ${bipolar ? 'atelier-bipolar-range h-3.5' : 'h-1.5'}`} style={fill}
         type="range" min={param.min} max={param.max} step={step} value={value}
         onChange={(event) => onChange(Number(event.target.value))} />

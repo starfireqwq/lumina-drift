@@ -10,6 +10,13 @@ import {
   type SelectionMaskData,
   type SelectionSnapshot,
 } from '@atelier/shared';
+import {
+  applyMaskRectPatch,
+  featherMaskBuffer,
+  rasterizeEllipseMask,
+  rasterizeRectMask,
+  readMaskSubRect,
+} from './selectionMaskOps';
 
 export type SelectionCombineMode = 'replace' | 'add' | 'subtract';
 
@@ -482,34 +489,97 @@ export class SelectionEngine {
     this.renderActiveSelection();
   }
 
+  /** Reads a sub-rectangle of the active selection mask (1 byte/px), or null when no selection exists */
+  public readMaskRect(x: number, y: number, width: number, height: number): Uint8Array | null {
+    return readMaskSubRect(this.activeMaskData, x, y, width, height);
+  }
+
+  /** Writes a sub-rectangle mask patch onto the active selection (replace / add / subtract) */
+  public writeMaskRect(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    patch: Uint8Array,
+    mode: SelectionCombineMode = 'replace',
+  ) {
+    const mask = applyMaskRectPatch(
+      this.activeMaskData,
+      this.canvasWidth,
+      this.canvasHeight,
+      x,
+      y,
+      width,
+      height,
+      patch,
+      mode,
+    );
+    if (!mask.activePixelCount) {
+      this.clearSelection();
+      return;
+    }
+    this.activeMaskData = mask;
+    this.activeSelection = { type: 'lasso', points: [], bounds: mask.bounds };
+    this.renderActiveSelection();
+  }
+
+  /** Selects an axis-aligned rectangle combined with the current selection */
+  public selectRect(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    mode: SelectionCombineMode = 'replace',
+  ) {
+    const next = rasterizeRectMask(x, y, width, height, this.canvasWidth, this.canvasHeight);
+    const mask = this.combine(next, mode);
+    if (!mask.activePixelCount) {
+      this.clearSelection();
+      return;
+    }
+    this.activeMaskData = mask;
+    this.activeSelection = { type: mode === 'replace' ? 'rect' : 'lasso', points: [], bounds: mask.bounds };
+    this.renderActiveSelection();
+  }
+
+  /** Selects an ellipse inscribed in (x, y, width, height) combined with the current selection */
+  public selectEllipse(
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    mode: SelectionCombineMode = 'replace',
+  ) {
+    const next = rasterizeEllipseMask(x, y, width, height, this.canvasWidth, this.canvasHeight);
+    const mask = this.combine(next, mode);
+    if (!mask.activePixelCount) {
+      this.clearSelection();
+      return;
+    }
+    this.activeMaskData = mask;
+    this.activeSelection = { type: 'lasso', points: [], bounds: mask.bounds };
+    this.renderActiveSelection();
+  }
+
+  /** Selects a closed polygon combined with the current selection */
+  public selectPolygon(points: Array<{ x: number; y: number }>, mode: SelectionCombineMode = 'replace') {
+    const next = rasterizeLassoMask(points, this.canvasWidth, this.canvasHeight);
+    const mask = this.combine(next, mode);
+    if (!mask.activePixelCount) {
+      this.clearSelection();
+      return;
+    }
+    this.activeMaskData = mask;
+    this.activeSelection = { type: 'lasso', points: mode === 'replace' ? [...points] : [], bounds: mask.bounds };
+    this.renderActiveSelection();
+  }
+
   /** 羽化: softens the edge over `radius` px (three box blurs ≈ a gaussian) */
   public featherSelection(radius: number) {
     const mask = this.activeMaskData;
     const r = Math.round(radius);
     if (!mask || r < 1) return;
-    const w = this.canvasWidth;
-    const h = this.canvasHeight;
-    let src = new Float32Array(mask.data);
-    let dst = new Float32Array(src.length);
-    const pass = (horizontal: boolean) => {
-      const lines = horizontal ? h : w;
-      const len = horizontal ? w : h;
-      const at = (line: number, k: number) => (horizontal ? line * w + k : k * w + line);
-      for (let line = 0; line < lines; line++) {
-        let sum = 0;
-        for (let k = -r; k <= r; k++) sum += src[at(line, Math.min(len - 1, Math.max(0, k)))];
-        for (let k = 0; k < len; k++) {
-          dst[at(line, k)] = sum / (2 * r + 1);
-          sum += src[at(line, Math.min(len - 1, k + r + 1))] - src[at(line, Math.max(0, k - r))];
-        }
-      }
-      [src, dst] = [dst, src];
-    };
-    for (let i = 0; i < 3; i++) {
-      pass(true);
-      pass(false);
-    }
-    this.applyMask(Uint8Array.from(src, (v) => Math.round(v)));
+    this.applyMask(featherMaskBuffer(mask.data, this.canvasWidth, this.canvasHeight, r));
   }
 
   // 選取筆 / 選取橡皮擦: paint the selection with a round tip, merged in on release

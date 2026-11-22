@@ -1,5 +1,8 @@
 import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import type { PluginAction } from '../plugins/pluginApi';
+import type { PluginAction, PluginManifestV2 } from '../plugins/pluginApi';
+import type { PluginV2Result } from '../plugins/pluginRpc';
+import { PluginCanvasTransaction, type PluginCanvasHostAdapter } from '../plugins/pluginCanvasBridge';
+import { createSelectionEngineBridge } from '../plugins/pluginSelectionBridge';
 import { Application, Container, type Filter, Graphics, MaskFilter, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
 
 function parseWorkspaceBgColor(cssColor: string, fallback = 0x0d0e12): number {
@@ -22,6 +25,7 @@ import {
   AtelierBrushPreset,
   MIN_BRUSH_SPACING,
   CanvasModel,
+  DEFAULT_TILE_SIZE,
   computeSmartEncloseFillMask,
   expandSelectionMask,
   floodFillMagicWand,
@@ -147,6 +151,7 @@ import { VectorEngine } from '../engine/VectorEngine';
 import { filterDraftFactor, filterFitsLayer, filterLabel, filterPointParam, getFilter, type FilterJob } from '../utils/filterRegistry';
 import { filterPoint } from '../utils/filterPoint';
 import { FilterWorkerClient } from '../engine/filterWorkerClient';
+import { PluginFilterWorkerClient } from '../plugins/pluginFilterClient';
 import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../utils/filterMemoryGuard';
 import type { FilterTargetOptions } from './FilterTargetBar';
 import { AtelierModal, modalButton } from './AtelierModal';
@@ -285,6 +290,18 @@ export interface CanvasProjectAccess {
 export interface CanvasPluginAccess {
   canvasId: string;
   apply(action: Exclude<PluginAction, { kind: 'message' }>): Promise<boolean>;
+  runV2Command(
+    plugin: PluginManifestV2,
+    commandId: string,
+    options?: { onSlowStart?: () => void; signal?: AbortSignal },
+  ): Promise<PluginV2Result>;
+  runV2PanelAction(
+    plugin: PluginManifestV2,
+    panelId: string,
+    actionId: string,
+    values: Record<string, unknown>,
+    options?: { onSlowStart?: () => void; signal?: AbortSignal },
+  ): Promise<PluginV2Result>;
 }
 
 interface CanvasWorkspaceProps {
@@ -316,7 +333,7 @@ interface CanvasWorkspaceProps {
   onReleaseLayer?: (layerId: string) => void;
   onClaimLayer?: (layerId: string, force?: boolean) => void;
   onTransferLayer?: (layerId: string, targetUserId: string) => void;
-  roomMembers?: Array<{ userId: string; displayName: string; role?: string }>;
+  roomMembers?: Array<{ userId: string; displayName: string; canvasRole?: string; role?: string }>;
   folderAccess: FolderAccess;
   onReorderLayer?: (layerId: string, newSortOrder: number, ascendingIds?: string[]) => void | Promise<void>;
   onUpdateLayerProps?: (layerId: string, props: Partial<LayerModel>) => void | Promise<void>;
@@ -382,7 +399,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   } = useSocket();
   // A phone keeps this layout when turned sideways; 桌面模式 switches it to the desktop layout.
   const isPhone = usePhoneLayout();
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const dockLayout = useDockLayout();
   const railRight = !isPhone && dockLayout.railSide === 'right';
   const [mobileSheet, setMobileSheet] = useState<PanelId | null>(null);
@@ -757,6 +774,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   filterIdRef.current = shownFilterId;
   /** One resident filter worker for this canvas (created on first use, idles out on its own) */
   const filterWorkerRef = useRef<FilterWorkerClient | null>(null);
+  /** Dedicated QuickJS filter worker for Plugin API v2 filters (strictly isolated from layer-filter.worker.ts) */
+  const pluginFilterWorkerRef = useRef<PluginFilterWorkerClient | null>(null);
   const filterRequestRef = useRef(0);
   const [filterBusy, setFilterBusy] = useState(false);
   /** A preview is still being worked out (a draft is shown, or it is slow): the filter window shows a light sweep */
@@ -980,12 +999,25 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     setCanRedoState(scopedUndoRef.current.canRedo(effectiveUserId));
   };
 
+  const resolveCurrentCanvasRole = (): 'owner' | 'admin' | 'editor' | 'viewer' | undefined => {
+    const uid = userRef.current?.id ?? user?.id;
+    if (!uid) return undefined;
+    const raw = (roomMembers && roomMembers.length > 0 ? roomMembers : members).find((m) => m.userId === uid);
+    const roleRaw = raw
+      ? ('canvasRole' in raw && raw.canvasRole ? raw.canvasRole : 'role' in raw ? raw.role : undefined)
+      : undefined;
+    return roleRaw === 'owner' || roleRaw === 'admin' || roleRaw === 'editor' || roleRaw === 'viewer'
+      ? roleRaw
+      : undefined;
+  };
+  const isCanvasViewer = resolveCurrentCanvasRole() === 'viewer';
+
   const canEditPixels = (raw: LayerModel) => {
     const layer = (raw.layerType === 'mask' && layersRef.current.find((l) => l.id === raw.parentId)) || raw;
     // A group's mask is painted by whoever may edit the group (the group itself has no pixels)
     return canEditOwnPixels(layer !== raw && layer.layerType === 'group' ? { ...layer, layerType: 'raster' } : layer);
   };
-  const canEditOwnPixels = (layer: LayerModel) => !isGuest && !layer.isLocked && layer.layerType !== 'group' && Boolean(
+  const canEditOwnPixels = (layer: LayerModel) => !isGuest && !isCanvasViewer && !layer.isLocked && layer.layerType !== 'group' && Boolean(
     layer.ownerId === user?.id || (!layer.isPublic && layer.ownerId && layer.aclMode === 'shared_all')
   );
 
@@ -1524,6 +1556,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         app, viewport, layerManager, tileEngine, selectionEngine, vectorEngine, animationEngine: timeline,
         undo: scopedUndoRef.current, tileToRgba,
         get filterWorker() { return filterWorkerRef.current; },
+        get pluginFilterWorker() { return pluginFilterWorkerRef.current; },
       };
 
       // 6.1 Initialize Rulers
@@ -1904,6 +1937,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             zoomAtViewCenter(1 / 1.2);
           } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_toggle_mic'), ev)) {
             toggleVoiceMute();
+          } else if (!ev.repeat) {
+            const pluginHit = shortcutMgr.findPluginActionForEvent(ev);
+            if (pluginHit) {
+              ev.preventDefault();
+              window.dispatchEvent(new CustomEvent('atelier:plugin-shortcut', { detail: pluginHit }));
+            }
           }
         }
       };
@@ -2333,6 +2372,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const cancelFilterWork = () => {
     filterRequestRef.current++;
     filterWorkerRef.current?.cancel();
+    pluginFilterWorkerRef.current?.cancel();
   };
 
   /**
@@ -2426,7 +2466,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       .catch(() => { /* the canvas middle stays */ });
   };
 
-  const canCreateFilterLayer = Boolean(onCreateLayer && !isGuest && canvas && isEngineReady && !transformLayerIdRef.current);
+  const canCreateFilterLayer = Boolean(onCreateLayer && !isGuest && !isCanvasViewer && canvas && isEngineReady && !transformLayerIdRef.current);
   const filterCanvasSizeKey = canvas ? `${canvas.id}:${canvas.width}x${canvas.height}` : '';
   const filterMemoryPlan = useMemo(
     () => canvas
@@ -2515,7 +2555,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const item = toNewLayer ? null : getFilterLayer();
     const engine = tileEngineRef.current;
     if ((!toNewLayer && !item) || !engine || !canvas) return false;
-    if (toNewLayer && (!onCreateLayer || isGuest || !isEngineReady || transformLayerIdRef.current)) return false;
+    if (toNewLayer && (!onCreateLayer || isGuest || isCanvasViewer || !isEngineReady || transformLayerIdRef.current)) return false;
     const { width, height } = canvas;
     const memoryPlan = toNewLayer ? assessFilterCompositeMemory(width, height, coarsePointer()) : null;
     if (toNewLayer && memoryPlan?.tier === 'block') return false;
@@ -2549,15 +2589,25 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           : (await lm.readAsync(item!.model.id, [{ x: 0, y: 0, w: width, h: height }]))[0];
       }
       if (request !== filterRequestRef.current) return false;
-      const client = filterWorkerRef.current ??= new FilterWorkerClient();
       const def = getFilter(filter.id);
-      let wantHistogram = previewOnly && Boolean(def?.histogram) && !filterHistogramRef.current;
+      const isPluginFilter = def?.source === 'plugin';
+      let wantHistogram = !isPluginFilter && previewOnly && Boolean(def?.histogram) && !filterHistogramRef.current;
       // Line colour and gap filling can use the colour being painted with
       const values = { ...filter.values, currentColor: brushProps.color };
       const stale = () => request !== filterRequestRef.current || tileEngineRef.current !== engine ||
         filterApplyNewLayerRef.current !== toNewLayer ||
         (toNewLayer ? filterIncludeBgRef.current !== includeBg : (activeLayerRef.current?.id !== item!.model.id || getFilterLayer() !== item));
       const compute = async (draft: number) => {
+        if (isPluginFilter && def) {
+          const pluginClient = pluginFilterWorkerRef.current ??= new PluginFilterWorkerClient();
+          const result = await pluginClient.run(def, new Uint8Array(source), width, height, values, mask, {
+            draft,
+            previewOnly,
+            isTouch: coarsePointer(),
+          });
+          return result?.output ?? null;
+        }
+        const client = filterWorkerRef.current ??= new FilterWorkerClient();
         const result = await client.run(filter.id, new Uint8Array(source), width, height, values, mask, { histogram: wantHistogram, draft });
         if (result?.histogram && request === filterRequestRef.current) {
           wantHistogram = false;
@@ -2619,7 +2669,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       const coords = bounds && selectionEngineRef.current?.hasSelection()
         ? engine.getDirtyTilesForBounds(bounds.minX, bounds.minY, bounds.maxX + 1, bounds.maxY + 1)
         : engine.getAllTileCoords();
-      const label = def ? filterLabel(def, t) : filter.id;
+      const label = def ? filterLabel(def, t, language) : filter.id;
 
       if (toNewLayer) {
         const nonEmptyCoords = filterNonEmptyTileCoords(pixels, width, height, engine.tileSize, coords);
@@ -2688,7 +2738,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     }
   };
 
-  useEffect(() => () => filterWorkerRef.current?.dispose(), []);
+  useEffect(() => () => {
+    filterWorkerRef.current?.dispose();
+    pluginFilterWorkerRef.current?.dispose();
+  }, []);
 
   const filterRunnerRef = useRef(runLayerFilter);
   filterRunnerRef.current = runLayerFilter;
@@ -3151,6 +3204,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const undoNow = async () => {
     const effectiveUserId = userRef.current?.id || user?.id || 'guest';
     const ops = scopedUndoRef.current.undoGroup(effectiveUserId, (layerId, candidate) => {
+      if (
+        candidate?.selectionBefore !== undefined &&
+        !candidate.beforeTiles.length &&
+        !candidate.afterTiles.length &&
+        !candidate.layerCreated &&
+        !candidate.layerRemoved
+      ) {
+        return true;
+      }
       const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model;
       return Boolean(target && (target.ownerId === effectiveUserId || canEditPixels(target)));
     });
@@ -3244,6 +3306,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const effectiveUserId = userRef.current?.id || user?.id || 'guest';
     const ops = scopedUndoRef.current.redoGroup(effectiveUserId, (layerId, candidate) => {
       if (undoneLayerIdsRef.current.has(layerId)) return true; // a layer undo took away
+      if (
+        candidate?.selectionAfter !== undefined &&
+        !candidate.beforeTiles.length &&
+        !candidate.afterTiles.length &&
+        !candidate.layerCreated &&
+        !candidate.layerRemoved
+      ) {
+        return true;
+      }
       const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model;
       return Boolean(target && (target.ownerId === effectiveUserId || canEditPixels(target)));
     });
@@ -4835,7 +4906,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       });
       return true;
     }
-    if (isGuest || !onCreateLayer) return false;
+    if (isGuest || isCanvasViewer || !onCreateLayer) return false;
     if (action.kind === 'layer') return Boolean(await onCreateLayer(action.name, 'normal', 'raster'));
 
     const source = document.createElement('canvas');
@@ -4861,9 +4932,201 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
   const pluginActionRef = useRef(applyPluginAction);
   pluginActionRef.current = applyPluginAction;
+
+  const runPluginV2 = async (
+    plugin: PluginManifestV2,
+    invocation:
+      | { kind: 'command'; commandId: string }
+      | { kind: 'panel'; panelId: string; actionId: string; values: Record<string, unknown> },
+    options?: { onSlowStart?: () => void; signal?: AbortSignal },
+  ): Promise<PluginV2Result> => {
+    const manager = layerManagerRef.current;
+    const tileEngine = tileEngineRef.current;
+    if (!canvas || !manager || !tileEngine || transformLayerIdRef.current || textEdit || importingRef.current) {
+      throw new Error('Canvas is busy or unavailable.');
+    }
+
+    // Snapshot-augmented layer view so multi-step create/update/reorder/delete within a single run
+    // sees immediate changes even before React commits state updates.
+    const liveOverlay = new Map<string, LayerModel>();
+    const deletedOverlay = new Set<string>();
+    const getOverlayLayers = (): LayerModel[] => {
+      const merged = new Map<string, LayerModel>();
+      for (const l of layersRef.current) {
+        if (!deletedOverlay.has(l.id)) merged.set(l.id, l);
+      }
+      for (const [id, l] of liveOverlay.entries()) {
+        if (!deletedOverlay.has(id)) merged.set(id, l);
+      }
+      return [...merged.values()];
+    };
+
+    const validRole = resolveCurrentCanvasRole();
+    const canvasMember = validRole && userRef.current
+      ? {
+          canvasId: canvas.id,
+          userId: userRef.current.id,
+          role: validRole,
+          canCreateLayer: validRole !== 'viewer',
+          canDeleteOtherLayer: validRole === 'owner' || validRole === 'admin',
+          canExport: true,
+          canManageMembers: validRole === 'owner' || validRole === 'admin',
+          joinedAt: 0,
+        }
+      : null;
+
+    const adapter: PluginCanvasHostAdapter = {
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
+      tileSize: DEFAULT_TILE_SIZE,
+      acl: {
+        user: userRef.current ?? user ?? null,
+        isGuest,
+        canvasMember,
+      },
+      getLayers: getOverlayLayers,
+      getActiveLayerId: () => activeLayerRef.current?.id ?? null,
+      setActiveLayer: (layerId) => {
+        onSelectLayer?.(layerId);
+      },
+      getBrush: () => ({
+        color: brushPropsRef.current?.color ?? brushProps.color,
+        size: brushPropsRef.current?.size ?? brushProps.size,
+      }),
+      setBrush: (patch) => {
+        handleBrushPropsChange({
+          ...(patch.color !== undefined ? { color: patch.color } : {}),
+          ...(patch.size !== undefined ? { size: patch.size } : {}),
+        });
+      },
+      createLayer: async (opts) => {
+        if (!onCreateLayer) return null;
+        const created = await onCreateLayer(
+          opts.name,
+          opts.blendMode,
+          opts.layerType,
+          opts.aboveLayerId,
+          opts.parentId,
+          { select: opts.select },
+        );
+        if (!created) return null;
+        const withProps: LayerModel = { ...created, opacity: opts.opacity };
+        if (opts.opacity !== 1) {
+          await onUpdateLayerProps?.(created.id, { opacity: opts.opacity });
+        }
+        liveOverlay.set(created.id, withProps);
+        deletedOverlay.delete(created.id);
+        await waitForLayerItem(created.id);
+        return withProps;
+      },
+      updateLayerProps: async (layerId, patch) => {
+        await onUpdateLayerProps?.(layerId, patch);
+        const existing = getOverlayLayers().find((l) => l.id === layerId);
+        if (existing) liveOverlay.set(layerId, { ...existing, ...patch });
+      },
+      reorderLayers: async (layerId, ascendingIds, parentIdPatch) => {
+        if (parentIdPatch !== undefined) {
+          await onUpdateLayerProps?.(layerId, { parentId: parentIdPatch });
+          const existing = getOverlayLayers().find((l) => l.id === layerId);
+          if (existing) liveOverlay.set(layerId, { ...existing, parentId: parentIdPatch });
+        }
+        await onReorderLayer?.(layerId, 0, ascendingIds);
+        ascendingIds.forEach((id, idx) => {
+          const existing = getOverlayLayers().find((l) => l.id === id);
+          if (existing) liveOverlay.set(id, { ...existing, sortOrder: (idx + 1) * 10 });
+        });
+      },
+      deleteLayer: async (layerId, opts) => {
+        const res = await onDeleteLayer?.(layerId, opts);
+        if (res === false) return false;
+        deletedOverlay.add(layerId);
+        liveOverlay.delete(layerId);
+        return true;
+      },
+      restoreDeletedLayer: async (model, tiles, belowId) => {
+        const restored = await recreateLayer(model, tiles, undefined, belowId ?? undefined);
+        if (restored) {
+          deletedOverlay.delete(restored.id);
+          liveOverlay.set(restored.id, restored);
+        }
+        return restored;
+      },
+      getOccupiedTiles: (layerId) => manager.occupiedTiles(layerId),
+      readLayerTile: async (layerId, col, row) => {
+        const tx = col * DEFAULT_TILE_SIZE;
+        const ty = row * DEFAULT_TILE_SIZE;
+        const w = Math.min(DEFAULT_TILE_SIZE, canvas.width - tx);
+        const h = Math.min(DEFAULT_TILE_SIZE, canvas.height - ty);
+        const [buf] = await manager.readAsync(layerId, [{ x: tx, y: ty, w, h }], 'after');
+        return buf ?? new Uint8Array(w * h * 4);
+      },
+      readLayerRect: async (layerId, rect) => {
+        const [buf] = await manager.readAsync(layerId, [{ x: rect.x, y: rect.y, w: rect.width, h: rect.height }], 'after');
+        return buf ?? new Uint8Array(rect.width * rect.height * 4);
+      },
+      readCompositeRect: async (rect, includeBackground) => {
+        const tex = manager.getCompositeTexture(includeBackground);
+        const [buf] = await tileEngine.readRegionsAsync(tex, [{ x: rect.x, y: rect.y, w: rect.width, h: rect.height }]);
+        return buf ?? new Uint8Array(rect.width * rect.height * 4);
+      },
+      applyLayerTiles: (layerId, tiles) => {
+        manager.applyTiles(layerId, tiles);
+        requestRenderRef.current();
+      },
+      commitTilePatch: (layerId, tiles, desc, beforeTiles) => {
+        commitTilePatch(layerId, tiles, false, desc, false, beforeTiles);
+      },
+      pushUndoOp: (op) => {
+        scopedUndoRef.current.push(op);
+      },
+      onTransactionCommitted: () => {
+        updateUndoRedoState();
+        requestRenderRef.current();
+      },
+      selection: selectionEngineRef.current
+        ? createSelectionEngineBridge(selectionEngineRef.current, () => selection.refreshSelection())
+        : undefined,
+    };
+
+    const tx = new PluginCanvasTransaction(adapter);
+    const { startPluginCommandV2, startPluginPanelActionV2 } = await import('../plugins/runPlugin');
+    const ctx = {
+      width: canvas.width,
+      height: canvas.height,
+      dpi: clampDpi(canvas.dpi ?? 300),
+      tileSize: DEFAULT_TILE_SIZE,
+    };
+
+    const handle = invocation.kind === 'command'
+      ? startPluginCommandV2(plugin, invocation.commandId, ctx, tx.createRpcHandler(), options)
+      : startPluginPanelActionV2(plugin, invocation.panelId, invocation.actionId, invocation.values, ctx, tx.createRpcHandler(), options);
+
+    try {
+      const result = await handle.promise;
+      if (layerManagerRef.current !== manager) {
+        await tx.rollback();
+        throw new Error('Canvas changed during plugin execution.');
+      }
+      tx.commit(`Plugin: ${plugin.name}`);
+      return result;
+    } catch (err) {
+      await tx.rollback();
+      throw err;
+    }
+  };
+  const runPluginV2Ref = useRef(runPluginV2);
+  runPluginV2Ref.current = runPluginV2;
+
   useLayoutEffect(() => {
     if (!canvas?.id || !isCanvasPresented || !isEngineReady || !onRegisterPluginAccess) return;
-    onRegisterPluginAccess({ canvasId: canvas.id, apply: (action) => pluginActionRef.current(action) });
+    onRegisterPluginAccess({
+      canvasId: canvas.id,
+      apply: (action) => pluginActionRef.current(action),
+      runV2Command: (plugin, commandId, options) =>
+        runPluginV2Ref.current(plugin, { kind: 'command', commandId }, options),
+      runV2PanelAction: (plugin, panelId, actionId, values, options) =>
+        runPluginV2Ref.current(plugin, { kind: 'panel', panelId, actionId, values }, options),
+    });
     return () => onRegisterPluginAccess(null);
   }, [canvas?.id, isCanvasPresented, isEngineReady, onRegisterPluginAccess]);
 

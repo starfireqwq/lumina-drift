@@ -3,7 +3,57 @@
  * Supports standard tools, tablet auxiliary expresskeys, single-key hotkeys, and combinations.
  */
 
-export type ShortcutCategory = 'toolbox' | 'layers' | 'filters' | 'studio' | 'actions' | 'navigation' | 'voice';
+import type { Language } from '../locales';
+import { resolvePluginName, resolvePluginText } from '../plugins/pluginApi';
+import type { InstalledPlugin } from '../plugins/pluginStore';
+
+export type ShortcutCategory = 'toolbox' | 'layers' | 'filters' | 'studio' | 'actions' | 'navigation' | 'voice' | 'plugins';
+
+export const makePluginCommandShortcutId = (pluginId: string, commandId: string) =>
+  `plugin:${pluginId}:cmd:${commandId}`;
+
+export const makePluginPanelShortcutId = (pluginId: string, panelId: string) =>
+  `plugin:${pluginId}:panel:${panelId}`;
+
+export type ParsedPluginShortcutId =
+  | { kind: 'command'; pluginId: string; commandId: string }
+  | { kind: 'panel'; pluginId: string; panelId: string };
+
+export function normalizeSuggestedShortcut(raw: string | undefined): string {
+  if (!raw) return '';
+  const parts = raw
+    .split('+')
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (!parts.length) return '';
+  const key = parts[parts.length - 1];
+  const rawMods = new Set(parts.slice(0, -1).map((m) => (m === 'Ctrl' ? 'Control' : m)));
+  const ordered: string[] = [];
+  for (const mod of ['Control', 'Meta', 'Alt', 'Shift']) {
+    if (rawMods.has(mod)) ordered.push(mod);
+  }
+  ordered.push(key);
+  return ordered.join('+');
+}
+
+export function parsePluginShortcutId(actionId: string): ParsedPluginShortcutId | null {
+  if (!actionId.startsWith('plugin:')) return null;
+  const cmdMarker = ':cmd:';
+  const cmdIdx = actionId.lastIndexOf(cmdMarker);
+  if (cmdIdx > 'plugin:'.length) {
+    const pluginId = actionId.slice('plugin:'.length, cmdIdx);
+    const commandId = actionId.slice(cmdIdx + cmdMarker.length);
+    if (pluginId && commandId) return { kind: 'command', pluginId, commandId };
+  }
+  const panelMarker = ':panel:';
+  const panelIdx = actionId.lastIndexOf(panelMarker);
+  if (panelIdx > 'plugin:'.length) {
+    const pluginId = actionId.slice('plugin:'.length, panelIdx);
+    const panelId = actionId.slice(panelIdx + panelMarker.length);
+    if (pluginId && panelId) return { kind: 'panel', pluginId, panelId };
+  }
+  return null;
+}
 
 export interface ShortcutItem {
   id: string;
@@ -716,6 +766,9 @@ const defaultShortcuts = (): ShortcutItem[] =>
 export class ShortcutManager {
   private static instance: ShortcutManager | null = null;
   private shortcuts: ShortcutItem[] = [];
+  private pluginShortcuts: ShortcutItem[] = [];
+  private savedPluginCombos = new Map<string, string>();
+  private lastPluginSync: { plugins: readonly InstalledPlugin[]; language?: Language } | null = null;
   private listeners = new Set<() => void>();
 
   private constructor() {
@@ -730,12 +783,120 @@ export class ShortcutManager {
   }
 
   public getShortcuts(): ShortcutItem[] {
-    return [...this.shortcuts];
+    return [...this.shortcuts, ...this.pluginShortcuts];
+  }
+
+  public getPluginShortcuts(): ShortcutItem[] {
+    return [...this.pluginShortcuts];
   }
 
   public getComboForAction(actionId: string): string {
-    const item = this.shortcuts.find((s) => s.id === actionId);
+    const item = this.shortcuts.find((s) => s.id === actionId) ?? this.pluginShortcuts.find((s) => s.id === actionId);
     return item ? item.currentCombo : '';
+  }
+
+  /**
+   * Synchronizes dynamic plugin shortcuts from enabled plugins.
+   * Anti-hijack rule: `suggestedShortcut` is only accepted when no user override exists AND it
+   * neither hits a browser-reserved combo nor conflicts with any built-in or already-occupied binding;
+   * otherwise it degrades cleanly to unbound ('').
+   */
+  public syncPluginShortcuts(plugins: readonly InstalledPlugin[], language?: Language): void {
+    this.lastPluginSync = { plugins: [...plugins], language };
+    const occupied = new Set<string>();
+    for (const s of this.shortcuts) {
+      if (s.currentCombo) occupied.add(s.currentCombo.toLowerCase());
+    }
+
+    type Candidate = {
+      id: string;
+      name: string;
+      description: string;
+      suggested: string;
+    };
+    const candidates: Candidate[] = [];
+    for (const entry of plugins) {
+      if (!entry.enabled) continue;
+      const { manifest } = entry;
+      const pluginName = resolvePluginName(manifest, language ?? 'en-US');
+      if (manifest.apiVersion === 2) {
+        if (manifest.permissions.includes('ui:panel')) {
+          for (const panel of manifest.panels) {
+            const title = resolvePluginText(panel.title, panel.i18nTitle, language ?? 'en-US');
+            candidates.push({
+              id: makePluginPanelShortcutId(manifest.id, panel.id),
+              name: `${pluginName} · ${title}`,
+              description: pluginName,
+              suggested: '',
+            });
+          }
+        }
+        if (manifest.permissions.includes('commands')) {
+          for (const cmd of manifest.commands) {
+            const label = resolvePluginText(cmd.label, cmd.i18nLabel, language ?? 'en-US');
+            candidates.push({
+              id: makePluginCommandShortcutId(manifest.id, cmd.id),
+              name: `${pluginName} · ${label}`,
+              description: cmd.group ? `${pluginName} · ${cmd.group}` : pluginName,
+              suggested: normalizeSuggestedShortcut(cmd.suggestedShortcut),
+            });
+          }
+        }
+      } else {
+        for (const cmd of manifest.commands) {
+          candidates.push({
+            id: makePluginCommandShortcutId(manifest.id, cmd.id),
+            name: `${pluginName} · ${cmd.label}`,
+            description: pluginName,
+            suggested: '',
+          });
+        }
+      }
+    }
+
+    // Reserve any user-saved plugin bindings first so suggested shortcuts from other plugins cannot collide with them
+    for (const c of candidates) {
+      if (this.savedPluginCombos.has(c.id)) {
+        const saved = this.savedPluginCombos.get(c.id) ?? '';
+        if (saved) occupied.add(saved.toLowerCase());
+      }
+    }
+
+    const next: ShortcutItem[] = [];
+    for (const c of candidates) {
+      let safeDefault = '';
+      if (c.suggested && !ShortcutManager.isBrowserReserved(c.suggested) && !occupied.has(c.suggested.toLowerCase())) {
+        safeDefault = c.suggested;
+      }
+      let currentCombo: string;
+      if (this.savedPluginCombos.has(c.id)) {
+        currentCombo = this.savedPluginCombos.get(c.id) ?? '';
+      } else {
+        currentCombo = safeDefault;
+        if (currentCombo) occupied.add(currentCombo.toLowerCase());
+      }
+      next.push({
+        id: c.id,
+        category: 'plugins',
+        name: c.name,
+        description: c.description,
+        defaultCombo: safeDefault,
+        currentCombo,
+      });
+    }
+
+    this.pluginShortcuts = next;
+    this.notify();
+  }
+
+  /** Finds the first bound plugin shortcut matching this KeyboardEvent (checked after built-in shortcuts). */
+  public findPluginActionForEvent(ev: KeyboardEvent): ParsedPluginShortcutId | null {
+    for (const item of this.pluginShortcuts) {
+      if (item.currentCombo && this.matchesEvent(item.currentCombo, ev)) {
+        return parsePluginShortcutId(item.id);
+      }
+    }
+    return null;
   }
 
   public getDisplayLabel(combo: string): string {
@@ -763,9 +924,17 @@ export class ShortcutManager {
   }
 
   public setShortcut(actionId: string, newCombo: string) {
-    const item = this.shortcuts.find((s) => s.id === actionId);
-    if (item) {
-      item.currentCombo = newCombo;
+    const builtin = this.shortcuts.find((s) => s.id === actionId);
+    if (builtin) {
+      builtin.currentCombo = newCombo;
+      this.save();
+      this.notify();
+      return;
+    }
+    const pluginItem = this.pluginShortcuts.find((s) => s.id === actionId);
+    if (pluginItem) {
+      pluginItem.currentCombo = newCombo;
+      this.savedPluginCombos.set(actionId, newCombo);
       this.save();
       this.notify();
     }
@@ -773,6 +942,10 @@ export class ShortcutManager {
 
   public resetToDefaults() {
     this.shortcuts = defaultShortcuts();
+    this.savedPluginCombos.clear();
+    if (this.lastPluginSync) {
+      this.syncPluginShortcuts(this.lastPluginSync.plugins, this.lastPluginSync.language);
+    }
     this.save();
     this.notify();
   }
@@ -789,8 +962,12 @@ export class ShortcutManager {
   }
 
   private save() {
+    if (typeof localStorage === 'undefined') return;
     try {
-      const data = this.shortcuts.map(({ id, currentCombo }) => ({ id, currentCombo }));
+      const data: Array<{ id: string; currentCombo: string }> = [
+        ...this.shortcuts.map(({ id, currentCombo }) => ({ id, currentCombo })),
+        ...Array.from(this.savedPluginCombos.entries()).map(([id, currentCombo]) => ({ id, currentCombo })),
+      ];
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     } catch (err) {
       console.warn('Failed to save shortcuts to localStorage:', err);
@@ -799,11 +976,18 @@ export class ShortcutManager {
 
   private load() {
     this.shortcuts = defaultShortcuts();
+    this.savedPluginCombos.clear();
+    if (typeof localStorage === 'undefined') return;
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const saved: Array<{ id: string; currentCombo: string }> = JSON.parse(raw);
         for (const item of saved) {
+          if (typeof item?.id !== 'string' || typeof item.currentCombo !== 'string') continue;
+          if (item.id.startsWith('plugin:')) {
+            this.savedPluginCombos.set(item.id, item.currentCombo);
+            continue;
+          }
           const match = this.shortcuts.find((s) => s.id === item.id);
           // save() also stores untouched defaults: a retired default is not a user choice
           if (RETIRED_DEFAULTS[item.id] === item.currentCombo) continue;

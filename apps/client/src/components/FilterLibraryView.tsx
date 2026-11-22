@@ -1,10 +1,13 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { Check, Pencil, Sparkles, Star, Trash2, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
+import { Check, Pencil, Puzzle, Sparkles, Star, Trash2, X } from 'lucide-react';
 import { PIXEL_FILTER_RUNNERS, runPixelFilter, type FilterValues } from '@atelier/shared';
 import {
   BUILTIN_LIBRARY_CARDS, scaleFilterValuesForThumbnail, type FavoriteFilterCard,
 } from '../utils/filterLibrary';
-import { filterFitsLayer, filterLabel, getFilter } from '../utils/filterRegistry';
+import {
+  filterFitsLayer, filterLabel, getFilter, getFilterRegistryVersion, subscribeFilterRegistry,
+} from '../utils/filterRegistry';
+import { PluginFilterWorkerClient } from '../plugins/pluginFilterClient';
 import { useI18n } from '../context/I18nContext';
 
 export interface FilterThumbSource {
@@ -76,12 +79,19 @@ export function FilterLibraryView({
   phone, busy, layerType, applyToNewLayer, source, favorites, selectedKey,
   onSelectCard, onRenameFavorite, onRemoveFavorite,
 }: Props) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
+  const registryVersion = useSyncExternalStore(subscribeFilterRegistry, getFilterRegistryVersion, getFilterRegistryVersion);
   const [tab, setTab] = useState<'featured' | 'favorites'>('featured');
   const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
-  const cacheRef = useRef<{ source: FilterThumbSource | null; map: Record<string, string> }>({ source: null, map: {} });
+  const cacheRef = useRef<{ source: FilterThumbSource | null; registryVersion: number; map: Record<string, string> }>({
+    source: null,
+    registryVersion: -1,
+    map: {},
+  });
+  const pluginThumbClientRef = useRef<PluginFilterWorkerClient | null>(null);
+  useEffect(() => () => pluginThumbClientRef.current?.dispose(), []);
 
   const entries = useMemo<CardEntry[]>(() => {
     if (tab === 'featured') {
@@ -97,19 +107,19 @@ export function FilterLibraryView({
       return {
         key: `fav:${fav.id}`,
         label: fav.name,
-        sublabel: def ? filterLabel(def, t) : fav.filterId,
+        sublabel: def ? filterLabel(def, t, language) : fav.filterId,
         filterId: fav.filterId,
         values: fav.values,
         favorite: fav,
       };
     });
-  }, [tab, favorites, t]);
+  }, [tab, favorites, t, language, registryVersion]);
 
   // Generate small thumbnails asynchronously in chunks of 2 so the UI stays 60fps
   useEffect(() => {
     if (!source) return;
-    if (cacheRef.current.source !== source) {
-      cacheRef.current = { source, map: {} };
+    if (cacheRef.current.source !== source || cacheRef.current.registryVersion !== registryVersion) {
+      cacheRef.current = { source, registryVersion, map: {} };
       setThumbs({});
     }
     let cancelled = false;
@@ -117,31 +127,48 @@ export function FilterLibraryView({
     const queue = entries.filter((entry) => !cacheRef.current.map[entry.key]);
     let index = 0;
 
-    const step = () => {
+    const step = async () => {
       if (cancelled) return;
       const batch: Record<string, string> = {};
       let produced = 0;
       while (index < queue.length && produced < 2) {
+        if (cancelled) return;
         const entry = queue[index++];
         const def = getFilter(entry.filterId);
-        const runner = PIXEL_FILTER_RUNNERS[entry.filterId];
-        if (!def || !runner) continue;
+        if (!def) continue;
         const scaled = scaleFilterValuesForThumbnail(def, entry.values, source.origWidth, source.origHeight, source.width, source.height);
+        if (def.source === 'plugin') {
+          try {
+            const client = pluginThumbClientRef.current ??= new PluginFilterWorkerClient();
+            const res = await client.run(def, new Uint8Array(source.pixels), source.width, source.height, scaled, null, { previewOnly: true });
+            if (cancelled || !res?.output) continue;
+            const url = pixelsToThumbUrl(res.output, source.width, source.height);
+            cacheRef.current.map[entry.key] = url;
+            batch[entry.key] = url;
+            produced++;
+          } catch {
+            // Skip failed plugin thumbnail without blocking other cards
+          }
+          continue;
+        }
+        const runner = PIXEL_FILTER_RUNNERS[entry.filterId];
+        if (!runner) continue;
         const out = runPixelFilter(runner, source.pixels, source.width, source.height, scaled);
         const url = pixelsToThumbUrl(out, source.width, source.height);
         cacheRef.current.map[entry.key] = url;
         batch[entry.key] = url;
         produced++;
       }
-      if (produced > 0) setThumbs((prev) => ({ ...prev, ...batch }));
-      if (index < queue.length) timer = setTimeout(step, 0);
+      if (!cancelled && produced > 0) setThumbs((prev) => ({ ...prev, ...batch }));
+      if (!cancelled && index < queue.length) timer = setTimeout(() => { void step(); }, 0);
     };
-    if (queue.length > 0) timer = setTimeout(step, 0);
+    if (queue.length > 0) timer = setTimeout(() => { void step(); }, 0);
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      pluginThumbClientRef.current?.cancel();
     };
-  }, [source, entries]);
+  }, [source, entries, registryVersion]);
 
   const commitRename = () => {
     if (editingId && draftName.trim()) onRenameFavorite(editingId, draftName.trim());
@@ -186,7 +213,7 @@ export function FilterLibraryView({
         <div className={`grid gap-1.5 ${phone ? 'grid-cols-2' : 'grid-cols-2'} ${selectedKey ? 'max-h-48 overflow-y-auto overscroll-contain pr-0.5' : ''}`}>
           {entries.map((entry, idx) => {
             const def = getFilter(entry.filterId);
-            const fits = !def || applyToNewLayer || filterFitsLayer(def, layerType);
+            const fits = Boolean(def) && (applyToNewLayer || filterFitsLayer(def!, layerType));
             const active = selectedKey === entry.key;
             const thumb = thumbs[entry.key];
             const isEditing = Boolean(entry.favorite && editingId === entry.favorite.id);
@@ -213,6 +240,11 @@ export function FilterLibraryView({
                       <img src={thumb} alt="" className="h-full w-full object-cover" draggable={false} />
                     ) : (
                       <div className="h-full w-full animate-pulse bg-neutral-800/50" />
+                    )}
+                    {def?.source === 'plugin' && (
+                      <span className="absolute right-1 top-1 rounded bg-neutral-950/75 p-0.5 text-cyan-300" title={t.filters.groups.plugin}>
+                        <Puzzle aria-hidden className="h-3 w-3" />
+                      </span>
                     )}
                   </div>
                   <div className="flex min-w-0 items-center justify-between gap-1 px-2 py-1">

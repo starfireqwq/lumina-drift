@@ -767,6 +767,7 @@ export interface Translations {
       blur: string;
       distort: string;
       sharpen: string;
+      plugin: string;
     };
     items: {
       box: string;
@@ -1326,6 +1327,8 @@ export interface Translations {
     shortcutCatAssistStudio: string;
     shortcutCatEdit: string;
     shortcutCatViewVoice: string;
+    shortcutCatPlugins: string;
+    shortcutClear: string;
     shortcutNotSet: string;
     shortcutBrowserReserved: string;
     shortcutBrowserReservedHint: string;
