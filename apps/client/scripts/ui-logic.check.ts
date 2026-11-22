@@ -104,13 +104,17 @@ import {
   type PluginStorageBackend,
 } from '../src/plugins/pluginStore';
 import { executePluginV1 } from '../src/plugins/pluginSandboxCore';
-import { startPluginV2Direct } from '../src/plugins/pluginHost';
+import { startPluginToolDirect, startPluginV2Direct } from '../src/plugins/pluginHost';
 import {
   PluginCanvasTransaction,
   premultipliedToStraight,
   straightToPremultiplied,
+  type PluginBrushState,
   type PluginCanvasHostAdapter,
+  type PluginTimelineBridge,
 } from '../src/plugins/pluginCanvasBridge';
+import { getPluginLabels, getPluginPermissionLabel } from '../src/plugins/pluginLabels';
+import { resetPluginEasingsForTests } from '../src/plugins/pluginEasingRegistry';
 import { createHeadlessSelectionBridge } from '../src/plugins/pluginSelectionBridge';
 import type { LayerModel } from '@atelier/shared';
 import { verticalRuns } from '../src/engine/textLayer';
@@ -2254,7 +2258,7 @@ const alphaAt = (pixels: Uint8Array, width: number, x: number, y: number) => pix
 
 // Plugin API v2.0 Batch 1: Manifest v1/v2 parsing, permissions, limits, and store migration
 {
-  assert.equal(PLUGIN_PERMISSIONS_V2_CORE.length, 8);
+  assert.equal(PLUGIN_PERMISSIONS_V2_CORE.length, 12);
   assert.equal(PLUGIN_LIMITS.maxPackageBytesV1, 128 * 1024);
   assert.equal(PLUGIN_LIMITS.maxPackageBytesV2, 256 * 1024);
   assert.equal(PLUGIN_LIMITS.maxInstalledPlugins, 24);
@@ -4110,5 +4114,475 @@ await (async () => {
   assert.equal(sutParsed[0].dynamics?.size?.tilt, true);
   assert.equal(sutParsed[0].dynamics?.opacity?.pressure, true);
   assert.ok(Math.abs((sutParsed[0].dynamics?.opacity?.min ?? 0) - 0.25) < 1e-6);
+})();
+
+// =========================================================================
+// Plugin API v2.5 Batch 1 & 2: permissions, tools manifest, timeline/keyframes/easing RPC,
+// brush v2 dynamics/mix, ACL batch rejection, single undo groupId, and tool pointer session
+// =========================================================================
+await (async () => {
+  resetPluginEasingsForTests();
+
+  // 1. 4-locale permission labels for all 4 new v2.5 permissions
+  const v25Perms = ['timeline:read', 'timeline:write', 'tools', 'input'] as const;
+  const locales: Language[] = ['en-US', 'zh-TW', 'zh-CN', 'ja-JP'];
+  for (const loc of locales) {
+    const lbl = getPluginLabels(loc);
+    assert.ok(lbl.toolsBadge.length > 0);
+    assert.ok(lbl.sampleV25.length > 0);
+    for (const perm of v25Perms) {
+      assert.ok(getPluginPermissionLabel(loc, perm).length > 0, `Missing ${perm} label for ${loc}`);
+    }
+  }
+
+  // 2. Manifest parsing for tools declaration + permission enforcement
+  const baseToolManifest = {
+    apiVersion: 2,
+    id: 'lumina.v25-test',
+    name: 'V2.5 Test',
+    version: '2.5.0',
+    author: 'Lumina',
+    description: 'Tests v2.5 tools and timeline APIs.',
+    permissions: ['timeline:read', 'timeline:write', 'tools', 'input', 'layers:read', 'pixels:write', 'brush'],
+    tools: [
+      {
+        id: 'spark-pen',
+        label: 'Spark Pen',
+        i18nLabel: { 'zh-TW': '星芒筆' },
+        icon: 'sparkles',
+        cursor: 'crosshair',
+        suggestedShortcut: 'Alt+Shift+KeyS',
+        throttleMs: 24,
+        options: [
+          { kind: 'range', key: 'radius', label: 'Radius', initial: 4, min: 1, max: 32, step: 1, unit: 'px' },
+          { kind: 'color', key: 'glow', label: 'Glow', initial: '#38bdf8' },
+        ],
+      },
+    ],
+    script: 'async function onPointerDown() {}',
+  };
+  const parsedToolPlugin = parsePlugin(baseToolManifest) as PluginManifestV2;
+  assert.equal(parsedToolPlugin.apiVersion, 2);
+  assert.equal(parsedToolPlugin.tools?.length, 1);
+  assert.equal(parsedToolPlugin.tools?.[0].id, 'spark-pen');
+  assert.equal(parsedToolPlugin.tools?.[0].throttleMs, 24);
+
+  // Declaring tools without "tools" permission must throw
+  assert.throws(() => parsePlugin({
+    ...baseToolManifest,
+    permissions: ['input'],
+  }));
+  // Invalid tool icon / cursor / throttleMs must throw
+  assert.throws(() => parsePlugin({
+    ...baseToolManifest,
+    tools: [{ id: 'bad', label: 'Bad', icon: 'invalid-icon' }],
+  }));
+  assert.throws(() => parsePlugin({
+    ...baseToolManifest,
+    tools: [{ id: 'bad', label: 'Bad', throttleMs: 5 }],
+  }));
+
+  // 3. Build an in-memory multi-user canvas adapter with animation folder + own layer + foreign layer
+  const buildV25Host = (role: 'owner' | 'editor' | 'viewer' = 'owner', userId = 'u_owner') => {
+    let curFrame = 0;
+    let loop = true;
+    let range: { start: number; end: number } | null = null;
+    let brushState: PluginBrushState = {
+      color: '#3b82f6',
+      secondaryColor: '#ffffff',
+      size: 20,
+      opacity: 1,
+      flow: 1,
+      mixMode: 'blend',
+      colorMixing: 0,
+      paintAmount: 0.7,
+      fgBgMix: 0,
+      wetEdges: false,
+      textureDensity: 0,
+      dualBrush: false,
+    };
+
+    const layers: LayerModel[] = [
+      {
+        id: 'anim_folder',
+        canvasId: 'c1',
+        parentId: null,
+        ownerId: 'u_owner',
+        name: 'Anim Track',
+        layerType: 'group',
+        blendMode: 'normal',
+        opacity: 1,
+        isVisible: true,
+        isLocked: false,
+        sortOrder: 10,
+        isPublic: false,
+        aclMode: 'owner_only',
+        createdAt: 1,
+        meta: { animation: { fps: 12, length: 24, shared: false } },
+      },
+      {
+        id: 'cel_own',
+        canvasId: 'c1',
+        parentId: 'anim_folder',
+        ownerId: 'u_owner',
+        name: '1',
+        layerType: 'raster',
+        blendMode: 'normal',
+        opacity: 1,
+        isVisible: true,
+        isLocked: false,
+        sortOrder: 20,
+        isPublic: false,
+        aclMode: 'owner_only',
+        createdAt: 2,
+        meta: { cel: { hold: 2 } },
+      },
+      {
+        id: 'layer_foreign',
+        canvasId: 'c1',
+        parentId: null,
+        ownerId: 'u_other',
+        name: 'Other Painter Layer',
+        layerType: 'raster',
+        blendMode: 'normal',
+        opacity: 1,
+        isVisible: true,
+        isLocked: false,
+        sortOrder: 30,
+        isPublic: false,
+        aclMode: 'owner_only',
+        createdAt: 3,
+        meta: {},
+      },
+    ];
+
+    const tileStore = new Map<string, Uint8Array>();
+    const appliedHistory: Array<{ layerId: string; tiles: TileData[] }> = [];
+    const undoMgr = new ScopedUndoManager(50);
+    const caps = getCanvasRoleCapabilities(role);
+    const timeline: PluginTimelineBridge = {
+      getFps: () => layers[0].meta?.animation?.fps ?? 12,
+      getLength: () => layers[0].meta?.animation?.length ?? 24,
+      getCurrentFrame: () => curFrame,
+      getIsPlaying: () => false,
+      getLoop: () => loop,
+      getRange: () => range,
+      setCurrentFrame: (f) => { curFrame = f; },
+      setLoop: (l) => { loop = l; },
+      setRange: (r) => { range = r; },
+    };
+
+    const adapter: PluginCanvasHostAdapter = {
+      canvasWidth: 64,
+      canvasHeight: 64,
+      tileSize: 64,
+      acl: {
+        user: { id: userId, username: userId, displayName: userId, role: 'user', serverRole: 'member' } as any,
+        isGuest: false,
+        canvasMember: { canvasId: 'c1', userId, role, ...caps, joinedAt: 1 },
+      },
+      getLayers: () => layers,
+      getActiveLayerId: () => 'cel_own',
+      setActiveLayer: () => {},
+      getBrush: () => ({ ...brushState }),
+      setBrush: (patch) => { brushState = { ...brushState, ...patch }; },
+      createLayer: async () => null,
+      updateLayerProps: async (layerId, patch) => {
+        const idx = layers.findIndex((l) => l.id === layerId);
+        if (idx >= 0) layers[idx] = { ...layers[idx], ...patch };
+      },
+      reorderLayers: async () => {},
+      deleteLayer: async () => false,
+      restoreDeletedLayer: async () => null,
+      getOccupiedTiles: () => [],
+      readLayerTile: async (layerId) => tileStore.get(layerId)?.slice() ?? new Uint8Array(64 * 64 * 4),
+      readLayerRect: async (layerId, rect) => {
+        const full = tileStore.get(layerId) ?? new Uint8Array(64 * 64 * 4);
+        const out = new Uint8Array(rect.width * rect.height * 4);
+        for (let y = 0; y < rect.height; y++) {
+          const srcOff = ((rect.y + y) * 64 + rect.x) * 4;
+          out.set(full.subarray(srcOff, srcOff + rect.width * 4), y * rect.width * 4);
+        }
+        return out;
+      },
+      readCompositeRect: async (rect) => new Uint8Array(rect.width * rect.height * 4),
+      applyLayerTiles: (layerId, tiles) => {
+        appliedHistory.push({ layerId, tiles });
+        if (tiles[0]) tileStore.set(layerId, tiles[0].data.slice());
+      },
+      commitTilePatch: () => {},
+      pushUndoOp: (op) => undoMgr.push(op),
+      timeline,
+    };
+
+    return { adapter, layers, undoMgr, tileStore, appliedHistory, getBrushState: () => brushState };
+  };
+
+  // 4. Timeline / Keyframes / Easing / Brush v2 end-to-end via QuickJS + single undo groupId
+  {
+    const host = buildV25Host('owner', 'u_owner');
+    const manifest = parsePlugin({
+      apiVersion: 2,
+      id: 'lumina.v25-timeline-test',
+      name: 'Timeline & Brush v2 Test',
+      version: '2.5.0',
+      author: 'Lumina',
+      description: 'Exercises timeline, keyframes, easing, and brush v2 APIs.',
+      permissions: ['commands', 'timeline:read', 'timeline:write', 'brush'],
+      commands: [{ id: 'run', label: 'Run' }],
+      script: `
+        async function onCommand(cmd, api) {
+          const state0 = await api.timeline.getState();
+          await api.timeline.setFps(24);
+          await api.timeline.setLength(48);
+          await api.timeline.setFrame(6);
+          await api.timeline.setLoop(false);
+          await api.timeline.setRange({ start: 2, end: 20 });
+          await api.timeline.setLabel(6, 'Peak');
+          await api.timeline.updateCel('cel_own', { hold: 4, mark: 'key', note: 'Jump apex' });
+
+          await api.easing.register('lumina-bounce', [0.34, 1.45, 0.64, 1], 'Lumina Bounce');
+          const presets = await api.easing.listPresets();
+          const evalMid = await api.easing.evaluate(0.5, { presetId: 'lumina-bounce' });
+
+          await api.keyframes.set('cel_own', { frame: 0, x: 0, y: 0, opacity: 1, presetId: 'lumina-bounce' });
+          await api.keyframes.set('cel_own', { frame: 10, x: 100, y: -40, opacity: 0.5, easing: 'easeOut' });
+          const kfEval = await api.keyframes.evaluate('cel_own', 5);
+
+          await api.brush.set({
+            color: '#0ea5e9',
+            size: 32,
+            mixMode: 'dilute',
+            wetEdges: true,
+            fgBgMix: 0.45,
+            dynamics: { size: { pressure: true, min: 0.25 }, opacity: { velocity: true, min: 0.4 } },
+          });
+          const brushAfter = await api.brush.get();
+
+          return {
+            notice: JSON.stringify({
+              fps0: state0.fps,
+              hasCustomPreset: presets.some((p) => p.id === 'lumina-bounce'),
+              evalMid: Number(evalMid.value.toFixed(3)),
+              kfMidX: Math.round(kfEval.x),
+              mixMode: brushAfter.mixMode,
+              wetEdges: brushAfter.wetEdges,
+              sizeMin: brushAfter.dynamics?.size?.min,
+            }),
+          };
+        }
+      `,
+    }) as PluginManifestV2;
+
+    const tx = new PluginCanvasTransaction(host.adapter, { pluginId: manifest.id });
+    const res = await startPluginV2Direct(
+      manifest,
+      { kind: 'command', commandId: 'run' },
+      { width: 64, height: 64, dpi: 300 },
+      tx.createRpcHandler(),
+    ).promise;
+    tx.commit('Plugin: Timeline & Brush v2 Test');
+
+    const parsed = JSON.parse(res.notice!);
+    assert.equal(parsed.fps0, 12);
+    assert.equal(parsed.hasCustomPreset, true);
+    assert.ok(parsed.evalMid > 0.5, 'overshoot bounce curve should exceed 0.5 at t=0.5');
+    assert.ok(parsed.kfMidX > 50, 'keyframe evaluation should apply registered custom bezier');
+    assert.equal(parsed.mixMode, 'dilute');
+    assert.equal(parsed.wetEdges, true);
+    assert.ok(Math.abs(parsed.sizeMin - 0.25) < 1e-6);
+
+    assert.equal(host.layers[0].meta?.animation?.fps, 24);
+    assert.equal(host.layers[0].meta?.animation?.length, 48);
+    assert.equal(host.layers[0].meta?.animation?.labels?.[0]?.text, 'Peak');
+    assert.equal(host.layers[1].meta?.cel?.hold, 4);
+    assert.equal(host.layers[1].meta?.cel?.mark, 'key');
+    assert.equal(host.layers[1].meta?.keyframes?.length, 2);
+
+    // Single undo group must capture both anim_folder and cel_own meta ops in one Ctrl+Z
+    const undone = host.undoMgr.undoGroup('u_owner', () => true);
+    assert.equal(undone.length, 2);
+    assert.equal(undone[0].groupId, tx.groupId);
+    assert.equal(undone[1].groupId, tx.groupId);
+    assert.equal(host.undoMgr.undoGroup('u_owner', () => true).length, 0);
+  }
+
+  // 5. Reject brush stabilizer modification via brush.set
+  {
+    const host = buildV25Host('owner', 'u_owner');
+    const tx = new PluginCanvasTransaction(host.adapter, { pluginId: 'test.stab' });
+    const rpc = tx.createRpcHandler();
+    await assert.rejects(() => rpc('brush.set', { stabilizerLevel: 50 }), /stabilizer/i);
+  }
+
+  // 6. Multiplayer ACL: viewer rejected on all timeline/keyframes/easing writes;
+  //    keyframes.setBatch atomically rejects entire batch if ANY target layer is unauthorized
+  {
+    const viewerHost = buildV25Host('viewer', 'u_viewer');
+    const viewerTx = new PluginCanvasTransaction(viewerHost.adapter, { pluginId: 'test.viewer' });
+    const vrpc = viewerTx.createRpcHandler();
+    // Viewer CAN read timeline state
+    const readRes = await vrpc('timeline.getState', {});
+    assert.equal((readRes.result as any).fps, 12);
+    // Viewer CANNOT write timeline, keyframes, or custom easing
+    await assert.rejects(() => vrpc('timeline.setFrame', { frame: 3 }), /viewer/i);
+    await assert.rejects(() => vrpc('timeline.setFps', { fps: 24 }), /viewer/i);
+    await assert.rejects(() => vrpc('keyframes.set', { layerId: 'cel_own', keyframe: { frame: 0, x: 10 } }), /viewer/i);
+    await assert.rejects(() => vrpc('easing.register', { id: 'v-bad', bezier: [0.2, 0, 0.8, 1] }), /viewer/i);
+
+    // Owner tries atomic keyframes.setBatch touching BOTH own layer and foreign painter's layer
+    const ownerHost = buildV25Host('owner', 'u_owner');
+    const ownerTx = new PluginCanvasTransaction(ownerHost.adapter, { pluginId: 'test.batch' });
+    const orpc = ownerTx.createRpcHandler();
+    await assert.rejects(
+      () =>
+        orpc('keyframes.setBatch', {
+          items: [
+            { layerId: 'cel_own', keyframes: [{ frame: 0, x: 99 }] },
+            { layerId: 'layer_foreign', keyframes: [{ frame: 0, x: 50 }] },
+          ],
+        }),
+    );
+    // Atomic guarantee: cel_own must remain untouched!
+    assert.equal(ownerHost.layers[1].meta?.keyframes, undefined);
+  }
+
+  // 7. Custom tool pointer session: state retention across Down -> Move -> Up,
+  //    live preview flush, shared single undo groupId, and timeout/cancel rollback
+  {
+    const host = buildV25Host('owner', 'u_owner');
+    const toolPlugin = parsePlugin({
+      apiVersion: 2,
+      id: 'lumina.v25-dot-tool',
+      name: 'Dot Tool',
+      version: '2.5.0',
+      author: 'Lumina',
+      description: 'Draws a 2x2 dot on each pointer event.',
+      permissions: ['tools', 'input', 'layers:read', 'pixels:write'],
+      tools: [{ id: 'dot', label: 'Dot', icon: 'sparkles', cursor: 'crosshair' }],
+      script: `
+        let count = 0;
+        async function stamp(x, y, api) {
+          const active = await api.layers.getActive();
+          const px = Math.max(0, Math.min(62, Math.floor(x)));
+          const py = Math.max(0, Math.min(62, Math.floor(y)));
+          const data = new Uint8Array(2 * 2 * 4);
+          for (let i = 0; i < data.length; i += 4) {
+            data[i] = 56; data[i + 1] = 189; data[i + 2] = 248; data[i + 3] = 255;
+          }
+          await api.pixels.write(active.id, { x: px, y: py, width: 2, height: 2, data });
+        }
+        async function onPointerDown(toolId, ev, api) {
+          count = 1;
+          await stamp(ev.x, ev.y, api);
+        }
+        async function onPointerMove(toolId, ev, api) {
+          count += 1;
+          await stamp(ev.x, ev.y, api);
+        }
+        async function onPointerUp(toolId, ev, api) {
+          count += 1;
+          await stamp(ev.x, ev.y, api);
+          return { notice: 'dots:' + count };
+        }
+      `,
+    }) as PluginManifestV2;
+
+    // Missing 'input' permission must be rejected
+    assert.throws(() =>
+      startPluginToolDirect(
+        { ...toolPlugin, permissions: ['tools'] },
+        'dot',
+        { width: 64, height: 64, dpi: 300 },
+        async () => ({ result: null }),
+      ),
+    );
+
+    const tx = new PluginCanvasTransaction(host.adapter, { pluginId: toolPlugin.id });
+    const session = startPluginToolDirect(
+      toolPlugin,
+      'dot',
+      { width: 64, height: 64, dpi: 300 },
+      tx.createRpcHandler(),
+    );
+    const mkEv = (phase: 'down' | 'move' | 'up' | 'cancel', x: number, y: number) => ({
+      phase,
+      x,
+      y,
+      startX: 4,
+      startY: 4,
+      deltaX: 0,
+      deltaY: 0,
+      pressure: 0.8,
+      tiltX: 0,
+      tiltY: 0,
+      pointerType: 'pen' as const,
+      buttons: phase === 'up' ? 0 : 1,
+      shiftKey: false,
+      ctrlKey: false,
+      altKey: false,
+      metaKey: false,
+      timestamp: 10,
+      options: {},
+    });
+
+    await session.dispatchEvent('down', mkEv('down', 4, 4));
+    tx.flushPreview();
+    assert.equal(host.appliedHistory.length, 1, 'live preview should flush to canvas during stroke');
+    await session.dispatchEvent('move', mkEv('move', 16, 16));
+    tx.flushPreview();
+    const upRes = await session.dispatchEvent('up', mkEv('up', 28, 28));
+    session.dispose();
+    assert.equal(upRes.notice, 'dots:3');
+    tx.commit('Plugin Tool: Dot');
+
+    // Entire drag produces a single grouped undo entry
+    const strokeUndo = host.undoMgr.undoGroup('u_owner', () => true);
+    assert.equal(strokeUndo.length, 1);
+    assert.equal(strokeUndo[0].groupId, tx.groupId);
+
+    // Timeout / runaway loop protection + rollback restores previewed pixels
+    const badHost = buildV25Host('owner', 'u_owner');
+    const badPlugin = parsePlugin({
+      apiVersion: 2,
+      id: 'lumina.v25-hang-tool',
+      name: 'Hang Tool',
+      version: '2.5.0',
+      author: 'Lumina',
+      description: 'Hangs on move',
+      permissions: ['tools', 'input', 'layers:read', 'pixels:write'],
+      tools: [{ id: 'hang', label: 'Hang' }],
+      script: `
+        async function onPointerDown(toolId, ev, api) {
+          const active = await api.layers.getActive();
+          const data = new Uint8Array(4 * 4);
+          data.fill(255);
+          await api.pixels.write(active.id, { x: 2, y: 2, width: 2, height: 2, data });
+        }
+        function onPointerMove() {
+          while (true) {}
+        }
+      `,
+    }) as PluginManifestV2;
+    const badTx = new PluginCanvasTransaction(badHost.adapter, { pluginId: badPlugin.id });
+    const badSession = startPluginToolDirect(
+      badPlugin,
+      'hang',
+      { width: 64, height: 64, dpi: 300 },
+      badTx.createRpcHandler(),
+      { eventCpuLimitMs: 120, eventWallLimitMs: 600 },
+    );
+    await badSession.dispatchEvent('down', mkEv('down', 2, 2));
+    badTx.flushPreview();
+    // Verify preview pixel is visible on canvas before move hangs
+    assert.equal(badHost.tileStore.get('cel_own')?.[(2 * 64 + 2) * 4 + 3], 255);
+    await assert.rejects(() => badSession.dispatchEvent('move', mkEv('move', 10, 10)), /time limit|timed out/i);
+    badSession.dispose();
+    await badTx.rollback();
+    // After rollback, previewed pixel MUST be reverted to 0!
+    assert.equal(badHost.tileStore.get('cel_own')?.[(2 * 64 + 2) * 4 + 3], 0);
+  }
+
+  resetPluginEasingsForTests();
 })();
 console.log('ui-logic checks passed');
