@@ -21,6 +21,12 @@ import {
   RgbColor,
   rgbToHex,
   simulateWetColorPickup,
+  evaluateDynamicChannel,
+  evaluateFgBgMixRatio,
+  type BrushDynamicsConfig,
+  type BrushMixMode,
+  type BrushTextureBlendMode,
+  type DualBrushBlendMode,
 } from '@atelier/shared';
 import { RulerManager } from './RulerManager';
 
@@ -51,17 +57,26 @@ export interface BrushProperties {
   // Brush engine (CSP / Krita style); all optional, off by default
   textureDensity?: number; // 紙紋強度 0–1: paper grain fixed to the canvas eats into the stroke
   textureScale?: number; // 紙紋大小 0.5–4
+  textureInvert?: boolean; // 反轉紙紋明暗
+  textureBlendMode?: BrushTextureBlendMode; // 紙紋混合模式：subtract / multiply / overlay
+  customTextureUrl?: string | null; // 自訂或匯入的紙紋貼圖
   dualBrush?: boolean; // 雙重筆刷: the stroke only shows where a second, scattered tip also lands
   dualSize?: number; // second tip size as a share of the main tip, 0.1–1
   dualScatter?: number; // how far the second tips scatter, 0–2
+  dualTipUrl?: string | null; // 雙重筆刷自訂副筆尖貼圖
+  dualBlendMode?: DualBrushBlendMode; // 雙重筆刷混合模式：multiply / subtract / darken
   hueJitter?: number; // 顏色抖動 0–1 per dab
   satJitter?: number;
   valJitter?: number;
+  fgBgMix?: number; // 主色↔副色混色強度 0–1
   angleMode?: 'direction' | 'pen' | 'fixed'; // tip angle: follow the stroke, the pen (twist / tilt direction), or fixed
   tipAngle?: number; // degrees, added to the mode's angle
   roundness?: number; // 圓度 0.1–1 (1 = round): a flat tip shows the angle
   tiltSize?: number; // 0–1: tilting the pen widens the tip (pencil side)
   colorStretch?: number; // 延展 0–1: picked-up colour keeps smearing further along the stroke
+  mixMode?: BrushMixMode; // 混色模式：blend / smudge / dilute
+  wetEdges?: boolean; // 水彩濕邊緣效果
+  dynamics?: BrushDynamicsConfig; // 細項動態控制（大小／不透明度／流量／角度／散佈／主副色）
 }
 
 const TIP_BUCKETS = [4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256] as const;
@@ -107,6 +122,15 @@ export class BrushRenderer {
   private pencilTipTextures = new Map<string, CachedTipEntry>();
   private customTipTexture: Texture | null = null;
   private tipRequest = 0;
+  private customPaperTexture: Texture | null = null;
+  private customPaperTextureInverted: Texture | null = null;
+  private customPaperUrlLoaded: string | null = null;
+  private paperRequest = 0;
+  private paperTextureInverted: Texture | null = null;
+  private dualTipTexture: Texture | null = null;
+  private dualTipUrlLoaded: string | null = null;
+  private dualTipRequest = 0;
+  private smudgeSampled = false;
 
   // Stamping batch container and sprite pool for zero-GC ultra-fast stamping
   private stampBatch = new Container();
@@ -149,14 +173,22 @@ export class BrushRenderer {
   }
 
   /** Tileable paper grain (alpha = how much a dab loses there), made once */
-  private getPaperTexture(): Texture {
-    if (this.paperTexture) return this.paperTexture;
+  private getPaperTexture(inverted = false): Texture {
+    if (inverted && this.customPaperTextureInverted) return this.customPaperTextureInverted;
+    if (!inverted && this.customPaperTexture) return this.customPaperTexture;
+    if (inverted && this.paperTextureInverted) return this.paperTextureInverted;
+    if (!inverted && this.paperTexture) return this.paperTexture;
     const size = 256;
     const canvas = document.createElement('canvas');
     canvas.width = size;
     canvas.height = size;
     const ctx = canvas.getContext('2d')!;
     const img = ctx.createImageData(size, size);
+    const invCanvas = document.createElement('canvas');
+    invCanvas.width = size;
+    invCanvas.height = size;
+    const invCtx = invCanvas.getContext('2d')!;
+    const invImg = invCtx.createImageData(size, size);
     // Value noise on a torus so the tile repeats without seams
     const grid = 32;
     const rnd = new Float32Array(grid * grid).map(() => Math.random());
@@ -180,14 +212,21 @@ export class BrushRenderer {
       for (let x = 0; x < size; x++) {
         const grain = noise(x, y, 32) * 0.55 + noise(x, y, 16) * 0.3 + noise(x, y, 8) * 0.15;
         const i = (y * size + x) * 4;
-        img.data[i] = img.data[i + 1] = img.data[i + 2] = 255;
-        img.data[i + 3] = Math.round(Math.max(0, Math.min(1, (0.62 - grain) * 2.6)) * 255);
+        const tooth = Math.round(Math.max(0, Math.min(1, (0.62 - grain) * 2.6)) * 255);
+        const lum = Math.round(Math.max(0, Math.min(1, grain)) * 255);
+        img.data[i] = img.data[i + 1] = img.data[i + 2] = lum;
+        img.data[i + 3] = tooth;
+        invImg.data[i] = invImg.data[i + 1] = invImg.data[i + 2] = 255 - lum;
+        invImg.data[i + 3] = 255 - tooth;
       }
     }
     ctx.putImageData(img, 0, 0);
+    invCtx.putImageData(invImg, 0, 0);
     this.paperTexture = Texture.from(canvas);
     this.paperTexture.source.style.addressMode = 'repeat';
-    return this.paperTexture;
+    this.paperTextureInverted = Texture.from(invCanvas);
+    this.paperTextureInverted.source.style.addressMode = 'repeat';
+    return inverted ? this.paperTextureInverted : this.paperTexture;
   }
 
   /** A render texture at least w×h, reused between batches */
@@ -213,6 +252,20 @@ export class BrushRenderer {
 
   public setProperties(props: Partial<BrushProperties>) {
     this.currentProperties = { ...this.currentProperties, ...props };
+    if ('customTextureUrl' in props) {
+      const nextTexUrl = props.customTextureUrl ?? null;
+      if (nextTexUrl !== this.customPaperUrlLoaded) {
+        if (nextTexUrl) void this.setCustomTextureImage(nextTexUrl).catch(() => {});
+        else this.clearCustomTexture();
+      }
+    }
+    if ('dualTipUrl' in props) {
+      const nextDualUrl = props.dualTipUrl ?? null;
+      if (nextDualUrl !== this.dualTipUrlLoaded) {
+        if (nextDualUrl) void this.setDualTipImage(nextDualUrl).catch(() => {});
+        else this.clearDualTip();
+      }
+    }
   }
 
   public getProperties(): BrushProperties {
@@ -251,12 +304,107 @@ export class BrushRenderer {
 
   public canBatchStrokeDabs(): boolean {
     const props = this.currentProperties;
-    return !this.activeSelectionMask && !props.isEraser && !props.colorMixing && !props.textureDensity && !props.dualBrush;
+    return !this.activeSelectionMask && !props.isEraser && !props.colorMixing && !props.textureDensity && !props.dualBrush && !props.wetEdges;
   }
 
   public resetStrokeState() {
     this.currentReservoirColor = hexToRgb(this.currentProperties.color);
+    this.smudgeSampled = false;
     this.mixerTileCache.clear();
+  }
+
+  /**
+   * Load a custom paper grain texture image (converted to tileable luminance+tooth RGBA + inverted variant)
+   */
+  public async setCustomTextureImage(url: string | null) {
+    if (!url) {
+      this.clearCustomTexture();
+      return;
+    }
+    const req = ++this.paperRequest;
+    this.customPaperUrlLoaded = url;
+    try {
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const el = new Image();
+        el.crossOrigin = 'anonymous';
+        el.onload = () => resolve(el);
+        el.onerror = () => reject(new Error('Failed to load custom paper texture'));
+        el.src = url;
+      });
+      if (req !== this.paperRequest) return;
+      const w = Math.max(16, Math.min(512, img.naturalWidth || 256));
+      const h = Math.max(16, Math.min(512, img.naturalHeight || 256));
+      const c1 = document.createElement('canvas');
+      c1.width = w; c1.height = h;
+      const ctx1 = c1.getContext('2d')!;
+      ctx1.drawImage(img, 0, 0, w, h);
+      const data1 = ctx1.getImageData(0, 0, w, h);
+      const c2 = document.createElement('canvas');
+      c2.width = w; c2.height = h;
+      const ctx2 = c2.getContext('2d')!;
+      const data2 = ctx2.createImageData(w, h);
+      for (let i = 0; i < data1.data.length; i += 4) {
+        const a = data1.data[i + 3] / 255;
+        const lum = Math.round((0.299 * data1.data[i] + 0.587 * data1.data[i + 1] + 0.114 * data1.data[i + 2]) * a + 255 * (1 - a));
+        const tooth = 255 - lum;
+        data1.data[i] = data1.data[i + 1] = data1.data[i + 2] = lum;
+        data1.data[i + 3] = tooth;
+        data2.data[i] = data2.data[i + 1] = data2.data[i + 2] = 255 - lum;
+        data2.data[i + 3] = 255 - tooth;
+      }
+      ctx1.putImageData(data1, 0, 0);
+      ctx2.putImageData(data2, 0, 0);
+      this.customPaperTexture?.destroy(true);
+      this.customPaperTextureInverted?.destroy(true);
+      this.customPaperTexture = Texture.from(c1);
+      this.customPaperTexture.source.style.addressMode = 'repeat';
+      this.customPaperTextureInverted = Texture.from(c2);
+      this.customPaperTextureInverted.source.style.addressMode = 'repeat';
+      this.currentProperties.customTextureUrl = url;
+    } catch (err) {
+      if (req === this.paperRequest) this.clearCustomTexture();
+      throw err;
+    }
+  }
+
+  public clearCustomTexture() {
+    this.paperRequest++;
+    this.customPaperUrlLoaded = null;
+    this.customPaperTexture?.destroy(true);
+    this.customPaperTexture = null;
+    this.customPaperTextureInverted?.destroy(true);
+    this.customPaperTextureInverted = null;
+    this.currentProperties.customTextureUrl = null;
+  }
+
+  /**
+   * Load a custom secondary tip image for Dual Brush mode
+   */
+  public async setDualTipImage(url: string | null) {
+    if (!url) {
+      this.clearDualTip();
+      return;
+    }
+    const req = ++this.dualTipRequest;
+    this.dualTipUrlLoaded = url;
+    this.dualTipTexture = null;
+    try {
+      const tex = await Assets.load<Texture>(url);
+      if (req !== this.dualTipRequest) return;
+      tex.source.autoGenerateMipmaps = true;
+      this.dualTipTexture = tex;
+      this.currentProperties.dualTipUrl = url;
+    } catch (err) {
+      if (req === this.dualTipRequest) this.clearDualTip();
+      throw err;
+    }
+  }
+
+  public clearDualTip() {
+    this.dualTipRequest++;
+    this.dualTipUrlLoaded = null;
+    this.dualTipTexture = null;
+    this.currentProperties.dualTipUrl = null;
   }
 
   /**
@@ -523,6 +671,9 @@ export class BrushRenderer {
     const colorMixing = engine ? props.colorMixing ?? 0.0 : 0;
     const paintAmount = props.paintAmount ?? 0.7;
     const colorStretch = props.colorStretch ?? 0;
+    const mixMode = props.mixMode ?? 'blend';
+    const fgBgMix = engine ? props.fgBgMix ?? 0 : 0;
+    const wetEdges = engine && !isEraser && Boolean(props.wetEdges);
     const roundness = engine ? Math.max(0.1, Math.min(1, props.roundness ?? 1)) : 1;
     const angleMode = props.angleMode ?? 'direction';
     const tipAngle = ((props.tipAngle ?? 0) * Math.PI) / 180;
@@ -530,7 +681,7 @@ export class BrushRenderer {
     const jitter = engine && ((props.hueJitter ?? 0) > 0 || (props.satJitter ?? 0) > 0 || (props.valJitter ?? 0) > 0);
     const textureDensity = engine ? props.textureDensity ?? 0 : 0;
     const dual = engine && Boolean(props.dualBrush);
-    const shaped = textureDensity > 0 || dual;
+    const shaped = textureDensity > 0 || dual || wetEdges;
 
     const explicitAirbrush = !isEraser && props.brushType === 'airbrush';
     const antiAlias: AntiAliasLevel = engine && !(explicitAirbrush && props.antiAlias === 'none')
@@ -579,6 +730,7 @@ export class BrushRenderer {
     const under = useTileMixer && !this.mixerTileReader && targetRT instanceof RenderTexture
       ? this.readBox(targetRT, bx, by, bw, bh) : null;
     const brushRgb = hexToRgb(baseColorHex);
+    const secondaryRgb = fgBgMix > 0 ? hexToRgb(props.secondaryColor || '#FFFFFF') : null;
 
     const sampleMixerUnder = (gx: number, gy: number): [number, number, number, number] => {
       const ix = Math.max(0, Math.min(this.canvasWidth - 1, Math.round(gx)));
@@ -644,11 +796,28 @@ export class BrushRenderer {
         }
       }
 
-      // 2. Mixer brush: pick up the colour underneath and blend smoothly by pressure
+      // 2. Foreground-to-Secondary mix + Mixer brush (blend / smudge / dilute)
       const pressure = dabsArray[offset + 3];
-      let dabRgb = brushRgb;
+      let targetRgb = brushRgb;
+      if (!isEraser && fgBgMix > 0 && secondaryRgb) {
+        const mixT = evaluateFgBgMixRatio(fgBgMix, props.dynamics?.colorMix, {
+          pressure,
+          tilt,
+          velocity: 0,
+          rand: Math.random(),
+        });
+        if (mixT > 0.001) {
+          targetRgb = {
+            r: brushRgb.r + (secondaryRgb.r - brushRgb.r) * mixT,
+            g: brushRgb.g + (secondaryRgb.g - brushRgb.g) * mixT,
+            b: brushRgb.b + (secondaryRgb.b - brushRgb.b) * mixT,
+          };
+        }
+      }
+
+      let dabRgb = targetRgb;
       if (!isEraser && colorMixing > 0 && antiAlias !== 'none') {
-        const res = (this.currentReservoirColor ??= { ...brushRgb });
+        const res = (this.currentReservoirColor ??= { ...targetRgb });
         const sampleR = Math.max(1, size * 0.34);
         const acrossX = -Math.sin(strokeAngle) * sampleR;
         const acrossY = Math.cos(strokeAngle) * sampleR;
@@ -674,16 +843,35 @@ export class BrushRenderer {
         }
         if (sumW > 0) {
           const avgA = sumW / offsets.length;
-          // Light pressure blends more of the underlying canvas; firmer pressure deposits more fresh pigment
-          const pick = colorMixing * avgA * (1 - colorStretch * 0.36) * (1 - pressure * 0.5) * 0.75;
-          res.r += (sumR / sumW - res.r) * pick;
-          res.g += (sumG / sumW - res.g) * pick;
-          res.b += (sumB / sumW - res.b) * pick;
+          const sampledR = sumR / sumW;
+          const sampledG = sumG / sumW;
+          const sampledB = sumB / sumW;
+          if (mixMode === 'smudge' && !this.smudgeSampled) {
+            res.r = sampledR;
+            res.g = sampledG;
+            res.b = sampledB;
+            this.smudgeSampled = true;
+          } else {
+            const pressureBias = mixMode === 'smudge' ? 1 : (1 - pressure * 0.5);
+            const pick = Math.min(0.95, colorMixing * avgA * (1 - colorStretch * 0.36) * pressureBias * (mixMode === 'dilute' ? 0.9 : 0.75));
+            res.r += (sampledR - res.r) * pick;
+            res.g += (sampledG - res.g) * pick;
+            res.b += (sampledB - res.b) * pick;
+          }
+        } else if (mixMode === 'smudge' && !this.smudgeSampled) {
+          // Pure smudge over empty transparent canvas deposits nothing until pigment is picked up
+          continue;
         }
-        const reload = paintAmount * (0.05 + 0.25 * pressure) * (1 - colorStretch * 0.8);
-        res.r += (brushRgb.r - res.r) * reload;
-        res.g += (brushRgb.g - res.g) * reload;
-        res.b += (brushRgb.b - res.b) * reload;
+        if (mixMode !== 'smudge') {
+          const diluteFactor = mixMode === 'dilute' ? 0.3 : 1;
+          const reload = paintAmount * diluteFactor * (0.05 + 0.25 * pressure) * (1 - colorStretch * 0.8);
+          res.r += (targetRgb.r - res.r) * reload;
+          res.g += (targetRgb.g - res.g) * reload;
+          res.b += (targetRgb.b - res.b) * reload;
+        }
+        if (mixMode === 'dilute') {
+          alpha *= 0.82;
+        }
         dabRgb = res;
       }
       let dabColor = dabRgb === brushRgb ? baseColorHex : rgbToHex(Math.round(dabRgb.r), Math.round(dabRgb.g), Math.round(dabRgb.b));
@@ -765,7 +953,7 @@ export class BrushRenderer {
         sbw <= AIRBRUSH_SCRATCH_LIMIT && sbh <= AIRBRUSH_SCRATCH_LIMIT;
       if (useScratch || precise) {
         this.renderShaped(targetRT, sbx, sby, sbw, sbh, textureDensity, dual, tipTexture,
-          isEraser, Boolean(isAlphaLocked), needsSelectionClip, precise);
+          isEraser, Boolean(isAlphaLocked), needsSelectionClip, precise, wetEdges);
       } else {
         this.drawInto(targetRT, this.stampBatch, x0, y0, x1 - x0, y1 - y0);
       }
@@ -793,7 +981,7 @@ export class BrushRenderer {
   private renderShaped(
     targetRT: BrushTarget, bx: number, by: number, bw: number, bh: number,
     textureDensity: number, dual: boolean, tipTexture: Texture, isEraser: boolean, isAlphaLocked: boolean,
-    clipWithSelectionMask = false, precise = false
+    clipWithSelectionMask = false, precise = false, wetEdges = false
   ) {
     const props = this.currentProperties;
     const scratch = precise
@@ -804,16 +992,37 @@ export class BrushRenderer {
     this.renderer.render({ container: this.stampBatch, target: scratch, clear: true, clearColor: [0, 0, 0, 0] });
     this.stampBatch.position.set(0, 0);
 
+    if (wetEdges && !isEraser) {
+      // Subtle watercolor wet-edge effect: carve a slightly shrunken inner core so pigment gathers at edges
+      const innerBatch = new Container();
+      for (const child of this.stampBatch.children) {
+        const main = child as Sprite;
+        const inner = new Sprite(main.texture);
+        inner.anchor.set(main.anchor.x, main.anchor.y);
+        inner.position.set(main.x - bx, main.y - by);
+        inner.width = main.width * 0.72;
+        inner.height = main.height * 0.72;
+        inner.rotation = main.rotation;
+        inner.alpha = Math.min(0.42, main.alpha * 0.55);
+        inner.blendMode = 'erase';
+        innerBatch.addChild(inner);
+      }
+      this.renderer.render({ container: innerBatch, target: scratch, clear: false });
+      innerBatch.destroy({ children: true });
+    }
+
     if (dual) {
       const dualRT = (this.dualRT = this.ensureRT(this.dualRT, bw, bh));
       const ratio = Math.max(0.1, Math.min(1, props.dualSize ?? 0.4));
       const spread = Math.max(0, props.dualScatter ?? 0.6);
+      const secondaryTex = this.dualTipTexture ?? tipTexture;
+      const dualMode = props.dualBlendMode ?? 'multiply';
       this.dualBatch.removeChildren().forEach((c) => c.destroy());
       for (const child of this.stampBatch.children) {
         const main = child as Sprite;
         const n = 2 + Math.round(spread * 2);
         for (let k = 0; k < n; k++) {
-          const d = new Sprite(tipTexture);
+          const d = new Sprite(secondaryTex);
           d.anchor.set(0.5);
           const r = main.width * 0.5 * spread * Math.sqrt(Math.random());
           const a = Math.random() * Math.PI * 2;
@@ -826,7 +1035,15 @@ export class BrushRenderer {
       this.renderer.render({ container: this.dualBatch, target: dualRT, clear: true, clearColor: [0, 0, 0, 0] });
       const holder = new Container();
       const cut = new Sprite(new Texture({ source: dualRT.source, frame: new Rectangle(0, 0, bw, bh) }));
-      cut.blendMode = 'dst-in' as any;
+      if (dualMode === 'subtract') {
+        cut.blendMode = 'erase';
+        cut.alpha = 0.85;
+      } else if (dualMode === 'darken') {
+        cut.blendMode = 'dst-in' as any;
+        cut.alpha = 0.8;
+      } else {
+        cut.blendMode = 'dst-in' as any;
+      }
       holder.addChild(cut);
       this.renderer.render({ container: holder, target: scratch, clear: false });
       cut.texture.destroy(false);
@@ -835,12 +1052,20 @@ export class BrushRenderer {
 
     if (textureDensity > 0) {
       const holder = new Container();
-      const paper = new TilingSprite({ texture: this.getPaperTexture(), width: bw, height: bh });
+      const paperTex = this.getPaperTexture(Boolean(props.textureInvert));
+      const paper = new TilingSprite({ texture: paperTex, width: bw, height: bh });
       const scale = Math.max(0.25, props.textureScale ?? 1);
       paper.tileScale.set(scale);
       paper.tilePosition.set(-bx, -by); // fixed to the canvas, like paper, not to the stroke
       paper.alpha = Math.min(1, textureDensity);
-      paper.blendMode = 'erase';
+      const texMode = props.textureBlendMode ?? 'subtract';
+      if (texMode === 'multiply') {
+        paper.blendMode = 'multiply';
+      } else if (texMode === 'overlay') {
+        paper.blendMode = 'overlay';
+      } else {
+        paper.blendMode = 'erase';
+      }
       holder.addChild(paper);
       this.renderer.render({ container: holder, target: scratch, clear: false });
       holder.destroy({ children: true });
@@ -917,11 +1142,17 @@ export class BrushRenderer {
         const x = 12 + t * (width - 24);
         const y = height / 2 + Math.sin(t * Math.PI * 2) * height * 0.22;
         const pressure = Math.sin(t * Math.PI) * 0.85 + 0.15;
-        const size = minSize + (maxSize - minSize) * pressure;
+        const dynInput = { pressure, tilt: 0.5 * t, velocity: Math.sin(t * Math.PI), rand: (i * 0.6180339) % 1 };
+        const dyn = props.dynamics;
+        const size = dyn?.size
+          ? Math.max(1, maxSize * evaluateDynamicChannel({ ...dyn.size, min: dyn.size.min ?? (maxSize > 0 ? minSize / maxSize : 0) }, dynInput, 1))
+          : minSize + (maxSize - minSize) * pressure;
         const minStep = size < 4 ? 0.35 : 0.8;
         if (i > 0 && Math.hypot(x - prev.x, y - prev.y) < Math.max(minStep, size * Math.max(MIN_BRUSH_SPACING, props.spacing))) continue;
         const angle = Math.atan2(y - prev.y, x - prev.x);
-        dabs.push(x, y, size, pressure, props.flow * props.opacity * (0.2 + 0.8 * pressure), angle, 0.5 * t);
+        const opMult = dyn?.opacity ? evaluateDynamicChannel(dyn.opacity, dynInput, 1) : (0.2 + 0.8 * pressure);
+        const flowMult = dyn?.flow ? evaluateDynamicChannel(dyn.flow, dynInput, 1) : 1;
+        dabs.push(x, y, size, pressure, props.flow * flowMult * props.opacity * opMult, angle, 0.5 * t);
         prev = { x, y };
       }
       const savedW = this.canvasWidth;

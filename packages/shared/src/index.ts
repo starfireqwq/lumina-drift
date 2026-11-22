@@ -14,8 +14,10 @@ export * from './protocol/msgpack';
 // Phase 4: Color, Brush, Selection, Filters & Blend Modes
 export * from './color/pigment-blend';
 export * from './brush/pressure-curve';
+export * from './brush/brush-dynamics';
 export * from './brush/stabilizer';
 export * from './brush/abr-parser';
+export * from './brush/sqlite-reader';
 export * from './brush/sut-parser';
 export * from './brush/brush-package';
 export * from './brush/brush-spacing';

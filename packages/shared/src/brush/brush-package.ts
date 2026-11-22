@@ -3,10 +3,16 @@
  * Handles brush preset packaging, import/export, and auto-conversion from ABR/SUT/Images.
  */
 
-import { AbrParser } from './abr-parser';
+import { AbrParser, type ParsedBrushTip } from './abr-parser';
 import { SutParser } from './sut-parser';
 import { MIN_BRUSH_SPACING } from './brush-spacing';
 import type { PressureCurveConfig } from './pressure-curve';
+import type {
+  BrushDynamicsConfig,
+  BrushMixMode,
+  BrushTextureBlendMode,
+  DualBrushBlendMode,
+} from './brush-dynamics';
 
 export interface AtelierBrushPreset {
   id: string;
@@ -30,10 +36,33 @@ export interface AtelierBrushPreset {
     paintAmount?: number; // 0.0 to 1.0 (水分 / 顏料量)
     pressureCurve?: string | PressureCurveConfig;
     colorStretch?: number;
+    mixMode?: BrushMixMode;
     brushType?: string;
     snapToRuler?: boolean;
+    textureDensity?: number;
+    textureScale?: number;
+    textureInvert?: boolean;
+    textureBlendMode?: BrushTextureBlendMode;
+    customTextureUrl?: string | null;
+    dualBrush?: boolean;
+    dualSize?: number;
+    dualScatter?: number;
+    dualTipUrl?: string | null;
+    dualBlendMode?: DualBrushBlendMode;
+    hueJitter?: number;
+    satJitter?: number;
+    valJitter?: number;
+    fgBgMix?: number;
+    angleMode?: 'direction' | 'pen' | 'fixed';
+    tipAngle?: number;
+    roundness?: number;
+    tiltSize?: number;
+    wetEdges?: boolean;
+    dynamics?: BrushDynamicsConfig;
   };
   tipDataUrl?: string | null;
+  textureDataUrl?: string | null;
+  dualTipDataUrl?: string | null;
   tags?: string[];
   createdAt: number;
 }
@@ -275,6 +304,65 @@ export class BrushPackageManager {
       }
     }
 
+    const mapParsedTipToProperties = (
+      tip: ParsedBrushTip,
+      defaults: {
+        size: number;
+        minSize: number;
+        color: string;
+        opacity: number;
+        flow: number;
+        hardness: number;
+        stabilizerLevel: number;
+        colorMixing: number;
+        paintAmount: number;
+      }
+    ): AtelierBrushPreset['properties'] => {
+      const size = Math.max(1, Math.min(500, Math.round(tip.size ?? defaults.size)));
+      const minSize = tip.minSize !== undefined
+        ? Math.max(0, Math.min(size, tip.minSize))
+        : tip.dynamics?.size?.min !== undefined
+          ? Math.round(size * tip.dynamics.size.min * 10) / 10
+          : defaults.minSize;
+      return {
+        size,
+        minSize,
+        color: defaults.color,
+        opacity: tip.opacity ?? defaults.opacity,
+        flow: tip.flow ?? defaults.flow,
+        hardness: tip.hardness ?? defaults.hardness,
+        spacing: Math.max(MIN_BRUSH_SPACING, Math.min(1.5, tip.spacing ?? MIN_BRUSH_SPACING)),
+        isEraser: false,
+        stabilizerLevel: defaults.stabilizerLevel,
+        scatter: tip.scatter ?? 0,
+        colorMixing: tip.colorMixing ?? defaults.colorMixing,
+        paintAmount: tip.paintAmount ?? defaults.paintAmount,
+        colorStretch: tip.colorStretch ?? 0,
+        mixMode: tip.mixMode,
+        pressureCurve: 's-curve',
+        textureDensity: tip.textureDensity ?? 0,
+        textureScale: tip.textureScale ?? 1,
+        textureInvert: tip.textureInvert,
+        textureBlendMode: tip.textureBlendMode,
+        customTextureUrl: tip.textureDataUrl ?? null,
+        dualBrush: tip.dualBrush ?? false,
+        dualSize: tip.dualSize ?? 0.4,
+        dualScatter: tip.dualScatter ?? 0.6,
+        dualTipUrl: tip.dualTipDataUrl ?? null,
+        dualBlendMode: tip.dualBlendMode,
+        hueJitter: tip.hueJitter ?? 0,
+        satJitter: tip.satJitter ?? 0,
+        valJitter: tip.valJitter ?? 0,
+        fgBgMix: tip.fgBgMix ?? 0,
+        angleMode: tip.angleMode ?? 'direction',
+        tipAngle: tip.angle ?? 0,
+        roundness: tip.roundness ?? 1,
+        tiltSize: tip.tiltSize ?? 0,
+        wetEdges: tip.wetEdges ?? false,
+        dynamics: tip.dynamics,
+      };
+    };
+
     // 3. .abr (Photoshop ABR)
     if (lowerName.endsWith('.abr')) {
       const parser = new AbrParser(byteView);
@@ -285,24 +373,22 @@ export class BrushPackageManager {
           name: tip.name,
           category: 'ABR 筆刷匯入',
           author: 'ABR 筆刷',
-          version: '1.0',
-          description: `從 ${fileName} 解析出的筆尖形狀`,
-          properties: {
-            size: Math.min(Math.max(tip.width, 24), 128),
+          version: '2.0',
+          description: `從 ${fileName} 還原的筆刷設定與筆尖`,
+          properties: mapParsedTipToProperties(tip, {
+            size: Math.min(Math.max(tip.width || 32, 24), 128),
             minSize: 4,
             color: '#3b82f6',
             opacity: 1.0,
             flow: 0.9,
-            hardness: tip.hardness ?? 0.8,
-            spacing: MIN_BRUSH_SPACING,
-            isEraser: false,
+            hardness: 0.8,
             stabilizerLevel: 3,
-            scatter: 0,
-            colorMixing: 0.4,
+            colorMixing: 0,
             paintAmount: 0.7,
-            pressureCurve: 's-curve',
-          },
+          }),
           tipDataUrl: tip.dataUrl,
+          textureDataUrl: tip.textureDataUrl ?? null,
+          dualTipDataUrl: tip.dualTipDataUrl ?? null,
           tags: ['ABR', 'Imported'],
           createdAt: Date.now(),
         });
@@ -323,24 +409,22 @@ export class BrushPackageManager {
           name: tip.name,
           category: 'SUT 筆刷匯入',
           author: 'SUT 筆刷',
-          version: '1.0',
-          description: `從 ${fileName} 解析之筆刷貼圖`,
-          properties: {
+          version: '2.0',
+          description: `從 ${fileName} 還原之筆刷設定與貼圖`,
+          properties: mapParsedTipToProperties(tip, {
             size: 32,
             minSize: 2,
             color: '#10b981',
             opacity: 0.95,
             flow: 0.85,
-            hardness: tip.hardness ?? 0.85,
-            spacing: MIN_BRUSH_SPACING,
-            isEraser: false,
+            hardness: 0.85,
             stabilizerLevel: 4,
-            scatter: 0,
-            colorMixing: 0.5,
+            colorMixing: 0,
             paintAmount: 0.75,
-            pressureCurve: 's-curve',
-          },
+          }),
           tipDataUrl: tip.dataUrl,
+          textureDataUrl: tip.textureDataUrl ?? null,
+          dualTipDataUrl: tip.dualTipDataUrl ?? null,
           tags: ['SUT', 'Imported'],
           createdAt: Date.now(),
         }));

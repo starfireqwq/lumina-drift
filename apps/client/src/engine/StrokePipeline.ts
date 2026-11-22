@@ -330,6 +330,7 @@ export class StrokePipeline {
         brushType: props.brushType,
         antiAlias: props.antiAlias,
         angleMode: props.angleMode,
+        dynamics: props.dynamics,
       },
       initialPoint
     );

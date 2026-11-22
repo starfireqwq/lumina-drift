@@ -2316,6 +2316,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       pressureCurve: (preset.properties.pressureCurve as BrushProperties['pressureCurve']) || 'linear',
       paintAmount: preset.properties.paintAmount ?? 0.8,
       customBrushUrl: preset.tipDataUrl || null,
+      customTextureUrl: preset.textureDataUrl ?? preset.properties.customTextureUrl ?? null,
+      dualTipUrl: preset.dualTipDataUrl ?? preset.properties.dualTipUrl ?? null,
     });
     setSelectedBrushId(preset.id);
   };
