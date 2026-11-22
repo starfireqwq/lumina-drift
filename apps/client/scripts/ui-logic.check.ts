@@ -57,6 +57,24 @@ import {
   timeOfCel, trackLength, upsertTimelineLabel, upsertTransformKeyframe,
 } from '../src/engine/AnimationEngine';
 import {
+  binarizeLineArt,
+  computeScaledExportDimensions,
+  DEFAULT_LINE_COLOR_RULES,
+  encodeBmp24,
+  encodeTga,
+  formatCelFileName,
+  formatSequenceFileName,
+  planSequenceFrames,
+  resolveExportFrameRange,
+  resolveExportRegion,
+  sanitizeFileNameSegment,
+} from '../src/engine/animationExport';
+import {
+  buildWebCodecsCandidates,
+  computeFrameDurationUs,
+  computeFrameTimestampUs,
+} from '../src/engine/videoExport';
+import {
   ShortcutManager,
   makePluginCommandShortcutId,
   makePluginPanelShortcutId,
@@ -3714,5 +3732,154 @@ await (async () => {
   assert.deepEqual(getCanvasRoleCapabilities('viewer'), {
     canCreateLayer: false, canDeleteOtherLayer: false, canExport: true, canManageMembers: false,
   });
+})();
+
+// --- Animation Phase D: D1 sequence naming/range, D3 region crop, D4 cel naming/binarize/TGA/BMP ---
+(() => {
+  // D3: resolveExportRegion (no camera -> full canvas; with camera -> camera rect)
+  assert.deepEqual(resolveExportRegion(1920, 1080, null), { x: 0, y: 0, width: 1920, height: 1080 });
+  assert.deepEqual(resolveExportRegion(1920, 1080, { x: 120.4, y: 80.6, width: 1280.2, height: 720.4 }), {
+    x: 120, y: 81, width: 1280, height: 720,
+  });
+
+  // Scaling with aspect ratio lock
+  assert.deepEqual(computeScaledExportDimensions(1920, 1080, { scalePercent: 50 }), { width: 960, height: 540 });
+  assert.deepEqual(computeScaledExportDimensions(1920, 1080, { targetWidth: 1280, lockAspect: true }), { width: 1280, height: 720 });
+  assert.deepEqual(computeScaledExportDimensions(1920, 1080, { targetHeight: 540, lockAspect: true }), { width: 960, height: 540 });
+
+  // D1: filename formatting and sanitization
+  assert.equal(
+    formatSequenceFileName(0, { prefix: 'cut01', suffix: 'line', separator: '_', startNumber: 1, zeroPad: 4 }),
+    'cut01_0001_line.png'
+  );
+  assert.equal(
+    formatSequenceFileName(11, { prefix: '', suffix: '', separator: '-', startNumber: 0, zeroPad: 3 }),
+    '011.png'
+  );
+  assert.equal(sanitizeFileNameSegment('CON'), '_CON');
+  assert.equal(sanitizeFileNameSegment('a/b:c*d?'), 'a_b_c_d_');
+
+  // D1: range resolution using parseTimecode ("s+f" and plain frames)
+  const rAll = resolveExportFrameRange(36, { mode: 'all', fps: 12 });
+  assert.deepEqual(rAll, { start: 0, end: 35, frameCount: 36, valid: true });
+  const rCustom = resolveExportFrameRange(36, { mode: 'custom', customStartText: '1+1', customEndText: '2+6', fps: 12 });
+  assert.deepEqual(rCustom, { start: 12, end: 29, frameCount: 18, valid: true });
+  const rBad = resolveExportFrameRange(36, { mode: 'custom', customStartText: '2+1', customEndText: '1+1', fps: 12 });
+  assert.equal(rBad.valid, false);
+
+  // D1: every-frame vs distinct-frames planning
+  const segs = [{ time: 0, hold: 3 }, { time: 3, hold: 2 }];
+  const expanded = planSequenceFrames(segs, 'every-frame');
+  assert.equal(expanded.length, 5);
+  assert.deepEqual(expanded.map((f) => f.sourceTime), [0, 0, 0, 3, 3]);
+  assert.deepEqual(expanded.map((f) => f.timelineFrame), [0, 1, 2, 3, 4]);
+  const distinct = planSequenceFrames(segs, 'distinct-frames');
+  assert.equal(distinct.length, 2);
+  assert.deepEqual(distinct.map((f) => f.sourceTime), [0, 3]);
+
+  // D4: per-cel naming and case-insensitive collision deduplication
+  const used = new Set<string>();
+  assert.equal(
+    formatCelFileName('A', '01', { mode: 'folder-cel', prefix: 's01', suffix: '', separator: '_', extension: 'png' }, used),
+    's01_A_01.png'
+  );
+  assert.equal(
+    formatCelFileName('a', '01', { mode: 'folder-cel', prefix: 's01', suffix: '', separator: '_', extension: 'png' }, used),
+    's01_a_01_2.png'
+  );
+  assert.equal(
+    formatCelFileName('A', '01', { mode: 'cel-only', prefix: '', suffix: 'clean', separator: '-', extension: 'tga' }),
+    '01-clean.tga'
+  );
+
+  // D4: binarization guarantees zero intermediate colors across anti-aliased black + red + blue pixels
+  const srcRgba = new Uint8ClampedArray([
+    0, 0, 0, 255,         // solid black
+    110, 110, 110, 255,   // anti-aliased gray (should snap to black)
+    240, 240, 240, 255,   // faint halo (should become background)
+    255, 0, 0, 255,       // solid red
+    255, 130, 130, 255,   // anti-aliased red (should snap to red)
+    0, 0, 255, 180,       // semi-transparent blue (should snap to blue)
+    255, 255, 255, 0,     // fully transparent (should become background)
+  ]);
+  const rules = DEFAULT_LINE_COLOR_RULES.map((r) =>
+    r.id === 'black' || r.id === 'red' || r.id === 'blue' ? { ...r, enabled: true, threshold: 180 } : r
+  );
+  const binWhite = binarizeLineArt(srcRgba, 7, 1, { enabled: true, rules, background: 'white' });
+  const allowedWhite = new Set(['0,0,0,255', '255,0,0,255', '0,0,255,255', '255,255,255,255']);
+  const outKeysWhite: string[] = [];
+  for (let i = 0; i < 7; i++) {
+    const key = `${binWhite[i * 4]},${binWhite[i * 4 + 1]},${binWhite[i * 4 + 2]},${binWhite[i * 4 + 3]}`;
+    assert.equal(allowedWhite.has(key), true, `unexpected intermediate pixel ${key}`);
+    outKeysWhite.push(key);
+  }
+  assert.deepEqual(outKeysWhite, [
+    '0,0,0,255',
+    '0,0,0,255',
+    '255,255,255,255',
+    '255,0,0,255',
+    '255,0,0,255',
+    '0,0,255,255',
+    '255,255,255,255',
+  ]);
+
+  const binTrans = binarizeLineArt(srcRgba, 7, 1, { enabled: true, rules, background: 'transparent' });
+  assert.equal(binTrans[2 * 4 + 3], 0);
+  assert.equal(binTrans[6 * 4 + 3], 0);
+  assert.equal(binTrans[3 * 4], 255);
+  assert.equal(binTrans[3 * 4 + 3], 255);
+
+  // D4: TGA (24-bit & 32-bit) and BMP (24-bit) encoders
+  const img2x2 = new Uint8ClampedArray([
+    255, 0, 0, 255,     0, 255, 0, 255,
+    0, 0, 255, 255,     0, 0, 0, 0,
+  ]);
+  const tga24 = encodeTga(img2x2, 2, 2, 24);
+  assert.equal(tga24.length, 18 + 2 * 2 * 3);
+  assert.equal(tga24[2], 2);
+  assert.equal(tga24[12], 2);
+  assert.equal(tga24[14], 2);
+  assert.equal(tga24[16], 24);
+  assert.equal(tga24[17], 0x20);
+  // First pixel red (255,0,0) -> BGR (0,0,255)
+  assert.deepEqual(Array.from(tga24.slice(18, 21)), [0, 0, 255]);
+  // Transparent pixel composited onto white -> BGR (255,255,255)
+  assert.deepEqual(Array.from(tga24.slice(27, 30)), [255, 255, 255]);
+
+  const tga32 = encodeTga(img2x2, 2, 2, 32);
+  assert.equal(tga32.length, 18 + 2 * 2 * 4);
+  assert.equal(tga32[16], 32);
+  assert.equal(tga32[17], 0x28);
+  assert.deepEqual(Array.from(tga32.slice(30, 34)), [0, 0, 0, 0]);
+
+  // 2x2 24-bit BMP: rowStride = ceil(6/4)*4 = 8 bytes -> 54 + 16 = 70 bytes
+  const bmp24 = encodeBmp24(img2x2, 2, 2);
+  assert.equal(bmp24.length, 70);
+  assert.equal(bmp24[0], 0x42);
+  assert.equal(bmp24[1], 0x4d);
+  // Bottom row in BMP is y=1 of source: (0,0,255) blue -> BGR (255,0,0), then transparent -> white (255,255,255)
+  assert.deepEqual(Array.from(bmp24.slice(54, 60)), [255, 0, 0, 255, 255, 255]);
+  // Top row in BMP is y=0 of source: (255,0,0) red -> BGR (0,0,255), then green -> BGR (0,255,0)
+  assert.deepEqual(Array.from(bmp24.slice(62, 68)), [0, 0, 255, 0, 255, 0]);
+
+  // D2: WebCodecs offline candidate selection & zero-drift CFR timestamp math
+  const c4k = buildWebCodecsCandidates(3840, 2160, 'mp4', '4k');
+  assert.equal(c4k[0].container, 'mp4');
+  assert.equal(c4k[0].webCodecsCodec, 'avc1.640033'); // Level 5.1 for 4K
+  assert.equal(c4k.some((c) => c.container === 'webm' && c.muxerCodec === 'V_VP9'), true);
+  const c1080 = buildWebCodecsCandidates(1920, 1080, 'mp4', '1080p');
+  assert.equal(c1080[0].webCodecsCodec, 'avc1.640028'); // Level 4.0 for 1080p
+  assert.equal(c1080.every((c) => c.width % 2 === 0 && c.height % 2 === 0), true);
+  const cWebm = buildWebCodecsCandidates(1280, 720, 'webm', '1080p');
+  assert.equal(cWebm[0].container, 'webm');
+  assert.equal(cWebm[0].muxerCodec, 'V_VP9');
+
+  // 144 frames @ 12 FPS = exact 12_000_000 us with zero cumulative drift
+  let sumDur = 0;
+  for (let f = 0; f < 144; f++) {
+    sumDur += computeFrameDurationUs(f, 1, 12);
+  }
+  assert.equal(sumDur, 12_000_000);
+  assert.equal(computeFrameTimestampUs(144, 12), 12_000_000);
 })();
 console.log('ui-logic checks passed');

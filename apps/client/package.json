@@ -27,13 +27,15 @@
     "gifenc": "^1.0.3",
     "jszip": "^3.10.2",
     "lucide-react": "^0.475.0",
+    "mp4-muxer": "^5.2.2",
     "pixi.js": "^8.22.0",
     "qrcode": "^1.5.4",
     "quickjs-emscripten-core": "0.32.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "socket.io-client": "^4.8.1",
-    "socket.io-parser": "^4.2.7"
+    "socket.io-parser": "^4.2.7",
+    "webm-muxer": "^5.1.4"
   },
   "devDependencies": {
     "@types/node": "^22.13.4",

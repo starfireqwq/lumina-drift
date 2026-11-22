@@ -142,7 +142,12 @@ import {
 import { lightIdsFor, loadLightTable, saveLightTable, type LightTableState } from '../engine/lightTable';
 import { DEFAULT_TEXT, renderText, textBounds } from '../engine/textLayer';
 import { nextGroupName } from '../utils/canvasName';
-import type { AnimationExportPlan, AnimationExportScope } from './AnimationTimelineBar';
+import type {
+  AnimationCelExportItem,
+  AnimationCelExportPlan,
+  AnimationExportPlan,
+  AnimationExportPlanRequest,
+} from './AnimationTimelineBar';
 import {
   BlendMode,
   ColorCurvesOptions,
@@ -4568,26 +4573,92 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     // A reused cel selects the drawing it shows; past the end of the track, the folder itself
     onSelectLayer?.(celLayerOf(entry) ?? folderId);
   };
-  /** GIF / video frames: one segment per distinct picture (held cels become one longer frame, keyframed moves get every step) */
-  const planAnimationExport = ({ scope, useRange }: { scope: AnimationExportScope; useRange: boolean }): AnimationExportPlan | null => {
+  /** GIF / video / sequence frames: one segment per distinct picture (held cels become one longer frame, keyframed moves get every step) */
+  const planAnimationExport = ({ scope, useRange, range: explicitRange, transparent }: AnimationExportPlanRequest): AnimationExportPlan | null => {
     const lm = layerManagerRef.current;
     const engine = animationEngine;
     if (!lm || !engine || !canvas || !animFolder) return null;
-    const range = useRange ? engine.getRange() : null;
-    const start = range?.start ?? 0;
-    const end = range?.end ?? animTimelineLength - 1;
+    const range = explicitRange ?? (useRange ? engine.getRange() : null);
+    const maxFrame = Math.max(0, animTimelineLength - 1);
+    const start = Math.max(0, Math.min(maxFrame, range?.start ?? 0));
+    const end = Math.max(start, Math.min(maxFrame, range?.end ?? maxFrame));
     const only = scope === 'folder' ? new Set([animFolder.id]) : scope === 'folders' ? new Set(animFolders.map((f) => f.id)) : null;
     const segments = exportSegments(layersRef.current, start, end, only, canvas.width, canvas.height);
     return {
       width: canvas.width,
       height: canvas.height,
+      bgColor: canvas.bgColor || '#FFFFFF',
       segments,
       render: (time) => {
         // Personal eyes and onion skin never go into a file
         lm.syncLayers(displayLayersFor(layersRef.current, { personal: false, time, only }));
-        return lm.renderCompositeCanvas();
+        return lm.renderCompositeCanvas({ transparent: Boolean(transparent) });
       },
-      done: () => lm.syncLayers(displayLayersFor(layersRef.current)),
+      done: () => {
+        lm.syncLayers(displayLayersFor(layersRef.current));
+        requestRenderRef.current();
+      },
+    };
+  };
+
+  /** D4 per-cel export: lists each unique drawn cel (excluding blanks and timeline repeats) and renders it isolated in drawn coordinates */
+  const planCelExport = ({ folderIds }: { folderIds: string[] }): AnimationCelExportPlan | null => {
+    const lm = layerManagerRef.current;
+    if (!lm || !canvas) return null;
+    const selectedFolders = new Set(folderIds);
+    const allLayers = layersRef.current;
+    const folders = animFolders.filter((f) => selectedFolders.has(f.id));
+    const items: AnimationCelExportItem[] = [];
+    for (const folder of folders) {
+      const cels = allLayers
+        .filter((l) => l.parentId === folder.id && l.layerType !== 'mask' && l.meta?.cel?.ref === undefined)
+        .sort((a, b) => a.sortOrder - b.sortOrder);
+      for (const cel of cels) {
+        items.push({
+          folderId: folder.id,
+          folderName: folder.name,
+          celId: cel.id,
+          celName: cel.name,
+        });
+      }
+    }
+    if (items.length === 0) return null;
+
+    const celFolderMap = new Map(items.map((it) => [it.celId, it.folderId]));
+    return {
+      width: canvas.width,
+      height: canvas.height,
+      items,
+      renderCel: (celId) => {
+        const folderId = celFolderMap.get(celId);
+        const keepIds = new Set<string>([celId]);
+        if (folderId) keepIds.add(folderId);
+        let grew = true;
+        while (grew) {
+          grew = false;
+          for (const l of allLayers) {
+            if (keepIds.has(l.id)) continue;
+            if (l.parentId && keepIds.has(l.parentId)) {
+              // Inside the animation folder, only keep the target cel (and any mask directly on the folder)
+              if (l.parentId === folderId && l.id !== celId && l.layerType !== 'mask') continue;
+              keepIds.add(l.id);
+              grew = true;
+            }
+          }
+        }
+        const isolated = allLayers.map((l) => {
+          if (l.id === folderId) return { ...l, isVisible: true, opacity: 1 };
+          if (l.id === celId) return { ...l, isVisible: true };
+          if (keepIds.has(l.id)) return { ...l };
+          return { ...l, isVisible: false };
+        });
+        lm.syncLayers(isolated);
+        return lm.renderCompositeCanvas({ transparent: true });
+      },
+      done: () => {
+        lm.syncLayers(displayLayersFor(layersRef.current));
+        requestRenderRef.current();
+      },
     };
   };
 
@@ -6401,6 +6472,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 onFpsChange={setAnimationFps}
                 onSelectCell={selectAnimationCell}
                 planExport={planAnimationExport}
+                planCelExport={planCelExport}
               />
             </Suspense>
           )}
