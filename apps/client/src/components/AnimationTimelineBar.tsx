@@ -5,8 +5,12 @@ import {
 } from '../engine/AnimationEngine';
 import { clearLightTable, lightTableHas, toggleLightCel, type LightTableScope, type LightTableState } from '../engine/lightTable';
 import {
+  BEZIER_PRESETS,
   evaluateTransformKeyframes,
+  matchBezierPreset,
   type CelMark,
+  type EvaluatedTransform,
+  type KeyframeBezierPresetId,
   type KeyframeEasing,
   type LayerModel,
   type TimelineLabel,
@@ -116,6 +120,12 @@ interface AnimationTimelineBarProps {
   canvasWidth?: number;
   canvasHeight?: number;
   onUpdateLayerKeyframes?: (layerId: string, keyframes: TransformKeyframe[]) => void;
+  /** Live transform preview during direct canvas handle drag (before pointerup commit) */
+  liveKeyframeEval?: EvaluatedTransform | null;
+  showKeyframeHandles?: boolean;
+  onToggleKeyframeHandles?: () => void;
+  showMotionPath?: boolean;
+  onToggleMotionPath?: () => void;
 }
 
 const TRACK_LABEL_WIDTH = 96;
@@ -161,6 +171,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   onSelectCell, planExport, onPlaceEntries, onCopyEntries, onPasteEntries, onSetEntryHold, ripple, onToggleRipple,
   timelineLength, lengthIsSet, onSetLength, lightTable, onUpdateLightTable,
   activeLayer, canvasWidth = 1920, canvasHeight = 1080, onUpdateLayerKeyframes,
+  liveKeyframeEval, showKeyframeHandles, onToggleKeyframeHandles, showMotionPath, onToggleMotionPath,
 }) => {
   const { t } = useI18n();
   const isPhone = usePhoneLayout();
@@ -941,10 +952,21 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
               const kfs = activeLayer.meta?.keyframes ?? [];
               const defPx = Math.round(canvasWidth / 2);
               const defPy = Math.round(canvasHeight / 2);
-              const curEval = evaluateTransformKeyframes(kfs, time, defPx, defPy);
+              const curEval = liveKeyframeEval ?? evaluateTransformKeyframes(kfs, time, defPx, defPy);
               const exactKf = kfs.find((k) => Math.round(k.frame) === time);
               const curEasing: KeyframeEasing = exactKf?.easing ?? 'easeInOut';
               const curBezier: [number, number, number, number] = exactKf?.bezier ?? [0.42, 0, 0.58, 1];
+              const activePreset: KeyframeBezierPresetId | '' = curEasing === 'cubicBezier' ? (matchBezierPreset(curBezier) ?? '') : '';
+              const presetLabel = (id: KeyframeBezierPresetId): string => {
+                switch (id) {
+                  case 'softEase': return t.animation.presetSoftEase;
+                  case 'strongEase': return t.animation.presetStrongEase;
+                  case 'decelerate': return t.animation.presetDecelerate;
+                  case 'accelerate': return t.animation.presetAccelerate;
+                  case 'softOvershoot': return t.animation.presetSoftOvershoot;
+                  case 'strongOvershoot': return t.animation.presetStrongOvershoot;
+                }
+              };
               const commitKf = (patch: Partial<TransformKeyframe>) => {
                 const nextKf: TransformKeyframe = {
                   frame: time,
@@ -955,37 +977,51 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                   rotation: exactKf?.rotation ?? curEval.rotation,
                   pivotX: exactKf?.pivotX ?? Math.round(curEval.pivotX),
                   pivotY: exactKf?.pivotY ?? Math.round(curEval.pivotY),
+                  opacity: exactKf?.opacity ?? curEval.opacity,
                   easing: exactKf?.easing ?? curEasing,
                   bezier: exactKf?.bezier ?? curBezier,
                   ...patch,
                 };
                 onUpdateLayerKeyframes(activeLayer.id, upsertTransformKeyframe(kfs, nextKf));
               };
-              const numBox = (label: string, val: number, step: number, onSet: (n: number) => void, w = 'w-12') => (
+              const numBox = (
+                label: string,
+                val: number,
+                step: number,
+                onSet: (n: number) => void,
+                opts?: { w?: string; min?: number; max?: number; testId?: string }
+              ) => (
                 <label className="flex shrink-0 items-center gap-0.5 text-[10px] text-neutral-400">
-                  <span>{label}</span>
+                  <span className="whitespace-nowrap">{label}</span>
                   <input
                     type="number"
                     step={step}
+                    min={opts?.min}
+                    max={opts?.max}
+                    data-testid={opts?.testId}
                     value={Number.isFinite(val) ? Number(val.toFixed(1)) : 0}
                     onChange={(e) => {
                       const n = parseFloat(e.target.value);
                       if (Number.isFinite(n)) onSet(n);
                     }}
-                    className={`h-6 ${w} rounded border border-neutral-700 bg-neutral-900 px-1 font-mono text-[10px] text-white outline-none`}
+                    className={`h-6 ${opts?.w ?? 'w-12'} rounded border border-neutral-700 bg-neutral-900 px-1 font-mono text-[10px] text-white outline-none`}
                   />
                 </label>
               );
+              // Expanded Y range [-0.6, 1.6] so overshoot presets render completely without clipping
+              const BEZ_Y_MIN = -0.6;
+              const BEZ_Y_MAX = 1.6;
+              const BEZ_Y_SPAN = BEZ_Y_MAX - BEZ_Y_MIN;
               const updateBezierPoint = (svg: SVGSVGElement, clientX: number, clientY: number, idx: 1 | 2) => {
                 const rect = svg.getBoundingClientRect();
                 const nx = Math.max(0, Math.min(1, Number((((clientX - rect.left - 4) / Math.max(1, rect.width - 8))).toFixed(2))));
-                const ny = Math.max(-0.5, Math.min(1.5, Number((1 - (clientY - rect.top - 4) / Math.max(1, rect.height - 8)).toFixed(2))));
+                const ny = Math.max(BEZ_Y_MIN, Math.min(BEZ_Y_MAX, Number((BEZ_Y_MAX - ((clientY - rect.top - 4) / Math.max(1, rect.height - 8)) * BEZ_Y_SPAN).toFixed(2))));
                 const b: [number, number, number, number] = [...curBezier];
                 if (idx === 1) { b[0] = nx; b[1] = ny; } else { b[2] = nx; b[3] = ny; }
                 commitKf({ easing: 'cubicBezier', bezier: b });
               };
               const mapX = (u: number) => 4 + u * 48;
-              const mapY = (v: number) => 4 + (1 - Math.max(-0.2, Math.min(1.2, v))) * 48;
+              const mapY = (v: number) => 4 + ((BEZ_Y_MAX - Math.max(BEZ_Y_MIN, Math.min(BEZ_Y_MAX, v))) / BEZ_Y_SPAN) * 48;
               return (
                 <>
                   <span className="shrink-0 truncate max-w-[84px] text-[10px] font-semibold text-indigo-300">{activeLayer.name}</span>
@@ -1008,21 +1044,47 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                   </button>
                   <button
                     type="button"
-                    onClick={() => commitKf({ x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: defPx, pivotY: defPy })}
+                    onClick={() => commitKf({ x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: defPx, pivotY: defPy, opacity: 1 })}
                     className={iconBtn}
                   >
                     {t.animation.keyframeReset}
                   </button>
-                  {numBox(t.animation.keyframeX, curEval.x, 2, (v) => commitKf({ x: v }))}
-                  {numBox(t.animation.keyframeY, curEval.y, 2, (v) => commitKf({ y: v }))}
-                  {numBox(t.animation.keyframeScale, curEval.scaleX * 100, 5, (v) => { const s = Math.max(0.05, v / 100); commitKf({ scaleX: s, scaleY: s }); })}
-                  {numBox(t.animation.keyframeRotation, (curEval.rotation * 180) / Math.PI, 5, (deg) => commitKf({ rotation: (deg * Math.PI) / 180 }))}
-                  {numBox(t.animation.keyframePivotX, curEval.pivotX, 4, (v) => commitKf({ pivotX: v }))}
-                  {numBox(t.animation.keyframePivotY, curEval.pivotY, 4, (v) => commitKf({ pivotY: v }))}
+                  {onToggleKeyframeHandles && (
+                    <button
+                      type="button"
+                      onClick={onToggleKeyframeHandles}
+                      aria-pressed={Boolean(showKeyframeHandles)}
+                      title={t.animation.keyframeHandlesTooltip}
+                      data-testid="keyframe-handles-toggle"
+                      className={chip(Boolean(showKeyframeHandles))}
+                    >
+                      {t.animation.keyframeHandles}
+                    </button>
+                  )}
+                  {onToggleMotionPath && (
+                    <button
+                      type="button"
+                      onClick={onToggleMotionPath}
+                      aria-pressed={Boolean(showMotionPath)}
+                      title={t.animation.motionPathTooltip}
+                      data-testid="keyframe-motion-path-toggle"
+                      className={chip(Boolean(showMotionPath))}
+                    >
+                      {t.animation.motionPath}
+                    </button>
+                  )}
+                  {numBox(t.animation.keyframeX, curEval.x, 2, (v) => commitKf({ x: v }), { testId: 'keyframe-x-input' })}
+                  {numBox(t.animation.keyframeY, curEval.y, 2, (v) => commitKf({ y: v }), { testId: 'keyframe-y-input' })}
+                  {numBox(t.animation.keyframeScale, curEval.scaleX * 100, 5, (v) => { const s = Math.max(0.05, v / 100); commitKf({ scaleX: s, scaleY: s }); }, { testId: 'keyframe-scale-input' })}
+                  {numBox(t.animation.keyframeRotation, (curEval.rotation * 180) / Math.PI, 5, (deg) => commitKf({ rotation: (deg * Math.PI) / 180 }), { testId: 'keyframe-rot-input' })}
+                  {numBox(t.animation.keyframeOpacity, curEval.opacity * 100, 5, (pct) => commitKf({ opacity: Math.max(0, Math.min(1, pct / 100)) }), { min: 0, max: 100, testId: 'keyframe-opacity-input' })}
+                  {numBox(t.animation.keyframePivotX, curEval.pivotX, 4, (v) => commitKf({ pivotX: v }), { testId: 'keyframe-pivot-x-input' })}
+                  {numBox(t.animation.keyframePivotY, curEval.pivotY, 4, (v) => commitKf({ pivotY: v }), { testId: 'keyframe-pivot-y-input' })}
                   <label className="flex shrink-0 items-center gap-1 text-[10px] text-neutral-400">
-                    <span>{t.animation.keyframeEasing}</span>
+                    <span className="whitespace-nowrap">{t.animation.keyframeEasing}</span>
                     <select
                       value={curEasing}
+                      data-testid="keyframe-easing-select"
                       onChange={(e) => commitKf({ easing: e.target.value as KeyframeEasing })}
                       className="h-6 rounded border border-neutral-700 bg-neutral-900 px-1 text-[10px] text-white outline-none"
                     >
@@ -1034,17 +1096,46 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                       <option value="cubicBezier">{t.animation.easingBezier}</option>
                     </select>
                   </label>
+                  <label className="flex shrink-0 items-center gap-1 text-[10px] text-neutral-400">
+                    <span className="whitespace-nowrap">{t.animation.keyframePreset}</span>
+                    <select
+                      value={activePreset}
+                      data-testid="keyframe-preset-select"
+                      onChange={(e) => {
+                        const preset = BEZIER_PRESETS.find((p) => p.id === e.target.value);
+                        if (preset) commitKf({ easing: 'cubicBezier', bezier: [...preset.bezier] });
+                      }}
+                      className="h-6 rounded border border-neutral-700 bg-neutral-900 px-1 text-[10px] text-white outline-none"
+                    >
+                      <option value="">{t.animation.presetCustom}</option>
+                      {BEZIER_PRESETS.map((p) => (
+                        <option key={p.id} value={p.id}>{presetLabel(p.id)}</option>
+                      ))}
+                    </select>
+                  </label>
                   {curEasing === 'cubicBezier' && (
                     <div className="relative flex shrink-0 items-center gap-1 rounded border border-neutral-700 bg-neutral-900/90 px-1.5 py-0.5" title={t.animation.keyframeBezierHint}>
                       <svg
                         width={56}
                         height={56}
+                        viewBox="0 0 56 56"
+                        data-testid="keyframe-bezier-svg"
                         className="h-7 w-7 cursor-crosshair touch-none overflow-visible"
                         onPointerMove={(e) => { if (bezierDragIdx) updateBezierPoint(e.currentTarget, e.clientX, e.clientY, bezierDragIdx); }}
                         onPointerUp={() => setBezierDragIdx(null)}
                         onPointerCancel={() => setBezierDragIdx(null)}
                       >
-                        <line x1={mapX(0)} y1={mapY(0)} x2={mapX(1)} y2={mapY(1)} stroke="#374151" strokeWidth="1" strokeDasharray="2 2" />
+                        <rect
+                          x={mapX(0)}
+                          y={mapY(1)}
+                          width={mapX(1) - mapX(0)}
+                          height={mapY(0) - mapY(1)}
+                          fill="none"
+                          stroke="#374151"
+                          strokeWidth="0.75"
+                          strokeDasharray="2 2"
+                        />
+                        <line x1={mapX(0)} y1={mapY(0)} x2={mapX(1)} y2={mapY(1)} stroke="#4b5563" strokeWidth="1" strokeDasharray="2 2" />
                         <line x1={mapX(0)} y1={mapY(0)} x2={mapX(curBezier[0])} y2={mapY(curBezier[1])} stroke="#818cf8" strokeWidth="1" />
                         <line x1={mapX(1)} y1={mapY(1)} x2={mapX(curBezier[2])} y2={mapY(curBezier[3])} stroke="#34d399" strokeWidth="1" />
                         <path
