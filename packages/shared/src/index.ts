@@ -45,4 +45,6 @@ export * from './ruler/ruler-math';
 export * from './vector/vector-types';
 export * from './vector/vector-math';
 export * from './animation/keyframes';
+export * from './animation/camera';
+export * from './animation/audio';
 export * from './canvas/canvas-units';

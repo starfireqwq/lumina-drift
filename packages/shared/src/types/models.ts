@@ -30,6 +30,8 @@ export interface LayerTextMeta {
 
 /** Free-form per-layer data the server stores as JSON */
 import type { TransformKeyframe } from '../animation/keyframes';
+import type { CameraFrameMeta } from '../animation/camera';
+import type { AudioTrackMeta } from '../animation/audio';
 import type { CanvasUnit } from '../canvas/canvas-units';
 
 export type CelMark = 'key' | 'inbetween';
@@ -56,6 +58,10 @@ export interface LayerMeta {
   cel?: { hold?: number; ref?: string; mark?: CelMark; note?: string };
   /** Non-destructive keyframe transform track (supports interpolation & joint pivot) */
   keyframes?: TransformKeyframe[];
+  /** On a group: 2D camera framing box whose motion is driven by `keyframes` */
+  camera?: CameraFrameMeta;
+  /** On a group: timeline audio track metadata (binary audio stays local in IndexedDB) */
+  audio?: AudioTrackMeta;
   /** On a mask layer: white hides and black shows */
   maskInverted?: boolean;
   text?: LayerTextMeta;

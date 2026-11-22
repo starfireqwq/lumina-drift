@@ -852,7 +852,15 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
     s = clearLightTable(s, { kind: 'cel', id: 'c5' });
     assert.equal(s.cels.c5, undefined);
     const cleaned = cleanLightTable({ enabled: 0, opacity: 9, cels: { x: ['a', 'a', 7, 'b'] }, tracks: [] });
-    assert.deepEqual(cleaned, { enabled: false, opacity: 1, cels: { x: ['a', 'b'] }, tracks: {} });
+    assert.deepEqual(cleaned, {
+      enabled: false,
+      opacity: 1,
+      cels: { x: ['a', 'b'] },
+      tracks: {},
+      transforms: {},
+      externalRefs: [],
+      pinnedTargetId: null,
+    });
     assert.deepEqual(cleanLightTable('junk'), emptyLightTable());
   }
 }

@@ -499,6 +499,13 @@ export function playbackFrame(
   return { frame: first + ((((target - first) % span) + span) % span), ended: false };
 }
 
+export interface LightTableDisplayItem {
+  opacity: number;
+  transform?: Affine2D;
+  tint?: number;
+  tintMode?: 'shade';
+}
+
 export interface AnimationView {
   /** Timeline frame on screen */
   time: number;
@@ -508,7 +515,12 @@ export interface AnimationView {
   /** Export: only these animation folders' layers are shown (null = everything) */
   only?: Set<string> | null;
   /** Light table: these cels are shown faded (`opacity` of their own) as a reference while drawing */
-  light?: { opacity: number; ids: ReadonlySet<string> } | null;
+  light?: {
+    opacity: number;
+    ids: ReadonlySet<string>;
+    /** Phase E2: per-cel transform, opacity multiplier, and optional tint/shade styling */
+    items?: ReadonlyMap<string, LightTableDisplayItem>;
+  } | null;
   /**
    * Drawing on this layer: it and the groups around it are shown where they were drawn (their own
    * keyframes left out), so a stroke lands under the pen; playback and export still move them
@@ -597,9 +609,13 @@ export function animationDisplay<T extends AnimLayer>(
   }
 
   // Per cel layer: shown, tinted, on the light table, or (default) hidden. `fade` scales the onion opacity
-  const celState = new Map<string, { tint?: number; fade?: number; light?: number }>();
+  const celState = new Map<
+    string,
+    { tint?: number; tintShade?: boolean; fade?: number; light?: number; lightTransform?: Affine2D }
+  >();
   const hidden = new Set<string>();
   const lightIds = view?.light?.ids;
+  const lightItems = view?.light?.items;
   for (const folder of folders) {
     const entries = celEntriesOf(layers, folder.id);
     for (const e of entries) hidden.add(e.id);
@@ -610,7 +626,19 @@ export function animationDisplay<T extends AnimLayer>(
     if (lightIds?.size) {
       for (const e of entries) {
         const id = celLayerOf(e);
-        if (id && lightIds.has(id) && !celState.has(id)) celState.set(id, { light: view!.light!.opacity });
+        if (id && lightIds.has(id) && !celState.has(id)) {
+          const item = lightItems?.get(id);
+          const effectiveLightOpacity = Math.max(
+            0.01,
+            Math.min(1, view!.light!.opacity * (item ? item.opacity : 1))
+          );
+          celState.set(id, {
+            light: effectiveLightOpacity,
+            lightTransform: item?.transform && !item.transform.isIdentity ? item.transform : undefined,
+            tint: item?.tint,
+            tintShade: item?.tintMode === 'shade',
+          });
+        }
       }
     }
     const onion = folder.id === view?.activeFolderId ? view?.onion : null;
@@ -625,22 +653,38 @@ export function animationDisplay<T extends AnimLayer>(
         distance++;
         // The nearest drawing at the set opacity, each one further away fainter (1, 0.8, 0.6… of 5).
         // 'original' only fades it: no colour, so no filter to run
-        if (!celState.has(id)) celState.set(id, { tint: onion.mode === 'original' ? undefined : tint(color), fade: 1 - (distance - 1) / count });
+        if (!celState.has(id)) {
+          celState.set(id, {
+            tint: onion.mode === 'original' ? undefined : tint(color),
+            tintShade: onion.mode === 'shade',
+            fade: 1 - (distance - 1) / count,
+          });
+        }
       }
     };
     walk(-1, onion.prevFramesCount, onion.prevColor);
     walk(1, onion.nextFramesCount, onion.nextColor);
   }
 
-  // A tinted cel folder tints everything inside it
-  const tintOf = new Map<string, number>();
-  const tintTree = (id: string, t: number) => {
+  // A tinted or light-transformed cel folder cascades its tint and light transform to everything inside it
+  const tintOf = new Map<string, { tint: number; shade: boolean }>();
+  const lightTransformOf = new Map<string, Affine2D>();
+  const tintTree = (id: string, entry: { tint: number; shade: boolean }) => {
     for (const c of children.get(id) ?? []) {
-      tintOf.set(c.id, t);
-      tintTree(c.id, t);
+      tintOf.set(c.id, entry);
+      tintTree(c.id, entry);
     }
   };
-  for (const [id, s] of celState) if (s.tint !== undefined) tintTree(id, s.tint);
+  const lightTransformTree = (id: string, tr: Affine2D) => {
+    lightTransformOf.set(id, tr);
+    for (const c of children.get(id) ?? []) {
+      lightTransformTree(c.id, tr);
+    }
+  };
+  for (const [id, s] of celState) {
+    if (s.tint !== undefined) tintTree(id, { tint: s.tint, shade: Boolean(s.tintShade) });
+    if (s.lightTransform) lightTransformTree(id, s.lightTransform);
+  }
 
   // Export scope: layers outside the chosen folders are hidden
   let allowed: Set<string> | null = null;
@@ -654,9 +698,10 @@ export function animationDisplay<T extends AnimLayer>(
   }
 
   const opacity = view?.onion?.opacity ?? 0.35;
-  const shade = view?.onion?.mode === 'shade' ? ({ onionMode: 'shade' } as const) : null;
   return layers.map((l) => {
-    const m = worldTransforms?.get(l.id);
+    const baseM = worldTransforms?.get(l.id);
+    const ltM = lightTransformOf.get(l.id);
+    const m = ltM ? multiplyAffine(ltM, baseM ?? IDENTITY_AFFINE) : baseM;
     const kfOpacity = localOpacities?.get(l.id);
     const baseOpacity = kfOpacity === undefined ? l.opacity : Math.max(0, Math.min(1, l.opacity * kfOpacity));
     const withTransform = m && !m.isIdentity ? { renderTransform: m } : null;
@@ -671,18 +716,23 @@ export function animationDisplay<T extends AnimLayer>(
     }
     if (state?.light !== undefined) {
       if (!l.isVisible) return withKf ? { ...l, ...withKf } : l;
-      return { ...l, ...withKf, opacity: baseOpacity * state.light };
+      const lightShade = state.tintShade ? ({ onionMode: 'shade' } as const) : null;
+      return l.layerType === 'group' || state.tint === undefined
+        ? { ...l, ...withKf, opacity: baseOpacity * state.light }
+        : { ...l, ...withKf, opacity: baseOpacity * state.light, onionTint: state.tint, ...lightShade };
     }
     if (state?.fade !== undefined) {
       if (!l.isVisible) return withKf ? { ...l, ...withKf } : l;
       const faded = opacity * state.fade * (kfOpacity ?? 1);
+      const onionShade = state.tintShade ? ({ onionMode: 'shade' } as const) : null;
       return l.layerType === 'group' || state.tint === undefined
         ? { ...l, ...withKf, opacity: faded }
-        : { ...l, ...withKf, opacity: faded, onionTint: state.tint, ...shade };
+        : { ...l, ...withKf, opacity: faded, onionTint: state.tint, ...onionShade };
     }
     const inherited = tintOf.get(l.id);
     if (inherited !== undefined && l.layerType !== 'group' && l.layerType !== 'mask') {
-      return { ...l, onionTint: inherited, ...shade, ...withKf };
+      const inhShade = inherited.shade ? ({ onionMode: 'shade' } as const) : null;
+      return { ...l, onionTint: inherited.tint, ...inhShade, ...withKf };
     }
     return withKf ? { ...l, ...withKf } : l;
   });
