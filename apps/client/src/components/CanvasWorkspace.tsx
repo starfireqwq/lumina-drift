@@ -27,6 +27,8 @@ import {
   CanvasModel,
   DEFAULT_TILE_SIZE,
   computeSmartEncloseFillMask,
+  evaluateTransformKeyframes,
+  type EvaluatedTransform,
   expandSelectionMask,
   floodFillMagicWand,
   hexToRgb,
@@ -36,6 +38,7 @@ import {
   LayerModel,
   LayerTextMeta,
   tileToRgba,
+  type TransformKeyframe,
   rasterizeLassoMask,
   OpBroadcastPacket,
   PreviewDabPacket,
@@ -128,8 +131,13 @@ import { LayerPanel } from './LayerPanel';
 import { getUserColor } from '../utils/userColors';
 import {
   AnimationEngine, AnimationTrack, animationDisplay, BLANK_CEL_NAME, celEntriesOf, celInsertAt, celLayerOf, celOfLayer, entryIndexAt, entryStart, exportSegments, findAdjacentKeyframe, isAnimationFolder, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
-  normalizeTimelineLabels, placeEntries, planRepeatCels, planSequentialCelRenames, trackLength,
+  normalizeTimelineLabels, placeEntries, planRepeatCels, planSequentialCelRenames, trackLength, upsertTransformKeyframe,
 } from '../engine/AnimationEngine';
+import {
+  buildKeyframeFromEval,
+  resolveParentWorldAffine,
+  type KeyframeBaseRect,
+} from '../utils/keyframeTransform';
 import { lightIdsFor, loadLightTable, saveLightTable, type LightTableState } from '../engine/lightTable';
 import { DEFAULT_TEXT, renderText, textBounds } from '../engine/textLayer';
 import { nextGroupName } from '../utils/canvasName';
@@ -205,6 +213,7 @@ const CanvasResizeOverlay = lazy(() => import('./CanvasResizeOverlay').then((m) 
 const RulerControlsModal = lazy(() => import('./RulerControlsModal').then((m) => ({ default: m.RulerControlsModal })));
 const ReferenceViewportHUD = lazy(() => import('./ReferenceViewportHUD').then((m) => ({ default: m.ReferenceViewportHUD })));
 const TransformOverlay = lazy(() => import('./TransformOverlay').then((m) => ({ default: m.TransformOverlay })));
+const KeyframeTransformOverlay = lazy(() => import('./KeyframeTransformOverlay').then((m) => ({ default: m.KeyframeTransformOverlay })));
 const MeshWarpOverlay = lazy(() => import('./MeshWarpOverlay').then((m) => ({ default: m.MeshWarpOverlay })));
 const TextCanvasEditor = lazy(() => import('./TextCanvasEditor').then((m) => ({ default: m.TextCanvasEditor })));
 const ComicStudioOverlay = lazy(() => import('./ComicStudioOverlay').then((m) => ({ default: m.ComicStudioOverlay })));
@@ -540,11 +549,21 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
    */
   // The keyframed layer being drawn on (set below once the tool and the timeline are known)
   const originalEditRef = useRef<string | null>(null);
+  const liveKeyframePreviewRef = useRef<{ layerId: string; frame: number; evaluated: EvaluatedTransform } | null>(null);
   const displayLayersFor = (ls: LayerModel[], opts: { personal?: boolean; time?: number; only?: Set<string> | null } = {}) => {
     const vis = localVisibilityRef.current;
-    const local = opts.personal === false ? ls : ls.map((l) => (l.id in vis ? { ...l, isVisible: vis[l.id] } : l));
+    let local = opts.personal === false ? ls : ls.map((l) => (l.id in vis ? { ...l, isVisible: vis[l.id] } : l));
     const engine = animEngineRef.current;
     const exporting = opts.time !== undefined;
+    const preview = !exporting ? liveKeyframePreviewRef.current : null;
+    if (preview) {
+      local = local.map((l) => {
+        if (l.id !== preview.layerId) return l;
+        const kfs = l.meta?.keyframes ?? [];
+        const merged = buildKeyframeFromEval(kfs, preview.frame, preview.evaluated);
+        return { ...l, meta: { ...(l.meta ?? {}), keyframes: upsertTransformKeyframe(kfs, merged) } };
+      });
+    }
     const aids = !exporting && engine && !engine.getIsPlaying() && animTimelineOpenRef.current; // onion skin, light table
     return animationDisplay(
       local,
@@ -860,6 +879,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   // it) shows where it is drawn, so a stroke lands under the pen; playback and the keyframe panel
   // show the motion again
   const [keyframePanelOpen, setKeyframePanelOpen] = useState(false);
+  const [showKeyframeHandles, setShowKeyframeHandles] = useState(true);
+  const [animFrame, setAnimFrame] = useState(0);
+  const [liveKeyframePreview, setLiveKeyframePreview] = useState<{ layerId: string; frame: number; evaluated: EvaluatedTransform } | null>(null);
   const [animPlaying, setAnimPlaying] = useState(false);
   const activeMovedByKeyframes = useMemo(() => movedByKeyframes(layers, activeLayer?.id), [layers, activeLayer?.id]);
   const originalEditId = activeLayer && activeMovedByKeyframes && ORIGINAL_POSITION_TOOLS.has(currentTool) && !(isAnimationTimelineOpen && keyframePanelOpen)
@@ -3245,6 +3267,19 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         return;
       }
 
+      if (
+        op.metaBefore !== undefined &&
+        op.beforeTiles.length === 0 &&
+        op.afterTiles.length === 0 &&
+        !op.layerRemoved &&
+        !op.vectorStroke &&
+        !op.vectorRemovedStrokes &&
+        !op.vectorAddedStrokes
+      ) {
+        onUpdateLayerProps?.(op.layerId, { meta: op.metaBefore });
+        return;
+      }
+
       const hasPixelOrMeta = Boolean(
         op.beforeTiles.length > 0 ||
         op.afterTiles.length > 0 ||
@@ -3343,6 +3378,19 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       }
       // Redo of a merge down: the merged layer goes away again
       if (op.layerRemoved) await onDeleteLayer?.(op.layerRemoved.model.id);
+
+      if (
+        op.metaAfter !== undefined &&
+        op.beforeTiles.length === 0 &&
+        op.afterTiles.length === 0 &&
+        !op.layerRemoved &&
+        !op.vectorStroke &&
+        !op.vectorRemovedStrokes &&
+        !op.vectorAddedStrokes
+      ) {
+        onUpdateLayerProps?.(op.layerId, { meta: op.metaAfter });
+        return;
+      }
 
       const hasPixelOrMeta = Boolean(
         op.beforeTiles.length > 0 ||
@@ -3927,13 +3975,17 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       if (active.id === shown || celOfLayer(layersRef.current, active.id)?.celId === shown) return; // already on it (or inside its cel folder)
       onSelectLayer?.(shown);
     };
-    const unsubFrame = engine.onFrameChange((_t, byUser) => {
+    const unsubFrame = engine.onFrameChange((t, byUser) => {
       show();
+      if (!engine.getIsPlaying()) setAnimFrame(t);
       if (byUser && !engine.getIsPlaying()) selectShown();
     });
     const unsubPlay = engine.onPlaybackStateChange((playing) => {
       layerManagerRef.current?.setThumbnailsPaused(playing);
-      if (!playing) lastSyncSig = '';
+      if (!playing) {
+        lastSyncSig = '';
+        setAnimFrame(engine.getTime());
+      }
       show();
       if (!playing) selectShown();
     });
@@ -4512,6 +4564,46 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   // ---------- Layer structure: merge down, group ----------
   const canManageLayer = (l: LayerModel) => !isGuest && l.ownerId === user?.id;
+
+  const updateLayerKeyframes = (layerId: string, keyframes: TransformKeyframe[]) => {
+    const target = layersRef.current.find((l) => l.id === layerId);
+    if (!target || !canManageLayer(target)) return;
+    const metaBefore: LayerMeta | null = target.meta ?? null;
+    const metaAfter: LayerMeta = { ...(target.meta ?? {}), keyframes };
+    scopedUndoRef.current.push({
+      opId: `op_kf_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      userId: userRef.current?.id || user?.id || 'guest',
+      layerId,
+      opType: 'TRANSFORM',
+      beforeTiles: [],
+      afterTiles: [],
+      metaBefore,
+      metaAfter,
+      timestamp: Date.now(),
+      desc: '關鍵影格變換',
+    });
+    updateUndoRedoState();
+    onUpdateLayerProps?.(layerId, { meta: metaAfter });
+  };
+
+  const handleKeyframePreviewChange = (next: EvaluatedTransform | null) => {
+    const layer = activeLayerRef.current;
+    const preview = next && layer ? { layerId: layer.id, frame: animFrame, evaluated: next } : null;
+    liveKeyframePreviewRef.current = preview;
+    setLiveKeyframePreview(preview);
+    const lm = layerManagerRef.current;
+    if (lm) {
+      lm.syncLayers(displayLayersFor(layersRef.current));
+      requestRenderRef.current();
+    }
+  };
+
+  useEffect(() => {
+    if (!liveKeyframePreviewRef.current) return;
+    liveKeyframePreviewRef.current = null;
+    setLiveKeyframePreview(null);
+  }, [activeLayer?.id, animFrame, keyframePanelOpen, isAnimationTimelineOpen, animPlaying]);
+
   /** 向下合併: the layer (with its opacity, blend mode and mask) is drawn into the one below, then removed */
   const mergeDown = (layerId: string) => {
     const ls = layersRef.current;
@@ -5331,6 +5423,81 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   );
   // Mid-transform, while typing text or with a filter previewing, the layer's pixels are not settled
   const alignBusy = Boolean(isTransformActive || textEdit || filterModalOpenRef.current);
+
+  const keyframeHandlesActive = Boolean(
+    isAnimationTimelineOpen &&
+    keyframePanelOpen &&
+    showKeyframeHandles &&
+    !animPlaying &&
+    !isTransformActive &&
+    !textEdit &&
+    !isResizeModalOpen &&
+    !filterModalOpenRef.current &&
+    activeLayer &&
+    activeLayer.layerType !== 'mask' &&
+    canManageLayer(activeLayer) &&
+    canvas
+  );
+
+  const activeKeyframeBaseRect: KeyframeBaseRect = useMemo(() => {
+    if (!canvas) return { x: 0, y: 0, width: 100, height: 100 };
+    const fallback: KeyframeBaseRect = {
+      x: Math.round(canvas.width * 0.2),
+      y: Math.round(canvas.height * 0.2),
+      width: Math.max(80, Math.round(canvas.width * 0.6)),
+      height: Math.max(80, Math.round(canvas.height * 0.6)),
+    };
+    if (!keyframeHandlesActive || !activeLayer) return fallback;
+    const lm = layerManagerRef.current;
+    const ts = tileEngineRef.current?.tileSize ?? DEFAULT_TILE_SIZE;
+    if (!lm) return fallback;
+
+    const collectIds = (rootId: string): string[] => {
+      const out = [rootId];
+      const stack = [rootId];
+      while (stack.length) {
+        const pid = stack.pop()!;
+        for (const l of layers) {
+          if (l.parentId === pid && l.layerType !== 'mask') {
+            out.push(l.id);
+            if (l.layerType === 'group') stack.push(l.id);
+          }
+        }
+      }
+      return out;
+    };
+
+    const ids = activeLayer.layerType === 'group' ? collectIds(activeLayer.id) : [activeLayer.id];
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const id of ids) {
+      const tiles = lm.occupiedTiles(id);
+      if (!tiles || tiles.length === 0) continue;
+      for (const tc of tiles) {
+        const x0 = Math.max(0, tc.col * ts);
+        const y0 = Math.max(0, tc.row * ts);
+        const x1 = Math.min(canvas.width, (tc.col + 1) * ts);
+        const y1 = Math.min(canvas.height, (tc.row + 1) * ts);
+        if (x0 < minX) minX = x0;
+        if (y0 < minY) minY = y0;
+        if (x1 > maxX) maxX = x1;
+        if (y1 > maxY) maxY = y1;
+      }
+    }
+    if (!Number.isFinite(minX) || maxX <= minX || maxY <= minY) return fallback;
+    const w = Math.max(80, maxX - minX);
+    const h = Math.max(80, maxY - minY);
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    return {
+      x: Math.max(0, Math.min(canvas.width - w, cx - w / 2)),
+      y: Math.max(0, Math.min(canvas.height - h, cy - h / 2)),
+      width: Math.min(canvas.width, w),
+      height: Math.min(canvas.height, h),
+    };
+  }, [keyframeHandlesActive, activeLayer, layers, canvas]);
   const alignBlockReason = alignOpen
     ? alignTargetsBlocker(alignTargetsList, {
       busy: alignBusy,
@@ -5866,7 +6033,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               />
 
               <ConditionalViewportConsumer
-                active={Boolean(textEdit || (isTransformActive && distortMode === 'transform') || isResizeModalOpen)}
+                active={Boolean(textEdit || (isTransformActive && distortMode === 'transform') || isResizeModalOpen || keyframeHandlesActive)}
                 subscribe={subscribeViewport}
                 getSnapshot={getViewportSnapshot}
               >
@@ -5914,6 +6081,30 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                           onModifiersChange={setResizeModifiers}
                           canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
                           screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
+                        />
+                      </Suspense>
+                    )}
+
+                    {keyframeHandlesActive && activeLayer && (
+                      <Suspense fallback={null}>
+                        <KeyframeTransformOverlay
+                          isActive
+                          baseRect={activeKeyframeBaseRect}
+                          evaluated={
+                            liveKeyframePreview && liveKeyframePreview.layerId === activeLayer.id && liveKeyframePreview.frame === animFrame
+                              ? liveKeyframePreview.evaluated
+                              : evaluateTransformKeyframes(activeLayer.meta?.keyframes, animFrame, canvas.width / 2, canvas.height / 2)
+                          }
+                          parentWorld={resolveParentWorldAffine(layers, activeLayer.id, animFrame, canvas.width, canvas.height)}
+                          frame={animFrame}
+                          canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
+                          screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
+                          onPreviewChange={handleKeyframePreviewChange}
+                          onCommit={(nextEval) => {
+                            const kfs = activeLayer.meta?.keyframes ?? [];
+                            const nextKf = buildKeyframeFromEval(kfs, animFrame, nextEval);
+                            updateLayerKeyframes(activeLayer.id, upsertTransformKeyframe(kfs, nextKf));
+                          }}
                         />
                       </Suspense>
                     )}
@@ -6041,11 +6232,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 activeLayer={activeLayer}
                 canvasWidth={canvas.width}
                 canvasHeight={canvas.height}
-                onUpdateLayerKeyframes={activeLayer && canManageLayer(activeLayer) ? (layerId, keyframes) => {
-                  const target = layersRef.current.find((l) => l.id === layerId);
-                  if (!target) return;
-                  onUpdateLayerProps?.(layerId, { meta: { ...(target.meta ?? {}), keyframes } });
-                } : undefined}
+                onUpdateLayerKeyframes={activeLayer && canManageLayer(activeLayer) ? updateLayerKeyframes : undefined}
+                liveKeyframeEval={liveKeyframePreview && activeLayer && liveKeyframePreview.layerId === activeLayer.id ? liveKeyframePreview.evaluated : null}
+                showKeyframeHandles={showKeyframeHandles}
+                onToggleKeyframeHandles={() => setShowKeyframeHandles((v) => !v)}
                 ownerNames={Object.fromEntries([
                   ...layers.filter((l) => l.ownerId).map((l) => [l.ownerId as string, l.ownerDisplayName || '畫師']),
                   ...(user ? [[user.id, `${user.displayName || user.username}（你）`]] : []),
