@@ -3881,7 +3881,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       for (let i = 0; i < list.length; i++) {
         const l = list[i] as LayerModel & { onionTint?: number; renderTransform?: { isIdentity: boolean; a: number; b: number; tx: number; ty: number } };
         if (!l.isVisible) continue;
-        s += `${l.id}:${l.opacity.toFixed(2)}:${l.onionTint ?? ''}`;
+        s += `${l.id}:${l.opacity.toFixed(3)}:${l.onionTint ?? ''}`;
         if (l.renderTransform && !l.renderTransform.isIdentity) {
           s += `@${l.renderTransform.a.toFixed(3)},${l.renderTransform.b.toFixed(3)},${l.renderTransform.tx.toFixed(1)},${l.renderTransform.ty.toFixed(1)}`;
         }

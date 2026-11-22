@@ -21,12 +21,16 @@ import { healUnderMask } from '../src/engine/VectorEngine';
 import { ScopedUndoManager } from '../src/engine/ScopedUndoManager';
 import {
   Affine2D,
+  applyAffinePoint,
+  BEZIER_PRESETS,
   computeSmartEncloseFillMask,
   DynamicStabilizer,
   clampDpi,
   evaluateEasing,
   evaluateTransformKeyframes,
   formatCanvasDimensions,
+  invertAffine,
+  matchBezierPreset,
   MAX_STABILIZER_LEVEL,
   multiplyAffine,
   pixelsToUnit,
@@ -880,6 +884,53 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   }
   const identTest = multiplyAffine(transformToAffineMatrix(mid), { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0, isIdentity: true });
   assert.equal(identTest.tx, m.tx);
+
+  // Phase C1 + C4: opacity keyframes, legacy default, overshoot clamping, bezier presets, affine invert
+  {
+    assert.equal(mid.opacity, 1, 'legacy keyframes without opacity evaluate to 1');
+    const fadeKfs = [
+      { frame: 0, x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 100, pivotY: 100, opacity: 0, easing: 'linear' as const },
+      { frame: 4, x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 100, pivotY: 100, opacity: 1, easing: 'linear' as const },
+    ];
+    assert.equal(evaluateTransformKeyframes(fadeKfs, 0, 100, 100).opacity, 0);
+    assert.ok(Math.abs(evaluateTransformKeyframes(fadeKfs, 2, 100, 100).opacity - 0.5) < 1e-6);
+    assert.equal(evaluateTransformKeyframes(fadeKfs, 4, 100, 100).opacity, 1);
+
+    // Overshoot bezier preset exceeds 1 for spatial props, but opacity stays clamped in [0, 1]
+    const strongOvershoot = BEZIER_PRESETS.find((p) => p.id === 'strongOvershoot')!;
+    assert.equal(matchBezierPreset(strongOvershoot.bezier), 'strongOvershoot');
+    assert.equal(matchBezierPreset([0.11, 0.22, 0.33, 0.44]), null);
+    const bounceKfs = [
+      { frame: 0, x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 0, pivotY: 0, opacity: 0, easing: 'cubicBezier' as const, bezier: strongOvershoot.bezier },
+      { frame: 10, x: 100, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 0, pivotY: 0, opacity: 1, easing: 'linear' as const },
+    ];
+    let sawOvershootX = false;
+    for (let f = 1; f < 10; f++) {
+      const ev = evaluateTransformKeyframes(bounceKfs, f, 0, 0);
+      if (ev.x > 100) sawOvershootX = true;
+      assert.ok(ev.opacity >= 0 && ev.opacity <= 1, `overshoot opacity must stay in [0, 1], got ${ev.opacity}`);
+    }
+    assert.ok(sawOvershootX, 'strongOvershoot preset should overshoot spatial motion');
+
+    // animationDisplay multiplies keyframe opacity (and skips during original-position edit)
+    const fadeLayer = { id: 'fade', parentId: null, layerType: 'raster', sortOrder: 1, isVisible: true, opacity: 0.8, meta: { keyframes: fadeKfs } };
+    const dispFadeMid = animationDisplay([fadeLayer], { time: 2, activeFolderId: null, onion: null }, 200, 200);
+    assert.ok(Math.abs(dispFadeMid[0].opacity - 0.4) < 1e-6, 'layer opacity multiplies with keyframe opacity');
+    assert.equal(dispFadeMid[0].renderOpacityApplied, true);
+    const dispFadeOrig = animationDisplay([fadeLayer], { time: 0, activeFolderId: null, onion: null, original: 'fade' }, 200, 200);
+    assert.equal(dispFadeOrig[0].opacity, 0.8, 'original-position editing keeps base opacity visible');
+
+    // exportSegments emits each distinct opacity step for GIF / video export
+    const fadeSegs = exportSegments([fadeLayer], 0, 4, null, 200, 200);
+    assert.equal(fadeSegs.length, 5, '0->1 fade over frames 0..4 produces 5 distinct export segments');
+
+    // invertAffine + applyAffinePoint round-trip
+    const inv = invertAffine(m);
+    assert.ok(inv, 'non-singular transform matrix must be invertible');
+    const pt = applyAffinePoint(m, 37, -19);
+    const back = applyAffinePoint(inv!, pt.x, pt.y);
+    assert.ok(Math.hypot(back.x - 37, back.y - -19) < 1e-5, 'invertAffine round-trips points');
+  }
 
   // Free transform pivot retention under rotation
   const box0: TransformBox = { x: 100, y: 200, width: 400, height: 200, rotation: 0, pivotX: 0.1, pivotY: 0.9 };

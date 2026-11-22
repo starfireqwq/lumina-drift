@@ -163,6 +163,9 @@ export function renderSharePreview(source: SharePreviewSource, snapshots: LayerT
         break;
       }
       opacity *= Math.max(0, Math.min(1, current.opacity));
+      if (current.meta?.keyframes?.length) {
+        opacity *= evaluateTransformKeyframes(current.meta.keyframes, 0, canvas.width / 2, canvas.height / 2).opacity;
+      }
       const mask = masks.get(current.id);
       if (mask) {
         let data = sampledMasks.get(mask.id);

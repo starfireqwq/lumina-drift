@@ -6,6 +6,45 @@ export type KeyframeEasing =
   | 'step'
   | 'cubicBezier';
 
+export type KeyframeBezierPresetId =
+  | 'softEase'
+  | 'strongEase'
+  | 'decelerate'
+  | 'accelerate'
+  | 'softOvershoot'
+  | 'strongOvershoot';
+
+export interface KeyframeBezierPreset {
+  id: KeyframeBezierPresetId;
+  bezier: [number, number, number, number];
+}
+
+export const BEZIER_PRESETS: ReadonlyArray<KeyframeBezierPreset> = [
+  { id: 'softEase', bezier: [0.37, 0, 0.63, 1] },
+  { id: 'strongEase', bezier: [0.83, 0, 0.17, 1] },
+  { id: 'decelerate', bezier: [0.16, 1, 0.3, 1] },
+  { id: 'accelerate', bezier: [0.7, 0, 0.84, 0] },
+  { id: 'softOvershoot', bezier: [0.34, 1.35, 0.64, 1] },
+  { id: 'strongOvershoot', bezier: [0.34, 1.56, 0.64, 1] },
+];
+
+export function matchBezierPreset(
+  bezier: Readonly<[number, number, number, number]> | undefined | null
+): KeyframeBezierPresetId | null {
+  if (!bezier) return null;
+  for (const preset of BEZIER_PRESETS) {
+    if (
+      Math.abs(preset.bezier[0] - bezier[0]) < 1e-3 &&
+      Math.abs(preset.bezier[1] - bezier[1]) < 1e-3 &&
+      Math.abs(preset.bezier[2] - bezier[2]) < 1e-3 &&
+      Math.abs(preset.bezier[3] - bezier[3]) < 1e-3
+    ) {
+      return preset.id;
+    }
+  }
+  return null;
+}
+
 export interface TransformKeyframe {
   frame: number;
   x: number;
@@ -15,6 +54,8 @@ export interface TransformKeyframe {
   rotation: number;
   pivotX: number;
   pivotY: number;
+  /** Optional keyframe opacity multiplier (0..1, omitted defaults to 1 for legacy files) */
+  opacity?: number;
   easing: KeyframeEasing;
   bezier?: [number, number, number, number];
 }
@@ -27,6 +68,7 @@ export interface EvaluatedTransform {
   rotation: number;
   pivotX: number;
   pivotY: number;
+  opacity: number;
   active: boolean;
 }
 
@@ -106,6 +148,9 @@ export function evaluateEasing(t: number, easing: KeyframeEasing, bezier?: [numb
   }
 }
 
+const clampKeyframeOpacity = (v: number | undefined): number =>
+  v === undefined || !Number.isFinite(v) ? 1 : Math.max(0, Math.min(1, v));
+
 export function evaluateTransformKeyframes(
   keyframes: ReadonlyArray<TransformKeyframe> | undefined | null,
   frame: number,
@@ -113,7 +158,7 @@ export function evaluateTransformKeyframes(
   defaultPivotY = 0
 ): EvaluatedTransform {
   if (!keyframes || keyframes.length === 0) {
-    return { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: defaultPivotX, pivotY: defaultPivotY, active: false };
+    return { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: defaultPivotX, pivotY: defaultPivotY, opacity: 1, active: false };
   }
   let sorted = keyframes;
   for (let i = 1; i < keyframes.length; i++) {
@@ -132,6 +177,7 @@ export function evaluateTransformKeyframes(
       rotation: first.rotation,
       pivotX: first.pivotX,
       pivotY: first.pivotY,
+      opacity: clampKeyframeOpacity(first.opacity),
       active: true,
     };
   }
@@ -145,6 +191,7 @@ export function evaluateTransformKeyframes(
       rotation: last.rotation,
       pivotX: last.pivotX,
       pivotY: last.pivotY,
+      opacity: clampKeyframeOpacity(last.opacity),
       active: true,
     };
   }
@@ -169,6 +216,7 @@ export function evaluateTransformKeyframes(
     rotation: lerp(k0.rotation, k1.rotation),
     pivotX: lerp(k0.pivotX, k1.pivotX),
     pivotY: lerp(k0.pivotY, k1.pivotY),
+    opacity: clampKeyframeOpacity(lerp(clampKeyframeOpacity(k0.opacity), clampKeyframeOpacity(k1.opacity))),
     active: true,
   };
 }
@@ -203,4 +251,26 @@ export function multiplyAffine(parent: Affine2D, child: Affine2D): Affine2D {
     ty: parent.b * child.tx + parent.d * child.ty + parent.ty,
     isIdentity: false,
   };
+}
+
+export function applyAffinePoint(m: Affine2D, x: number, y: number): { x: number; y: number } {
+  if (m.isIdentity) return { x, y };
+  return {
+    x: m.a * x + m.c * y + m.tx,
+    y: m.b * x + m.d * y + m.ty,
+  };
+}
+
+export function invertAffine(m: Affine2D): Affine2D | null {
+  if (m.isIdentity) return IDENTITY_AFFINE;
+  const det = m.a * m.d - m.b * m.c;
+  if (!Number.isFinite(det) || Math.abs(det) < 1e-8) return null;
+  const invDet = 1 / det;
+  const a = m.d * invDet;
+  const b = -m.b * invDet;
+  const c = -m.c * invDet;
+  const d = m.a * invDet;
+  const tx = -(a * m.tx + c * m.ty);
+  const ty = -(b * m.tx + d * m.ty);
+  return { a, b, c, d, tx, ty, isIdentity: false };
 }
