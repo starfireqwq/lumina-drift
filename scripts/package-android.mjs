@@ -18,7 +18,7 @@ const out = path.resolve(process.argv[2] || path.join(root, 'apps/client/release
 const web = path.resolve(process.argv[3] || path.join(root, 'apps/client/dist'));
 const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'lumina-android-'));
 const native = path.join(root, 'apps/client/android');
-const [major, minor, patch] = version.split('.').map(Number);
+const [major, minor, patch] = version.split('.').map((part) => parseInt(part, 10) || 0);
 const versionCode = major * 10000 + minor * 100 + patch;
 const run = (exe, args, options = {}) => execFileSync(exe, args, { stdio: 'inherit', ...options });
 for (const dir of ['assets/web', 'res/drawable', 'classes', 'dex']) fs.mkdirSync(path.join(stage, dir), { recursive: true });

@@ -1,6 +1,6 @@
 {
   "name": "atelier-sync",
-  "version": "1.2.0",
+  "version": "1.2.8-beta",
   "license": "MIT",
   "private": true,
   "description": "AtelierSync - Private multi-user real-time collaborative drawing software",

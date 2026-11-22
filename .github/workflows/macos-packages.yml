@@ -128,5 +128,4 @@ jobs:
             || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag --title "Lumina Drift Paint ${TAG#v}" --notes "" \
             || gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
-            apps/client/release/*-Mac-*-"$EXPECTED_ARCH".pkg \
-            apps/client/release/SHA256SUMS-macOS-"$EXPECTED_ARCH".txt
+            apps/client/release/*-Mac-*-"$EXPECTED_ARCH".pkg
