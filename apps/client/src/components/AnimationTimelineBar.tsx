@@ -32,16 +32,41 @@ import {
 } from '../engine/videoExport';
 import { useI18n } from '../context/I18nContext';
 
-/** What to put in a GIF / video: one folder (solo), every animation folder (team), or the whole picture */
+/** What to put in a GIF / video / sequence: one folder (solo), every animation folder (team), or the whole picture */
 export type AnimationExportScope = 'folder' | 'folders' | 'all';
+
+export interface AnimationExportPlanRequest {
+  scope: AnimationExportScope;
+  useRange: boolean;
+  /** Explicit 0-based inclusive frame range; overrides useRange when supplied */
+  range?: { start: number; end: number } | null;
+  /** Leave background transparent instead of filling canvas paper color */
+  transparent?: boolean;
+}
 
 /** Frames to encode: each segment is one distinct picture shown for `hold` frames */
 export interface AnimationExportPlan {
   width: number;
   height: number;
+  bgColor: string;
   segments: Array<{ time: number; hold: number }>;
   render: (time: number) => HTMLCanvasElement;
   /** Puts the screen back */
+  done: () => void;
+}
+
+export interface AnimationCelExportItem {
+  folderId: string;
+  folderName: string;
+  celId: string;
+  celName: string;
+}
+
+export interface AnimationCelExportPlan {
+  width: number;
+  height: number;
+  items: AnimationCelExportItem[];
+  renderCel: (celId: string) => HTMLCanvasElement;
   done: () => void;
 }
 
@@ -115,7 +140,8 @@ interface AnimationTimelineBarProps {
   onFpsChange: (fps: number) => void;
   /** A click on a track: that folder becomes the edited one, at that frame */
   onSelectCell: (folderId: string, time: number) => void;
-  planExport: (opts: { scope: AnimationExportScope; useRange: boolean }) => AnimationExportPlan | null;
+  planExport: (opts: AnimationExportPlanRequest) => AnimationExportPlan | null;
+  planCelExport?: (opts: { folderIds: string[] }) => AnimationCelExportPlan | null;
   activeLayer?: LayerModel | null;
   canvasWidth?: number;
   canvasHeight?: number;

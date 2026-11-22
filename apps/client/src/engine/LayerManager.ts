@@ -3372,8 +3372,8 @@ export class LayerManager {
     }
   }
 
-  /** Full-size picture as shown (background, masks, current animation frames), for GIF / video frames */
-  public renderCompositeCanvas(): HTMLCanvasElement {
+  /** Full-size picture as shown (background, masks, current animation frames), for GIF / video / sequence / cel export */
+  public renderCompositeCanvas(options?: { transparent?: boolean }): HTMLCanvasElement {
     const w = this.canvasWidth;
     const h = this.canvasHeight;
     let totalCold = 0;
@@ -3384,8 +3384,10 @@ export class LayerManager {
     out.width = w;
     out.height = h;
     const ctx = out.getContext('2d')!;
-    ctx.fillStyle = this.lastBgColor;
-    ctx.fillRect(0, 0, w, h);
+    if (!options?.transparent) {
+      ctx.fillStyle = this.lastBgColor;
+      ctx.fillRect(0, 0, w, h);
+    }
 
     if (totalCold > 2400) {
       // Massive multi-layer offscreen fallback: composite visible layers via 2D canvas without overflowing GPU atlas

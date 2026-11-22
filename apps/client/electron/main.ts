@@ -21,6 +21,7 @@ import { connectWinTab } from './winTab';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { ChildProcess, fork, spawn } from 'node:child_process';
 import http from 'node:http';
 import { createInterface } from 'node:readline';
@@ -639,6 +640,87 @@ ipcMain.handle('atelier:auth-clear-credentials', (event, rawOrigin: unknown) => 
   if (!(origin in store)) return true;
   delete store[origin];
   return writeAuthStore(store);
+});
+
+// Phase D1 / D4: Authorized directory picker & flat file writer for batch animation exports
+const exportDirectories = new Map<string, string>();
+const MAX_EXPORT_DIR_SESSIONS = 16;
+
+function isSafeFlatFileName(raw: unknown): raw is string {
+  if (typeof raw !== 'string') return false;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.length > 200) return false;
+  if (trimmed === '.' || trimmed === '..') return false;
+  if (/[\\/\x00-\x1f]/.test(trimmed)) return false;
+  if (path.basename(trimmed) !== trimmed) return false;
+  return true;
+}
+
+ipcMain.handle(
+  'atelier:export-pick-directory',
+  async (event, payload?: { title?: string }): Promise<{ canceled: boolean; dirId?: string; dirPath?: string }> => {
+    if (!isAuthorizedMainSender(event) || !mainWindow || mainWindow.isDestroyed()) {
+      return { canceled: true };
+    }
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: typeof payload?.title === 'string' && payload.title.trim() ? payload.title.trim() : '選擇輸出資料夾',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true };
+    }
+    const dirPath = path.resolve(result.filePaths[0]);
+    const dirId = crypto.randomUUID();
+    if (exportDirectories.size >= MAX_EXPORT_DIR_SESSIONS) {
+      const oldest = exportDirectories.keys().next().value;
+      if (oldest) exportDirectories.delete(oldest);
+    }
+    exportDirectories.set(dirId, dirPath);
+    return { canceled: false, dirId, dirPath };
+  }
+);
+
+ipcMain.handle(
+  'atelier:export-write-file',
+  async (
+    event,
+    payload: { dirId?: unknown; fileName?: unknown; data?: unknown }
+  ): Promise<{ ok: boolean; filePath?: string; error?: string }> => {
+    if (!isAuthorizedMainSender(event)) {
+      return { ok: false, error: 'Unauthorized IPC sender' };
+    }
+    if (typeof payload?.dirId !== 'string') {
+      return { ok: false, error: 'Invalid export directory session' };
+    }
+    const dirPath = exportDirectories.get(payload.dirId);
+    if (!dirPath) {
+      return { ok: false, error: 'Export directory session expired or unknown' };
+    }
+    if (!isSafeFlatFileName(payload.fileName)) {
+      return { ok: false, error: 'Invalid export filename' };
+    }
+    if (!(payload.data instanceof Uint8Array)) {
+      return { ok: false, error: 'Invalid binary payload' };
+    }
+    const targetPath = path.resolve(dirPath, payload.fileName);
+    if (path.dirname(targetPath) !== dirPath) {
+      return { ok: false, error: 'Path traversal rejected' };
+    }
+    try {
+      await fs.promises.writeFile(
+        targetPath,
+        Buffer.from(payload.data.buffer, payload.data.byteOffset, payload.data.byteLength)
+      );
+      return { ok: true, filePath: targetPath };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+);
+
+ipcMain.handle('atelier:export-close-directory', (event, dirId: unknown): boolean => {
+  if (!isAuthorizedMainSender(event) || typeof dirId !== 'string') return false;
+  return exportDirectories.delete(dirId);
 });
 
 app.whenReady().then(async () => {

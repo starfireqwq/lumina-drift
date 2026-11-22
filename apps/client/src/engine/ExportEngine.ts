@@ -4,9 +4,20 @@ import { writePsd, Psd, Layer as PsdLayer } from 'ag-psd';
 
 import { LayerCanvasItem, LayerTree, compositeLayers, maskCoverage } from './layerComposite';
 import {
+  binarizeLineArt,
   cropAndScaleCanvas,
+  encodeBmp24,
+  encodeTga,
+  formatCelFileName,
+  formatSequenceFileName,
+  planSequenceFrames,
   resolveExportRegion,
+  type BinarizeLineArtOptions,
+  type CelExportFormat,
+  type CelNamingOptions,
   type ExportCropRect,
+  type SequenceFrameMode,
+  type SequenceNamingOptions,
 } from './animationExport';
 import {
   buildVideoRecorderCandidates,
@@ -576,6 +587,186 @@ export class ExportEngine {
         }
       })();
     });
+  }
+
+  /**
+   * D1: Export timeline as numbered PNG image sequence (ZIP blob on Web, or streamed via onWriteFile for Electron folder export).
+   */
+  public static async exportImageSequence(opts: {
+    segments: ReadonlyArray<{ time: number; hold: number }>;
+    renderFrame: (time: number) => Promise<HTMLCanvasElement> | HTMLCanvasElement;
+    srcWidth: number;
+    srcHeight: number;
+    targetWidth: number;
+    targetHeight: number;
+    cropRegion?: ExportCropRect | null;
+    transparent: boolean;
+    bgColor?: string;
+    frameMode: SequenceFrameMode;
+    naming: SequenceNamingOptions;
+    signal?: AbortSignal;
+    onProgress?: (current: number, total: number, fileName: string) => void;
+    /** When provided (e.g. Electron folder export), streams each file directly instead of buffering a ZIP */
+    onWriteFile?: (fileName: string, data: Uint8Array) => Promise<void>;
+  }): Promise<{ blob?: Blob; fileCount: number; fileNames: string[] }> {
+    const planned = planSequenceFrames(opts.segments, opts.frameMode);
+    if (planned.length === 0) throw new Error('No animation frames to export');
+    const region = resolveExportRegion(opts.srcWidth, opts.srcHeight, opts.cropRegion);
+    const outW = Math.max(1, Math.round(opts.targetWidth) || region.width);
+    const outH = Math.max(1, Math.round(opts.targetHeight) || region.height);
+    const bgFill = opts.transparent ? null : (opts.bgColor || '#FFFFFF');
+    const needsTransform =
+      region.x !== 0 ||
+      region.y !== 0 ||
+      region.width !== opts.srcWidth ||
+      region.height !== opts.srcHeight ||
+      outW !== opts.srcWidth ||
+      outH !== opts.srcHeight;
+
+    const zip = opts.onWriteFile ? null : new JSZip();
+    const fileNames: string[] = [];
+    let cachedTime = -1;
+    let cachedBytes: Uint8Array | null = null;
+
+    for (let i = 0; i < planned.length; i++) {
+      if (opts.signal?.aborted) throw createAbortError();
+      const entry = planned[i];
+      const fileName = formatSequenceFileName(entry.outputIndex, opts.naming);
+
+      let bytes: Uint8Array;
+      if (entry.sourceTime === cachedTime && cachedBytes) {
+        bytes = cachedBytes;
+      } else {
+        const rendered = await opts.renderFrame(entry.sourceTime);
+        if (opts.signal?.aborted) throw createAbortError();
+        const finalCanvas = needsTransform
+          ? cropAndScaleCanvas(rendered, region, outW, outH, bgFill)
+          : rendered;
+        const blob = await this.canvasToBlob(finalCanvas, 'image/png');
+        bytes = new Uint8Array(await blob.arrayBuffer());
+        if (finalCanvas !== rendered) {
+          finalCanvas.width = 0;
+          finalCanvas.height = 0;
+        }
+        cachedTime = entry.sourceTime;
+        cachedBytes = bytes;
+      }
+
+      if (opts.onWriteFile) {
+        await opts.onWriteFile(fileName, bytes);
+      } else {
+        zip!.file(fileName, bytes);
+      }
+      fileNames.push(fileName);
+      opts.onProgress?.(i + 1, planned.length, fileName);
+      // Yield briefly to keep UI/abort button responsive
+      if (i % 4 === 3) await new Promise<void>((r) => setTimeout(r, 0));
+    }
+
+    if (zip) {
+      if (opts.signal?.aborted) throw createAbortError();
+      const blob = await zip.generateAsync({ type: 'blob' });
+      return { blob, fileCount: fileNames.length, fileNames };
+    }
+    return { fileCount: fileNames.length, fileNames };
+  }
+
+  /**
+   * D4: Export each animation cel once (independent of timeline repeats/holds),
+   * with optional anti-alias removal / multi-color line binarization and PNG / TGA / BMP encoding.
+   */
+  public static async exportAnimationCels(opts: {
+    items: ReadonlyArray<{ folderName: string; celId: string; celName: string }>;
+    renderCel: (celId: string) => Promise<HTMLCanvasElement> | HTMLCanvasElement;
+    srcWidth: number;
+    srcHeight: number;
+    targetWidth: number;
+    targetHeight: number;
+    cropRegion?: ExportCropRect | null;
+    format: CelExportFormat;
+    tgaBitsPerPixel?: 24 | 32;
+    transparentBackground: boolean;
+    binarize: BinarizeLineArtOptions;
+    naming: CelNamingOptions;
+    signal?: AbortSignal;
+    onProgress?: (current: number, total: number, fileName: string) => void;
+    onWriteFile?: (fileName: string, data: Uint8Array) => Promise<void>;
+  }): Promise<{ blob?: Blob; fileCount: number; fileNames: string[] }> {
+    if (opts.items.length === 0) throw new Error('No animation cels to export');
+    const region = resolveExportRegion(opts.srcWidth, opts.srcHeight, opts.cropRegion);
+    const outW = Math.max(1, Math.round(opts.targetWidth) || region.width);
+    const outH = Math.max(1, Math.round(opts.targetHeight) || region.height);
+    const forceOpaqueBg = opts.format === 'bmp' || (opts.format === 'tga' && (opts.tgaBitsPerPixel ?? 24) === 24);
+    const bgMode: 'white' | 'transparent' = forceOpaqueBg
+      ? 'white'
+      : opts.binarize.enabled
+        ? opts.binarize.background
+        : opts.transparentBackground
+          ? 'transparent'
+          : 'white';
+
+    const zip = opts.onWriteFile ? null : new JSZip();
+    const usedLowerNames = new Set<string>();
+    const fileNames: string[] = [];
+
+    for (let i = 0; i < opts.items.length; i++) {
+      if (opts.signal?.aborted) throw createAbortError();
+      const item = opts.items[i];
+      const fileName = formatCelFileName(item.folderName, item.celName, opts.naming, usedLowerNames);
+      const rendered = await opts.renderCel(item.celId);
+      if (opts.signal?.aborted) throw createAbortError();
+
+      const workCanvas = cropAndScaleCanvas(
+        rendered,
+        region,
+        outW,
+        outH,
+        opts.binarize.enabled ? null : bgMode === 'white' ? '#FFFFFF' : null
+      );
+      const ctx = workCanvas.getContext('2d')!;
+      const imgData = ctx.getImageData(0, 0, outW, outH);
+      let rgba: Uint8ClampedArray = imgData.data;
+
+      if (opts.binarize.enabled) {
+        rgba = binarizeLineArt(rgba, outW, outH, {
+          ...opts.binarize,
+          background: bgMode,
+        });
+      }
+
+      let bytes: Uint8Array;
+      if (opts.format === 'tga') {
+        bytes = encodeTga(rgba, outW, outH, opts.tgaBitsPerPixel ?? (bgMode === 'transparent' ? 32 : 24));
+      } else if (opts.format === 'bmp') {
+        bytes = encodeBmp24(rgba, outW, outH);
+      } else {
+        if (opts.binarize.enabled) {
+          const outData = new ImageData(new Uint8ClampedArray(rgba), outW, outH);
+          ctx.putImageData(outData, 0, 0);
+        }
+        const blob = await this.canvasToBlob(workCanvas, 'image/png');
+        bytes = new Uint8Array(await blob.arrayBuffer());
+      }
+
+      workCanvas.width = 0;
+      workCanvas.height = 0;
+
+      if (opts.onWriteFile) {
+        await opts.onWriteFile(fileName, bytes);
+      } else {
+        zip!.file(fileName, bytes);
+      }
+      fileNames.push(fileName);
+      opts.onProgress?.(i + 1, opts.items.length, fileName);
+      if (i % 4 === 3) await new Promise<void>((r) => setTimeout(r, 0));
+    }
+
+    if (zip) {
+      if (opts.signal?.aborted) throw createAbortError();
+      const blob = await zip.generateAsync({ type: 'blob' });
+      return { blob, fileCount: fileNames.length, fileNames };
+    }
+    return { fileCount: fileNames.length, fileNames };
   }
 
   /**

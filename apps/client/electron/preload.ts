@@ -70,6 +70,22 @@ contextBridge.exposeInMainWorld('atelierDesktop', {
     };
   },
   openLuminaFile: () => ipcRenderer.invoke('lumina:open-file'),
+  exportFolder: {
+    pickDirectory: (title?: string) =>
+      ipcRenderer.invoke('atelier:export-pick-directory', { title }) as Promise<{
+        canceled: boolean;
+        dirId?: string;
+        dirPath?: string;
+      }>,
+    writeFile: (dirId: string, fileName: string, data: Uint8Array) =>
+      ipcRenderer.invoke('atelier:export-write-file', { dirId, fileName, data }) as Promise<{
+        ok: boolean;
+        filePath?: string;
+        error?: string;
+      }>,
+    closeDirectory: (dirId: string) =>
+      ipcRenderer.invoke('atelier:export-close-directory', dirId) as Promise<boolean>,
+  },
   consumePendingLumina: () => ipcRenderer.invoke('lumina:consume-pending'),
   onOpenLumina: (
     callback: (payload: { filePath: string; data: Uint8Array }) => void
