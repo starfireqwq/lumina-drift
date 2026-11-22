@@ -1,5 +1,5 @@
 import type { Statement } from 'better-sqlite3';
-import { CanvasRole, DRAW_OP_TYPES, OfflineMemberInfo } from '@atelier/shared';
+import { CanvasRole, DRAW_OP_TYPES, OfflineMemberInfo, ServerRole } from '@atelier/shared';
 import { sqlite } from '../db';
 
 // Prepared on first use: this module loads before initDatabase() adds the columns
@@ -58,7 +58,7 @@ export function listCanvasRoster(canvasId: string, includeVisitors: boolean): Of
        UNION
        SELECT user_id FROM canvas_visits WHERE canvas_id = @canvasId AND @includeVisitors
      )
-     SELECT r.user_id AS userId, u.display_name AS displayName, m.role AS role,
+     SELECT r.user_id AS userId, u.display_name AS displayName, u.server_role AS serverRole, m.role AS role,
             NULLIF(MAX(COALESCE(m.last_seen_at, 0), COALESCE(v.last_seen_at, 0)), 0) AS lastSeenAt,
             MAX(COALESCE(m.draw_time_ms, 0), COALESCE(v.draw_time_ms, 0)) AS drawTimeMs
      FROM roster r JOIN users u ON u.id = r.user_id
@@ -66,10 +66,11 @@ export function listCanvasRoster(canvasId: string, includeVisitors: boolean): Of
      LEFT JOIN canvas_visits v ON v.canvas_id = @canvasId AND v.user_id = r.user_id
      WHERE u.is_active = 1 AND u.server_role <> 'guest'
      ORDER BY lastSeenAt IS NULL, lastSeenAt DESC`
-  ).all({ canvasId, includeVisitors: Number(includeVisitors) }) as Array<{ userId: string; displayName: string; role: CanvasRole | null; lastSeenAt: number | null; drawTimeMs: number }>;
+  ).all({ canvasId, includeVisitors: Number(includeVisitors) }) as Array<{ userId: string; displayName: string; serverRole: ServerRole; role: CanvasRole | null; lastSeenAt: number | null; drawTimeMs: number }>;
   return rows.map((r) => ({
     userId: r.userId,
     displayName: r.displayName,
+    serverRole: r.serverRole,
     canvasRole: r.role ?? undefined,
     lastSeenAt: r.lastSeenAt,
     drawTimeMs: r.drawTimeMs,

@@ -7,6 +7,7 @@ import {
   AtelierPacket,
   calculatePainterLevel,
   canUserPerformLayerAction,
+  CanvasRole,
   CanvasSticker,
   CursorPacket,
   decodePacket,
@@ -638,6 +639,12 @@ export class RealtimeRoomManager {
     if (!data || !Array.isArray(data.dabs) || data.dabs.length > 512) return;
 
     const user = socket.data.user as UserPayload;
+    if (!user) return;
+    // Viewer role is immediately read-only (bypass previewAcl cache so demotion takes effect with zero delay)
+    const roomMember = this.roomMembers.get(data.canvasId)?.get(socket.id);
+    if (user.serverRole !== 'admin' && roomMember?.canvasRole === 'viewer') {
+      return;
+    }
     // Previews arrive ~40 times a second per painter: the permission answer is reused for a
     // second (three DB reads per packet otherwise). Committed ops are always checked in full.
     const cacheKey = `${data.canvasId}:${data.layerId}:${data.isEraser ? 'e' : 'd'}`;
@@ -755,10 +762,23 @@ export class RealtimeRoomManager {
     return Boolean(membership && (membership.role === 'owner' || membership.role === 'admin'));
   }
 
+  private isCanvasReadOnly(socket: Socket, canvasId: string): boolean {
+    if (socket.data.isGuest) return true;
+    const user = socket.data.user as UserPayload | undefined;
+    if (!user || user.serverRole === 'guest') return true;
+    if (user.serverRole === 'admin') return false;
+    const membership = getCanvasMembership(canvasId, user.id);
+    return membership?.role === 'viewer';
+  }
+
   private handleReleaseLayer(socket: Socket, data: { canvasId: string; layerId: string }) {
     const user = socket.data.user as UserPayload;
     if (!user) {
       socket.emit('error', { code: 'PERMISSION_DENIED', message: '無效的使用者身分' });
+      return;
+    }
+    if (this.isCanvasReadOnly(socket, data.canvasId)) {
+      socket.emit('error', { code: 'PERMISSION_DENIED', message: '你在本畫布中為僅檢視權限，無法編輯圖層。' });
       return;
     }
     const isAdmin = this.isCanvasAdmin(data.canvasId, user);
@@ -784,6 +804,10 @@ export class RealtimeRoomManager {
     const user = socket.data.user as UserPayload;
     if (!user) {
       socket.emit('error', { code: 'PERMISSION_DENIED', message: '無效的使用者身分' });
+      return;
+    }
+    if (this.isCanvasReadOnly(socket, data.canvasId)) {
+      socket.emit('error', { code: 'PERMISSION_DENIED', message: '你在本畫布中為僅檢視權限，無法接管圖層。' });
       return;
     }
     const isAdmin = this.isCanvasAdmin(data.canvasId, user);
@@ -818,6 +842,10 @@ export class RealtimeRoomManager {
       socket.emit('error', { code: 'PERMISSION_DENIED', message: '無效的使用者身分' });
       return;
     }
+    if (this.isCanvasReadOnly(socket, data.canvasId)) {
+      socket.emit('error', { code: 'PERMISSION_DENIED', message: '你在本畫布中為僅檢視權限，無法轉移圖層。' });
+      return;
+    }
     const isAdmin = this.isCanvasAdmin(data.canvasId, user);
     try {
       const updated = transferLayer(data.canvasId, data.layerId, data.targetUserId, user.id, isAdmin);
@@ -841,6 +869,10 @@ export class RealtimeRoomManager {
     const user = socket.data.user as UserPayload;
     if (!user) {
       socket.emit('error', { code: 'PERMISSION_DENIED', message: '無效的使用者身分' });
+      return;
+    }
+    if (this.isCanvasReadOnly(socket, data.canvasId)) {
+      socket.emit('error', { code: 'PERMISSION_DENIED', message: '你在本畫布中為僅檢視權限，無法排序圖層。' });
       return;
     }
     const isAdmin = this.isCanvasAdmin(data.canvasId, user);
@@ -1250,6 +1282,11 @@ export class RealtimeRoomManager {
     socket: Socket,
     data: { canvasId: string; sticker: CanvasSticker }
   ) {
+    if (!data?.canvasId || !data.sticker?.id) return;
+    if (this.isCanvasReadOnly(socket, data.canvasId)) {
+      socket.emit('error', { code: 'PERMISSION_DENIED', message: '你在本畫布中為僅檢視權限，無法新增貼紙。' });
+      return;
+    }
     if (!this.canvasStickers.has(data.canvasId)) {
       this.canvasStickers.set(data.canvasId, new Map());
     }
@@ -1267,6 +1304,11 @@ export class RealtimeRoomManager {
     socket: Socket,
     data: { canvasId: string; stickerId: string; updates: Partial<CanvasSticker> }
   ) {
+    if (!data?.canvasId || !data.stickerId) return;
+    if (this.isCanvasReadOnly(socket, data.canvasId)) {
+      socket.emit('error', { code: 'PERMISSION_DENIED', message: '你在本畫布中為僅檢視權限，無法編輯貼紙。' });
+      return;
+    }
     const map = this.canvasStickers.get(data.canvasId);
     if (map && map.has(data.stickerId)) {
       const existing = map.get(data.stickerId)!;
@@ -1285,6 +1327,11 @@ export class RealtimeRoomManager {
     socket: Socket,
     data: { canvasId: string; stickerId: string }
   ) {
+    if (!data?.canvasId || !data.stickerId) return;
+    if (this.isCanvasReadOnly(socket, data.canvasId)) {
+      socket.emit('error', { code: 'PERMISSION_DENIED', message: '你在本畫布中為僅檢視權限，無法刪除貼紙。' });
+      return;
+    }
     const map = this.canvasStickers.get(data.canvasId);
     if (map) {
       map.delete(data.stickerId);
@@ -1293,6 +1340,35 @@ export class RealtimeRoomManager {
         stickerId: data.stickerId,
       });
     }
+  }
+
+  public getOnlineUserIds(canvasId: string): Set<string> {
+    const ids = new Set<string>();
+    const membersMap = this.roomMembers.get(canvasId);
+    if (membersMap) {
+      for (const m of membersMap.values()) ids.add(m.userId);
+    }
+    return ids;
+  }
+
+  /**
+   * Immediately reflects a canvas member role change on all online sockets (including multi-tab)
+   * of that user, invalidates cached preview ACLs, and broadcasts the updated room state.
+   */
+  public syncMemberRole(canvasId: string, userId: string, role: CanvasRole): void {
+    const membersMap = this.roomMembers.get(canvasId);
+    if (membersMap) {
+      for (const [socketId, member] of membersMap.entries()) {
+        if (member.userId === userId) {
+          member.canvasRole = role;
+          const sock = this.io.sockets.sockets.get(socketId);
+          if (sock) {
+            sock.data.previewAcl = undefined;
+          }
+        }
+      }
+    }
+    this.broadcastRoomState(canvasId);
   }
 
   private broadcastRoomState(canvasId: string) {

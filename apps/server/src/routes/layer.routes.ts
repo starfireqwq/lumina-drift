@@ -41,6 +41,13 @@ function isCanvasAdmin(canvasId: string, user: UserPayload): boolean {
   return Boolean(membership && (membership.role === 'owner' || membership.role === 'admin'));
 }
 
+function isCanvasViewer(canvasId: string, user: UserPayload): boolean {
+  if (user.serverRole === 'admin') return false;
+  if (user.serverRole === 'guest') return true;
+  const membership = getCanvasMembership(canvasId, user.id);
+  return membership?.role === 'viewer';
+}
+
 /** Folder membership is granted by the specific folder owner. */
 function parentDenied(parentId: string, canvasId: string, user: UserPayload): string | null {
   const parent = getLayerById(parentId);
@@ -294,6 +301,9 @@ export const layerRoutes: FastifyPluginAsync = async (fastify) => {
       handler: async (request, reply) => {
         const { id, layerId } = request.params;
         const user = request.user as UserPayload;
+        if (isCanvasViewer(id, user)) {
+          return reply.code(403).send({ error: '你在本畫布中的角色為「瀏覽者 (Viewer)」，無法編輯圖層。' });
+        }
         const isAdmin = isCanvasAdmin(id, user);
 
         try {
@@ -314,6 +324,9 @@ export const layerRoutes: FastifyPluginAsync = async (fastify) => {
       handler: async (request, reply) => {
         const { id, layerId } = request.params;
         const user = request.user as UserPayload;
+        if (isCanvasViewer(id, user)) {
+          return reply.code(403).send({ error: '你在本畫布中的角色為「瀏覽者 (Viewer)」，無法接管圖層。' });
+        }
         const isAdmin = isCanvasAdmin(id, user);
         const force = Boolean(request.body?.force);
 
@@ -336,6 +349,9 @@ export const layerRoutes: FastifyPluginAsync = async (fastify) => {
         const { id, layerId } = request.params;
         const { targetUserId } = request.body || {};
         const user = request.user as UserPayload;
+        if (isCanvasViewer(id, user)) {
+          return reply.code(403).send({ error: '你在本畫布中的角色為「瀏覽者 (Viewer)」，無法轉移圖層。' });
+        }
         const isAdmin = isCanvasAdmin(id, user);
 
         if (!targetUserId) {
@@ -360,6 +376,9 @@ export const layerRoutes: FastifyPluginAsync = async (fastify) => {
       handler: async (request, reply) => {
         const { id } = request.params;
         const user = request.user as UserPayload;
+        if (isCanvasViewer(id, user)) {
+          return reply.code(403).send({ error: '你在本畫布中的角色為「瀏覽者 (Viewer)」，無法排序圖層。' });
+        }
         const isAdmin = isCanvasAdmin(id, user);
         const { layerIds } = request.body || ({} as { layerIds: string[] });
 
@@ -385,6 +404,9 @@ export const layerRoutes: FastifyPluginAsync = async (fastify) => {
       handler: async (request, reply) => {
         const { id, layerId } = request.params;
         const user = request.user as UserPayload;
+        if (isCanvasViewer(id, user)) {
+          return reply.code(403).send({ error: '你在本畫布中的角色為「瀏覽者 (Viewer)」，無法排序圖層。' });
+        }
         const isAdmin = isCanvasAdmin(id, user);
         const { newSortOrder } = request.body || ({} as { newSortOrder: number });
 
