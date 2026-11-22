@@ -192,6 +192,8 @@ interface LayerPanelProps {
   folderAccess?: FolderAccess;
   /** True when the current user is the creator/owner/admin of this room */
   isRoomAdmin?: boolean;
+  /** True when the current user has a read-only room role (e.g. viewer) */
+  isReadOnly?: boolean;
 }
 
 export interface BlendModeGroup {
@@ -425,9 +427,11 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   canManage: canManageProp,
   folderAccess,
   isRoomAdmin,
+  isReadOnly,
 }) => {
   const { t } = useI18n();
   const { isGuest, user } = useAuth();
+  const readOnly = isGuest || Boolean(isReadOnly);
   // Masks are not rows: each shows as a second thumbnail on the layer it belongs to
   const layers = allLayers.filter((l) => l.layerType !== 'mask');
   const maskOf = new Map(allLayers.filter((l) => l.layerType === 'mask' && l.parentId).map((m) => [m.parentId as string, m]));
@@ -536,7 +540,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   const [dropPosition, setDropPosition] = useState<'above' | 'below' | 'inside' | null>(null);
   // An image file dragged over the empty space under the rows (goes to the very bottom)
   const [fileDropAtEnd, setFileDropAtEnd] = useState(false);
-  const isFileDrag = (e: React.DragEvent) => !draggedLayerId && Boolean(onImportImages) && !isGuest && isImageDrag(e.dataTransfer);
+  const isFileDrag = (e: React.DragEvent) => !draggedLayerId && Boolean(onImportImages) && !readOnly && isImageDrag(e.dataTransfer);
 
   // Touch Drag Refs
   const isTouchDraggingRef = useRef<boolean>(false);
@@ -898,15 +902,15 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   const active = layers.find((l) => l.id === (activeMask?.parentId ?? activeLayerId)) || null;
   const activeLayerMask = active ? maskOf.get(active.id) : undefined;
   const activeIsOwner = Boolean(active && user?.id === active.ownerId);
-  const canEditActive = Boolean(active && activeIsOwner);
+  const canEditActive = Boolean(!readOnly && active && activeIsOwner);
   const activeIsGroup = active?.layerType === 'group';
   const descending = getSortedDescending();
   // Up / down move within the layer's own group
   const activeSiblings = active ? siblingsOf(active) : [];
   const activeIndex = active ? activeSiblings.findIndex((l) => l.id === active.id) : -1;
-  const canMoveActive = Boolean(active && (activeIsOwner || isAdmin || active.isPublic || !active.ownerId));
+  const canMoveActive = Boolean(!readOnly && active && (activeIsOwner || isAdmin || active.isPublic || !active.ownerId));
   // A group goes with its content: something has to be left
-  const canDeleteActive = Boolean(active && (activeIsOwner || isAdmin) && layers.some((l) => !isWithin(l, active.id)));
+  const canDeleteActive = Boolean(!readOnly && active && (activeIsOwner || isAdmin) && layers.some((l) => !isWithin(l, active.id)));
   const blendGroups = getLocalizedBlendModeGroups(t);
   const blendLabel = (mode: BlendMode) => {
     for (const grp of blendGroups) {
@@ -966,7 +970,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             title={t.layers.lockAlphaTooltip} aria-label={t.layers.lockAlpha} className={iconBtn(Boolean(active?.alphaLocked))}>
             <AlphaLockIcon />
           </button>
-          <button type="button" disabled={!active || !(activeIsOwner || isAdmin)} aria-pressed={Boolean(active?.isLocked)}
+          <button type="button" disabled={readOnly || !active || !(activeIsOwner || isAdmin)} aria-pressed={Boolean(active?.isLocked)}
             onClick={() => active && onToggleLock(active)} title={t.layers.lockLayerTooltip} aria-label={t.layers.lockLayerTooltip} className={iconBtn(Boolean(active?.isLocked))}>
             <Lock className="h-3.5 w-3.5" />
           </button>
@@ -1039,25 +1043,25 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
 
           {/* Ownership icons: compact CSP style instead of full-width banners */}
           <div className="ml-auto flex items-center gap-0.5">
-            {active && !activeIsOwner && (active.isPublic || !active.ownerId) && !isGuest && (
+            {active && !activeIsOwner && (active.isPublic || !active.ownerId) && !readOnly && (
               <button type="button" onClick={() => onClaimLayer(active.id, false)} title={t.layers.claimTooltip} aria-label={t.layers.claim}
                 className={iconBtn(false, '!border-emerald-500/40 !text-emerald-400 hover:!bg-emerald-500/15')}>
                 <HandMetal className="h-3.5 w-3.5" />
               </button>
             )}
-            {active && !activeIsOwner && !active.isPublic && active.ownerId && isAdmin && (
+            {active && !activeIsOwner && !active.isPublic && active.ownerId && isAdmin && !readOnly && (
               <button type="button" onClick={() => setForceClaimTarget(active)} title={t.layers.adminForceClaim} aria-label={t.layers.adminForceClaim}
                 className={iconBtn(false, '!border-amber-500/45 !text-amber-400 hover:!bg-amber-500/15')}>
                 <ShieldAlert className="h-3.5 w-3.5" />
               </button>
             )}
-            {active && activeIsOwner && (
+            {active && activeIsOwner && !readOnly && (
               <button type="button" onClick={() => { if (confirm(t.layers.releaseConfirm.replace('{name}', active.name))) onReleaseLayer(active.id); }}
                 title={t.layers.releaseTooltip} aria-label={t.layers.release} className={iconBtn(false)}>
                 <Unlock className="h-3.5 w-3.5" />
               </button>
             )}
-            {active && (activeIsOwner || isAdmin) && onTransferLayer && (
+            {active && (activeIsOwner || isAdmin) && !readOnly && onTransferLayer && (
               <div className="relative">
                 <button ref={transferBtnRef} type="button" onClick={() => setTransferLayerId(transferLayerId === active.id ? null : active.id)}
                   title={t.layers.transferTooltip} aria-label={t.layers.transfer} className={iconBtn(transferLayerId === active.id)}>
@@ -1085,7 +1089,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
         </div>
 
         {/* Row 3: Single-row CSP layer creation & stack commands bar */}
-        {!isGuest && (
+        {!readOnly && (
           <div className="flex items-center gap-0.5 border-t border-neutral-800/60 pt-1">
             <button type="button" onClick={handleDirectAddRaster} title={t.layers.addRaster} aria-label={t.layers.addRaster}
               className="atelier-icon-btn h-6 w-6"><Plus className="h-3.5 w-3.5" /></button>
@@ -1188,7 +1192,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
       )}
 
       {/* Slim hint only when no public/owned layer exists yet in collaborative session */}
-      {layers.length > 0 && !hasDrawableLayer && !isGuest && (
+      {layers.length > 0 && !hasDrawableLayer && !readOnly && (
         <div className="flex shrink-0 items-center gap-1.5 border-b border-atelier-border bg-indigo-950/30 px-2 py-1 text-[10px] text-indigo-300">
           <Sparkles className="h-3 w-3 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{t.layers.empty}</span>
@@ -1227,7 +1231,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
         {layers.length === 0 ? (
           <div className="flex flex-col items-center gap-1.5 py-6 text-center text-neutral-500">
             <span>{t.layers.empty}</span>
-            {!isGuest && (
+            {!readOnly && (
               <button type="button" onClick={handleDirectAddRaster}
                 className="rounded-md bg-indigo-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-500">
                 {t.layers.addLayer}
@@ -1480,8 +1484,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             <MenuItem label={ids.length > 1 ? `${t.layers.groupSelected} (${ids.length})` : t.layers.addGroup} hint="Ctrl+G" disabledReason={groupBlocked}
               onClick={close(() => { onGroupLayers?.(ids); setSelectedLayerIds(new Set()); })} />
             {onCopyLayers && <MenuItem label={ids.length > 1 ? `${t.layers.copyLayers} (${ids.length})` : t.layers.copyLayers} hint="Ctrl+Alt+C" onClick={close(() => onCopyLayers(ids))} />}
-            {onPasteLayers && <MenuItem label={t.layers.pasteLayers} hint="Ctrl+Alt+V" disabledReason={isGuest ? t.layers.guestCannotPaste : null} onClick={close(() => onPasteLayers())} />}
-            {onCopyLayers && onPasteLayers && <MenuItem label={t.layers.duplicate} hint="Ctrl+J" disabledReason={isGuest ? t.layers.guestCannotPaste : null} onClick={close(() => { onCopyLayers(ids); onPasteLayers(); })} />}
+            {onPasteLayers && <MenuItem label={t.layers.pasteLayers} hint="Ctrl+Alt+V" disabledReason={readOnly ? (isGuest ? t.layers.guestCannotPaste : t.collab.viewerReadOnlyWarn) : null} onClick={close(() => onPasteLayers())} />}
+            {onCopyLayers && onPasteLayers && <MenuItem label={t.layers.duplicate} hint="Ctrl+J" disabledReason={readOnly ? (isGuest ? t.layers.guestCannotPaste : t.collab.viewerReadOnlyWarn) : null} onClick={close(() => { onCopyLayers(ids); onPasteLayers(); })} />}
             {onToggleKeepLayerClipboard && <MenuItem label={`${keepLayerClipboard ? '✓ ' : ''}${t.layers.keepClipboard}`} hint="~5MB" onClick={close(onToggleKeepLayerClipboard)} />}
             <div className="my-1 h-px bg-neutral-700/70" />
             <MenuItem label={t.layers.mergeDown} hint="Ctrl+E" disabledReason={ids.length > 1 ? t.layers.mergeOneAtATime : mergeBlocker(layer)} onClick={close(() => onMergeDown?.(layer.id))} />

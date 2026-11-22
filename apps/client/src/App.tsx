@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { BlendMode, CanvasMemberModel, CanvasModel, CanvasUnit, CreateCanvasDto, LayerMeta, LayerModel, LayerType, clampDpi } from '@atelier/shared';
+import { BlendMode, CanvasMemberModel, CanvasModel, CanvasUnit, CreateCanvasDto, LayerMeta, LayerModel, LayerType, clampDpi, getCanvasRoleCapabilities } from '@atelier/shared';
 import { ApiService } from './services/api';
 import { OfflineSessionStore } from './services/offlineStore';
 import { LuminaProjectEngine } from './engine/LuminaProjectEngine';
@@ -1489,10 +1489,7 @@ export const App: React.FC = () => {
               canvasId: currentCanvas.id,
               userId: user.id,
               role: validRole,
-              canCreateLayer: validRole !== 'viewer',
-              canDeleteOtherLayer: validRole === 'owner' || validRole === 'admin',
-              canExport: true,
-              canManageMembers: validRole === 'owner' || validRole === 'admin',
+              ...getCanvasRoleCapabilities(validRole),
               joinedAt: 0,
             }
           : null;
