@@ -7,12 +7,17 @@ import { db, sqlite } from '../db';
 import { config } from '../config';
 import { canvases, canvasGroups, canvasGroupMembers, canvasMembers, layers, canvasOps, canvasSnapshots } from '../db/schema';
 import {
+  AssignableCanvasRole,
+  CanvasMemberInfo,
   CanvasMemberModel,
   CanvasModel,
+  CanvasRole,
   CanvasSnapshotBundle,
   clampDpi,
   CreateCanvasDto,
   DEFAULT_TILE_SIZE,
+  getCanvasRoleCapabilities,
+  ServerRole,
   UpdateCanvasDto,
 } from '@atelier/shared';
 import { hashPassword, verifyPassword } from './auth.service';
@@ -256,6 +261,143 @@ export async function joinCanvas(
   })();
 
   return getCanvasMembership(canvasId, userId)!;
+}
+
+const ROLE_SORT_WEIGHT: Record<CanvasRole, number> = {
+  owner: 0,
+  admin: 1,
+  editor: 2,
+  viewer: 3,
+};
+
+export function listCanvasMembers(
+  canvasId: string,
+  onlineUserIds?: ReadonlySet<string>
+): CanvasMemberInfo[] {
+  const canvas = getCanvasById(canvasId);
+  if (!canvas) return [];
+
+  const includeVisitors = canvas.accessMode === 'invite' && !canvas.roomPassHash;
+  const rows = sqlite
+    .prepare(
+      `WITH roster AS (
+         SELECT user_id FROM canvas_members WHERE canvas_id = @canvasId
+         UNION
+         SELECT user_id FROM canvas_visits WHERE canvas_id = @canvasId AND @includeVisitors
+         UNION
+         SELECT owner_id AS user_id FROM canvases WHERE id = @canvasId
+       )
+       SELECT
+         r.user_id AS userId,
+         u.username AS username,
+         u.display_name AS displayName,
+         u.avatar_url AS avatarUrl,
+         u.server_role AS serverRole,
+         m.role AS memberRole,
+         m.can_create_layer AS canCreateLayer,
+         m.can_delete_other_layer AS canDeleteOtherLayer,
+         m.can_export AS canExport,
+         m.can_manage_members AS canManageMembers,
+         m.joined_at AS joinedAt,
+         NULLIF(MAX(COALESCE(m.last_seen_at, 0), COALESCE(v.last_seen_at, 0)), 0) AS lastSeenAt,
+         MAX(COALESCE(m.draw_time_ms, 0), COALESCE(v.draw_time_ms, 0)) AS drawTimeMs
+       FROM roster r
+       JOIN users u ON u.id = r.user_id
+       LEFT JOIN canvas_members m ON m.canvas_id = @canvasId AND m.user_id = r.user_id
+       LEFT JOIN canvas_visits v ON v.canvas_id = @canvasId AND v.user_id = r.user_id
+       WHERE u.is_active = 1 AND u.server_role <> 'guest'`
+    )
+    .all({ canvasId, includeVisitors: Number(includeVisitors) }) as Array<{
+    userId: string;
+    username: string;
+    displayName: string;
+    avatarUrl: string | null;
+    serverRole: ServerRole;
+    memberRole: CanvasRole | null;
+    canCreateLayer: number | null;
+    canDeleteOtherLayer: number | null;
+    canExport: number | null;
+    canManageMembers: number | null;
+    joinedAt: number | null;
+    lastSeenAt: number | null;
+    drawTimeMs: number;
+  }>;
+
+  const list: CanvasMemberInfo[] = rows.map((r) => {
+    const role: CanvasRole = r.userId === canvas.ownerId ? 'owner' : (r.memberRole ?? 'editor');
+    const defaults = getCanvasRoleCapabilities(role);
+    return {
+      canvasId,
+      userId: r.userId,
+      username: r.username,
+      displayName: r.displayName,
+      avatarUrl: r.avatarUrl,
+      serverRole: r.serverRole,
+      role,
+      canCreateLayer: r.canCreateLayer !== null ? Boolean(r.canCreateLayer) : defaults.canCreateLayer,
+      canDeleteOtherLayer: r.canDeleteOtherLayer !== null ? Boolean(r.canDeleteOtherLayer) : defaults.canDeleteOtherLayer,
+      canExport: r.canExport !== null ? Boolean(r.canExport) : defaults.canExport,
+      canManageMembers: r.canManageMembers !== null ? Boolean(r.canManageMembers) : defaults.canManageMembers,
+      joinedAt: r.joinedAt ?? r.lastSeenAt ?? canvas.createdAt,
+      isOnline: onlineUserIds ? onlineUserIds.has(r.userId) : undefined,
+      lastSeenAt: r.lastSeenAt,
+      drawTimeMs: r.drawTimeMs,
+    };
+  });
+
+  list.sort((a, b) => {
+    const rw = ROLE_SORT_WEIGHT[a.role] - ROLE_SORT_WEIGHT[b.role];
+    if (rw !== 0) return rw;
+    const onlineDiff = Number(Boolean(b.isOnline)) - Number(Boolean(a.isOnline));
+    if (onlineDiff !== 0) return onlineDiff;
+    return (b.lastSeenAt ?? b.joinedAt) - (a.lastSeenAt ?? a.joinedAt);
+  });
+
+  return list;
+}
+
+export function updateCanvasMemberRole(
+  canvasId: string,
+  targetUserId: string,
+  nextRole: AssignableCanvasRole
+): CanvasMemberModel {
+  const canvas = getCanvasById(canvasId);
+  if (!canvas) throw new Error('畫布不存在');
+
+  const caps = getCanvasRoleCapabilities(nextRole);
+  const now = Date.now();
+  sqlite
+    .prepare(
+      `INSERT INTO canvas_members (
+         canvas_id, user_id, role,
+         can_create_layer, can_delete_other_layer, can_export, can_manage_members,
+         joined_at, last_seen_at, draw_time_ms
+       ) VALUES (
+         @canvasId, @userId, @role,
+         @canCreateLayer, @canDeleteOtherLayer, @canExport, @canManageMembers,
+         @joinedAt,
+         (SELECT last_seen_at FROM canvas_visits WHERE canvas_id = @canvasId AND user_id = @userId),
+         COALESCE((SELECT draw_time_ms FROM canvas_visits WHERE canvas_id = @canvasId AND user_id = @userId), 0)
+       )
+       ON CONFLICT (canvas_id, user_id) DO UPDATE SET
+         role = excluded.role,
+         can_create_layer = excluded.can_create_layer,
+         can_delete_other_layer = excluded.can_delete_other_layer,
+         can_export = excluded.can_export,
+         can_manage_members = excluded.can_manage_members`
+    )
+    .run({
+      canvasId,
+      userId: targetUserId,
+      role: nextRole,
+      canCreateLayer: caps.canCreateLayer ? 1 : 0,
+      canDeleteOtherLayer: caps.canDeleteOtherLayer ? 1 : 0,
+      canExport: caps.canExport ? 1 : 0,
+      canManageMembers: caps.canManageMembers ? 1 : 0,
+      joinedAt: now,
+    });
+
+  return getCanvasMembership(canvasId, targetUserId)!;
 }
 
 export function incrementCanvasSeq(canvasId: string): number {

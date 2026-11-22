@@ -1523,6 +1523,18 @@ export interface Translations {
     noOnlineMembers: string;
     painter: string;
     adminRole: string;
+    roleOwner: string;
+    roleAdmin: string;
+    roleEditor: string;
+    roleViewer: string;
+    roleGuest: string;
+    roleSelectAria: string;
+    roleUpdateFailed: string;
+    viewerReadOnlyBadge: string;
+    viewerReadOnlyWarn: string;
+    roleChangedToViewer: string;
+    roleChangedToEditor: string;
+    roleChangedToAdmin: string;
     lastSeenPrefix: string;
     drawTimePrefix: string;
     justNow: string;

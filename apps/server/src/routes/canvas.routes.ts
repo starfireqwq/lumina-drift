@@ -1,12 +1,16 @@
 import { FastifyInstance, FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { findUserById, promoteGuestToMember, verifyPassword } from '../services/auth.service';
 import {
+  canManageCanvasMemberRole,
   CanvasModel,
   CanvasSnapshotBundle,
   CreateCanvasDto,
   encodePacket,
+  isAssignableCanvasRole,
   JoinCanvasDto,
+  MemberRoleManageDenialReason,
   UpdateCanvasDto,
+  UpdateCanvasMemberRoleDto,
   UserPayload,
 } from '@atelier/shared';
 import {
@@ -16,9 +20,11 @@ import {
   getCanvasMembership,
   hasCanvasGroupAccess,
   joinCanvas,
+  listCanvasMembers,
   listCanvases,
   resizeCanvasWithShift,
   updateCanvas,
+  updateCanvasMemberRole,
 } from '../services/canvas.service';
 import { getLayersByCanvasId } from '../services/layer.service';
 import {
@@ -395,6 +401,85 @@ export const canvasRoutes: FastifyPluginAsync = async (fastify) => {
         } catch (err: any) {
           return reply.code(400).send({ error: err.message });
         }
+      },
+    }
+  );
+
+  // GET /api/canvases/:id/members - List canvas members (including owner and registered public-room visitors)
+  fastify.get<{ Params: { id: string } }>('/:id/members', async (request, reply) => {
+    const { id } = request.params;
+    const canvas = getCanvasById(id);
+    if (!canvas) return reply.code(404).send({ error: '畫布不存在' });
+    if (!(await canReadCanvas(fastify, request, canvas))) return reply.code(403).send(ROOM_LOCKED);
+
+    const onlineIds = fastify.roomManager.getOnlineUserIds(id);
+    const members = listCanvasMembers(id, onlineIds);
+    return reply.send({ canvasId: id, ownerId: canvas.ownerId, members });
+  });
+
+  // PATCH /api/canvases/:id/members/:userId/role - Update a member's room role (UPSERT for public-room accounts)
+  const ROLE_DENIAL_MESSAGE: Record<MemberRoleManageDenialReason, string> = {
+    cannot_modify_self: '無法變更自己的房間角色',
+    cannot_modify_guest: '無法變更訪客角色',
+    cannot_modify_owner: '無法變更房主的角色',
+    cannot_modify_server_admin: '無法變更伺服器管理員的房間角色',
+    cannot_modify_canvas_admin: '僅房主或伺服器管理員可變更房間管理員的角色',
+    insufficient_permission: '你沒有權限變更該成員的角色',
+    invalid_target_role: '無效的目標角色',
+  };
+
+  fastify.patch<{ Params: { id: string; userId: string }; Body: UpdateCanvasMemberRoleDto }>(
+    '/:id/members/:userId/role',
+    {
+      preHandler: [fastify.authenticate],
+      handler: async (request, reply) => {
+        const { id, userId: targetUserId } = request.params;
+        const actor = request.user as UserPayload;
+        const canvas = getCanvasById(id);
+        if (!canvas) return reply.code(404).send({ error: '畫布不存在' });
+
+        const nextRole = request.body?.role;
+        if (!isAssignableCanvasRole(nextRole)) {
+          return reply.code(400).send({ error: ROLE_DENIAL_MESSAGE.invalid_target_role });
+        }
+
+        if (targetUserId.startsWith('guest_')) {
+          return reply.code(403).send({ error: ROLE_DENIAL_MESSAGE.cannot_modify_guest });
+        }
+
+        const targetUser = findUserById(targetUserId);
+        if (!targetUser || !targetUser.isActive) {
+          return reply.code(404).send({ error: '找不到目標使用者' });
+        }
+
+        const actorMembership = getCanvasMembership(id, actor.id);
+        const targetMembership = getCanvasMembership(id, targetUser.id);
+        const check = canManageCanvasMemberRole(
+          {
+            userId: actor.id,
+            serverRole: actor.serverRole,
+            canvasRole: actorMembership?.role ?? (canvas.ownerId === actor.id ? 'owner' : undefined),
+            isCanvasOwner: canvas.ownerId === actor.id,
+          },
+          {
+            userId: targetUser.id,
+            serverRole: targetUser.serverRole,
+            canvasRole: targetMembership?.role ?? (canvas.ownerId === targetUser.id ? 'owner' : undefined),
+            isCanvasOwner: canvas.ownerId === targetUser.id,
+            isGuest: targetUser.serverRole === 'guest',
+          },
+          nextRole
+        );
+
+        if (!check.allowed) {
+          const reason = check.reason ?? 'insufficient_permission';
+          const status = reason === 'invalid_target_role' ? 400 : 403;
+          return reply.code(status).send({ error: ROLE_DENIAL_MESSAGE[reason], code: reason });
+        }
+
+        const member = updateCanvasMemberRole(id, targetUser.id, nextRole);
+        fastify.roomManager.syncMemberRole(id, targetUser.id, member.role);
+        return reply.send({ member });
       },
     }
   );

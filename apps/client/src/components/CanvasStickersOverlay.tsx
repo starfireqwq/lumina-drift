@@ -20,6 +20,7 @@ import {
 interface CanvasStickersOverlayProps {
   stickers: CanvasSticker[];
   currentUserId?: string;
+  readOnly?: boolean;
   zoom: number;
   pan: { x: number; y: number };
   onUpdateSticker: (stickerId: string, updates: Partial<CanvasSticker>) => void;
@@ -63,6 +64,7 @@ export const PRESET_REACTION_STICKERS = [
 export const CanvasStickersOverlay: React.FC<CanvasStickersOverlayProps> = ({
   stickers,
   currentUserId,
+  readOnly = false,
   zoom,
   pan,
   onUpdateSticker,
@@ -253,6 +255,7 @@ export const CanvasStickersOverlay: React.FC<CanvasStickersOverlayProps> = ({
     <div className="absolute inset-0 pointer-events-none z-20 overflow-hidden">
       {/* 1. Floating Sticker Picker Trigger Button */}
       {/* stopPropagation: this sits inside the canvas, whose pointerdown would otherwise paint here too */}
+      {!readOnly && (
       <div className="absolute bottom-3 right-3 pointer-events-auto flex items-center gap-2" onPointerDown={(e) => e.stopPropagation()}>
         <button
           type="button"
@@ -318,6 +321,7 @@ export const CanvasStickersOverlay: React.FC<CanvasStickersOverlayProps> = ({
           </div>
         )}
       </div>
+      )}
 
       {/* 2. Render Canvas Stickers & Reference Pins */}
       {stickers.map((s) => {
@@ -345,8 +349,8 @@ export const CanvasStickersOverlay: React.FC<CanvasStickersOverlayProps> = ({
           >
             {/* Header Toolbar (Controls: Move, Lock, Flip, Grayscale, Opacity, Close) */}
             <div
-              onPointerDown={(e) => handlePointerDownDrag(e, s)}
-              className={`h-6 px-1.5 rounded-t-lg bg-neutral-900/90 backdrop-blur-md flex items-center justify-between text-[10px] text-neutral-300 cursor-move border-b border-neutral-800 transition ${
+              onPointerDown={(e) => { if (!readOnly) handlePointerDownDrag(e, s); }}
+              className={`h-6 px-1.5 rounded-t-lg bg-neutral-900/90 backdrop-blur-md flex items-center justify-between text-[10px] text-neutral-300 ${readOnly ? 'cursor-default' : 'cursor-move'} border-b border-neutral-800 transition ${
                 isSelected || !s.isLocked ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
               }`}
             >
@@ -355,6 +359,7 @@ export const CanvasStickersOverlay: React.FC<CanvasStickersOverlayProps> = ({
                 <span className="truncate">{s.title || '釘選貼圖'}</span>
               </div>
 
+              {!readOnly && (
               <div className="flex items-center gap-1" onPointerDown={(e) => e.stopPropagation()}>
                 {/* Flip Horizontal */}
                 <button
@@ -396,6 +401,7 @@ export const CanvasStickersOverlay: React.FC<CanvasStickersOverlayProps> = ({
                   <X className="w-3 h-3" />
                 </button>
               </div>
+              )}
             </div>
 
             {/* Sticker Image Content */}
@@ -412,6 +418,7 @@ export const CanvasStickersOverlay: React.FC<CanvasStickersOverlayProps> = ({
               />
 
               {/* Bottom Opacity Bar on Hover */}
+              {!readOnly && (
               <div
                 className="absolute bottom-0 inset-x-0 h-4 bg-black/60 backdrop-blur-sm opacity-0 group-hover:opacity-100 flex items-center px-1.5 transition text-[9px] gap-1 text-white"
                 onPointerDown={(e) => e.stopPropagation()}
@@ -427,9 +434,10 @@ export const CanvasStickersOverlay: React.FC<CanvasStickersOverlayProps> = ({
                   className="w-16 h-1 accent-indigo-500 cursor-pointer"
                 />
               </div>
+              )}
 
               {/* Bottom-right Resize Handle */}
-              {!s.isLocked && (
+              {!readOnly && !s.isLocked && (
                 <div
                   onPointerDown={(e) => handlePointerDownResize(e, s)}
                   className="absolute bottom-0 right-0 w-4 h-4 cursor-se-resize flex items-center justify-center text-neutral-400 hover:text-white bg-black/50 rounded-tl"

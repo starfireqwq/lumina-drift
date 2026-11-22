@@ -1,6 +1,9 @@
 import {
+  AssignableCanvasRole,
   AuthResponse,
   CanvasDetailResponse,
+  CanvasMemberModel,
+  CanvasMembersResponse,
   CanvasModel,
   CanvasUnit,
   CreateCanvasDto,
@@ -13,6 +16,7 @@ import {
   RegisterDto,
   TileData,
   UpdateCanvasDto,
+  UpdateCanvasMemberRoleResponse,
   UpdateLayerDto,
   UserPayload,
   VectorStroke,
@@ -431,6 +435,31 @@ export class ApiService {
     });
     if (dpi || unit) saveUnitMeta(canvasId, { ...(unit ? { unit } : {}), ...(dpi ? { dpi } : {}) });
     return applyUnitMeta(res.canvas);
+  }
+
+  static async getCanvasMembers(canvasId: string): Promise<CanvasMembersResponse> {
+    if (OfflineSessionStore.isOfflineCanvas(canvasId)) {
+      return { canvasId, ownerId: 'offline-local', members: [] };
+    }
+    return this.request<CanvasMembersResponse>(`/canvases/${canvasId}/members`);
+  }
+
+  static async updateCanvasMemberRole(
+    canvasId: string,
+    userId: string,
+    role: AssignableCanvasRole
+  ): Promise<CanvasMemberModel> {
+    if (OfflineSessionStore.isOfflineCanvas(canvasId)) {
+      throw new Error('單機模式不支援變更房間成員角色');
+    }
+    const res = await this.request<UpdateCanvasMemberRoleResponse>(
+      `/canvases/${canvasId}/members/${encodeURIComponent(userId)}/role`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ role }),
+      }
+    );
+    return res.member;
   }
 
   // Layers

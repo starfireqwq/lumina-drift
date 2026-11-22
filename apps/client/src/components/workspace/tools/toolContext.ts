@@ -25,6 +25,8 @@ export interface ToolContext {
   activeLayer: LayerModel | null;
   user: UserPayload | null;
   isAdmin: boolean;
+  isCanvasViewer?: boolean;
+  viewerReadOnlyWarn?: string;
   currentTool: ToolType;
   brushProps: BrushProperties;
   setBrushProps: Dispatch<SetStateAction<BrushProperties>>;

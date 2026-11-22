@@ -138,6 +138,7 @@ import {
   BlendMode,
   ColorCurvesOptions,
   type FilterValues,
+  getCanvasRoleCapabilities,
   GradientPresetName,
   GradientStop,
   LayerType,
@@ -155,7 +156,7 @@ import { PluginFilterWorkerClient } from '../plugins/pluginFilterClient';
 import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../utils/filterMemoryGuard';
 import type { FilterTargetOptions } from './FilterTargetBar';
 import { AtelierModal, modalButton } from './AtelierModal';
-import { AlertCircle, ImagePlus, Keyboard, Layers, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
+import { AlertCircle, Eye, ImagePlus, Keyboard, Layers, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
 import { type DroppedImages, type ImageDropTarget, ImageImportError, imageEntries, isImageDrag, loadImageEntry, readDroppedImages } from '../utils/imageImport';
 
 /** Where a key types text (a text field), unlike a focused button, slider, checkbox or the page */
@@ -377,7 +378,6 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   onThumbnailsChange,
 }) => {
   const { isGuest, user } = useAuth();
-  const isAdmin = user?.serverRole === 'admin' || Boolean(canvas && user?.id && canvas.ownerId === user.id);
 
   const {
     members,
@@ -397,6 +397,29 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     removeSticker,
     toggleVoiceMute,
   } = useSocket();
+
+  const resolveCurrentCanvasRole = (): 'owner' | 'admin' | 'editor' | 'viewer' | undefined => {
+    const uid = user?.id;
+    if (!uid) return undefined;
+    const raw =
+      members.find((m) => m.userId === uid) ??
+      (roomMembers && roomMembers.length > 0 ? roomMembers.find((m) => m.userId === uid) : undefined);
+    const roleRaw = raw
+      ? ('canvasRole' in raw && raw.canvasRole ? raw.canvasRole : 'role' in raw ? raw.role : undefined)
+      : undefined;
+    if (roleRaw === 'owner' || roleRaw === 'admin' || roleRaw === 'editor' || roleRaw === 'viewer') {
+      return roleRaw;
+    }
+    if (canvas && canvas.ownerId === uid) return 'owner';
+    return undefined;
+  };
+  const currentCanvasRole = resolveCurrentCanvasRole();
+  const isCanvasViewer = !isGuest && user?.serverRole !== 'admin' && currentCanvasRole === 'viewer';
+  const isAdmin =
+    user?.serverRole === 'admin' ||
+    currentCanvasRole === 'owner' ||
+    currentCanvasRole === 'admin' ||
+    Boolean(canvas && user?.id && canvas.ownerId === user.id);
   // A phone keeps this layout when turned sideways; 桌面模式 switches it to the desktop layout.
   const isPhone = usePhoneLayout();
   const { t, language } = useI18n();
@@ -999,19 +1022,6 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     setCanRedoState(scopedUndoRef.current.canRedo(effectiveUserId));
   };
 
-  const resolveCurrentCanvasRole = (): 'owner' | 'admin' | 'editor' | 'viewer' | undefined => {
-    const uid = userRef.current?.id ?? user?.id;
-    if (!uid) return undefined;
-    const raw = (roomMembers && roomMembers.length > 0 ? roomMembers : members).find((m) => m.userId === uid);
-    const roleRaw = raw
-      ? ('canvasRole' in raw && raw.canvasRole ? raw.canvasRole : 'role' in raw ? raw.role : undefined)
-      : undefined;
-    return roleRaw === 'owner' || roleRaw === 'admin' || roleRaw === 'editor' || roleRaw === 'viewer'
-      ? roleRaw
-      : undefined;
-  };
-  const isCanvasViewer = resolveCurrentCanvasRole() === 'viewer';
-
   const canEditPixels = (raw: LayerModel) => {
     const layer = (raw.layerType === 'mask' && layersRef.current.find((l) => l.id === raw.parentId)) || raw;
     // A group's mask is painted by whoever may edit the group (the group itself has no pixels)
@@ -1028,6 +1038,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     activeLayer,
     user,
     isAdmin,
+    isCanvasViewer,
+    viewerReadOnlyWarn: t.collab.viewerReadOnlyWarn,
     currentTool,
     brushProps,
     setBrushProps,
@@ -3971,7 +3983,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     while (used.has(String(n))) n++;
     return String(n);
   };
-  const canAddCel = (folder: LayerModel | null) => Boolean(folder && !isGuest && folderAccess.canAdd(folder));
+  const canAddCel = (folder: LayerModel | null) => Boolean(folder && !isGuest && !isCanvasViewer && folderAccess.canAdd(folder));
   const createAnimationFolder = async () => {
     if (!onCreateLayer) return;
     const fps = animationEngine?.getFps() ?? 12; // a new track plays at the same speed as the others
@@ -4511,7 +4523,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
 
   // ---------- Layer structure: merge down, group ----------
-  const canManageLayer = (l: LayerModel) => !isGuest && l.ownerId === user?.id;
+  const canManageLayer = (l: LayerModel) => !isGuest && !isCanvasViewer && l.ownerId === user?.id;
   /** 向下合併: the layer (with its opacity, blend mode and mask) is drawn into the one below, then removed */
   const mergeDown = (layerId: string) => {
     const ls = layersRef.current;
@@ -4660,6 +4672,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const te = tileEngineRef.current;
     if (!clip || !onCreateLayer || !te || !canvas) return warn('還沒有複製任何圖層。');
     if (isGuest) return warn('訪客不能貼上圖層，請先登入。');
+    if (isCanvasViewer) return warn(t.collab.viewerReadOnlyWarn);
     let anchor = activeLayerRef.current;
     let insertionAbove: string | undefined;
     if (anchor?.layerType === 'mask') anchor = layersRef.current.find((l) => l.id === anchor!.parentId) ?? null;
@@ -4832,6 +4845,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const lm = layerManagerRef.current;
     if (!canvas || !onCreateLayer || !lm || !tileEngineRef.current) return;
     if (isGuest) return warn('訪客不能匯入圖片，請先登入。');
+    if (isCanvasViewer) return warn(t.collab.viewerReadOnlyWarn);
     const { entries, skipped, tooMany } = imageEntries(dropped);
     if (!entries.length) return warn(skipped ? '只能匯入圖片檔（PNG、JPG、WebP、GIF、SVG…）。' : '沒有可匯入的圖片。');
     if (transformLayerIdRef.current) return warn('請先按 Enter 確定或 Esc 取消目前的變形，再匯入圖片。', 3500);
@@ -4962,15 +4976,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     };
 
     const validRole = resolveCurrentCanvasRole();
-    const canvasMember = validRole && userRef.current
+    const caps = validRole ? getCanvasRoleCapabilities(validRole) : null;
+    const canvasMember = validRole && caps && userRef.current
       ? {
           canvasId: canvas.id,
           userId: userRef.current.id,
           role: validRole,
-          canCreateLayer: validRole !== 'viewer',
-          canDeleteOtherLayer: validRole === 'owner' || validRole === 'admin',
-          canExport: true,
-          canManageMembers: validRole === 'owner' || validRole === 'admin',
+          ...caps,
           joinedAt: 0,
         }
       : null;
@@ -5239,6 +5251,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       warn('訪客不能新增文字，請先登入。');
       return;
     }
+    if (isCanvasViewer) {
+      warn(t.collab.viewerReadOnlyWarn);
+      return;
+    }
     const hit = textHitAt(local);
     if (hit) editTextLayer(hit);
     else setTextEdit({ layerId: null, meta: { ...DEFAULT_TEXT, color: brushProps.color, x: Math.round(local.x), y: Math.round(local.y) } });
@@ -5262,6 +5278,36 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     layerManagerRef.current?.clearPreview();
     layerManagerRef.current?.syncLayers(displayLayersRef.current); // shows the edited layer again
   };
+
+  // Live role-change feedback: when changed online, immediately enter/exit read-only state
+  const currentCanvasId = canvas?.id ?? null;
+  const prevCanvasRoleRef = useRef<{ canvasId: string | null; role: typeof currentCanvasRole }>({
+    canvasId: currentCanvasId,
+    role: currentCanvasRole,
+  });
+  useEffect(() => {
+    const prev = prevCanvasRoleRef.current;
+    if (prev.canvasId !== currentCanvasId) {
+      prevCanvasRoleRef.current = { canvasId: currentCanvasId, role: currentCanvasRole };
+      return;
+    }
+    if (prev.role !== currentCanvasRole) {
+      const hadPrev = prev.role !== undefined;
+      prevCanvasRoleRef.current = { canvasId: currentCanvasId, role: currentCanvasRole };
+      if (!isGuest && user?.serverRole !== 'admin') {
+        if (currentCanvasRole === 'viewer') {
+          if (textEdit) endTextEdit();
+          if (transformLayerIdRef.current) cancelTransform();
+          warn(t.collab.roleChangedToViewer, 3500);
+        } else if (hadPrev && currentCanvasRole === 'editor') {
+          warn(t.collab.roleChangedToEditor, 2800);
+        } else if (hadPrev && currentCanvasRole === 'admin') {
+          warn(t.collab.roleChangedToAdmin, 2800);
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentCanvasId, currentCanvasRole, isGuest, user?.serverRole]);
   /** The text is drawn into its layer and sent as tiles (every screen shows the same pixels); meta keeps it editable */
   const commitText = async (meta: LayerTextMeta) => {
     const editing = textEdit;
@@ -5643,6 +5689,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           canManage={canManageLayer}
           folderAccess={folderAccess}
           isRoomAdmin={isAdmin}
+          isReadOnly={isCanvasViewer}
           onLoadLayerSelection={(id) => {
             const layer = layersRef.current.find((l) => l.id === id);
             if (layer) selection.loadLayerSelection(layer);
@@ -5655,7 +5702,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       title: PANEL_TITLES.members,
       icon: <Users />,
       badge: <span className="ml-1 rounded-full bg-emerald-500/20 px-1.5 text-[10px] font-bold text-emerald-300">{roomMemberCards(members).length}</span>,
-      render: () => <UserListPanel members={members} />,
+      render: () => <UserListPanel members={members} canvasId={canvas.id} canvasOwnerId={canvas.ownerId} />,
     },
     { id: 'oplog', title: PANEL_TITLES.oplog, icon: <Terminal />, render: () => <OpLogPanel /> },
     { id: 'quickKeys', title: PANEL_TITLES.quickKeys, icon: <Keyboard />, render: () => <QuickKeysPanel /> },
@@ -5838,6 +5885,18 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                   <span className="text-neutral-400">{t.animation.originalEditHint}</span>
                 </div>
               </OverlayPresence>
+              <OverlayPresence open={isCanvasViewer} kind="popover">
+                <div
+                  role="status"
+                  data-viewer-readonly
+                  className={`atelier-popover pointer-events-none absolute left-1/2 z-20 flex max-w-[calc(100%-16px)] -translate-x-1/2 items-center gap-1.5 overflow-hidden whitespace-nowrap rounded-full border border-sky-500/50 bg-sky-950/90 px-3 py-1 text-[11px] font-medium text-sky-100 shadow-lg ${
+                    Boolean(originalEditId) && !animPlaying ? 'top-12' : 'top-3'
+                  }`}
+                >
+                  <Eye className="h-3.5 w-3.5 shrink-0 text-sky-300" />
+                  <span className="truncate">{t.collab.viewerReadOnlyBadge}</span>
+                </div>
+              </OverlayPresence>
               <ViewportConsumer subscribe={subscribeViewportZoom} getSnapshot={getViewportZoomSnapshot}>
                 {(viewportState) => (
                   <>
@@ -5926,6 +5985,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                   <CanvasStickersOverlay
                     stickers={stickers}
                     currentUserId={user?.id}
+                    readOnly={isGuest || isCanvasViewer}
                     zoom={viewportState.zoom}
                     pan={{ x: viewportState.panX, y: viewportState.panY }}
                     onAddSticker={addSticker}
@@ -6051,7 +6111,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                   ...(user ? [[user.id, `${user.displayName || user.username}（你）`]] : []),
                 ])}
                 can={{
-                  createFolder: !isGuest && Boolean(onCreateLayer),
+                  createFolder: !isGuest && !isCanvasViewer && Boolean(onCreateLayer),
                   editFolder: Boolean(animFolder && canManageLayer(animFolder)),
                   addCel: canAddCel(animFolder),
                   editableEntryIds: new Set(animTracks.flatMap((t) => t.entries).filter((e) => { const l = layers.find((x) => x.id === e.id); return Boolean(l && canManageLayer(l)); }).map((e) => e.id)),

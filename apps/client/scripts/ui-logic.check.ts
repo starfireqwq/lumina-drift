@@ -21,12 +21,15 @@ import { healUnderMask } from '../src/engine/VectorEngine';
 import { ScopedUndoManager } from '../src/engine/ScopedUndoManager';
 import {
   Affine2D,
+  canManageCanvasMemberRole,
   computeSmartEncloseFillMask,
   DynamicStabilizer,
   clampDpi,
   evaluateEasing,
   evaluateTransformKeyframes,
   formatCanvasDimensions,
+  getCanvasRoleCapabilities,
+  isAssignableCanvasRole,
   MAX_STABILIZER_LEVEL,
   multiplyAffine,
   pixelsToUnit,
@@ -3456,5 +3459,113 @@ await (async () => {
   const undoOps = undo.undoGroup('u1');
   assert.ok(undoOps.length >= 2, 'Single undoGroup covers layer creation, pixels, and selection');
   assert.ok(new Set(undoOps.map((o) => o.groupId)).size === 1, 'All ops share one groupId');
+})();
+
+// --- Room member role management authorization (canManageCanvasMemberRole) ---
+(() => {
+  const serverAdmin = { userId: 'u-sadmin', serverRole: 'admin' as const, canvasRole: 'editor' as const };
+  const otherServerAdmin = { userId: 'u-sadmin-2', serverRole: 'admin' as const, canvasRole: 'editor' as const };
+  const owner = { userId: 'u-owner', serverRole: 'member' as const, canvasRole: 'owner' as const, isCanvasOwner: true };
+  const canvasAdmin = { userId: 'u-cadmin', serverRole: 'member' as const, canvasRole: 'admin' as const };
+  const otherCanvasAdmin = { userId: 'u-cadmin-2', serverRole: 'member' as const, canvasRole: 'admin' as const };
+  const editor = { userId: 'u-editor', serverRole: 'member' as const, canvasRole: 'editor' as const };
+  const viewer = { userId: 'u-viewer', serverRole: 'member' as const, canvasRole: 'viewer' as const };
+  const publicVisitor = { userId: 'u-visitor', serverRole: 'member' as const, canvasRole: undefined };
+  const guest = { userId: 'guest_abc', serverRole: 'guest' as const, isGuest: true };
+
+  // Self cannot be modified
+  for (const actor of [serverAdmin, owner, canvasAdmin, editor, viewer]) {
+    const res = canManageCanvasMemberRole(actor, actor, 'editor');
+    assert.equal(res.allowed, false);
+    assert.equal(res.reason, 'cannot_modify_self');
+    assert.deepEqual(res.allowedRoles, []);
+  }
+
+  // Guests cannot be modified by anyone
+  for (const actor of [serverAdmin, owner, canvasAdmin]) {
+    assert.equal(canManageCanvasMemberRole(actor, guest).reason, 'cannot_modify_guest');
+    assert.equal(
+      canManageCanvasMemberRole(actor, { userId: 'u-g', serverRole: 'guest' }, 'viewer').reason,
+      'cannot_modify_guest'
+    );
+    assert.equal(
+      canManageCanvasMemberRole(actor, { userId: 'guest_999', serverRole: 'member' }, 'viewer').reason,
+      'cannot_modify_guest'
+    );
+  }
+
+  // Owner cannot be modified even by serverAdmin
+  assert.equal(canManageCanvasMemberRole(serverAdmin, owner).reason, 'cannot_modify_owner');
+  assert.equal(canManageCanvasMemberRole(serverAdmin, owner, 'admin').reason, 'cannot_modify_owner');
+  assert.equal(
+    canManageCanvasMemberRole(serverAdmin, { userId: 'u-owner-flag', serverRole: 'member', isCanvasOwner: true }).reason,
+    'cannot_modify_owner'
+  );
+  assert.equal(canManageCanvasMemberRole(canvasAdmin, owner, 'viewer').reason, 'cannot_modify_owner');
+
+  // ServerAdmin cannot be modified even by owner or another serverAdmin
+  assert.equal(canManageCanvasMemberRole(owner, serverAdmin).reason, 'cannot_modify_server_admin');
+  assert.equal(canManageCanvasMemberRole(otherServerAdmin, serverAdmin, 'viewer').reason, 'cannot_modify_server_admin');
+  assert.equal(canManageCanvasMemberRole(canvasAdmin, serverAdmin, 'viewer').reason, 'cannot_modify_server_admin');
+
+  // ServerAdmin & Owner can assign admin / editor / viewer to canvasAdmin, editor, viewer, publicVisitor
+  for (const actor of [serverAdmin, owner]) {
+    for (const target of [canvasAdmin, editor, viewer, publicVisitor]) {
+      const inspect = canManageCanvasMemberRole(actor, target);
+      assert.equal(inspect.allowed, true);
+      assert.deepEqual(inspect.allowedRoles, ['admin', 'editor', 'viewer']);
+      assert.equal(canManageCanvasMemberRole(actor, target, 'admin').allowed, true);
+      assert.equal(canManageCanvasMemberRole(actor, target, 'editor').allowed, true);
+      assert.equal(canManageCanvasMemberRole(actor, target, 'viewer').allowed, true);
+      const toOwner = canManageCanvasMemberRole(actor, target, 'owner');
+      assert.equal(toOwner.allowed, false);
+      assert.equal(toOwner.reason, 'invalid_target_role');
+    }
+  }
+
+  // Canvas admin can assign editor / viewer to regular members, but not admin/owner and not other canvas admins
+  for (const target of [editor, viewer, publicVisitor]) {
+    const inspect = canManageCanvasMemberRole(canvasAdmin, target);
+    assert.equal(inspect.allowed, true);
+    assert.deepEqual(inspect.allowedRoles, ['editor', 'viewer']);
+    assert.equal(canManageCanvasMemberRole(canvasAdmin, target, 'editor').allowed, true);
+    assert.equal(canManageCanvasMemberRole(canvasAdmin, target, 'viewer').allowed, true);
+    const toAdmin = canManageCanvasMemberRole(canvasAdmin, target, 'admin');
+    assert.equal(toAdmin.allowed, false);
+    assert.equal(toAdmin.reason, 'insufficient_permission');
+    const toOwner = canManageCanvasMemberRole(canvasAdmin, target, 'owner');
+    assert.equal(toOwner.allowed, false);
+    assert.equal(toOwner.reason, 'invalid_target_role');
+  }
+  const peerAdminRes = canManageCanvasMemberRole(canvasAdmin, otherCanvasAdmin, 'editor');
+  assert.equal(peerAdminRes.allowed, false);
+  assert.equal(peerAdminRes.reason, 'cannot_modify_canvas_admin');
+
+  // Editor, viewer, guest cannot manage anyone
+  for (const actor of [editor, viewer, guest]) {
+    const res = canManageCanvasMemberRole(actor, publicVisitor, 'viewer');
+    assert.equal(res.allowed, false);
+    assert.equal(res.reason, 'insufficient_permission');
+  }
+
+  // isAssignableCanvasRole & capability flags
+  assert.equal(isAssignableCanvasRole('admin'), true);
+  assert.equal(isAssignableCanvasRole('editor'), true);
+  assert.equal(isAssignableCanvasRole('viewer'), true);
+  assert.equal(isAssignableCanvasRole('owner'), false);
+  assert.equal(isAssignableCanvasRole('superadmin'), false);
+
+  assert.deepEqual(getCanvasRoleCapabilities('owner'), {
+    canCreateLayer: true, canDeleteOtherLayer: true, canExport: true, canManageMembers: true,
+  });
+  assert.deepEqual(getCanvasRoleCapabilities('admin'), {
+    canCreateLayer: true, canDeleteOtherLayer: true, canExport: true, canManageMembers: true,
+  });
+  assert.deepEqual(getCanvasRoleCapabilities('editor'), {
+    canCreateLayer: true, canDeleteOtherLayer: false, canExport: true, canManageMembers: false,
+  });
+  assert.deepEqual(getCanvasRoleCapabilities('viewer'), {
+    canCreateLayer: false, canDeleteOtherLayer: false, canExport: true, canManageMembers: false,
+  });
 })();
 console.log('ui-logic checks passed');

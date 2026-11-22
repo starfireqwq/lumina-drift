@@ -323,7 +323,12 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
 
     const isReadOnlyTool = currentTool === 'eyedropper' || currentTool === 'lasso' || currentTool === 'magic_wand';
     if (!isReadOnlyTool && !canEditPixels(targetLayer)) {
-      warn('請先選擇自己的圖層、接管圖層，或請擁有者共用圖層。', 3500);
+      warn(
+        ctx.isCanvasViewer
+          ? (ctx.viewerReadOnlyWarn || '目前為旁觀模式，無法編輯畫布')
+          : '請先選擇自己的圖層、接管圖層，或請擁有者共用圖層。',
+        3500
+      );
       return;
     }
     const local = viewportRef.current?.screenToCanvas(e.clientX, e.clientY);

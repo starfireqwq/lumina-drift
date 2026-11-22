@@ -55,6 +55,7 @@ export const DRAW_OP_TYPES: readonly string[] = ['STROKE', 'ERASE', 'SMART_FILL'
 export interface OfflineMemberInfo {
   userId: string;
   displayName: string;
+  serverRole?: ServerRole;
   canvasRole?: CanvasRole;
   /** When their last tab left this canvas (null: never seen since tracking began) */
   lastSeenAt: number | null;
