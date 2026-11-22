@@ -1700,6 +1700,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       // Test hooks: the undo history (ops carry their foreign-pixel masks) lets browser checks explain an undo
       (window as any).__debugPixi = {
         app, viewport, layerManager, tileEngine, selectionEngine, vectorEngine, animationEngine: timeline,
+        rulerManager: RulerManager.getInstance(),
         undo: scopedUndoRef.current, tileToRgba,
         get filterWorker() { return filterWorkerRef.current; },
         get pluginFilterWorker() { return pluginFilterWorkerRef.current; },

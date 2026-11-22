@@ -92,7 +92,7 @@ export const RulerControlsModal: React.FC<RulerControlsModalProps> = ({
 
   return (
     <ToolWindow id="rulers" title={t.rulers.title} icon={<Compass />} onClose={onClose}
-      initial={{ x: -332, y: 96, w: 320, h: 0 }} minW={280}
+      initial={{ x: 84, y: 96, w: 312, h: 0 }} minW={280}
       footer={state.mode !== 'off' ? (
         <>
           <button type="button" onClick={() => rulerMgr.initDimensions(canvasWidth, canvasHeight)} className="atelier-btn atelier-btn--ghost mr-auto">
