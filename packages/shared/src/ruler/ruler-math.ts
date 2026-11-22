@@ -43,6 +43,24 @@ export interface ConcentricConfig {
   stepRadius?: number; // e.g. 50px increments
 }
 
+/** Vertical ('x': constant x) or horizontal ('y': constant y) canvas guide line */
+export type CanvasGuideAxis = 'x' | 'y';
+
+export interface CanvasGuide {
+  id: string;
+  axis: CanvasGuideAxis;
+  /** Whole-pixel coordinate in canvas space */
+  position: number;
+  locked?: boolean;
+}
+
+export interface GuidesConfig {
+  visible: boolean;
+  items: CanvasGuide[];
+  /** Subset of guide IDs explicitly chosen as alignment/distribution basis (empty = all visible) */
+  selectedIds: string[];
+}
+
 /**
  * Computes all symmetric counterpart points for a stroke dab point
  */

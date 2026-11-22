@@ -922,14 +922,14 @@ export interface Translations {
     };
   };
 
-  /** Align & distribute layers to objects, canvas, or selection (對齊 L2) */
+  /** Align & distribute layers, vector strokes, text bounds, and guides (對齊 L3) */
   align: {
     title: string;
     openTitle: string;
     menuItem: string;
     targetCount: string;
     basis: string;
-    basisNames: { auto: string; objects: string; canvas: string; selection: string };
+    basisNames: { auto: string; objects: string; guide: string; canvas: string; selection: string };
     /** Next to the basis menu while it is on auto: {basis} = the frame in use */
     autoUses: string;
     horizontal: string;
@@ -953,6 +953,17 @@ export interface Translations {
       bottom: string;
       vgap: string;
     };
+    guideMode: string;
+    guideModes: { range: string; nearest: string };
+    guideSummary: string;
+    guideSelectedBadge: string;
+    manageGuides: string;
+    vectorScope: string;
+    vectorScopes: { layer: string; selected: string; all: string };
+    vectorBounds: string;
+    vectorBoundsModes: { stroke: string; path: string };
+    textBounds: string;
+    textBoundsModes: { glyph: string; box: string };
     done: string;
     alreadyAligned: string;
     distributed: string;
@@ -960,6 +971,8 @@ export interface Translations {
     empty: string;
     failed: string;
     noSelection: string;
+    noGuides: string;
+    needGuides: string;
     needMulti: string;
     cropTitle: string;
     cropBody: string;
@@ -1256,6 +1269,15 @@ export interface Translations {
     radial: string;
     axesCount: string;
     angle: string;
+    guidesTitle: string;
+    guidesShow: string;
+    addVerticalGuide: string;
+    addHorizontalGuide: string;
+    clearGuides: string;
+    guidesEmpty: string;
+    guideSelectHint: string;
+    guideLock: string;
+    guideDelete: string;
   };
 
   reference: {

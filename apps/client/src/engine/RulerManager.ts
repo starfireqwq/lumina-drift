@@ -1,6 +1,9 @@
 import {
+  CanvasGuide,
+  CanvasGuideAxis,
   computeSymmetryPoints,
   ConcentricConfig,
+  GuidesConfig,
   ParallelConfig,
   PerspectiveConfig,
   Point2D,
@@ -17,6 +20,7 @@ export interface RulerState {
   perspective: PerspectiveConfig;
   parallel: ParallelConfig;
   concentric: ConcentricConfig;
+  guides: GuidesConfig;
 }
 
 export type RulerChangeListener = (state: RulerState) => void;
@@ -49,6 +53,11 @@ export class RulerManager {
       centerX: 1024,
       centerY: 1024,
       stepRadius: 50,
+    },
+    guides: {
+      visible: true,
+      items: [],
+      selectedIds: [],
     },
   };
 
@@ -119,7 +128,98 @@ export class RulerManager {
     this.state.perspective.vp3 = { x: cx, y: Math.round(height * 1.5) };
     this.state.concentric.centerX = cx;
     this.state.concentric.centerY = cy;
+    if (this.state.guides.items.length > 0) {
+      this.state.guides = {
+        ...this.state.guides,
+        items: this.state.guides.items.map((g) => ({
+          ...g,
+          position: Math.max(0, Math.min(g.axis === 'x' ? width : height, Math.round(g.position))),
+        })),
+      };
+    }
     this.notify();
+  }
+
+  public setGuidesVisible(visible: boolean) {
+    if (this.state.guides.visible === visible) return;
+    this.state.guides = { ...this.state.guides, visible };
+    this.notify();
+  }
+
+  public addGuide(axis: CanvasGuideAxis, position: number): CanvasGuide {
+    const guide: CanvasGuide = {
+      id: `guide_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+      axis,
+      position: Math.round(position),
+      locked: false,
+    };
+    this.state.guides = {
+      ...this.state.guides,
+      visible: true,
+      items: [...this.state.guides.items, guide],
+    };
+    this.notify();
+    return guide;
+  }
+
+  public updateGuide(id: string, partial: Partial<Pick<CanvasGuide, 'position' | 'locked'>>) {
+    let changed = false;
+    const nextItems = this.state.guides.items.map((g) => {
+      if (g.id !== id) return g;
+      changed = true;
+      return {
+        ...g,
+        ...(partial.position !== undefined ? { position: Math.round(partial.position) } : {}),
+        ...(partial.locked !== undefined ? { locked: partial.locked } : {}),
+      };
+    });
+    if (!changed) return;
+    this.state.guides = { ...this.state.guides, items: nextItems };
+    this.notify();
+  }
+
+  public removeGuide(id: string) {
+    const nextItems = this.state.guides.items.filter((g) => g.id !== id);
+    if (nextItems.length === this.state.guides.items.length) return;
+    this.state.guides = {
+      ...this.state.guides,
+      items: nextItems,
+      selectedIds: this.state.guides.selectedIds.filter((sid) => sid !== id),
+    };
+    this.notify();
+  }
+
+  public clearGuides() {
+    if (this.state.guides.items.length === 0 && this.state.guides.selectedIds.length === 0) return;
+    this.state.guides = {
+      ...this.state.guides,
+      items: [],
+      selectedIds: [],
+    };
+    this.notify();
+  }
+
+  public setSelectedGuides(ids: string[]) {
+    const valid = new Set(this.state.guides.items.map((g) => g.id));
+    const next = [...new Set(ids.filter((id) => valid.has(id)))];
+    this.state.guides = { ...this.state.guides, selectedIds: next };
+    this.notify();
+  }
+
+  public toggleGuideSelected(id: string, additive = false) {
+    if (!this.state.guides.items.some((g) => g.id === id)) return;
+    const prev = this.state.guides.selectedIds;
+    const exists = prev.includes(id);
+    const next = additive
+      ? (exists ? prev.filter((sid) => sid !== id) : [...prev, id])
+      : (exists && prev.length === 1 ? [] : [id]);
+    this.state.guides = { ...this.state.guides, selectedIds: next };
+    this.notify();
+  }
+
+  public getActiveGuides(): CanvasGuide[] {
+    if (!this.state.guides.visible) return [];
+    return this.state.guides.items;
   }
 
   /**

@@ -5,17 +5,51 @@
  * are copied dx / dy pixels away.
  */
 
-export type AlignBasisChoice = 'auto' | 'objects' | 'canvas' | 'selection';
-export type AlignBasis = 'objects' | 'canvas' | 'selection';
+import { sampleBezierSegment, type CanvasGuide, type VectorStroke } from '@atelier/shared';
+
+export type AlignBasisChoice = 'auto' | 'objects' | 'guide' | 'canvas' | 'selection';
+export type AlignBasis = 'objects' | 'guide' | 'canvas' | 'selection';
 export type AlignX = 'left' | 'center' | 'right';
 export type AlignY = 'top' | 'center' | 'bottom';
 export type DistributeMode = 'left' | 'hcenter' | 'right' | 'hgap' | 'top' | 'vcenter' | 'bottom' | 'vgap';
-export type AlignOutcome = 'moved' | 'aligned' | 'empty' | 'confirm' | 'noSelection' | 'needMulti' | 'failed';
+export type AlignOutcome =
+  | 'moved'
+  | 'aligned'
+  | 'empty'
+  | 'confirm'
+  | 'noSelection'
+  | 'noGuides'
+  | 'needGuides'
+  | 'needMulti'
+  | 'failed';
+
+export type GuideAlignMode = 'range' | 'nearest';
+export type VectorAlignScope = 'layer' | 'selected' | 'all';
+export type VectorBoundsMode = 'stroke' | 'path';
+export type TextBoundsMode = 'glyph' | 'box';
+
+export interface AlignGuideSummary {
+  /** Sorted unique vertical guide X coordinates (used for horizontal alignment/distribution) */
+  xs: number[];
+  /** Sorted unique horizontal guide Y coordinates (used for vertical alignment/distribution) */
+  ys: number[];
+  /** True when only an explicitly selected subset of guides is active */
+  usingSelection: boolean;
+  /** Total visible guide count on the canvas */
+  totalCount: number;
+}
+
+export interface GuideAxisAvailability {
+  canAlignX: boolean;
+  canAlignY: boolean;
+  canDistributeX: boolean;
+  canDistributeY: boolean;
+}
 
 /** x / y = top-left pixel, w / h = size in pixels */
 export interface AlignRect { x: number; y: number; w: number; h: number }
 
-export const ALIGN_BASIS_CHOICES: readonly AlignBasisChoice[] = ['auto', 'objects', 'canvas', 'selection'];
+export const ALIGN_BASIS_CHOICES: readonly AlignBasisChoice[] = ['auto', 'objects', 'guide', 'canvas', 'selection'];
 
 /** Why the selected targets cannot be aligned/distributed now (a key of t.align.blocked) */
 export type AlignBlocker = 'noLayer' | 'busy' | 'mask' | 'notEditable' | 'keyframes' | 'animationFolder';
@@ -39,13 +73,19 @@ export type AlignTargetUnit<T extends AlignLayerLike = AlignLayerLike> = {
 
 /**
  * The frame / basis targets align or distribute against.
- * Auto: selection when active, else objects when >= 2 targets, else canvas.
+ * Auto: selection when active, else guide when visible guides exist, else objects when >= 2 targets, else canvas.
  */
-export function resolveAlignBasis(choice: AlignBasisChoice, hasSelection: boolean, targetCount = 1): AlignBasis | null {
+export function resolveAlignBasis(
+  choice: AlignBasisChoice,
+  hasSelection: boolean,
+  targetCount = 1,
+  hasGuides = false,
+): AlignBasis | null {
   if (choice === 'canvas') return 'canvas';
   if (choice === 'selection') return hasSelection ? 'selection' : null;
+  if (choice === 'guide') return hasGuides ? 'guide' : null;
   if (choice === 'objects') return targetCount >= 2 ? 'objects' : null;
-  return hasSelection ? 'selection' : targetCount >= 2 ? 'objects' : 'canvas';
+  return hasSelection ? 'selection' : hasGuides ? 'guide' : targetCount >= 2 ? 'objects' : 'canvas';
 }
 
 /** Inclusive selection bounds as a frame (a lasso's bounds may be fractional: the pixels they touch) */
@@ -354,4 +394,209 @@ export function distributeOffsets(
   }
 
   return out;
+}
+
+const uniqueSortedCoords = (coords: number[]): number[] => {
+  const uniq = new Set<number>();
+  for (const v of coords) {
+    if (Number.isFinite(v)) uniq.add(Math.round(v));
+  }
+  return [...uniq].sort((a, b) => a - b);
+};
+
+/** Summarises visible guides (or only explicitly selected guides when any selected ID is active). */
+export function summarizeGuides(
+  guides: readonly CanvasGuide[],
+  selectedIds: readonly string[] = [],
+): AlignGuideSummary {
+  if (guides.length === 0) {
+    return { xs: [], ys: [], usingSelection: false, totalCount: 0 };
+  }
+  const selectedSet = selectedIds.length > 0 ? new Set(selectedIds) : null;
+  const picked = selectedSet ? guides.filter((g) => selectedSet.has(g.id)) : [];
+  const active = picked.length > 0 ? picked : guides;
+  const xs = uniqueSortedCoords(active.filter((g) => g.axis === 'x').map((g) => g.position));
+  const ys = uniqueSortedCoords(active.filter((g) => g.axis === 'y').map((g) => g.position));
+  return {
+    xs,
+    ys,
+    usingSelection: picked.length > 0,
+    totalCount: guides.length,
+  };
+}
+
+/** Which axes can align or distribute when using guides as the basis. */
+export function guideAxisAvailability(summary: AlignGuideSummary): GuideAxisAvailability {
+  const canAlignX = summary.xs.length > 0;
+  const canAlignY = summary.ys.length > 0;
+  const canDistributeX = summary.xs.length >= 2 && summary.xs[summary.xs.length - 1] > summary.xs[0];
+  const canDistributeY = summary.ys.length >= 2 && summary.ys[summary.ys.length - 1] > summary.ys[0];
+  return { canAlignX, canAlignY, canDistributeX, canDistributeY };
+}
+
+const pickNearestCoord = (coords: readonly number[], refValue: number): number => {
+  let best = coords[0];
+  let bestDist = Math.abs(coords[0] - refValue);
+  for (let i = 1; i < coords.length; i++) {
+    const d = Math.abs(coords[i] - refValue);
+    if (d < bestDist) {
+      bestDist = d;
+      best = coords[i];
+    }
+  }
+  return best;
+};
+
+/**
+ * Whole-pixel move aligning `content` against vertical/horizontal guides.
+ * - `range`: 1 guide aligns to that line; 2+ guides form a span `[min, max]`.
+ * - `nearest`: picks the guide closest to the aligned edge/centre of `content`.
+ * Axes without guides stay untouched (dx = 0 or dy = 0).
+ */
+export function guideAlignOffset(
+  content: AlignRect,
+  summary: AlignGuideSummary,
+  x: AlignX | null,
+  y: AlignY | null,
+  mode: GuideAlignMode = 'range',
+): { dx: number; dy: number } {
+  let dx = 0;
+  let dy = 0;
+
+  if (x !== null && summary.xs.length > 0) {
+    const where = x === 'left' ? 'start' : x === 'right' ? 'end' : 'center';
+    if (mode === 'nearest' && summary.xs.length > 1) {
+      const refX = where === 'start' ? content.x : where === 'end' ? content.x + content.w : content.x + content.w / 2;
+      const gx = pickNearestCoord(summary.xs, refX);
+      dx = along(content.x, content.w, gx, 0, where);
+    } else {
+      const minX = summary.xs[0];
+      const maxX = summary.xs[summary.xs.length - 1];
+      dx = along(content.x, content.w, minX, maxX - minX, where);
+    }
+  }
+
+  if (y !== null && summary.ys.length > 0) {
+    const where = y === 'top' ? 'start' : y === 'bottom' ? 'end' : 'center';
+    if (mode === 'nearest' && summary.ys.length > 1) {
+      const refY = where === 'start' ? content.y : where === 'end' ? content.y + content.h : content.y + content.h / 2;
+      const gy = pickNearestCoord(summary.ys, refY);
+      dy = along(content.y, content.h, gy, 0, where);
+    } else {
+      const minY = summary.ys[0];
+      const maxY = summary.ys[summary.ys.length - 1];
+      dy = along(content.y, content.h, minY, maxY - minY, where);
+    }
+  }
+
+  return { dx: dx || 0, dy: dy || 0 };
+}
+
+export function guideAlignManyOffsets(
+  rects: AlignRect[],
+  summary: AlignGuideSummary,
+  x: AlignX | null,
+  y: AlignY | null,
+  mode: GuideAlignMode = 'range',
+): Array<{ dx: number; dy: number }> {
+  return rects.map((r) => guideAlignOffset(r, summary, x, y, mode));
+}
+
+/**
+ * Distribution frame derived from guides for the given distribution mode.
+ * Returns null if the axis lacks at least 2 distinct guide coordinates.
+ */
+export function guideDistributeFrame(
+  summary: AlignGuideSummary,
+  mode: DistributeMode,
+): AlignRect | null {
+  const { horizontal } = DISTRIBUTE_AXIS[mode];
+  if (horizontal) {
+    if (summary.xs.length < 2) return null;
+    const x0 = summary.xs[0];
+    const x1 = summary.xs[summary.xs.length - 1];
+    if (x1 <= x0) return null;
+    return { x: x0, y: 0, w: x1 - x0, h: 1 };
+  }
+  if (summary.ys.length < 2) return null;
+  const y0 = summary.ys[0];
+  const y1 = summary.ys[summary.ys.length - 1];
+  if (y1 <= y0) return null;
+  return { x: 0, y: y0, w: 1, h: y1 - y0 };
+}
+
+export function isHorizontalDistribute(mode: DistributeMode): boolean {
+  return DISTRIBUTE_AXIS[mode].horizontal;
+}
+
+/**
+ * Computes the whole-pixel alignment bounding box of a vector stroke:
+ * - `'path'`: centerline Bézier path bounds (excludes stroke thickness).
+ * - `'stroke'`: outer ink bounds including interpolated anchor stroke width along each segment.
+ */
+export function computeVectorStrokeAlignRect(
+  stroke: VectorStroke,
+  mode: VectorBoundsMode = 'stroke',
+  stepsPerSegment = 16,
+): AlignRect | null {
+  const { anchors } = stroke;
+  if (!anchors || anchors.length === 0) return null;
+
+  const fallbackW = Math.max(1, stroke.baseWidth || 1);
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  const include = (px: number, py: number, halfWidth: number) => {
+    const r = mode === 'stroke' ? halfWidth : 0;
+    if (px - r < minX) minX = px - r;
+    if (py - r < minY) minY = py - r;
+    if (px + r > maxX) maxX = px + r;
+    if (py + r > maxY) maxY = py + r;
+  };
+
+  if (anchors.length === 1) {
+    const a = anchors[0];
+    const hw = Math.max(0.5, (a.width || fallbackW) / 2);
+    include(a.x, a.y, hw);
+  } else {
+    const segCount = stroke.closed && anchors.length >= 3 ? anchors.length : anchors.length - 1;
+    for (let i = 0; i < segCount; i++) {
+      const a0 = anchors[i];
+      const a1 = anchors[(i + 1) % anchors.length];
+      const p0 = { x: a0.x, y: a0.y };
+      const cp1 = { x: a0.cp2x ?? a0.x, y: a0.cp2y ?? a0.y };
+      const cp2 = { x: a1.cp1x ?? a1.x, y: a1.cp1y ?? a1.y };
+      const p1 = { x: a1.x, y: a1.y };
+      const w0 = Math.max(1, a0.width || fallbackW);
+      const w1 = Math.max(1, a1.width || fallbackW);
+      const pts = sampleBezierSegment(p0, cp1, cp2, p1, stepsPerSegment);
+      for (let k = 0; k < pts.length; k++) {
+        const t = k / stepsPerSegment;
+        const hw = (w0 + (w1 - w0) * t) / 2;
+        include(pts[k].x, pts[k].y, hw);
+      }
+    }
+  }
+
+  if (!Number.isFinite(minX) || !Number.isFinite(minY)) return null;
+  const x = Math.floor(minX);
+  const y = Math.floor(minY);
+  const w = Math.max(1, Math.ceil(maxX) - x);
+  const h = Math.max(1, Math.ceil(maxY) - y);
+  return { x, y, w, h };
+}
+
+/** Union of alignment bounds for all strokes on a vector layer. */
+export function computeVectorLayerAlignRect(
+  strokes: readonly VectorStroke[],
+  mode: VectorBoundsMode = 'stroke',
+): AlignRect | null {
+  const rects: AlignRect[] = [];
+  for (const s of strokes) {
+    const r = computeVectorStrokeAlignRect(s, mode);
+    if (r) rects.push(r);
+  }
+  return unionRect(rects);
 }
