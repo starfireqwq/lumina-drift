@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { createPortal } from 'react-dom';
 import {
   AnimationEngine, AnimationTrack, MAX_FLIP_SPAN, MAX_HOLD, MAX_ONION, MAX_TIMELINE_FRAMES, ONION_MODES, OnionSkinConfig, TIMELINE_SLACK, celLayerOf, entryIndexAt, entryStart,
   formatTimecode, parseTimecode, planRepeatCels, removeTimelineLabel, trackLength, upsertTimelineLabel, upsertTransformKeyframe, removeTransformKeyframe, type OnionMode, type TimecodeMode,
@@ -609,6 +610,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   const lightScope: LightTableScope | null = lightKind === 'track' ? (activeFolderId ? { kind: 'track', id: activeFolderId } : null) : currentCel ? { kind: 'cel', id: currentCel } : null;
   const lightNow = lightIdsFor(lightTable, activeFolderId, currentCel);
   const lightExternalNow = externalRefsFor(lightTable, activeFolderId, currentCel, { visibleOnly: true });
+  const hasTimelineContent = tracks.length > 0 || Boolean(cameraLayer) || audioLayers.length > 0;
   const lightCount = lightNow.size + lightExternalNow.length;
   const commitLength = () => {
     if (lengthDraft === null) return;
@@ -646,7 +648,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
             {active?.shared && <span title={t.animation.sharedFolderTooltip} className="rounded bg-sky-500/20 px-1 text-[9px] text-sky-300">{t.animation.trackShared}</span>}
           </div>
         )}
-        {tracks.length > 0 && isPhone && (
+        {hasTimelineContent && isPhone && (
           <>
             <button type="button" onClick={() => engine.goToPrevFrame()} title={t.animation.prevCel} aria-label={t.animation.prevCel} className={`${iconBtn} h-8 min-w-8`}><ChevronLeft className="h-4 w-4" /></button>
             <button type="button" onClick={() => engine.togglePlay()} disabled={(range ? range.end - range.start + 1 : length) < 2}
@@ -721,7 +723,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
             </button>
           </>
         )}
-        {tracks.length > 0 && !isPhone && (
+        {hasTimelineContent && !isPhone && (
           <>
             <button type="button" onClick={() => engine.goToStart()} title={t.animation.firstCel} aria-label={t.animation.firstCel} className={iconBtn}><SkipBack className="h-3.5 w-3.5" /></button>
             <button type="button" onClick={() => engine.goToPrevFrame()} title={t.animation.prevCel} aria-label={t.animation.prevCel} className={iconBtn}><ChevronLeft className="h-4 w-4" /></button>
@@ -870,13 +872,13 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 <span className="font-mono text-[10px]">{activeLayer!.meta!.keyframes!.length}</span>
               )}
             </button>
-            <button type="button" onClick={() => setShowExportModal(true)} title={t.animation.exportModalTitle}
+            <button type="button" data-testid="timeline-export-btn" onClick={() => setShowExportModal(true)} title={t.animation.exportModalTitle}
               className="ml-auto flex h-7 shrink-0 whitespace-nowrap items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-600/20 px-2 text-[11px] font-bold text-emerald-300 hover:bg-emerald-600/30">
               <Download className="h-3 w-3" /><span className="hidden sm:inline">{t.common.export}</span>
             </button>
           </>
         )}
-        <div className={`flex shrink-0 items-center ${tracks.length ? '' : 'ml-auto'}`}>
+        <div className={`flex shrink-0 items-center ${hasTimelineContent ? '' : 'ml-auto'}`}>
           <button type="button" onClick={() => setIsCollapsed(!isCollapsed)} aria-label={isCollapsed ? t.animation.expandTimeline : t.animation.collapseTimeline} className={iconBtn}>
             {isCollapsed ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
           </button>
@@ -884,7 +886,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
         </div>
       </div>
 
-      {!isCollapsed && tracks.length === 0 && (
+      {!isCollapsed && !hasTimelineContent && (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 p-3 text-center text-[11px] text-neutral-400">
           <span>{t.animation.createFolderDesc}</span>
           <button type="button" onClick={onCreateFolder} disabled={!can.createFolder}
@@ -894,7 +896,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
         </div>
       )}
 
-      {!isCollapsed && tracks.length > 0 && (
+      {!isCollapsed && hasTimelineContent && (
         <>
           {/* Edit row, or the settings panel that is open (hidden on phone unless a sub-panel is active) */}
           {(!isPhone || panel !== null) && (
@@ -1969,16 +1971,17 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
         })()}
       </OverlayPresence>
 
-      <OverlayPresence open={phoneDrawerOpen}>
-        <AtelierModal
-          title={active?.name ?? t.animation.timeline}
-          icon={<SlidersHorizontal />}
-          width="md"
-          onClose={() => setPhoneDrawerOpen(false)}
-          footer={
-            <button type="button" className={modalButton.primary} onClick={() => setPhoneDrawerOpen(false)}>{t.common.done}</button>
-          }
-        >
+      {typeof document !== 'undefined' && createPortal(
+        <OverlayPresence open={phoneDrawerOpen}>
+          <AtelierModal
+            title={active?.name ?? t.animation.timeline}
+            icon={<SlidersHorizontal />}
+            width="md"
+            onClose={() => setPhoneDrawerOpen(false)}
+            footer={
+              <button type="button" className={modalButton.primary} onClick={() => setPhoneDrawerOpen(false)}>{t.common.done}</button>
+            }
+          >
           <div data-phone-drawer className="space-y-4 text-xs text-neutral-200">
             {/* Cel actions */}
             <section className="space-y-2">
@@ -2106,26 +2109,26 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 <button type="button" onClick={() => { setPhoneDrawerOpen(false); setPanel('range'); }} className={chip(Boolean(range))}>
                   <Repeat className="h-3.5 w-3.5" />{t.animation.range}
                 </button>
-                <button type="button" onClick={() => { setPhoneDrawerOpen(false); if (onToggleLightWindow) onToggleLightWindow(); else setPanel('light'); }} className={chip(lightWindowOpen || (lightTable.enabled && lightCount > 0))}>
+                <button type="button" data-testid="phone-drawer-light-btn" onClick={() => { setPhoneDrawerOpen(false); if (onToggleLightWindow) onToggleLightWindow(); else setPanel('light'); }} className={chip(lightWindowOpen || (lightTable.enabled && lightCount > 0))}>
                   <Lamp className="h-3.5 w-3.5" />{t.animation.lightTable}
                 </button>
                 {onToggleCameraWindow && (
-                  <button type="button" onClick={() => { setPhoneDrawerOpen(false); onToggleCameraWindow(); }} className={chip(cameraWindowOpen || Boolean(cameraLayer))}>
+                  <button type="button" data-testid="phone-drawer-camera-btn" onClick={() => { setPhoneDrawerOpen(false); onToggleCameraWindow(); }} className={chip(cameraWindowOpen || Boolean(cameraLayer))}>
                     <Camera className="h-3.5 w-3.5" />{t.animation.camera}
                   </button>
                 )}
                 {cameraLayer && onToggleCameraPreview && (
-                  <button type="button" onClick={() => { setPhoneDrawerOpen(false); onToggleCameraPreview(); }} className={chip(cameraPreviewActive)}>
+                  <button type="button" data-testid="phone-drawer-camera-preview-btn" onClick={() => { setPhoneDrawerOpen(false); onToggleCameraPreview(); }} className={chip(cameraPreviewActive)}>
                     {cameraPreviewActive ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}{t.animation.cameraPreview}
                   </button>
                 )}
                 {onToggleAudioWindow && (
-                  <button type="button" onClick={() => { setPhoneDrawerOpen(false); onToggleAudioWindow(); }} className={chip(audioWindowOpen || audioLayers.length > 0)}>
+                  <button type="button" data-testid="phone-drawer-audio-btn" onClick={() => { setPhoneDrawerOpen(false); onToggleAudioWindow(); }} className={chip(audioWindowOpen || audioLayers.length > 0)}>
                     <Music className="h-3.5 w-3.5" />{t.animation.audioTrack}
                   </button>
                 )}
                 {onToggleAudioScrub && (
-                  <button type="button" onClick={() => onToggleAudioScrub()} aria-pressed={audioScrubEnabled} className={chip(audioScrubEnabled)}>
+                  <button type="button" data-testid="phone-drawer-audio-scrub-btn" onClick={() => onToggleAudioScrub()} aria-pressed={audioScrubEnabled} className={chip(audioScrubEnabled)}>
                     <Headphones className="h-3.5 w-3.5" />{t.animation.audioScrub}
                   </button>
                 )}
@@ -2137,15 +2140,17 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                     <Users className="h-3.5 w-3.5" />{t.animation.trackShared}
                   </button>
                 )}
-                <button type="button" onClick={() => { setPhoneDrawerOpen(false); setShowExportModal(true); }}
+                <button type="button" data-testid="phone-drawer-export-btn" onClick={() => { setPhoneDrawerOpen(false); setShowExportModal(true); }}
                   className="flex h-7 items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-600/20 px-2.5 text-[11px] font-bold text-emerald-300">
                   <Download className="h-3.5 w-3.5" />{t.common.export}
                 </button>
               </div>
             </section>
           </div>
-        </AtelierModal>
-      </OverlayPresence>
+          </AtelierModal>
+        </OverlayPresence>,
+        document.body
+      )}
 
       <AnimationExportModal
         open={showExportModal}

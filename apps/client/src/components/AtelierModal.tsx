@@ -75,7 +75,7 @@ export const AtelierModal: React.FC<AtelierModalProps> = ({
 
   return (
     <div
-      className="atelier-modal-backdrop fixed inset-0 z-[70] flex items-end justify-center sm:items-center sm:p-4"
+      className="atelier-modal-backdrop fixed inset-0 z-[90] flex items-end justify-center sm:items-center sm:p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
