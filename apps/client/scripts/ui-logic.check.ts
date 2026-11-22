@@ -21,6 +21,8 @@ import { healUnderMask } from '../src/engine/VectorEngine';
 import { ScopedUndoManager } from '../src/engine/ScopedUndoManager';
 import {
   Affine2D,
+  applyAffinePoint,
+  BEZIER_PRESETS,
   canManageCanvasMemberRole,
   computeSmartEncloseFillMask,
   DynamicStabilizer,
@@ -29,7 +31,9 @@ import {
   evaluateTransformKeyframes,
   formatCanvasDimensions,
   getCanvasRoleCapabilities,
+  invertAffine,
   isAssignableCanvasRole,
+  matchBezierPreset,
   MAX_STABILIZER_LEVEL,
   multiplyAffine,
   pixelsToUnit,
@@ -41,6 +45,12 @@ import {
   unitToPixels,
 } from '@atelier/shared';
 import { getBoxPivotCanvasPoint, type TransformBox } from '../src/utils/transformProjection';
+import {
+  applyKeyframeHandleDrag,
+  buildKeyframeFromEval,
+  resolveParentWorldAffine,
+  sampleKeyframeMotionPath,
+} from '../src/utils/keyframeTransform';
 import {
   adjacentKeyframeFrame, AnimationEngine, animationDisplay, celEntriesOf, celInsertAt, celOfLayer, entryIndexAt, exportSegments, findAdjacentKeyframe, formatTimecode, frameSignature, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
   normalizeTimelineLabels, parseTimecode, placeEntries, planRepeatCels, planSequentialCelRenames, playbackFrame, removeTimelineLabel, removeTransformKeyframe,
@@ -883,6 +893,143 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   }
   const identTest = multiplyAffine(transformToAffineMatrix(mid), { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0, isIdentity: true });
   assert.equal(identTest.tx, m.tx);
+
+  // Phase C1 + C4: opacity keyframes, legacy default, overshoot clamping, bezier presets, affine invert
+  {
+    assert.equal(mid.opacity, 1, 'legacy keyframes without opacity evaluate to 1');
+    const fadeKfs = [
+      { frame: 0, x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 100, pivotY: 100, opacity: 0, easing: 'linear' as const },
+      { frame: 4, x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 100, pivotY: 100, opacity: 1, easing: 'linear' as const },
+    ];
+    assert.equal(evaluateTransformKeyframes(fadeKfs, 0, 100, 100).opacity, 0);
+    assert.ok(Math.abs(evaluateTransformKeyframes(fadeKfs, 2, 100, 100).opacity - 0.5) < 1e-6);
+    assert.equal(evaluateTransformKeyframes(fadeKfs, 4, 100, 100).opacity, 1);
+
+    // Overshoot bezier preset exceeds 1 for spatial props, but opacity stays clamped in [0, 1]
+    const strongOvershoot = BEZIER_PRESETS.find((p) => p.id === 'strongOvershoot')!;
+    assert.equal(matchBezierPreset(strongOvershoot.bezier), 'strongOvershoot');
+    assert.equal(matchBezierPreset([0.11, 0.22, 0.33, 0.44]), null);
+    const bounceKfs = [
+      { frame: 0, x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 0, pivotY: 0, opacity: 0, easing: 'cubicBezier' as const, bezier: strongOvershoot.bezier },
+      { frame: 10, x: 100, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 0, pivotY: 0, opacity: 1, easing: 'linear' as const },
+    ];
+    let sawOvershootX = false;
+    for (let f = 1; f < 10; f++) {
+      const ev = evaluateTransformKeyframes(bounceKfs, f, 0, 0);
+      if (ev.x > 100) sawOvershootX = true;
+      assert.ok(ev.opacity >= 0 && ev.opacity <= 1, `overshoot opacity must stay in [0, 1], got ${ev.opacity}`);
+    }
+    assert.ok(sawOvershootX, 'strongOvershoot preset should overshoot spatial motion');
+
+    // animationDisplay multiplies keyframe opacity (and skips during original-position edit)
+    const fadeLayer = { id: 'fade', parentId: null, layerType: 'raster', sortOrder: 1, isVisible: true, opacity: 0.8, meta: { keyframes: fadeKfs } };
+    const dispFadeMid = animationDisplay([fadeLayer], { time: 2, activeFolderId: null, onion: null }, 200, 200);
+    assert.ok(Math.abs(dispFadeMid[0].opacity - 0.4) < 1e-6, 'layer opacity multiplies with keyframe opacity');
+    assert.equal(dispFadeMid[0].renderOpacityApplied, true);
+    const dispFadeOrig = animationDisplay([fadeLayer], { time: 0, activeFolderId: null, onion: null, original: 'fade' }, 200, 200);
+    assert.equal(dispFadeOrig[0].opacity, 0.8, 'original-position editing keeps base opacity visible');
+
+    // exportSegments emits each distinct opacity step for GIF / video export
+    const fadeSegs = exportSegments([fadeLayer], 0, 4, null, 200, 200);
+    assert.equal(fadeSegs.length, 5, '0->1 fade over frames 0..4 produces 5 distinct export segments');
+
+    // invertAffine + applyAffinePoint round-trip
+    const inv = invertAffine(m);
+    assert.ok(inv, 'non-singular transform matrix must be invertible');
+    const pt = applyAffinePoint(m, 37, -19);
+    const back = applyAffinePoint(inv!, pt.x, pt.y);
+    assert.ok(Math.hypot(back.x - 37, back.y - -19) < 1e-5, 'invertAffine round-trips points');
+
+    // Phase C2 + C3: direct canvas keyframe handle solver & motion path sampling
+    const baseEval = {
+      x: 20, y: -10, scaleX: 1.5, scaleY: 0.8, rotation: Math.PI / 6,
+      pivotX: 100, pivotY: 120, opacity: 0.75, active: true,
+    };
+    const mBefore = transformToAffineMatrix(baseEval);
+    // Dragging pivot by (+40, -25) must preserve the resulting affine matrix (zero visual jump)
+    const afterPivot = applyKeyframeHandleDrag({
+      handle: 'pivot',
+      startEval: baseEval,
+      parentWorld: { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0, isIdentity: true },
+      startCanvas: { x: 120, y: 110 },
+      curCanvas: { x: 160, y: 85 },
+    });
+    const mAfter = transformToAffineMatrix(afterPivot);
+    const testPx = applyAffinePoint(mBefore, 45, 70);
+    const testPxAfter = applyAffinePoint(mAfter, 45, 70);
+    assert.ok(
+      Math.hypot(testPx.x - testPxAfter.x, testPx.y - testPxAfter.y) < 0.35,
+      `pivot drag must not shift rendered pixels (delta=${Math.hypot(testPx.x - testPxAfter.x, testPx.y - testPxAfter.y)})`
+    );
+
+    // Move handle under a 90-degree rotated parent group maps canvas +X into local -Y
+    const rotParentLayer = {
+      id: 'grp90', parentId: null, layerType: 'group', sortOrder: 1, isVisible: true, opacity: 1,
+      meta: { keyframes: [{ frame: 0, x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: Math.PI / 2, pivotX: 0, pivotY: 0, easing: 'linear' as const }] },
+    };
+    const childLayer = {
+      id: 'child1', parentId: 'grp90', layerType: 'raster', sortOrder: 2, isVisible: true, opacity: 1,
+      meta: { keyframes: [] },
+    };
+    const parentW = resolveParentWorldAffine([rotParentLayer, childLayer], 'child1', 0, 200, 200);
+    const movedLocal = applyKeyframeHandleDrag({
+      handle: 'move',
+      startEval: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 100, pivotY: 100, opacity: 1, active: false },
+      parentWorld: parentW,
+      startCanvas: { x: 0, y: 0 },
+      curCanvas: { x: 100, y: 0 },
+    });
+    assert.ok(Math.abs(movedLocal.x) < 1e-3 && Math.abs(movedLocal.y - -100) < 1e-3, 'rotated parent inverse maps world +X to local -Y');
+
+    // Rotate handle with 15-degree snap & uniform corner scale
+    const rotSnapped = applyKeyframeHandleDrag({
+      handle: 'rotate',
+      startEval: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 100, pivotY: 100, opacity: 1, active: true },
+      parentWorld: { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0, isIdentity: true },
+      startCanvas: { x: 100, y: 50 },
+      curCanvas: { x: 130, y: 60 },
+      snapAngle: true,
+    });
+    const degSnap = (rotSnapped.rotation * 180) / Math.PI;
+    assert.ok(Math.abs(degSnap - Math.round(degSnap / 15) * 15) < 0.05, 'snapAngle rounds rotation to 15-degree steps');
+
+    const scaled = applyKeyframeHandleDrag({
+      handle: 'se',
+      startEval: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 100, pivotY: 100, opacity: 1, active: true },
+      parentWorld: { a: 1, b: 0, c: 0, d: 1, tx: 0, ty: 0, isIdentity: true },
+      startCanvas: { x: 150, y: 150 },
+      curCanvas: { x: 200, y: 200 },
+      maintainAspect: true,
+    });
+    assert.ok(Math.abs(scaled.scaleX - 2) < 1e-3 && Math.abs(scaled.scaleY - 2) < 1e-3, 'uniform corner drag doubles scale');
+
+    // buildKeyframeFromEval preserves existing opacity & easing
+    const preserved = buildKeyframeFromEval(fadeKfs, 0, { ...baseEval, x: 55 });
+    assert.equal(preserved.opacity, 0);
+    assert.equal(preserved.easing, 'linear');
+    assert.equal(preserved.x, 55);
+
+    // sampleKeyframeMotionPath returns samples & keyPoints and updates with liveOverride
+    const pathLayer = {
+      id: 'mover', parentId: null, layerType: 'raster', sortOrder: 1, isVisible: true, opacity: 1,
+      meta: {
+        keyframes: [
+          { frame: 0, x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 100, pivotY: 100, easing: 'linear' as const },
+          { frame: 4, x: 80, y: 40, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 100, pivotY: 100, easing: 'linear' as const },
+        ],
+      },
+    };
+    const path = sampleKeyframeMotionPath([pathLayer], 'mover', 200, 200);
+    assert.ok(path && path.hasMovement);
+    assert.equal(path!.samples.length, 5);
+    assert.equal(path!.keyPoints.length, 2);
+    assert.ok(Math.abs(path!.samples[2].x - 140) < 1e-5 && Math.abs(path!.samples[2].y - 120) < 1e-5);
+    const livePath = sampleKeyframeMotionPath([pathLayer], 'mover', 200, 200, {
+      frame: 4,
+      evaluated: { x: 200, y: 0, scaleX: 1, scaleY: 1, rotation: 0, pivotX: 100, pivotY: 100, opacity: 1, active: true },
+    });
+    assert.ok(livePath && Math.abs(livePath.keyPoints[1].x - 300) < 1e-5, 'liveOverride updates motion path in real time');
+  }
 
   // Free transform pivot retention under rotation
   const box0: TransformBox = { x: 100, y: 200, width: 400, height: 200, rotation: 0, pivotX: 0.1, pivotY: 0.9 };

@@ -537,7 +537,7 @@ export function animationDisplay<T extends AnimLayer>(
   view: AnimationView | null,
   canvasWidth = 0,
   canvasHeight = 0
-): Array<T & { onionTint?: number; onionMode?: 'shade'; renderTransform?: Affine2D }> {
+): Array<T & { onionTint?: number; onionMode?: 'shade'; renderTransform?: Affine2D; renderOpacityApplied?: boolean }> {
   const folders = layers.filter(isAnimationFolder);
   let hasKeyframes = false;
   for (let i = 0; i < layers.length; i++) {
@@ -560,8 +560,9 @@ export function animationDisplay<T extends AnimLayer>(
     }
   }
 
-  // Evaluate hierarchical transform keyframes (parent groups cascade cleanly onto children)
+  // Evaluate hierarchical transform & opacity keyframes (parent groups cascade cleanly onto children)
   const worldTransforms = hasKeyframes ? new Map<string, Affine2D>() : null;
+  const localOpacities = hasKeyframes ? new Map<string, number>() : null;
   if (worldTransforms) {
     const defaultPx = canvasWidth / 2;
     const defaultPy = canvasHeight / 2;
@@ -577,6 +578,7 @@ export function animationDisplay<T extends AnimLayer>(
       if (kfs && kfs.length > 0 && !unmoved.has(l.id)) {
         const evaluated = evaluateTransformKeyframes(kfs, time, defaultPx, defaultPy);
         localMap.set(l.id, transformToAffineMatrix(evaluated));
+        if (evaluated.opacity !== 1) localOpacities!.set(l.id, evaluated.opacity);
       }
     }
     const resolveWorld = (id: string, depth = 0): Affine2D => {
@@ -655,30 +657,34 @@ export function animationDisplay<T extends AnimLayer>(
   const shade = view?.onion?.mode === 'shade' ? ({ onionMode: 'shade' } as const) : null;
   return layers.map((l) => {
     const m = worldTransforms?.get(l.id);
+    const kfOpacity = localOpacities?.get(l.id);
+    const baseOpacity = kfOpacity === undefined ? l.opacity : Math.max(0, Math.min(1, l.opacity * kfOpacity));
     const withTransform = m && !m.isIdentity ? { renderTransform: m } : null;
+    const withOpacity = kfOpacity === undefined ? null : { opacity: baseOpacity, renderOpacityApplied: true as const };
+    const withKf = withTransform || withOpacity ? { ...withTransform, ...withOpacity } : null;
     if (allowed && !allowed.has(l.id) && l.layerType !== 'group') {
-      return withTransform ? { ...l, isVisible: false, ...withTransform } : { ...l, isVisible: false };
+      return withKf ? { ...l, isVisible: false, ...withKf } : { ...l, isVisible: false };
     }
     const state = celState.get(l.id);
     if (hidden.has(l.id) && !state) {
-      return withTransform ? { ...l, isVisible: false, ...withTransform } : { ...l, isVisible: false };
+      return withKf ? { ...l, isVisible: false, ...withKf } : { ...l, isVisible: false };
     }
     if (state?.light !== undefined) {
-      if (!l.isVisible) return withTransform ? { ...l, ...withTransform } : l;
-      return { ...l, opacity: l.opacity * state.light, ...withTransform };
+      if (!l.isVisible) return withKf ? { ...l, ...withKf } : l;
+      return { ...l, ...withKf, opacity: baseOpacity * state.light };
     }
     if (state?.fade !== undefined) {
-      if (!l.isVisible) return withTransform ? { ...l, ...withTransform } : l;
-      const faded = opacity * state.fade;
+      if (!l.isVisible) return withKf ? { ...l, ...withKf } : l;
+      const faded = opacity * state.fade * (kfOpacity ?? 1);
       return l.layerType === 'group' || state.tint === undefined
-        ? { ...l, opacity: faded, ...withTransform }
-        : { ...l, opacity: faded, onionTint: state.tint, ...shade, ...withTransform };
+        ? { ...l, ...withKf, opacity: faded }
+        : { ...l, ...withKf, opacity: faded, onionTint: state.tint, ...shade };
     }
     const inherited = tintOf.get(l.id);
     if (inherited !== undefined && l.layerType !== 'group' && l.layerType !== 'mask') {
-      return { ...l, onionTint: inherited, ...shade, ...withTransform };
+      return { ...l, onionTint: inherited, ...shade, ...withKf };
     }
-    return withTransform ? { ...l, ...withTransform } : l;
+    return withKf ? { ...l, ...withKf } : l;
   });
 }
 

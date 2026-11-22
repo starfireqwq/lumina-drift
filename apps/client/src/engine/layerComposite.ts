@@ -78,7 +78,18 @@ export class LayerTree {
     return out;
   }
   visible = (i: LayerCanvasItem) => i.layer.isVisible && this.ancestors(i).every((a) => a.layer.isVisible);
-  opacity = (i: LayerCanvasItem) => this.ancestors(i).reduce((o, a) => o * a.layer.opacity, i.layer.opacity);
+  opacity = (i: LayerCanvasItem, frame = 0) => {
+    const chain = [...this.ancestors(i), i];
+    let acc = 1;
+    for (const node of chain) {
+      acc *= node.layer.opacity;
+      const applied = (node.layer as LayerModel & { renderOpacityApplied?: boolean }).renderOpacityApplied;
+      if (!applied && node.layer.meta?.keyframes?.length) {
+        acc *= evaluateTransformKeyframes(node.layer.meta.keyframes, frame).opacity;
+      }
+    }
+    return Math.max(0, Math.min(1, acc));
+  };
   transformMatrix = (i: LayerCanvasItem, width: number, height: number, frame = 0): Affine2D => {
     const chain = [...this.ancestors(i).reverse(), i];
     let acc = IDENTITY_AFFINE;
