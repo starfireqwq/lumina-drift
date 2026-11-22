@@ -4,15 +4,52 @@
  */
 
 import { MIN_BRUSH_SPACING } from './brush-spacing';
+import type {
+  BrushDynamicsConfig,
+  BrushMixMode,
+  BrushTextureBlendMode,
+  DualBrushBlendMode,
+} from './brush-dynamics';
 
 export interface ParsedBrushTip {
   id: string;
   name: string;
   width: number;
   height: number;
-  dataUrl: string; // Base64 RGBA PNG DataURL
+  dataUrl: string | null; // Base64 RGBA PNG DataURL, or null for procedural round tips
   spacing?: number;
   hardness?: number;
+  // Extended Brush Engine v2 restored parameters (optional for backward compatibility)
+  size?: number;
+  minSize?: number;
+  opacity?: number;
+  flow?: number;
+  angle?: number;
+  roundness?: number;
+  angleMode?: 'direction' | 'pen' | 'fixed';
+  scatter?: number;
+  colorMixing?: number;
+  paintAmount?: number;
+  colorStretch?: number;
+  mixMode?: BrushMixMode;
+  textureDensity?: number;
+  textureScale?: number;
+  textureInvert?: boolean;
+  textureBlendMode?: BrushTextureBlendMode;
+  textureDataUrl?: string | null;
+  dualBrush?: boolean;
+  dualSize?: number;
+  dualScatter?: number;
+  dualTipDataUrl?: string | null;
+  dualBlendMode?: DualBrushBlendMode;
+  hueJitter?: number;
+  satJitter?: number;
+  valJitter?: number;
+  fgBgMix?: number;
+  tiltSize?: number;
+  wetEdges?: boolean;
+  dynamics?: BrushDynamicsConfig;
+  sourceFormat?: 'abr' | 'sut';
 }
 
 export class AbrParser {
