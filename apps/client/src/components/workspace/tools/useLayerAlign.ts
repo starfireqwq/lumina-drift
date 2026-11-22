@@ -1,12 +1,15 @@
 import type { MutableRefObject } from 'react';
 import type { LayerMeta, LayerModel, ScopedUndoOp, TileCoord, VectorStroke } from '@atelier/shared';
 import type { LayerManager } from '../../../engine/LayerManager';
+import { textBoxRect } from '../../../engine/textLayer';
 import { findContentBounds } from '../../../utils/pixelBounds';
 import {
-  alignCrops, alignDestination, alignManyOffsets, copyRgbaRect, distributeOffsets,
-  rectMinus, selectionFrame, unionRect,
-  type AlignBasis, type AlignOutcome, type AlignRect, type AlignTargetUnit,
-  type AlignX, type AlignY, type DistributeMode,
+  alignCrops, alignDestination, alignManyOffsets, computeVectorLayerAlignRect,
+  computeVectorStrokeAlignRect, copyRgbaRect, distributeOffsets,
+  guideAlignManyOffsets, guideDistributeFrame, rectMinus, selectionFrame, unionRect,
+  type AlignBasis, type AlignGuideSummary, type AlignOutcome, type AlignRect, type AlignTargetUnit,
+  type AlignX, type AlignY, type DistributeMode, type GuideAlignMode,
+  type TextBoundsMode, type VectorAlignScope, type VectorBoundsMode,
 } from '../../../utils/layerAlign';
 import { shiftVectorStroke } from '../../../services/offlineStore';
 import type { ToolContext } from './toolContext';
@@ -15,9 +18,21 @@ import { commitInOrder, diffTilesAsync } from './asyncTiles';
 export {
   alignCrops, alignDestination, alignManyOffsets, copyRgbaRect, distributeOffsets,
   rectMinus, selectionFrame, unionRect,
-  type AlignBasis, type AlignOutcome, type AlignRect, type AlignTargetUnit,
-  type AlignX, type AlignY, type DistributeMode,
+  type AlignBasis, type AlignGuideSummary, type AlignOutcome, type AlignRect, type AlignTargetUnit,
+  type AlignX, type AlignY, type DistributeMode, type GuideAlignMode,
+  type TextBoundsMode, type VectorAlignScope, type VectorBoundsMode,
 };
+
+export interface AlignRunOptions {
+  guideSummary?: AlignGuideSummary;
+  guideMode?: GuideAlignMode;
+  vectorScope?: VectorAlignScope;
+  vectorBoundsMode?: VectorBoundsMode;
+  selectedStrokeIds?: readonly string[];
+  textBoundsMode?: TextBoundsMode;
+}
+
+const EMPTY_GUIDE_SUMMARY: AlignGuideSummary = { xs: [], ys: [], usingSelection: false, totalCount: 0 };
 
 interface AlignDeps {
   layersRef: MutableRefObject<LayerModel[]>;
@@ -25,6 +40,8 @@ interface AlignDeps {
   applyVectorPayload: (layerId: string, payload: { vectorRemovedIds: string[]; vectorAdded: VectorStroke[] }) => void;
   /** Saves a layer's meta (synced to everyone) */
   updateLayerMeta: (layerId: string, meta: LayerMeta) => void;
+  /** Refreshes the active layer's stroke list overlay after in-place vector stroke alignment */
+  onVectorStrokesChanged?: (layerId: string) => void;
 }
 
 type LayerContent = NonNullable<Awaited<ReturnType<typeof readContent>>>;
@@ -80,12 +97,192 @@ export function useLayerAlign(ctx: ToolContext, deps: AlignDeps) {
     scopedUndoRef, updateUndoRedoState, commitOp, commitTilePatch, userRef,
   } = ctx;
 
+  const computeOffsetsForBasis = (
+    rects: AlignRect[],
+    op: BatchOp,
+    basis: AlignBasis,
+    W: number,
+    H: number,
+    options?: AlignRunOptions,
+  ): { ok: true; offsets: Array<{ dx: number; dy: number }> } | { ok: false; outcome: AlignOutcome } => {
+    const isDistribute = op.kind === 'distribute';
+    if (isDistribute) {
+      if (rects.length < 2) return { ok: false, outcome: 'needMulti' };
+      if (basis === 'objects' && rects.length < 3) return { ok: false, outcome: 'aligned' };
+    } else if (basis === 'objects' && rects.length < 2) {
+      return { ok: false, outcome: 'needMulti' };
+    }
+
+    if (basis === 'guide') {
+      const summary = options?.guideSummary ?? EMPTY_GUIDE_SUMMARY;
+      if (summary.xs.length === 0 && summary.ys.length === 0) {
+        return { ok: false, outcome: 'noGuides' };
+      }
+      if (op.kind === 'distribute') {
+        const frame = guideDistributeFrame(summary, op.mode);
+        if (!frame) return { ok: false, outcome: 'needGuides' };
+        return { ok: true, offsets: distributeOffsets(rects, op.mode, 'guide', frame) };
+      }
+      return {
+        ok: true,
+        offsets: guideAlignManyOffsets(rects, summary, op.x, op.y, options?.guideMode ?? 'range'),
+      };
+    }
+
+    let frame: AlignRect;
+    if (basis === 'selection') {
+      const sel = selectionEngineRef.current;
+      const b = sel?.hasSelection() ? (sel.getMaskData()?.bounds ?? sel.getSelection()?.bounds) : null;
+      if (!b) return { ok: false, outcome: 'noSelection' };
+      frame = selectionFrame(b);
+    } else if (basis === 'canvas') {
+      frame = { x: 0, y: 0, w: W, h: H };
+    } else {
+      frame = unionRect(rects)!;
+    }
+
+    const offsets = op.kind === 'distribute'
+      ? distributeOffsets(rects, op.mode, basis, frame)
+      : alignManyOffsets(rects, frame, op.x, op.y);
+    return { ok: true, offsets };
+  };
+
+  /** Aligns or distributes individual strokes inside a single vector layer (single undo step + VECTOR_EDIT sync). */
+  const runVectorStrokeBatch = (
+    layer: LayerModel,
+    op: BatchOp,
+    basis: AlignBasis,
+    allowCrop: boolean,
+    options?: AlignRunOptions,
+  ): Promise<AlignOutcome> => {
+    const lm = layerManagerRef.current;
+    const te = tileEngineRef.current;
+    const ve = vectorEngineRef.current;
+    if (!lm || !te || !ve || !canvas) return Promise.resolve('failed');
+    const item = lm.getLayerItem(layer.id);
+    if (!item) return Promise.resolve('failed');
+    const W = canvas.width;
+    const H = canvas.height;
+    const isDistribute = op.kind === 'distribute';
+    const scope = options?.vectorScope ?? 'all';
+    const boundsMode: VectorBoundsMode = options?.vectorBoundsMode ?? 'stroke';
+
+    const stillThere = () =>
+      layerManagerRef.current === lm &&
+      tileEngineRef.current === te &&
+      vectorEngineRef.current === ve &&
+      lm.getLayerItem(layer.id) === item;
+
+    return new Promise<AlignOutcome>((resolve) => {
+      commitInOrder(async () => null, () => {
+        try {
+          if (!stillThere()) {
+            resolve('failed');
+            return;
+          }
+          const allStrokes = ve.getStrokes(layer.id);
+          const picked = scope === 'selected'
+            ? (() => {
+                const selectedSet = new Set(options?.selectedStrokeIds ?? []);
+                return allStrokes.filter((s) => selectedSet.has(s.id));
+              })()
+            : allStrokes;
+          if (picked.length === 0) {
+            resolve('empty');
+            return;
+          }
+
+          const entries: Array<{ stroke: VectorStroke; rect: AlignRect }> = [];
+          for (const stroke of picked) {
+            const rect = computeVectorStrokeAlignRect(stroke, boundsMode);
+            if (rect) entries.push({ stroke, rect });
+          }
+          if (entries.length === 0) {
+            resolve('empty');
+            return;
+          }
+
+          const computed = computeOffsetsForBasis(entries.map((e) => e.rect), op, basis, W, H, options);
+          if (!computed.ok) {
+            resolve(computed.outcome);
+            return;
+          }
+
+          const moved: Array<{ stroke: VectorStroke; rect: AlignRect; dx: number; dy: number }> = [];
+          entries.forEach((entry, index) => {
+            const { dx, dy } = computed.offsets[index];
+            if (!dx && !dy) return;
+            moved.push({ ...entry, dx, dy });
+          });
+
+          if (moved.length === 0) {
+            resolve('aligned');
+            return;
+          }
+          if (!allowCrop && moved.some((m) => alignCrops(m.rect, m.dx, m.dy, W, H))) {
+            resolve('confirm');
+            return;
+          }
+
+          const removedIds = moved.map((m) => m.stroke.id);
+          const shifted = moved.map((m) => shiftVectorStroke(m.stroke, m.dx, m.dy));
+          const res = ve.replaceStrokes(item.renderTexture, layer.id, removedIds, shifted);
+          lm.syncPingPong(layer.id);
+
+          const now = Date.now();
+          const userId = userRef.current?.id || 'guest';
+          const desc = isDistribute ? '均分' : '對齊';
+          scopedUndoRef.current.push({
+            opId: `op_${isDistribute ? 'dist' : 'align'}_vec_${now}_${Math.random().toString(36).slice(2, 6)}`,
+            userId,
+            layerId: layer.id,
+            opType: 'STROKE',
+            beforeTiles: res.beforeTiles,
+            afterTiles: res.dirtyTiles,
+            vectorRemovedStrokes: res.removed,
+            vectorAddedStrokes: res.added,
+            timestamp: now,
+            desc,
+          });
+          deps.onVectorStrokesChanged?.(layer.id);
+          commitOp(
+            layer.id,
+            'VECTOR_EDIT',
+            {
+              tiles: res.dirtyTiles,
+              vectorRemovedIds: res.removed.map((s) => s.id),
+              vectorAdded: res.added,
+              actionDesc: desc,
+            },
+            true,
+          );
+          updateUndoRedoState();
+          resolve('moved');
+        } catch (err) {
+          console.warn(`[${isDistribute ? 'distribute' : 'align'} vector strokes] failed:`, err);
+          resolve('failed');
+        }
+      });
+    });
+  };
+
   const runBatch = (
     targets: AlignTargetUnit<LayerModel>[],
     op: BatchOp,
     basis: AlignBasis,
     allowCrop = false,
+    options?: AlignRunOptions,
   ): Promise<AlignOutcome> => {
+    const vectorScope = options?.vectorScope ?? 'layer';
+    if (
+      targets.length === 1 &&
+      !targets[0].isGroup &&
+      targets[0].root.layerType === 'vector' &&
+      (vectorScope === 'selected' || vectorScope === 'all')
+    ) {
+      return runVectorStrokeBatch(targets[0].root, op, basis, allowCrop, options);
+    }
+
     const lm = layerManagerRef.current;
     const te = tileEngineRef.current;
     if (!lm || !te || !canvas || targets.length === 0) return Promise.resolve('failed');
@@ -103,6 +300,8 @@ export function useLayerAlign(ctx: ToolContext, deps: AlignDeps) {
       tileEngineRef.current === te &&
       trackedLayers.every((l) => lm.getLayerItem(l.id) === itemByLayer.get(l.id));
     const isDistribute = op.kind === 'distribute';
+    const textBoundsMode: TextBoundsMode = options?.textBoundsMode ?? 'glyph';
+    const vectorBoundsMode: VectorBoundsMode = options?.vectorBoundsMode ?? 'stroke';
 
     const work = async (): Promise<Work> => {
       try {
@@ -113,12 +312,25 @@ export function useLayerAlign(ctx: ToolContext, deps: AlignDeps) {
         const contentByLayer = new Map<string, LayerContent | null>();
         uniqueLayers.forEach((l, idx) => contentByLayer.set(l.id, contents[idx]));
 
+        const measureLayerRect = (member: LayerModel, content: LayerContent | null): AlignRect | null => {
+          if (!content) return null;
+          if (member.layerType === 'text' && member.meta?.text && textBoundsMode === 'box') {
+            return textBoxRect(member.meta.text);
+          }
+          if (member.layerType === 'vector' && vectorBoundsMode === 'path') {
+            const strokes = vectorEngineRef.current?.getStrokes(member.id) ?? [];
+            const pathRect = computeVectorLayerAlignRect(strokes, 'path');
+            if (pathRect) return pathRect;
+          }
+          return content.rect;
+        };
+
         const nonEmpty: Array<{ target: AlignTargetUnit<LayerModel>; rect: AlignRect }> = [];
         for (const target of targets) {
           const memberRects: AlignRect[] = [];
           for (const member of target.members) {
-            const c = contentByLayer.get(member.id);
-            if (c) memberRects.push(c.rect);
+            const rect = measureLayerRect(member, contentByLayer.get(member.id) ?? null);
+            if (rect) memberRects.push(rect);
           }
           // Masks move by their target's delta without altering the target's visual bounds
           const rect = unionRect(memberRects);
@@ -126,29 +338,10 @@ export function useLayerAlign(ctx: ToolContext, deps: AlignDeps) {
         }
 
         if (nonEmpty.length === 0) return { kind: 'empty' };
-        if (isDistribute) {
-          if (nonEmpty.length < 2) return { kind: 'needMulti' };
-          if (basis === 'objects' && nonEmpty.length < 3) return { kind: 'aligned' };
-        } else if (basis === 'objects' && nonEmpty.length < 2) {
-          return { kind: 'needMulti' };
-        }
 
-        let frame: AlignRect;
-        if (basis === 'selection') {
-          const sel = selectionEngineRef.current;
-          const b = sel?.hasSelection() ? (sel.getMaskData()?.bounds ?? sel.getSelection()?.bounds) : null;
-          if (!b) return { kind: 'noSelection' };
-          frame = selectionFrame(b);
-        } else if (basis === 'canvas') {
-          frame = { x: 0, y: 0, w: W, h: H };
-        } else {
-          frame = unionRect(nonEmpty.map((t) => t.rect))!;
-        }
-
-        const rects = nonEmpty.map((t) => t.rect);
-        const offsets = op.kind === 'distribute'
-          ? distributeOffsets(rects, op.mode, basis, frame)
-          : alignManyOffsets(rects, frame, op.x, op.y);
+        const computed = computeOffsetsForBasis(nonEmpty.map((t) => t.rect), op, basis, W, H, options);
+        if (!computed.ok) return { kind: computed.outcome as Exclude<AlignOutcome, 'moved'> };
+        const offsets = computed.offsets;
 
         const movable: Array<{ layer: LayerModel; content: LayerContent; dx: number; dy: number }> = [];
         nonEmpty.forEach(({ target }, index) => {
@@ -266,14 +459,16 @@ export function useLayerAlign(ctx: ToolContext, deps: AlignDeps) {
     y: AlignY | null,
     basis: AlignBasis,
     allowCrop = false,
-  ): Promise<AlignOutcome> => runBatch(targets, { kind: 'align', x, y }, basis, allowCrop);
+    options?: AlignRunOptions,
+  ): Promise<AlignOutcome> => runBatch(targets, { kind: 'align', x, y }, basis, allowCrop, options);
 
   const distributeTargets = (
     targets: AlignTargetUnit<LayerModel>[],
     mode: DistributeMode,
     basis: AlignBasis,
     allowCrop = false,
-  ): Promise<AlignOutcome> => runBatch(targets, { kind: 'distribute', mode }, basis, allowCrop);
+    options?: AlignRunOptions,
+  ): Promise<AlignOutcome> => runBatch(targets, { kind: 'distribute', mode }, basis, allowCrop, options);
 
   return { alignTargets, distributeTargets };
 }
