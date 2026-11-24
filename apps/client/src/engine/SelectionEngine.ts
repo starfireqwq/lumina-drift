@@ -106,7 +106,10 @@ export class SelectionEngine {
     return this.hasSelection() ? this.maskGraphic : null;
   }
 
-  public startLasso(x: number, y: number) {
+  private thinLassoDraft = false;
+
+  public startLasso(x: number, y: number, thinDraft = false) {
+    this.thinLassoDraft = thinDraft;
     this.isSelecting = true;
     this.currentPoints = [{ x, y }];
     this.renderDraftLasso();
@@ -682,8 +685,9 @@ export class SelectionEngine {
     }
 
     // A dark halo under a light line: readable on light and dark paint alike, 1.5 screen px wide
-    const w = 1.5 / this.viewScale;
-    for (const [width, color, alpha] of [[w + 2 / this.viewScale, 0x0b1020, 0.55], [w, 0x93c5fd, 1]] as const) {
+    const w = (this.thinLassoDraft ? 1 : 1.5) / this.viewScale;
+    const halo = (this.thinLassoDraft ? 0.75 : 2) / this.viewScale;
+    for (const [width, color, alpha] of [[w + halo, 0x0b1020, 0.55], [w, 0x93c5fd, 1]] as const) {
       this.selectionGraphic.beginPath();
       this.selectionGraphic.moveTo(this.currentPoints[0].x, this.currentPoints[0].y);
       for (let i = 1; i < this.currentPoints.length; i++) {

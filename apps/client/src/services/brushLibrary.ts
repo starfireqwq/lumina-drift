@@ -14,6 +14,7 @@ interface BrushLibraryIndex {
 
 const oldStorageKey = 'atelier_user_brush_presets';
 const databaseName = 'lumina_brush_library';
+const BRUSH_DEFAULTS_VERSION = 2;
 const previousBuiltInNames = new Map([
   ['preset_csp_gpen', '經典 G 筆 (G-Pen)'],
   ['preset_csp_watercolor', '逼真濃淡水彩 (Wet Watercolor)'],
@@ -88,7 +89,7 @@ function load() {
       readStoredLibrary(tx, (stored, index) => {
         publish(withCurrentBrushDefaults(withCurrentBuiltInNames(stored), index), index?.revision);
         resolve();
-        if (index?.brushDefaultsVersion !== 1) {
+        if ((index?.brushDefaultsVersion ?? 0) < BRUSH_DEFAULTS_VERSION) {
           void updateBrushLibrary(library => library).catch(error => console.warn('Brush defaults migration failed:', error));
         }
       });
@@ -108,7 +109,7 @@ function readStoredLibrary(tx: IDBTransaction, done: (library: BrushLibrary, ind
       legacy.onsuccess = () => done(legacy.result ?? current);
       return;
     }
-    if (saved.revision === currentRevision && saved.brushDefaultsVersion === 1) {
+    if (saved.revision === currentRevision && (saved.brushDefaultsVersion ?? 0) >= BRUSH_DEFAULTS_VERSION) {
       done(current, saved);
       return;
     }
@@ -142,13 +143,23 @@ function withCurrentBuiltInNames(library: BrushLibrary): BrushLibrary {
 }
 
 function withCurrentBrushDefaults(library: BrushLibrary, index?: BrushLibraryIndex): BrushLibrary {
-  if (index?.brushDefaultsVersion === 1) return library;
+  const version = index?.brushDefaultsVersion ?? 0;
+  if (version >= BRUSH_DEFAULTS_VERSION) return library;
   const brushes = library.brushes.map(brush => {
+    const inkPen = brush.id === 'preset_csp_gpen';
     const defaultBrush = builtInNames.has(brush.id) || brush.tags?.some(tag => tag === 'Imported' || tag === 'CustomImage');
-    const minSize = brush.id === 'preset_csp_gpen' && brush.properties.minSize === 1 ? 0 : brush.properties.minSize;
-    return defaultBrush && (brush.properties.spacing !== MIN_BRUSH_SPACING || brush.properties.minSize !== minSize)
-      ? { ...brush, properties: { ...brush.properties, spacing: MIN_BRUSH_SPACING, minSize } }
-      : brush;
+    let properties = brush.properties;
+    if (version < 1 && defaultBrush) {
+      const minSize = inkPen && properties.minSize === 1 ? 0 : properties.minSize;
+      if (properties.spacing !== MIN_BRUSH_SPACING || properties.minSize !== minSize) {
+        properties = { ...properties, spacing: MIN_BRUSH_SPACING, minSize };
+      }
+    }
+    if (inkPen && brush.name === builtInNames.get(brush.id) && properties.brushType === 'pen' &&
+        properties.hardness === 0.95 && properties.pressureCurve === 's-curve') {
+      properties = { ...properties, hardness: 1, pressureCurve: 'linear' };
+    }
+    return properties === brush.properties ? brush : { ...brush, properties };
   });
   return brushes.some((brush, index) => brush !== library.brushes[index]) ? { ...library, brushes } : library;
 }
@@ -167,7 +178,7 @@ export async function updateBrushLibrary(update: (library: BrushLibrary) => Brus
           const prior = withCurrentBrushDefaults(withCurrentBuiltInNames(stored), index);
           next = update(prior);
           revision = index?.revision;
-          if (next === stored && index?.brushDefaultsVersion === 1) return;
+          if (next === stored && (index?.brushDefaultsVersion ?? 0) >= BRUSH_DEFAULTS_VERSION) return;
           revision = newBrushId();
           const oldBrushes = new Map(index ? stored.brushes.map(brush => [brush.id, brush]) : []);
           for (const brush of next.brushes) {
@@ -176,7 +187,7 @@ export async function updateBrushLibrary(update: (library: BrushLibrary) => Brus
           }
           for (const id of oldBrushes.keys()) store.delete(`brush/${id}`);
           // One value per tip keeps large brush sets within IndexedDB's per-value limit.
-          store.put({ ids: next.brushes.map(brush => brush.id), groups: next.groups, revision, brushDefaultsVersion: 1 }, 'brush-index');
+          store.put({ ids: next.brushes.map(brush => brush.id), groups: next.groups, revision, brushDefaultsVersion: Math.max(BRUSH_DEFAULTS_VERSION, index?.brushDefaultsVersion ?? 0) }, 'brush-index');
         } catch (error) {
           reject(error);
           tx.abort();

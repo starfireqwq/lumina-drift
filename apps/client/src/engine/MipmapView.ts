@@ -5,6 +5,8 @@ interface MipState {
   levels: number;
   /** Levels 1… sampled (TEXTURE_MAX_LEVEL > 0) and matching level 0 */
   fresh: boolean;
+  /** Source-level tile atlas slot pitch in texels (0 = single image without slot isolation) */
+  slotPitch: number;
   onDestroy: () => void;
 }
 
@@ -13,7 +15,157 @@ interface GlTextureInfo {
   internalFormat: number;
   format: number;
   type: number;
+  texture?: WebGLTexture | null;
 }
+
+interface MipResampler {
+  program: WebGLProgram;
+  vao: WebGLVertexArrayObject;
+  fbo: WebGLFramebuffer;
+  uTex: WebGLUniformLocation | null;
+  uSrcSize: WebGLUniformLocation | null;
+  uDstSize: WebGLUniformLocation | null;
+  uSlotPitch: WebGLUniformLocation | null;
+  uKernel: WebGLUniformLocation | null;
+}
+
+/** 4-tap Lanczos-2 / Catmull-Rom style kernel for level 0 → 1 (high line-art contrast, H(π)=0) */
+export const MIP_KERNEL_L1 = [-0.09, 0.59, 0.59, -0.09] as const;
+/** Standard Catmull-Rom 4-tap kernel for level k → k+1 (k >= 1) to avoid multi-level ringing */
+export const MIP_KERNEL_DEEP = [-0.0625, 0.5625, 0.5625, -0.0625] as const;
+
+export function mipKernelForLevel(level: number): readonly [number, number, number, number] {
+  return level <= 1 ? MIP_KERNEL_L1 : MIP_KERNEL_DEEP;
+}
+
+/**
+ * Pure CPU reference implementation of the WebGL2 4×4 premultiplied-RGBA mip downsampler.
+ * `slotPitch` is the source-level atlas slot pitch in texels (0 disables slot boundary clamping).
+ */
+export function downsampleRgbaPremul4x4(
+  src: Uint8Array,
+  srcW: number,
+  srcH: number,
+  dstW: number,
+  dstH: number,
+  kernel: readonly [number, number, number, number],
+  slotPitch = 0,
+): Uint8Array {
+  if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) return new Uint8Array(0);
+  const dst = new Uint8Array(dstW * dstH * 4);
+  const scaleX = srcW / dstW;
+  const scaleY = srcH / dstH;
+  const maxSlotX = slotPitch > 0 ? Math.max(0, Math.floor((srcW - 1) / slotPitch)) : 0;
+  const maxSlotY = slotPitch > 0 ? Math.max(0, Math.floor((srcH - 1) / slotPitch)) : 0;
+
+  for (let dy = 0; dy < dstH; dy++) {
+    const srcPosY = (dy + 0.5) * scaleY;
+    const baseY = Math.floor(srcPosY - 0.5);
+    let minY = 0;
+    let maxY = srcH - 1;
+    if (slotPitch > 0) {
+      const sySlot = Math.max(0, Math.min(maxSlotY, Math.floor(srcPosY / slotPitch)));
+      minY = sySlot * slotPitch;
+      maxY = Math.min(srcH - 1, minY + slotPitch - 1);
+    }
+
+    for (let dx = 0; dx < dstW; dx++) {
+      const srcPosX = (dx + 0.5) * scaleX;
+      const baseX = Math.floor(srcPosX - 0.5);
+      let minX = 0;
+      let maxX = srcW - 1;
+      if (slotPitch > 0) {
+        const sxSlot = Math.max(0, Math.min(maxSlotX, Math.floor(srcPosX / slotPitch)));
+        minX = sxSlot * slotPitch;
+        maxX = Math.min(srcW - 1, minX + slotPitch - 1);
+      }
+
+      let sumR = 0;
+      let sumG = 0;
+      let sumB = 0;
+      let sumA = 0;
+      for (let j = 0; j < 4; j++) {
+        const iy = Math.max(minY, Math.min(maxY, baseY + j - 1));
+        const wy = kernel[j];
+        let rowR = 0;
+        let rowG = 0;
+        let rowB = 0;
+        let rowA = 0;
+        const rowBase = iy * srcW;
+        for (let i = 0; i < 4; i++) {
+          const ix = Math.max(minX, Math.min(maxX, baseX + i - 1));
+          const wx = kernel[i];
+          const si = (rowBase + ix) * 4;
+          rowR += src[si] * wx;
+          rowG += src[si + 1] * wx;
+          rowB += src[si + 2] * wx;
+          rowA += src[si + 3] * wx;
+        }
+        sumR += rowR * wy;
+        sumG += rowG * wy;
+        sumB += rowB * wy;
+        sumA += rowA * wy;
+      }
+
+      const a = Math.max(0, Math.min(255, Math.round(sumA)));
+      const r = Math.min(a, Math.max(0, Math.min(255, Math.round(sumR))));
+      const g = Math.min(a, Math.max(0, Math.min(255, Math.round(sumG))));
+      const b = Math.min(a, Math.max(0, Math.min(255, Math.round(sumB))));
+      const di = (dy * dstW + dx) * 4;
+      dst[di] = r;
+      dst[di + 1] = g;
+      dst[di + 2] = b;
+      dst[di + 3] = a;
+    }
+  }
+  return dst;
+}
+
+const MIP_VERT_SRC = `#version 300 es
+void main() {
+  vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+const MIP_FRAG_SRC = `#version 300 es
+precision highp float;
+uniform sampler2D uTex;
+uniform ivec2 uSrcSize;
+uniform ivec2 uDstSize;
+uniform int uSlotPitch;
+uniform vec4 uKernel;
+out vec4 fragColor;
+
+void main() {
+  vec2 srcPos = gl_FragCoord.xy * (vec2(uSrcSize) / vec2(uDstSize));
+  ivec2 base = ivec2(floor(srcPos - 0.5));
+  int minX = 0;
+  int maxX = uSrcSize.x - 1;
+  int minY = 0;
+  int maxY = uSrcSize.y - 1;
+  if (uSlotPitch > 0) {
+    int sx = clamp(int(floor(srcPos.x / float(uSlotPitch))), 0, max(0, (uSrcSize.x - 1) / uSlotPitch));
+    int sy = clamp(int(floor(srcPos.y / float(uSlotPitch))), 0, max(0, (uSrcSize.y - 1) / uSlotPitch));
+    minX = sx * uSlotPitch;
+    maxX = min(uSrcSize.x - 1, minX + uSlotPitch - 1);
+    minY = sy * uSlotPitch;
+    maxY = min(uSrcSize.y - 1, minY + uSlotPitch - 1);
+  }
+  float w[4] = float[4](uKernel.x, uKernel.y, uKernel.z, uKernel.w);
+  vec4 sum = vec4(0.0);
+  for (int j = 0; j < 4; j++) {
+    int iy = clamp(base.y + j - 1, minY, maxY);
+    vec4 rowSum = vec4(0.0);
+    for (int i = 0; i < 4; i++) {
+      int ix = clamp(base.x + i - 1, minX, maxX);
+      rowSum += texelFetch(uTex, ivec2(ix, iy), 0) * w[i];
+    }
+    sum += rowSum * w[j];
+  }
+  vec4 c = clamp(sum, 0.0, 1.0);
+  c.rgb = min(c.rgb, vec3(c.a));
+  fragColor = c;
+}`;
 
 interface TextureSystemInternals {
   bindSource(source: TextureSource, location?: number): void;
@@ -46,6 +198,8 @@ export class MipmapView {
   private dirty = new Set<TextureSource>();
   private unhook: (() => void) | null = null;
   private lastUsed = 0;
+  private resampler: MipResampler | null = null;
+  private resamplerFailed = false;
 
   constructor(private renderer: Renderer) {
     const r = renderer as unknown as {
@@ -82,11 +236,11 @@ export class MipmapView {
   }
 
   /** `source` is about to be shown zoomed out: its levels exist and match level 0 */
-  ensure(source: TextureSource, levels: number) {
+  ensure(source: TextureSource, levels: number, slotPitch = 0) {
     if (!this.supported || source.destroyed || levels < 2) return;
     this.lastUsed = performance.now();
     let s = this.states.get(source);
-    if (s && s.fresh && !this.dirty.has(source)) return;
+    if (s && s.fresh && !this.dirty.has(source) && s.slotPitch === slotPitch) return;
     const gl = this.gl!;
     const info = this.bindForEdit(source);
     if (!s) {
@@ -98,19 +252,37 @@ export class MipmapView {
         gl.texImage2D(info.target, level, info.internalFormat, w, h, 0, info.format, info.type, null);
       }
       const onDestroy = () => this.forget(source);
-      s = { levels, fresh: false, onDestroy };
+      s = { levels, fresh: false, slotPitch, onDestroy };
       this.states.set(source, s);
       source.once('destroy', onDestroy);
       // Pixi picks a mipmapped minFilter from mipLevelCount; style.update() pushes it to the GPU
       source.mipLevelCount = levels;
       source.style.update();
       this.bindForEdit(source);
+    } else {
+      s.slotPitch = slotPitch;
     }
-    // generateMipmap fills levels up to TEXTURE_MAX_LEVEL only: raise it first (stale levels sat at 0)
-    gl.texParameteri(info.target, gl.TEXTURE_MAX_LEVEL, s.levels - 1);
-    gl.generateMipmap(info.target);
+
+    if (!this.buildSharpMips(gl, source, info, s)) {
+      // Fallback: hardware 2x2 box mipmaps; raise TEXTURE_MAX_LEVEL before generateMipmap
+      gl.texParameteri(info.target, gl.TEXTURE_MAX_LEVEL, s.levels - 1);
+      gl.generateMipmap(info.target);
+    }
     s.fresh = true;
     this.dirty.delete(source);
+  }
+
+  /** Temporarily clamp sampling to mip level 0 without freeing mip storage (sharp 85%–100% view) */
+  suspend() {
+    if (!this.gl || !this.states.size) return;
+    const gl = this.gl;
+    for (const [source, s] of this.states) {
+      if (!s.fresh || source.destroyed) continue;
+      const info = this.bindForEdit(source);
+      gl.texParameteri(info.target, gl.TEXTURE_MAX_LEVEL, 0);
+      s.fresh = false;
+    }
+    this.dirty.clear();
   }
 
   /** Zoomed in again for `idleMs`: the levels' memory is given back */
@@ -153,6 +325,12 @@ export class MipmapView {
 
   destroy() {
     this.releaseAll();
+    if (this.gl && this.resampler) {
+      this.gl.deleteFramebuffer(this.resampler.fbo);
+      this.gl.deleteVertexArray(this.resampler.vao);
+      this.gl.deleteProgram(this.resampler.program);
+      this.resampler = null;
+    }
     this.unhook?.();
     this.unhook = null;
   }
@@ -191,6 +369,166 @@ export class MipmapView {
       ts._activeTextureLocation = 0;
     }
     return ts.getGlSource(source);
+  }
+
+  private ensureResampler(gl: WebGL2RenderingContext): MipResampler | null {
+    if (this.resampler) return this.resampler;
+    if (
+      this.resamplerFailed ||
+      typeof gl.createProgram !== 'function' ||
+      typeof gl.createShader !== 'function' ||
+      typeof gl.createVertexArray !== 'function' ||
+      typeof gl.createFramebuffer !== 'function'
+    ) {
+      this.resamplerFailed = true;
+      return null;
+    }
+
+    const compile = (type: number, src: string): WebGLShader | null => {
+      const sh = gl.createShader(type);
+      if (!sh) return null;
+      gl.shaderSource(sh, src);
+      gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+        gl.deleteShader(sh);
+        return null;
+      }
+      return sh;
+    };
+
+    const vs = compile(gl.VERTEX_SHADER, MIP_VERT_SRC);
+    const fs = compile(gl.FRAGMENT_SHADER, MIP_FRAG_SRC);
+    if (!vs || !fs) {
+      if (vs) gl.deleteShader(vs);
+      if (fs) gl.deleteShader(fs);
+      this.resamplerFailed = true;
+      return null;
+    }
+
+    const program = gl.createProgram();
+    if (!program) {
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      this.resamplerFailed = true;
+      return null;
+    }
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+      gl.deleteProgram(program);
+      this.resamplerFailed = true;
+      return null;
+    }
+
+    const vao = gl.createVertexArray();
+    const fbo = gl.createFramebuffer();
+    if (!vao || !fbo) {
+      if (vao) gl.deleteVertexArray(vao);
+      if (fbo) gl.deleteFramebuffer(fbo);
+      gl.deleteProgram(program);
+      this.resamplerFailed = true;
+      return null;
+    }
+
+    this.resampler = {
+      program,
+      vao,
+      fbo,
+      uTex: gl.getUniformLocation(program, 'uTex'),
+      uSrcSize: gl.getUniformLocation(program, 'uSrcSize'),
+      uDstSize: gl.getUniformLocation(program, 'uDstSize'),
+      uSlotPitch: gl.getUniformLocation(program, 'uSlotPitch'),
+      uKernel: gl.getUniformLocation(program, 'uKernel'),
+    };
+    return this.resampler;
+  }
+
+  private buildSharpMips(
+    gl: WebGL2RenderingContext,
+    source: TextureSource,
+    info: GlTextureInfo,
+    s: MipState,
+  ): boolean {
+    if (!info.texture || info.target !== gl.TEXTURE_2D) return false;
+    const resampler = this.ensureResampler(gl);
+    if (!resampler) return false;
+
+    const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    const prevViewport = gl.getParameter(gl.VIEWPORT) as Int32Array | number[] | null;
+    const prevColorMask = gl.getParameter(gl.COLOR_WRITEMASK) as boolean[] | null;
+    const prevScissor = gl.isEnabled(gl.SCISSOR_TEST);
+    const prevBlend = gl.isEnabled(gl.BLEND);
+    const prevDepth = gl.isEnabled(gl.DEPTH_TEST);
+    const prevStencil = gl.isEnabled(gl.STENCIL_TEST);
+    const prevCull = gl.isEnabled(gl.CULL_FACE);
+    const prevMinFilter = gl.getTexParameter(info.target, gl.TEXTURE_MIN_FILTER) as number;
+    const prevMagFilter = gl.getTexParameter(info.target, gl.TEXTURE_MAG_FILTER) as number;
+
+    let ok = true;
+    try {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, resampler.fbo);
+      if (prevScissor) gl.disable(gl.SCISSOR_TEST);
+      if (prevBlend) gl.disable(gl.BLEND);
+      if (prevDepth) gl.disable(gl.DEPTH_TEST);
+      if (prevStencil) gl.disable(gl.STENCIL_TEST);
+      if (prevCull) gl.disable(gl.CULL_FACE);
+      gl.colorMask(true, true, true, true);
+
+      gl.useProgram(resampler.program);
+      gl.bindVertexArray(resampler.vao);
+      gl.uniform1i(resampler.uTex, 0);
+      gl.texParameteri(info.target, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(info.target, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+      let srcW = source.pixelWidth;
+      let srcH = source.pixelHeight;
+      for (let level = 1; level < s.levels; level++) {
+        const dstW = Math.max(1, srcW >> 1);
+        const dstH = Math.max(1, srcH >> 1);
+        gl.texParameteri(info.target, gl.TEXTURE_BASE_LEVEL, level - 1);
+        gl.texParameteri(info.target, gl.TEXTURE_MAX_LEVEL, level - 1);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, info.target, info.texture, level);
+        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+          ok = false;
+          break;
+        }
+        gl.viewport(0, 0, dstW, dstH);
+        gl.uniform2i(resampler.uSrcSize, srcW, srcH);
+        gl.uniform2i(resampler.uDstSize, dstW, dstH);
+        const levelSlotPitch = s.slotPitch > 0 ? Math.max(1, s.slotPitch >> (level - 1)) : 0;
+        gl.uniform1i(resampler.uSlotPitch, levelSlotPitch);
+        const k = mipKernelForLevel(level);
+        gl.uniform4f(resampler.uKernel, k[0], k[1], k[2], k[3]);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        srcW = dstW;
+        srcH = dstH;
+      }
+    } finally {
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, info.target, null, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo);
+      gl.bindVertexArray(null);
+      gl.texParameteri(info.target, gl.TEXTURE_BASE_LEVEL, 0);
+      gl.texParameteri(info.target, gl.TEXTURE_MAX_LEVEL, s.levels - 1);
+      if (prevMinFilter) gl.texParameteri(info.target, gl.TEXTURE_MIN_FILTER, prevMinFilter);
+      if (prevMagFilter) gl.texParameteri(info.target, gl.TEXTURE_MAG_FILTER, prevMagFilter);
+      if (prevViewport && prevViewport.length >= 4) {
+        gl.viewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
+      }
+      if (prevColorMask && prevColorMask.length >= 4) {
+        gl.colorMask(prevColorMask[0], prevColorMask[1], prevColorMask[2], prevColorMask[3]);
+      }
+      if (prevScissor) gl.enable(gl.SCISSOR_TEST);
+      if (prevBlend) gl.enable(gl.BLEND);
+      if (prevDepth) gl.enable(gl.DEPTH_TEST);
+      if (prevStencil) gl.enable(gl.STENCIL_TEST);
+      if (prevCull) gl.enable(gl.CULL_FACE);
+      (this.renderer as unknown as { resetState?: () => void }).resetState?.();
+    }
+    return ok;
   }
 }
 

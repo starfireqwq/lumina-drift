@@ -95,6 +95,104 @@ function pickTipBucket(diameter: number): number {
   return 256;
 }
 
+function hash2D(ix: number, iy: number, seed: number): number {
+  const h = Math.sin(ix * 127.1 + iy * 311.7 + seed * 74.7) * 43758.5453123;
+  return h - Math.floor(h);
+}
+
+function valueNoise2D(px: number, py: number, seed: number): number {
+  const ix = Math.floor(px);
+  const iy = Math.floor(py);
+  const fx = px - ix;
+  const fy = py - iy;
+  const ux = fx * fx * (3 - 2 * fx);
+  const uy = fy * fy * (3 - 2 * fy);
+  const a = hash2D(ix, iy, seed);
+  const b = hash2D(ix + 1, iy, seed);
+  const c = hash2D(ix, iy + 1, seed);
+  const d = hash2D(ix + 1, iy + 1, seed);
+  return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+}
+
+export interface GeneratedPencilTipPixels {
+  bucket: number;
+  texSize: number;
+  scaleRatio: number;
+  data: Uint8ClampedArray;
+}
+
+/**
+ * Pure procedural graphite pencil tip generator (zero DOM dependency for deterministic testing).
+ * Uses 3-octave coherent 2D Value Noise paper grain and full-saturation peaks so light strokes show tooth
+ * while heavy strokes stack to solid darks.
+ */
+export function generatePencilTipPixels(
+  hardness: number,
+  antiAlias: AntiAliasLevel = 'medium',
+  targetDiameter = 64,
+): GeneratedPencilTipPixels {
+  const isBinary = antiAlias === 'none';
+  const quantizedHardness = Math.round(hardness * 20) / 20;
+  const bucket = isBinary
+    ? Math.max(1, Math.min(256, Math.round(targetDiameter)))
+    : Math.max(16, pickTipBucket(targetDiameter));
+  const texSize = isBinary ? bucket : bucket + 4;
+  const center = texSize / 2;
+  const rPix = bucket * 0.5;
+  const aaPx =
+    antiAlias === 'none'
+      ? 0
+      : antiAlias === 'weak'
+        ? 0.6
+        : antiAlias === 'medium'
+          ? 1.0
+          : 1.4;
+  const softBand = rPix * (1 - quantizedHardness) * 0.85;
+  const innerR = Math.max(0, rPix - Math.max(aaPx * 0.5, softBand));
+  const outerR = rPix + aaPx * 0.5;
+  const span = Math.max(1e-4, outerR - innerR);
+
+  const data = new Uint8ClampedArray(texSize * texSize * 4);
+  const s = Math.max(1, bucket / 24);
+
+  for (let y = 0; y < texSize; y++) {
+    for (let x = 0; x < texSize; x++) {
+      const dist = Math.hypot(x + 0.5 - center, y + 0.5 - center);
+      let alpha = 0;
+      if (dist <= outerR) {
+        if (antiAlias === 'none') {
+          alpha = dist <= rPix ? 1.0 : 0;
+        } else if (dist <= innerR) {
+          alpha = 1.0;
+        } else {
+          const t = (dist - innerR) / span;
+          alpha = 1.0 - t * t * (3 - 2 * t);
+        }
+
+        const gx = x / s;
+        const gy = y / s;
+        const gCoarse = valueNoise2D(gx * 0.55, gy * 0.55, 1.3);
+        const gMed = valueNoise2D(gx * 1.35, gy * 1.35, 4.7);
+        const gFine = valueNoise2D(x * 1.85, y * 1.85, 9.1);
+        const grain = gCoarse * 0.42 + gMed * 0.36 + gFine * 0.22;
+        const norm = Math.max(0, Math.min(1, (grain - 0.32) / 0.34));
+        const toothMask = 0.04 + 0.96 * (norm * norm * (3 - 2 * norm));
+        alpha *= toothMask;
+        if (antiAlias === 'none') alpha = alpha >= 0.42 ? 1.0 : 0.0;
+      }
+
+      const idx = (y * texSize + x) * 4;
+      const aVal = Math.max(0, Math.min(255, Math.round(alpha * 255)));
+      data[idx] = 255;
+      data[idx + 1] = 255;
+      data[idx + 2] = 255;
+      data[idx + 3] = aVal;
+    }
+  }
+
+  return { bucket, texSize, scaleRatio: texSize / bucket, data };
+}
+
 export class BrushRenderer {
   private renderer: Renderer;
   private currentProperties: BrushProperties = {
@@ -468,10 +566,10 @@ export class BrushRenderer {
       antiAlias === 'none'
         ? 0
         : antiAlias === 'weak'
-          ? 0.65
+          ? 0.42
           : antiAlias === 'medium'
-            ? 1.05
-            : 1.45;
+            ? 0.72
+            : 1.15;
     const softBand = rPix * (1 - quantizedHardness) * 0.95;
     const innerR = quantizedHardness <= 0.1
       ? 0
@@ -524,7 +622,9 @@ export class BrushRenderer {
     texture.source.scaleMode = filterMode;
     texture.source.magFilter = filterMode;
     texture.source.minFilter = filterMode;
-    texture.source.autoGenerateMipmaps = !isBinary;
+    // Procedural round tips are already size-bucketed close to targetDiameter; enabling mipmaps
+    // causes WebGL to blend blurry level-1/2 mips whenever size < bucket (especially on fine tails).
+    texture.source.autoGenerateMipmaps = false;
     texture.source.style.update();
     const entry: CachedTipEntry = { texture, scaleRatio: texSize / bucket };
     this.defaultTipTextures.set(cacheKey, entry);
@@ -557,84 +657,26 @@ export class BrushRenderer {
     const cached = this.pencilTipTextures.get(cacheKey);
     if (cached) return cached;
 
-    const texSize = isBinary ? bucket : bucket + 4;
+    const tip = generatePencilTipPixels(hardness, antiAlias, targetDiameter);
     const canvas = document.createElement('canvas');
-    canvas.width = texSize;
-    canvas.height = texSize;
+    canvas.width = tip.texSize;
+    canvas.height = tip.texSize;
     const ctx = canvas.getContext('2d');
     if (!ctx) return { texture: Texture.WHITE, scaleRatio: 1 };
 
-    const center = texSize / 2;
-    const rPix = bucket * 0.5;
-    const aaPx =
-      antiAlias === 'none'
-        ? 0
-        : antiAlias === 'weak'
-          ? 0.6
-          : antiAlias === 'medium'
-            ? 1.0
-            : 1.4;
-    const softBand = rPix * (1 - quantizedHardness) * 0.85;
-    const innerR = Math.max(0, rPix - Math.max(aaPx * 0.5, softBand));
-    const outerR = rPix + aaPx * 0.5;
-    const span = Math.max(1e-4, outerR - innerR);
-
-    const imgData = ctx.createImageData(texSize, texSize);
-    const data = imgData.data;
-
-    // Deterministic pseudo-random noise generator
-    const pseudoNoise = (px: number, py: number) => {
-      const n = Math.sin(px * 127.1 + py * 311.7) * 43758.5453123;
-      return n - Math.floor(n);
-    };
-    const scaleNorm = 128 / bucket;
-
-    for (let y = 0; y < texSize; y++) {
-      for (let x = 0; x < texSize; x++) {
-        const dist = Math.hypot(x + 0.5 - center, y + 0.5 - center);
-
-        let alpha = 0;
-        if (dist <= outerR) {
-          if (antiAlias === 'none') {
-            alpha = dist <= rPix ? 0.95 : 0;
-          } else if (dist <= innerR) {
-            alpha = 0.95;
-          } else {
-            const t = (dist - innerR) / span;
-            alpha = 0.95 * (1.0 - t * t * (3 - 2 * t));
-          }
-
-          const gx = x * scaleNorm;
-          const gy = y * scaleNorm;
-          const n1 = pseudoNoise(gx * 2.3, gy * 2.3);
-          const n2 = pseudoNoise(gx * 5.7 + 13.1, gy * 5.7 + 17.3);
-          const n3 = pseudoNoise(gx * 11.2 + 3.7, gy * 11.2 + 29.1);
-          const paperTooth = (Math.sin(gx * 0.6) * Math.cos(gy * 0.6) + 1) * 0.5;
-
-          const grain = n1 * 0.45 + n2 * 0.35 + n3 * 0.1 + paperTooth * 0.1;
-          const toothMask = grain > 0.38 ? Math.pow((grain - 0.38) / 0.62, 0.9) : 0.05;
-          alpha = alpha * Math.min(1.0, toothMask * 1.55);
-          if (antiAlias === 'none') alpha = alpha >= 0.42 ? 1.0 : 0.0;
-        }
-
-        const idx = (y * texSize + x) * 4;
-        const aVal = Math.max(0, Math.min(255, Math.round(alpha * 255)));
-        data[idx] = 255;
-        data[idx + 1] = 255;
-        data[idx + 2] = 255;
-        data[idx + 3] = aVal;
-      }
-    }
-
+    const imgData = ctx.createImageData(tip.texSize, tip.texSize);
+    imgData.data.set(tip.data);
     ctx.putImageData(imgData, 0, 0);
     const texture = Texture.from(canvas);
     const filterMode = isBinary ? 'nearest' : 'linear';
     texture.source.scaleMode = filterMode;
     texture.source.magFilter = filterMode;
     texture.source.minFilter = filterMode;
-    texture.source.autoGenerateMipmaps = !isBinary;
+    // Procedural round tips are already size-bucketed close to targetDiameter; enabling mipmaps
+    // causes WebGL to blend blurry level-1/2 mips whenever size < bucket (especially on fine tails).
+    texture.source.autoGenerateMipmaps = false;
     texture.source.style.update();
-    const entry: CachedTipEntry = { texture, scaleRatio: texSize / bucket };
+    const entry: CachedTipEntry = { texture, scaleRatio: tip.scaleRatio };
     this.pencilTipTextures.set(cacheKey, entry);
     return entry;
   }
@@ -688,6 +730,8 @@ export class BrushRenderer {
       ? (props.antiAlias ?? 'medium') : 'medium';
     const isPencil = props.brushType === 'pencil';
     const airbrush = !isEraser && !isPencil && (props.brushType === 'airbrush' || hardness <= 0.25);
+    const antialiasFineInk = engine && !isEraser && !isPencil && !airbrush && hardness >= 0.85 &&
+      antiAlias !== 'none' && !customTip && !shaped && roundness === 1 && colorMixing === 0;
     if (customTip) {
       const targetScale = antiAlias === 'none' ? 'nearest' : 'linear';
       if (customTip.source.scaleMode !== targetScale) {
@@ -883,6 +927,13 @@ export class BrushRenderer {
           : angleMode === 'pen' ? strokeAngle + tipAngle // the worker put the pen's angle in this slot
             : strokeAngle + tipAngle;
       if (tiltSize > 0 && tilt > 0) size *= 1 + tiltSize * tilt * 1.5;
+      if (antialiasFineInk && size < 1.6) {
+        // Small dabs can miss every pixel center. Keep their coverage proportional to
+        // area until 8-bit alpha would quantize away the lightest contacts.
+        const coverage = size / 1.6;
+        alpha *= coverage * Math.max(coverage, 0.27);
+        size = 1.6;
+      }
 
       const rulerMgr = RulerManager.getInstance();
       const isSymmetry = !this.previewMode && rulerMgr.state.mode === 'symmetry';
@@ -1147,12 +1198,30 @@ export class BrushRenderer {
         const size = dyn?.size
           ? Math.max(1, maxSize * evaluateDynamicChannel({ ...dyn.size, min: dyn.size.min ?? (maxSize > 0 ? minSize / maxSize : 0) }, dynInput, 1))
           : minSize + (maxSize - minSize) * pressure;
-        const minStep = size < 4 ? 0.35 : 0.8;
-        if (i > 0 && Math.hypot(x - prev.x, y - prev.y) < Math.max(minStep, size * Math.max(MIN_BRUSH_SPACING, props.spacing))) continue;
+        const isPencilPreview = props.brushType === 'pencil';
+        const minStep = isPencilPreview ? (size < 4 ? Math.max(0.25, size * 0.2) : 0.8) : (size < 4 ? 0.35 : 0.8);
+        const effectiveSpacing = isPencilPreview
+          ? Math.max(minStep, size * Math.max(0.10, props.spacing))
+          : Math.max(minStep, size * Math.max(MIN_BRUSH_SPACING, props.spacing));
+        const dist = Math.hypot(x - prev.x, y - prev.y);
+        if (i > 0 && dist < effectiveSpacing) continue;
         const angle = Math.atan2(y - prev.y, x - prev.x);
-        const opMult = dyn?.opacity ? evaluateDynamicChannel(dyn.opacity, dynInput, 1) : (0.2 + 0.8 * pressure);
         const flowMult = dyn?.flow ? evaluateDynamicChannel(dyn.flow, dynInput, 1) : 1;
-        dabs.push(x, y, size, pressure, props.flow * flowMult * props.opacity * opMult, angle, 0.5 * t);
+        let dabAlpha: number;
+        if (isPencilPreview) {
+          const opMult = dyn?.opacity ? evaluateDynamicChannel(dyn.opacity, dynInput, 1) : Math.pow(pressure, 0.75);
+          const toothComp = pressure > 0.7 ? 1 + ((pressure - 0.7) / 0.3) * 0.75 : 1;
+          const rawLoad = Math.min(0.999, Math.max(0, props.flow * flowMult * opMult));
+          const inkLoad = Math.min(0.9995, 1 - Math.pow(1 - rawLoad, toothComp));
+          const passAlpha = Math.min(0.9995, props.opacity * inkLoad);
+          const sampleStep = i > 0 ? Math.max(effectiveSpacing, dist) : effectiveSpacing;
+          const overlap = Math.max(1.0, (0.72 * size) / sampleStep);
+          dabAlpha = 1 - Math.pow(1 - passAlpha, 1 / overlap);
+        } else {
+          const opMult = dyn?.opacity ? evaluateDynamicChannel(dyn.opacity, dynInput, 1) : (0.2 + 0.8 * pressure);
+          dabAlpha = props.flow * flowMult * props.opacity * opMult;
+        }
+        dabs.push(x, y, size, pressure, dabAlpha, angle, 0.5 * t);
         prev = { x, y };
       }
       const savedW = this.canvasWidth;

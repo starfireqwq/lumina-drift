@@ -32,7 +32,11 @@ export function bucketMask(
     bounds.maxX = Math.max(bounds.maxX, maxX);
     bounds.maxY = Math.max(bounds.maxY, maxY);
   }
-  return combined ? { data: combined, bounds } : null;
+  if (!combined) return null;
+  const coversCanvas = bounds.minX === 0 && bounds.minY === 0 &&
+    bounds.maxX === fullBounds.maxX && bounds.maxY === fullBounds.maxY &&
+    combined.every((coverage) => coverage === 255);
+  return { data: coversCanvas ? null : combined, bounds };
 }
 
 export interface GradientPaint {

@@ -9,11 +9,10 @@ const TS = DEFAULT_TILE_SIZE;
  * neighbouring slot — bilinear at 1:1, and the page's mip levels when zoomed out (see below).
  */
 export const GUTTER = 4;
-const PITCH = TS + 2 * GUTTER;
+export const PITCH = TS + 2 * GUTTER;
 const SLOTS_PER_ROW = 8;
 /** 8 × 8 = 64 tiles per page (2112 px square: fits every GPU's texture limit) */
 export const ATLAS_PAGE_SIZE = PITCH * SLOTS_PER_ROW;
-const SLOTS_PER_PAGE = SLOTS_PER_ROW * SLOTS_PER_ROW;
 export const ATLAS_PAGE_BYTES = ATLAS_PAGE_SIZE * ATLAS_PAGE_SIZE * 4;
 /**
  * Mip levels of a page shown zoomed out: while the pitch divides by 2^level, a texel of that
@@ -71,11 +70,14 @@ export class TileAtlas {
   private uploadHolder: Container | null = null;
   private magFilter: MagFilter = 'linear';
 
-  constructor(private renderer: Renderer, private mips?: MipmapView) {}
+  constructor(private renderer: Renderer, private mips?: MipmapView, private slotsPerRow = SLOTS_PER_ROW) {}
 
   /** The pages in use (zoomed out, their mip levels are brought up to date before a frame) */
-  *pageTextures(): Iterable<RenderTexture> {
-    for (const p of this.pages) if (p) yield p.rt;
+  *pageTextures(visible?: ReadonlySet<number>): Iterable<RenderTexture> {
+    for (let index = 0; index < this.pages.length; index++) {
+      const page = this.pages[index];
+      if (page && (!visible || visible.has(index))) yield page.rt;
+    }
   }
 
   /** Zoomed in far, pages are sampled 'nearest' (sharp pixels); copies are 1:1 and unaffected */
@@ -98,14 +100,16 @@ export class TileAtlas {
     if (pageIndex < 0) {
       pageIndex = this.pages.indexOf(null);
       if (pageIndex < 0) pageIndex = this.pages.length;
-      const rt = RenderTexture.create({ width: ATLAS_PAGE_SIZE, height: ATLAS_PAGE_SIZE, resolution: 1 });
+      const size = PITCH * this.slotsPerRow;
+      const slots = this.slotsPerRow ** 2;
+      const rt = RenderTexture.create({ width: size, height: size, resolution: 1 });
       if (this.magFilter !== 'linear') applyMagFilter(rt, this.magFilter);
-      this.pages[pageIndex] = { rt, free: Array.from({ length: SLOTS_PER_PAGE }, (_, i) => SLOTS_PER_PAGE - 1 - i), used: 0 };
+      this.pages[pageIndex] = { rt, free: Array.from({ length: slots }, (_, i) => slots - 1 - i), used: 0 };
     }
     const page = this.pages[pageIndex]!;
     const index = page.free.pop()!;
     page.used++;
-    return { page: pageIndex, index, x: (index % SLOTS_PER_ROW) * PITCH + GUTTER, y: Math.floor(index / SLOTS_PER_ROW) * PITCH + GUTTER };
+    return { page: pageIndex, index, x: (index % this.slotsPerRow) * PITCH + GUTTER, y: Math.floor(index / this.slotsPerRow) * PITCH + GUTTER };
   }
 
   /** The slot goes back to its page; an empty page is freed (the GPU memory goes with it) */
@@ -351,7 +355,7 @@ export class TileAtlas {
       pages++;
       slots += p.used;
     }
-    return { pages, slots, bytes: pages * ATLAS_PAGE_BYTES };
+    return { pages, slots, bytes: pages * (PITCH * this.slotsPerRow) ** 2 * 4 };
   }
 
   destroy() {

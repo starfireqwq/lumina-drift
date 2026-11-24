@@ -21,11 +21,12 @@ export interface StrokePoint {
 }
 
 /**
- * Per-stage time constant (ms) for levels 0–10.
+ * Per-stage time constant (ms) for levels 0–15.
  * Tuned for 60–240Hz displays: Levels 1–4 filter jitter with sub-frame/near-zero cursor drag;
- * Levels 5–10 provide progressive lazy-string line smoothing.
+ * Levels 5–10 provide progressive lazy-string line smoothing; Levels 11–15 offer heavy
+ * CSP-like ultra-smooth lineart stabilization (higher lag, jitter-free path & thickness).
  */
-const STAGE_TAU_MS = [0, 1.5, 3, 5, 7.5, 10.5, 14, 18.5, 24, 31, 40];
+const STAGE_TAU_MS = [0, 1.5, 3, 5, 7.5, 10.5, 14, 18.5, 24, 31, 40, 52, 66, 82, 100, 120];
 export const MAX_STABILIZER_LEVEL = STAGE_TAU_MS.length - 1;
 export const STABILIZER_LEVEL_STEP = 0.5;
 /** Event spacing assumed for points without a timestamp, and the step `settle` simulates */
@@ -46,7 +47,8 @@ function positionTau(level: number, pullDist: number, settling: boolean): number
   const catchThresh = level <= 5 ? 2.5 : 5;
   if (baseTau <= 2 || pullDist <= catchThresh) return tau;
   const scale = level <= 5 ? 14 : 22;
-  const catchUp = 1 + Math.min(2.4, (pullDist - catchThresh) / scale);
+  // Light stabilization should stay close to widely spaced samples, including at a fast turn.
+  const catchUp = 1 + Math.min(level <= 5 ? 4 : 2.4, (pullDist - catchThresh) / scale);
   return Math.max(1.5, tau / catchUp);
 }
 
@@ -79,7 +81,11 @@ export class DynamicStabilizer {
     const lowerTau = STAGE_TAU_MS[this.lowerLevel];
     const upperTau = STAGE_TAU_MS[Math.ceil(this.level)];
     const baseTau = lowerTau + (upperTau - lowerTau) * this.levelFraction;
-    this.pressureTau = Math.max(1.5, Math.min(6, baseTau * 0.45));
+    // Scale pressure smoothing with stabilizer level so higher levels also smooth out
+    // micro-tremors in line width (phase-aligned with position), while keeping levels 1–4 snappy.
+    this.pressureTau = this.level <= 4
+      ? Math.max(1.5, Math.min(6, baseTau * 0.45))
+      : Math.max(4, Math.min(24, baseTau * 0.5));
   }
 
   public getLevel(): number {
@@ -120,8 +126,15 @@ export class DynamicStabilizer {
       return { ...raw };
     }
     this.stepPosition(raw.x, raw.y, dt);
-    // A shorter time constant keeps pen size responsive to contact pressure.
-    const apAlpha = 1 - Math.exp(-dt / this.pressureTau);
+    // Smooth pressure along with position; falling pressure uses a shorter tau and sharp-unload catch-up
+    // so high stabilizer levels (8-10) don't smear flick tails into blunt stumps while leaving +/-0.14 jitter smooth.
+    let effectivePressureTau = this.pressureTau;
+    if (rawP < this.bp) {
+      const dropGap = this.bp - rawP;
+      const unloadCatchUp = dropGap > 0.14 ? 1 + Math.min(2.8, (dropGap - 0.14) / 0.12) : 1;
+      effectivePressureTau = Math.max(1.5, (this.pressureTau * 0.72) / unloadCatchUp);
+    }
+    const apAlpha = 1 - Math.exp(-dt / effectivePressureTau);
     this.ap += (rawP - this.ap) * apAlpha;
     this.bp += (this.ap - this.bp) * apAlpha;
     return { x: this.bx, y: this.by, pressure: this.bp, tiltX: raw.tiltX, tiltY: raw.tiltY, time: raw.time };
@@ -138,11 +151,12 @@ export class DynamicStabilizer {
     let prevX = this.bx;
     let prevY = this.by;
     const startP = this.bp;
-    // Target end pressure: smoothly taper slightly on lift without dropping instantaneously to 0.02 or rebounding above startP
-    const endP = raw.pressure > 0.01 ? Math.min(startP, raw.pressure) : Math.min(startP, Math.max(0.04, startP * 0.4));
+    // Finish at the measured contact pressure without rebounding above the live stroke.
+    const endP = Math.min(startP, raw.pressure);
 
     let totalDist = 0;
-    for (let i = 0; i < 120 && Math.hypot(raw.x - this.bx, raw.y - this.by) > 0.35; i++) {
+    const maxSettleSteps = this.level > 10 ? 240 : 120;
+    for (let i = 0; i < maxSettleSteps && Math.hypot(raw.x - this.bx, raw.y - this.by) > 0.35; i++) {
       this.stepPosition(raw.x, raw.y, DEFAULT_DT_MS, true);
       const seg = Math.hypot(this.bx - prevX, this.by - prevY);
       totalDist += seg;
@@ -162,13 +176,15 @@ export class DynamicStabilizer {
     this.ap = this.bp = endP;
 
     const invTotal = totalDist > 1e-4 ? 1 / totalDist : 0;
+    const falling = endP < startP;
     return positions.map((pos, idx) => {
       const u = invTotal > 0 ? Math.min(1, pos.dist * invTotal) : (idx + 1) / Math.max(1, positions.length);
-      const smooth = u * u * (3 - 2 * u);
+      // When pressure is falling on lift, avoid zero-slope plateau at u=1 so the tip keeps tapering cleanly.
+      const curve = falling ? u * (0.4 + 0.6 * u) : u * u * (3 - 2 * u);
       return {
         x: pos.x,
         y: pos.y,
-        pressure: startP + (endP - startP) * smooth,
+        pressure: startP + (endP - startP) * curve,
         tiltX: raw.tiltX,
         tiltY: raw.tiltY,
         time: raw.time,

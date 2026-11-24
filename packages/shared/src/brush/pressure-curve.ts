@@ -66,19 +66,20 @@ export function evaluatePressureCurve(
 
 /**
  * Evaluates a 1D cubic Bezier curve defined by P0=(0,0), P1=(p1x,p1y), P2=(p2x,p2y), P3=(1,1)
- * Finds y for a given x using binary search / Newton-Raphson
+ * Finds y for a given x using bounded bisection.
  */
 function evaluateCubicBezierPressure(x: number, pts: [number, number, number, number]): number {
   const [p1x, p1y, p2x, p2y] = pts;
+  if (x === 0 || x === 1 || (p1x === p1y && p2x === p2y)) return x;
 
   // Solve x(t) = x for t in [0..1]
   let low = 0.0;
   let high = 1.0;
   let t = x;
 
-  for (let iter = 0; iter < 12; iter++) {
+  for (let iter = 0; iter < 20; iter++) {
     const currentX = 3 * (1 - t) * (1 - t) * t * p1x + 3 * (1 - t) * t * t * p2x + t * t * t;
-    if (Math.abs(currentX - x) < 0.001) break;
+    if (Math.abs(currentX - x) < 0.000001) break;
     if (currentX < x) {
       low = t;
     } else {

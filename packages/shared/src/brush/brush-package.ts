@@ -5,6 +5,7 @@
 
 import { AbrParser, type ParsedBrushTip } from './abr-parser';
 import { SutParser } from './sut-parser';
+import { ProcreateParser } from './procreate-parser';
 import { MIN_BRUSH_SPACING } from './brush-spacing';
 import type { PressureCurveConfig } from './pressure-curve';
 import type {
@@ -118,7 +119,7 @@ export const DEFAULT_COMMUNITY_PRESETS: AtelierBrushPreset[] = [
       color: '#1e293b',
       opacity: 1.0,
       flow: 1.0,
-      hardness: 0.95,
+      hardness: 1,
       spacing: MIN_BRUSH_SPACING,
       isEraser: false,
       stabilizerLevel: 4,
@@ -126,7 +127,7 @@ export const DEFAULT_COMMUNITY_PRESETS: AtelierBrushPreset[] = [
       brushType: 'pen',
       colorMixing: 0.0,
       paintAmount: 1.0,
-      pressureCurve: 's-curve',
+      pressureCurve: 'linear',
     },
     tipDataUrl: null,
     tags: ['Lineart', 'Inking', 'Manga'],
@@ -431,6 +432,39 @@ export class BrushPackageManager {
       }
     }
 
+    // 4.5. .brush / .brushset (Procreate)
+    if (lowerName.endsWith('.brush') || lowerName.endsWith('.brushset')) {
+      const parser = new ProcreateParser(byteView, fileName);
+      const { setName, brushes: parsedBrushes } = await parser.parse();
+      if (parsedBrushes.length > 0) {
+        const category = setName || 'Procreate 筆刷匯入';
+        return parsedBrushes.map((tip, index) => ({
+          id: `imported_procreate_${Date.now()}_${index}`,
+          name: tip.name,
+          category,
+          author: 'Procreate 筆刷',
+          version: '2.0',
+          description: `從 ${fileName} 還原之 Procreate 筆刷設定與筆尖`,
+          properties: mapParsedTipToProperties(tip, {
+            size: tip.size ?? 32,
+            minSize: tip.minSize ?? 2,
+            color: '#111111',
+            opacity: tip.opacity ?? 1,
+            flow: tip.flow ?? 1,
+            hardness: tip.hardness ?? 0.85,
+            stabilizerLevel: tip.stabilizerLevel ?? 3,
+            colorMixing: tip.colorMixing ?? 0,
+            paintAmount: tip.paintAmount ?? 0.75,
+          }),
+          tipDataUrl: tip.dataUrl,
+          textureDataUrl: tip.textureDataUrl ?? null,
+          dualTipDataUrl: tip.dualTipDataUrl ?? null,
+          tags: ['Procreate', 'Imported'],
+          createdAt: Date.now(),
+        }));
+      }
+    }
+
     // 5. Image files (PNG, JPG, WEBP as custom tip texture)
     if (
       lowerName.endsWith('.png') ||
@@ -488,6 +522,6 @@ export class BrushPackageManager {
       ];
     }
 
-    throw new Error(`無法識別的筆刷檔案格式: ${fileName}。支援格式: .abr, .sut, .asbrush, .png, .jpg`);
+    throw new Error(`無法識別的筆刷檔案格式: ${fileName}。支援格式: .abr, .sut, .brush, .brushset, .asbrush, .png, .jpg`);
   }
 }

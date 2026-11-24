@@ -1,4 +1,5 @@
 import type { InkSample, TabletMode, TabletPreference, WinTabSample, WinTabStatus, WinTabUpdate } from '../../electron/tabletProtocol';
+import { getTouchSimulatedPressure, TouchPressureSimulator } from './inputPreferences';
 import { DEFAULT_PRESSURE_CURVE, readStylusPressureCurve } from './stylusPressure';
 
 type DesktopTablet = {
@@ -192,11 +193,12 @@ export class TabletStroke {
   readonly generation = generation;
   readonly pointerId: number;
   private readonly pointerIsPen: boolean;
+  private readonly pointerIsTouch: boolean;
+  private readonly touchSimulator?: TouchPressureSimulator;
   private readonly penCurve;
   private readonly contactMask: number;
   private readonly expectsEraser: boolean;
   private lastNativePressure: number;
-  private lastInkPressure?: number;
   private previousPoint: TabletPoint;
   private nativeLast?: WinTabSample;
   private nativeSource?: NativeSource;
@@ -215,6 +217,10 @@ export class TabletStroke {
     this.nativeLast = sample;
     this.pointerId = event.pointerId;
     this.pointerIsPen = event.pointerType === 'pen';
+    this.pointerIsTouch = event.pointerType === 'touch';
+    this.touchSimulator = this.pointerIsTouch && !this.isPen && getTouchSimulatedPressure()
+      ? new TouchPressureSimulator(event)
+      : undefined;
     this.contactMask = event.pointerType === 'pen' && ((event.buttons & PEN_ERASER_MASK) !== 0 ||
       (event.button === PEN_ERASER_BUTTON && !(event.buttons & 1))) ? PEN_ERASER_MASK : 1;
     this.expectsEraser = this.contactMask === PEN_ERASER_MASK || isTabletEraser(event, true);
@@ -224,7 +230,6 @@ export class TabletStroke {
     if (reportsInkPressure(event)) {
       const id = deviceId(event);
       if (id) inkDevices.add(id);
-      this.lastInkPressure = event.pressure;
     }
     this.initialPoint = sample ? this.nativePoint(sample, event) : event;
     this.previousPoint = this.initialPoint;
@@ -244,6 +249,14 @@ export class TabletStroke {
     return this.pointerIsPen || (this.nativeSource !== undefined && this.nativeSource !== 'mouse');
   }
 
+  get isTouchSimulated() {
+    return Boolean(this.touchSimulator && !this.isPen);
+  }
+
+  get touchTravelDistance() {
+    return this.touchSimulator?.distance ?? 0;
+  }
+
   get hasNativeMotion() {
     return this.nativeSource !== undefined;
   }
@@ -261,19 +274,31 @@ export class TabletStroke {
     if (reportsInkPressure(event)) {
       const id = deviceId(event);
       if (id) inkDevices.add(id);
-      this.lastInkPressure = event.pressure;
     }
     if (this.nativeSource && this.nativeSource !== 'mouse' && this.generation === generation) {
       const pressure = matchedSample(event, this.nativeLast?.cursor, this.nativeSource === 'ink' ? nativeInk : samples)?.pressure;
       if (pressure !== undefined) this.lastNativePressure = pressure;
     }
-    const raw = this.nativeSource
-      ? this.lastNativePressure
-      : this.isPen && event.pressure === 0.5 && this.lastInkPressure !== undefined
-        ? this.lastInkPressure
-        : event.pressure;
-    if (!this.isPen) return { raw, normalized: raw > 0 ? raw : 0.5 };
+    // A 0.5 contact packet can be real pen pressure. The raster pipeline resolves ambiguous rebound at lift.
+    const raw = this.nativeSource ? this.lastNativePressure : event.pressure;
+    if (!this.isPen) {
+      if (this.pointerIsTouch) {
+        if (this.touchSimulator) {
+          const isRelease = 'type' in event && (event as { type?: string }).type === 'pointerup';
+          return { raw, normalized: this.touchSimulator.sample(event, isRelease) };
+        }
+        return { raw, normalized: 1 };
+      }
+      return { raw, normalized: raw > 0 ? raw : 0.5 };
+    }
     return { raw, normalized: Number.isFinite(raw) ? raw : 0.02 };
+  }
+
+  releasePressure(event: InputEvent & { nativePressure?: number }) {
+    if (!this.isPen && this.pointerIsTouch && this.touchSimulator) {
+      return { raw: event.pressure, normalized: this.touchSimulator.release(event) };
+    }
+    return this.pressure(event);
   }
 
   isContact(event: InputEvent) {

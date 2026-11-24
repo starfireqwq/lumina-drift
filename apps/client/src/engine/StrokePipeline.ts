@@ -14,6 +14,7 @@ const isDesktopInput = () => typeof window !== 'undefined' && Boolean(
 );
 
 export interface StrokePipelineCallbacks {
+  coalesceTouch?: boolean;
   onEmitPreviewDabs?: (dabs: Array<{ x: number; y: number; pressure: number }>, isEraser: boolean) => void;
   onCommitStroke?: (strokeData: any, inkTiles?: Promise<TileData[]>) => void;
 }
@@ -33,6 +34,7 @@ export class StrokePipeline {
   private lastValidPoint: RawPoint | null = null;
   private tabletStroke: TabletStroke | null = null;
   private motionPending = false;
+  private touchMotion: TabletPoint[] = [];
   private onNeedsRender: (() => void) | null = null;
 
   public setOnNeedsRender(cb: (() => void) | null) {
@@ -40,7 +42,7 @@ export class StrokePipeline {
   }
 
   public hasPendingWork(): boolean {
-    return this.motionPending || this.frameDabFloats > 0;
+    return this.motionPending || this.touchMotion.length > 0 || this.frameDabFloats > 0;
   }
   private frameDabs: Float32Array[] = [];
   private frameDabFloats = 0;
@@ -87,6 +89,7 @@ export class StrokePipeline {
   }
 
   public renderFrame() {
+    this.flushTouchMotion();
     if (this.motionPending && this.tabletStroke) {
       this.motionPending = false;
       const motion = this.tabletStroke.consumeMotion();
@@ -205,12 +208,12 @@ export class StrokePipeline {
                 pressure: Math.round(dabsArray[offset + 3] * 100) / 100,
               };
               this.currentStrokePoints.push(pt);
-              this.pendingPreviewDabs.push(pt);
+              if (this.callbacks.onEmitPreviewDabs) this.pendingPreviewDabs.push(pt);
             }
           }
 
           // Check throttled preview dab emission
-          const now = performance.now();
+          const now = this.callbacks.onEmitPreviewDabs ? performance.now() : 0;
           if (
             this.callbacks.onEmitPreviewDabs &&
             this.pendingPreviewDabs.length > 0 &&
@@ -294,7 +297,7 @@ export class StrokePipeline {
     const snapped = shouldSnap ? rulerMgr.snapPoint(localPt) : { point: localPt, snapped: false };
     const strokeStartPt = snapped.point;
 
-    const pressure = this.eraserProps && !tablet.isPen ? 1 : tablet.pressure(initial).normalized;
+    const pressure = this.eraserProps && !tablet.isPen && !tablet.isTouchSimulated ? 1 : tablet.pressure(initial).normalized;
     const time = eventTime(initial);
     this.lastEventTime = time;
 
@@ -321,8 +324,9 @@ export class StrokePipeline {
         eraserMode: this.eraserProps?.eraserMode,
         opacity: props.opacity,
         stabilizerLevel: props.stabilizerLevel,
-        followSamples: props.stabilizerLevel === 0 && (tablet.hasNativeMotion || isDesktopInput()) && initial.pointerType !== 'touch',
-        lowRateInput: !tablet.hasNativeMotion && !isDesktopInput(),
+        // Pen points already pass through the stabilizer. A midpoint spline would add half a packet of lag.
+        followSamples: tablet.isPen || (props.stabilizerLevel === 0 && isDesktopInput() && initial.pointerType !== 'touch'),
+        lowRateInput: !tablet.isPen && !tablet.hasNativeMotion && !isDesktopInput(),
         scatter: props.scatter,
         pressureCurve: tablet.curve ?? props.pressureCurve,
         colorMixing: props.colorMixing,
@@ -344,7 +348,27 @@ export class StrokePipeline {
     const tablet = this.tabletStroke;
     if (!this.isDrawing || !tablet || tablet.pointerId !== e.pointerId) return;
 
-    this.applyMotion(tablet, tablet.contactPoints('nativeEvent' in e ? e.nativeEvent : e));
+    const motion = tablet.contactPoints('nativeEvent' in e ? e.nativeEvent : e);
+    if (this.callbacks.coalesceTouch && e.pointerType === 'touch' && !motion.lifted && motion.runs.length === 1) {
+      const samples = motion.runs[0];
+      if (this.touchMotion.length + samples.length > 256) this.flushTouchMotion();
+      if (samples.length > 256) {
+        this.applyMotion(tablet, motion);
+      } else if (samples.length > 0) {
+        this.touchMotion.push(...samples);
+        this.onNeedsRender?.();
+      }
+      return;
+    }
+    this.flushTouchMotion();
+    this.applyMotion(tablet, motion);
+  }
+
+  private flushTouchMotion() {
+    if (!this.touchMotion.length) return;
+    const run = this.touchMotion;
+    this.touchMotion = [];
+    if (this.tabletStroke) this.applyMotion(this.tabletStroke, { runs: [run], lifted: false });
   }
 
   private applyMotion(tablet: TabletStroke, { runs, lifted }: TabletMotion) {
@@ -374,7 +398,7 @@ export class StrokePipeline {
         return {
           x: snapped.point.x,
           y: snapped.point.y,
-          pressure: this.eraserProps && !tablet.isPen ? 1 : pressure,
+          pressure: this.eraserProps && !tablet.isPen && !tablet.isTouchSimulated ? 1 : pressure,
           tiltX: ev.tiltX,
           tiltY: ev.tiltY,
           twist: ev.twist,
@@ -382,7 +406,7 @@ export class StrokePipeline {
         };
       });
       if (index > 0 && tablet.curve) {
-        this.engine.setPressureCurve(tablet.curve, props.stabilizerLevel === 0 && (tablet.hasNativeMotion || isDesktopInput()));
+        this.engine.setPressureCurve(tablet.curve, tablet.isPen);
       }
 
       if (index > 0) {
@@ -503,6 +527,7 @@ export class StrokePipeline {
   public finishInterruptedStroke(pointerId: number) {
     const tablet = this.tabletStroke;
     if (!this.isDrawing || !tablet || tablet.pointerId !== pointerId) return;
+    this.flushTouchMotion();
     this.isDrawing = false;
     this.clearPendingRelease();
     this.motionPending = false;
@@ -512,12 +537,8 @@ export class StrokePipeline {
     if (!this.lastValidPoint) return;
     const props = this.strokeProps!;
     if (props.snapToRuler !== false) RulerManager.getInstance().onStrokeEnd();
-    const endPt = tablet.isPen
-      ? { ...this.lastValidPoint, pressure: props.brushType === 'pen' || props.minSize === 0
-        ? 0
-        : tablet.hasNativeMotion
-          ? this.lastValidPoint.pressure
-          : Math.min(this.lastValidPoint.pressure, Math.max(0.04, this.lastValidPoint.pressure * 0.55)) }
+    const endPt = tablet.isPen && !tablet.hasNativeMotion && props.brushType !== 'pen' && props.minSize > 0
+      ? { ...this.lastValidPoint, pressure: Math.min(this.lastValidPoint.pressure, Math.max(0.04, this.lastValidPoint.pressure * 0.55)) }
       : this.lastValidPoint;
     this.flushFrameDabs();
     this.emitDabs(this.engine.finishStroke(endPt), this.strokeId, false, true);
@@ -529,6 +550,7 @@ export class StrokePipeline {
   public handlePointerUp(e: React.PointerEvent<HTMLCanvasElement> | PointerEvent) {
     const tablet = this.tabletStroke;
     if (!this.isDrawing || !tablet || tablet.pointerId !== e.pointerId) return;
+    this.flushTouchMotion();
     const event = 'nativeEvent' in e ? e.nativeEvent : e;
     if (event.type === 'pointerup' && (tablet.hasNativeMotion || tablet.awaitingNativeStart)) {
       if (this.pendingRelease) return;
@@ -586,17 +608,24 @@ export class StrokePipeline {
     const snapped = shouldSnap ? rulerMgr.snapPoint(localPt) : { point: localPt, snapped: false };
     if (shouldSnap) rulerMgr.onStrokeEnd();
 
+    const releasePressure = tablet.isTouchSimulated ? tablet.releasePressure(e).normalized : undefined;
+
     let finishPoint: RawPoint | undefined;
     if (this.lastValidPoint) {
       const dist = Math.hypot(snapped.point.x - this.lastValidPoint.x, snapped.point.y - this.lastValidPoint.y);
       const maxJump = Math.max(24, (props.size || 24) * 1.5);
+      const endPressure = releasePressure !== undefined ? releasePressure : this.lastValidPoint.pressure;
       if (dist > maxJump * 2) {
-        finishPoint = this.lastValidPoint;
+        finishPoint = {
+          ...this.lastValidPoint,
+          pressure: endPressure,
+          time: Math.max(this.lastEventTime + 1, eventTime(e)),
+        };
       } else {
         finishPoint = {
           x: snapped.point.x,
           y: snapped.point.y,
-          pressure: this.lastValidPoint.pressure,
+          pressure: endPressure,
           tiltX: e.tiltX,
           tiltY: e.tiltY,
           twist: e.twist,
@@ -607,7 +636,7 @@ export class StrokePipeline {
       finishPoint = {
         x: snapped.point.x,
         y: snapped.point.y,
-        pressure: tablet.pressure(e).normalized,
+        pressure: releasePressure ?? tablet.pressure(e).normalized,
         tiltX: e.tiltX,
         tiltY: e.tiltY,
         twist: e.twist,
@@ -622,6 +651,7 @@ export class StrokePipeline {
   }
 
   public cancelStroke() {
+    this.touchMotion.length = 0;
     if (this.strokeInk) this.layerManager.releaseStrokeInk(this.strokeInk);
     this.strokeInk = undefined;
     this.clearPendingRelease();

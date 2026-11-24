@@ -19,6 +19,7 @@ export * from './brush/stabilizer';
 export * from './brush/abr-parser';
 export * from './brush/sqlite-reader';
 export * from './brush/sut-parser';
+export * from './brush/procreate-parser';
 export * from './brush/brush-package';
 export * from './brush/brush-spacing';
 export * from './selection/selection-mask';

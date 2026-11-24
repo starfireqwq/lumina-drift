@@ -17,6 +17,8 @@ export class CanvasViewport {
 
   private canvasWidth: number;
   private canvasHeight: number;
+  /** Physical pixels per CSS pixel (window.devicePixelRatio / Pixi renderer resolution) */
+  private displayScale = 1;
 
   private state: ViewportState = {
     zoom: 1.0,
@@ -68,10 +70,37 @@ export class CanvasViewport {
     this.updateTransform();
   }
 
+  public setDisplayScale(scale: number) {
+    if (Number.isFinite(scale) && scale > 0 && scale !== this.displayScale) {
+      this.displayScale = scale;
+      this.updateTransform();
+    }
+  }
+
+  public getDisplayScale(): number {
+    return this.displayScale;
+  }
+
+  /** CSS zoom value where 1 canvas pixel equals 1 physical monitor pixel (CSP / Photoshop 100%). */
+  public getActualSizeZoom(): number {
+    return 1 / this.displayScale;
+  }
+
   public updateTransform() {
     const { zoom, panX, panY, rotation, mirrorX } = this.state;
 
-    this.canvasContainer.position.set(panX, panY);
+    // At 1:1 physical scale (unrotated), snap canvas origin to the physical pixel grid so 100% view
+    // never suffers half-pixel bilinear blur.
+    if (Math.abs(rotation) < 1e-4 && Math.abs(zoom * this.displayScale - 1) < 1e-3) {
+      const res = this.displayScale;
+      const halfX = (this.canvasWidth % 2) * 0.5 * zoom;
+      const halfY = (this.canvasHeight % 2) * 0.5 * zoom;
+      const sx = Math.round((panX - halfX) * res) / res + halfX;
+      const sy = Math.round((panY - halfY) * res) / res + halfY;
+      this.canvasContainer.position.set(sx, sy);
+    } else {
+      this.canvasContainer.position.set(panX, panY);
+    }
     this.canvasContainer.scale.set(mirrorX ? -zoom : zoom, zoom);
     this.canvasContainer.rotation = rotation;
 
@@ -87,7 +116,7 @@ export class CanvasViewport {
     const padding = Math.min(60, viewWidth / 8, viewHeight / 8);
     const scaleX = Math.max(1, viewWidth - padding * 2) / this.canvasWidth;
     const scaleY = Math.max(1, viewHeight - padding * 2) / this.canvasHeight;
-    return Math.min(scaleX, scaleY, 1.5);
+    return Math.min(scaleX, scaleY, 1.5 / this.displayScale);
   }
 
   /** True while the view is still exactly "fit to a viewWidth × viewHeight view" (untouched by the user). */
@@ -99,7 +128,7 @@ export class CanvasViewport {
   }
 
   public centerInView(viewWidth: number, viewHeight: number, fit: boolean = true) {
-    const zoom = fit ? this.fitZoom(viewWidth, viewHeight) : 1.0;
+    const zoom = fit ? this.fitZoom(viewWidth, viewHeight) : this.getActualSizeZoom();
 
     this.state.zoom = zoom;
     this.state.panX = viewWidth / 2;
@@ -125,7 +154,16 @@ export class CanvasViewport {
   public zoomAt(clientX: number, clientY: number, factor: number) {
     const oldZoom = this.state.zoom;
     const minZoom = Math.min(MIN_ZOOM, oldZoom);
-    const newZoom = Math.max(minZoom, Math.min(MAX_ZOOM, oldZoom * factor));
+    let newZoom = Math.max(minZoom, Math.min(MAX_ZOOM, oldZoom * factor));
+    const oneToOne = this.getActualSizeZoom();
+    // Magnetically snap to exact physical 100% when wheel-zooming into its ±3.5% neighborhood
+    // so users never get stuck at 98.7% with fractional resampling blur.
+    if (
+      Math.abs(oldZoom - oneToOne) / oneToOne > 0.001 &&
+      Math.abs(newZoom - oneToOne) / oneToOne <= 0.035
+    ) {
+      newZoom = oneToOne;
+    }
     if (newZoom === oldZoom) return;
 
     const rect = this.domElement?.getBoundingClientRect();

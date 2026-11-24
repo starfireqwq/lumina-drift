@@ -7,7 +7,7 @@ export const isBrushTool = (tool: ToolType): tool is BrushToolId => tool === 'br
 
 const COMMON: Partial<BrushProperties> = {
   size: 24,
-  minSize: 0.8,
+  minSize: 0,
   opacity: 1,
   flow: 1,
   hardness: 0.8,
@@ -45,7 +45,7 @@ const COMMON: Partial<BrushProperties> = {
 
 export const BRUSH_TOOL_DEFAULTS: Record<BrushToolId, Partial<BrushProperties>> = {
   brush: { ...COMMON, brushType: 'brush', isEraser: false },
-  pencil: { ...COMMON, brushType: 'pencil', isEraser: false, size: 8, hardness: 0.85, flow: 0.85, scatter: 0.04 },
+  pencil: { ...COMMON, brushType: 'pencil', isEraser: false, size: 8, hardness: 0.85, flow: 1, scatter: 0.04 },
   eraser: { ...COMMON, brushType: 'brush', isEraser: true, eraserMode: 'hard', size: 40 },
 };
 
@@ -91,17 +91,30 @@ type SavedTools = Partial<Record<BrushToolId, Partial<BrushProperties>>> & { bru
 const readAll = (): SavedTools => {
   try {
     const saved: SavedTools = JSON.parse(localStorage.getItem(KEY) || '{}');
-    if (saved.brushDefaultsVersion !== 1) {
-      const previousDefaults = new Set([0.04, 0.06, 0.08, 0.1, 0.22]);
-      for (const tool of ['brush', 'pencil', 'eraser'] as const) {
-        if (previousDefaults.has(saved[tool]?.spacing ?? MIN_BRUSH_SPACING)) {
-          saved[tool] = { ...saved[tool], spacing: MIN_BRUSH_SPACING };
+    const ver = saved.brushDefaultsVersion ?? 0;
+    if (ver < 3) {
+      if (ver < 2) {
+        if (ver < 1) {
+          const previousDefaults = new Set([0.04, 0.06, 0.08, 0.1, 0.22]);
+          for (const tool of ['brush', 'pencil', 'eraser'] as const) {
+            if (previousDefaults.has(saved[tool]?.spacing ?? MIN_BRUSH_SPACING)) {
+              saved[tool] = { ...saved[tool], spacing: MIN_BRUSH_SPACING };
+            }
+            if (saved[tool]?.brushType === 'pen' && (saved[tool]?.minSize ?? 1) <= 1) {
+              saved[tool] = { ...saved[tool], minSize: 0 };
+            }
+          }
         }
-        if (saved[tool]?.brushType === 'pen' && (saved[tool]?.minSize ?? 1) <= 1) {
-          saved[tool] = { ...saved[tool], minSize: 0 };
+        // Migrate legacy default minSize (0.8) on the general brush tool to 0 so hard-edge inking tapers cleanly to a needle point
+        if (saved.brush && saved.brush.minSize === 0.8) {
+          saved.brush = { ...saved.brush, minSize: 0 };
         }
       }
-      saved.brushDefaultsVersion = 1;
+      // Migrate legacy pencil flow (0.85) to 1 so graphite pencils can reach full darks on heavy pressure
+      if (saved.pencil && saved.pencil.flow === 0.85) {
+        saved.pencil = { ...saved.pencil, flow: 1 };
+      }
+      saved.brushDefaultsVersion = 3;
       try {
         localStorage.setItem(KEY, JSON.stringify(saved));
       } catch {

@@ -75,11 +75,36 @@ export class StrokeWorkerEngine {
   private lastControl: RawPoint | null = null;
   private hasFirstSegment = false;
   private distanceToNextDab = 0; // Remaining path length, carried across segments and worker messages.
+  private spacing = MIN_BRUSH_SPACING;
+  private opacityPen = false;
   // The pen's latest tilt / twist: they change slowly, so a batch of dabs shares them
   private pen = { tilt: 0, azimuth: 0, twist: 0, has: false };
   // Smoothed normalized stroke velocity (0..1) for velocity-driven dynamics (does not alter stabilizer)
   private lastRawForVel: { x: number; y: number; time: number } | null = null;
   private currentVelocity = 0;
+  // Monotonic fast-unload tail taper strength [0..0.95] so stabilizer settle substeps never rebound into a bulb
+  private tailTaper = 0;
+  private prevRawPressure = 0;
+  private lastRawPoint: { x: number; y: number; time: number } | null = null;
+  private recentRawPeak = 0;
+  private rawTailLow = 1;
+  private isSettling = false;
+
+  private isTaperCapable(): boolean {
+    const isSolidBrush =
+      this.config.brushType === 'pen' ||
+      (this.config.brushType !== 'pencil' &&
+        this.config.brushType !== 'airbrush' &&
+        (this.config.colorMixing ?? 0) === 0);
+    return Boolean(
+      this.config.followSamples &&
+        isSolidBrush &&
+        this.config.hardness >= 0.85 &&
+        this.config.antiAlias !== 'none' &&
+        !this.config.isEraser &&
+        this.config.dynamics?.size?.pressure !== false
+    );
+  }
 
   private trackPen(pt: RawPoint) {
     const tx = pt.tiltX ?? 0;
@@ -108,6 +133,10 @@ export class StrokeWorkerEngine {
 
   public initStroke(config: WorkerBrushConfig, initialPoint: RawPoint): Float32Array {
     this.config = { ...config };
+    this.opacityPen = config.brushType === 'pen' && config.hardness >= 0.85 &&
+      config.flow >= 0.99 && !config.isEraser && config.antiAlias !== 'none' && config.dynamics?.opacity?.pressure === true;
+    // On a dense pen, distributing low opacity over too many dabs loses it to 8-bit alpha rounding.
+    this.spacing = Math.max(this.opacityPen ? 0.08 : MIN_BRUSH_SPACING, config.spacing);
     this.stabilizer.setLevel(config.stabilizerLevel ?? 3);
     this.stabilizer.setLowRateInput(config.lowRateInput ?? false);
     this.stabilizer.reset(initialPoint);
@@ -118,6 +147,12 @@ export class StrokeWorkerEngine {
     this.hasFirstSegment = false;
     this.lastRawForVel = null;
     this.currentVelocity = 0;
+    this.tailTaper = 0;
+    this.prevRawPressure = initialPoint.pressure ?? 0.5;
+    this.lastRawPoint = { x: initialPoint.x, y: initialPoint.y, time: initialPoint.time ?? 0 };
+    this.recentRawPeak = this.prevRawPressure;
+    this.rawTailLow = this.prevRawPressure;
+    this.isSettling = false;
     this.trackPen(initialPoint);
 
     // Generate the initial dab at start of stroke
@@ -127,6 +162,7 @@ export class StrokeWorkerEngine {
   public setPressureCurve(curve: PressureCurveConfig, followSamples = false) {
     this.config.pressureCurve = curve;
     this.config.followSamples = followSamples;
+    if (followSamples) this.stabilizer.setLowRateInput(false);
   }
 
   public startSegment(point: RawPoint): Float32Array {
@@ -145,9 +181,11 @@ export class StrokeWorkerEngine {
       rand: Math.random(),
     };
 
+    const sizeMinRatio = dyn?.size?.min ?? (this.config.size > 0 ? effectiveMin / this.config.size : 0);
+
     if (this.config.eraserMode) {
       const size = dyn?.size
-        ? Math.max(0.35, this.config.size * evaluateDynamicChannel(dyn.size, dynInput, 1))
+        ? Math.max(0.35, this.config.size * evaluateDynamicChannel({ ...dyn.size, min: sizeMinRatio }, dynInput, 1))
         : effectiveMin + (this.config.size - effectiveMin) * p;
       const opMult = dyn?.opacity ? evaluateDynamicChannel(dyn.opacity, dynInput, 1) : 1;
       return {
@@ -159,7 +197,7 @@ export class StrokeWorkerEngine {
     const explicitAirbrush = this.config.brushType === 'airbrush';
     if (this.config.antiAlias === 'none' && !explicitAirbrush) {
       const size = dyn?.size
-        ? Math.max(1, Math.round(this.config.size * evaluateDynamicChannel(dyn.size, dynInput, 1)))
+        ? Math.max(1, Math.round(this.config.size * evaluateDynamicChannel({ ...dyn.size, min: sizeMinRatio }, dynInput, 1)))
         : Math.max(1, Math.round(effectiveMin + (this.config.size - effectiveMin) * p));
       return { size, alpha: 1.0 };
     }
@@ -167,12 +205,12 @@ export class StrokeWorkerEngine {
     // Compute dab size using explicit v2 size dynamics when configured, else preserve legacy minSize..size taper
     const computeSize = (defaultSize: number): number => {
       if (!dyn?.size) return defaultSize;
-      const minRatio = dyn.size.min ?? (this.config.size > 0 ? effectiveMin / this.config.size : 0);
-      const mult = evaluateDynamicChannel({ ...dyn.size, min: minRatio }, dynInput, 1);
+      const mult = evaluateDynamicChannel({ ...dyn.size, min: sizeMinRatio }, dynInput, 1);
       return Math.max(0.35, this.config.size * mult);
     };
 
-    const isAirbrush = explicitAirbrush || this.config.hardness <= 0.25;
+    const isPencil = this.config.brushType === 'pencil';
+    const isAirbrush = !isPencil && (explicitAirbrush || this.config.hardness <= 0.25);
     if (isAirbrush) {
       const size = Math.max(1.5, computeSize(effectiveMin + (this.config.size - effectiveMin) * (0.72 + 0.28 * p)));
       const opMult = dyn?.opacity ? evaluateDynamicChannel(dyn.opacity, dynInput, 1) : Math.pow(p, 1.4);
@@ -184,13 +222,28 @@ export class StrokeWorkerEngine {
     }
 
     const isInkingPen =
-      this.config.brushType !== 'pencil' &&
+      !isPencil &&
       (this.config.brushType === 'pen' ||
         (this.config.hardness >= 0.92 && (this.config.colorMixing ?? 0) === 0 && this.config.flow >= 0.98));
 
     if (isInkingPen && !dyn?.opacity && !dyn?.flow) {
       const size = computeSize(effectiveMin + (this.config.size - effectiveMin) * p);
       const alpha = this.config.flow * this.config.opacity * (0.78 + 0.22 * Math.pow(p, 0.5));
+      return { size, alpha };
+    }
+
+    if (isPencil) {
+      const size = computeSize(effectiveMin + (this.config.size - effectiveMin) * p);
+      const legacyPencilOpacity = Math.pow(p, 0.75);
+      const opMult = dyn?.opacity ? evaluateDynamicChannel(dyn.opacity, dynInput, 1) : legacyPencilOpacity;
+      const flowMult = dyn?.flow ? evaluateDynamicChannel(dyn.flow, dynInput, 1) : 1;
+      const toothComp = p > 0.7 ? 1 + ((p - 0.7) / 0.3) * 0.75 : 1;
+      const rawLoad = Math.min(0.999, Math.max(0, this.config.flow * flowMult * opMult));
+      const inkLoad = Math.min(0.9995, 1 - Math.pow(1 - rawLoad, toothComp));
+      const passAlpha = Math.min(0.9995, this.config.opacity * inkLoad);
+      const step = this.spacingForSize(size);
+      const overlap = Math.max(1.0, (0.72 * size) / step);
+      const alpha = 1 - Math.pow(1 - passAlpha, 1 / overlap);
       return { size, alpha };
     }
 
@@ -207,7 +260,9 @@ export class StrokeWorkerEngine {
     if (dyn?.opacity && !dyn.opacity.pressure && !dyn.opacity.tilt && !dyn.opacity.velocity && !(dyn.opacity.random ?? 0) && this.config.flow * flowMult >= 0.99 && this.config.hardness >= 0.85) {
       return { size, alpha: passAlpha };
     }
-    const overlap = Math.max(1.2, 0.55 / Math.max(MIN_BRUSH_SPACING, this.config.spacing));
+    const overlap = this.opacityPen
+      ? Math.max(1, 0.85 * size / this.spacingForSize(size))
+      : Math.max(1.2, 0.55 / this.spacing);
     const alpha = 1 - Math.pow(1 - passAlpha, 1 / overlap);
     return { size, alpha };
   }
@@ -233,10 +288,12 @@ export class StrokeWorkerEngine {
   private spacingForSize(size: number) {
     // Keep standard 0.8px floor for normal brush sizes, tighten smoothly below 4px so needle tapers never bead
     const minStep = size < 4 ? Math.max(0.25, size * 0.2) : 0.8;
+    if (this.config.brushType === 'pencil') {
+      return Math.max(minStep, size * Math.max(0.10, this.spacing));
+    }
     const soft = !this.config.eraserMode &&
       (this.config.brushType === 'airbrush' || (this.config.antiAlias !== 'none' && this.config.hardness <= 0.25));
-    const spacing = Math.max(MIN_BRUSH_SPACING, this.config.spacing);
-    return soft ? Math.max(0.25, size * Math.min(0.08, spacing)) : Math.max(minStep, size * spacing);
+    return soft ? Math.max(0.25, size * Math.min(0.08, this.spacing)) : Math.max(minStep, size * this.spacing);
   }
 
   private appendSmoothedPoint(pt: RawPoint, generatedDabsList: number[]) {
@@ -279,6 +336,27 @@ export class StrokeWorkerEngine {
     this.lastControl = { ...pt };
   }
 
+  private trackRawUnload(raw: RawPoint) {
+    const rp = raw.pressure ?? 0.5;
+    const rDist = this.lastRawPoint ? Math.hypot(raw.x - this.lastRawPoint.x, raw.y - this.lastRawPoint.y) : 0;
+    const rTime = raw.time ?? (this.lastRawPoint ? this.lastRawPoint.time + (rDist > 0 ? 8 : 0) : 0);
+    const rDt = this.lastRawPoint ? Math.max(0, rTime - this.lastRawPoint.time) : 8;
+    const decay = Math.exp(-rDist / 220 - rDt / 95);
+    this.recentRawPeak = rp >= this.recentRawPeak ? rp : rp + (this.recentRawPeak - rp) * decay;
+    if (rp >= this.recentRawPeak - 0.02) {
+      this.rawTailLow = rp;
+    } else if (rp < this.rawTailLow) {
+      this.rawTailLow = rp;
+    } else if (rp - this.rawTailLow > 0.06) {
+      // Deliberate re-press (> 0.06): reset tail state without triggering on <= 0.03 hardware jitter
+      this.recentRawPeak = rp;
+      this.rawTailLow = rp;
+      this.tailTaper = 0;
+    }
+    this.lastRawPoint = { x: raw.x, y: raw.y, time: rTime };
+    this.prevRawPressure = rp;
+  }
+
   public addRawPoints(points: RawPoint[]): Float32Array {
     if (points.length === 0) return new Float32Array(0);
 
@@ -286,6 +364,7 @@ export class StrokeWorkerEngine {
 
     for (let i = 0; i < points.length; i++) {
       const raw = points[i];
+      this.trackRawUnload(raw);
       this.trackPen(raw);
       const smoothed = this.stabilizer.pushRawPoint(raw);
       this.appendSmoothedPoint(smoothed, generatedDabsList);
@@ -298,14 +377,37 @@ export class StrokeWorkerEngine {
     const generatedDabsList: number[] = [];
 
     if (lastPoint) {
+      this.trackRawUnload(lastPoint);
+    }
+    const lastP = lastPoint?.pressure ?? this.prevRawPressure;
+    const rawDrop = Math.max(0, this.recentRawPeak - lastP);
+    const rawDropRatio = this.recentRawPeak > 0.05 ? rawDrop / this.recentRawPeak : 0;
+    const notRepressing = lastP - this.rawTailLow <= 0.05;
+    const rawUnloading = notRepressing && (
+      (rawDrop >= 0.04 && rawDropRatio >= 0.22 && lastP <= 0.55) ||
+      (lastP < 0.18 && rawDrop >= 0.025 && rawDropRatio >= 0.18)
+    );
+    const unloading = this.isTaperCapable() && (rawUnloading || (notRepressing && this.tailTaper > 0.05));
+    const needleP = this.config.size > 0 ? Math.min(0.03, 0.45 / this.config.size) : 0.015;
+    const unloadTargetP = unloading
+      ? Math.min(lastP, Math.max(0.008, Math.min(lastP * 0.22, needleP)))
+      : lastP;
+    this.isSettling = unloading;
+    if (unloading) {
+      const rawStrength = Math.min(0.95, Math.max(0.55, rawDropRatio * 1.15));
+      this.tailTaper = Math.max(this.tailTaper, rawStrength);
+    }
+
+    if (lastPoint) {
       this.trackPen(lastPoint);
+      const settlePoint = unloading ? { ...lastPoint, pressure: unloadTargetP } : lastPoint;
       if (this.stabilizer.getLevel() > 0) {
-        const tail = this.stabilizer.settle(lastPoint);
+        const tail = this.stabilizer.settle(settlePoint);
         for (const pt of tail) {
           this.appendSmoothedPoint(pt, generatedDabsList);
         }
       } else {
-        const pt = this.stabilizer.pushRawPoint(lastPoint);
+        const pt = this.stabilizer.pushRawPoint(settlePoint);
         this.appendSmoothedPoint(pt, generatedDabsList);
       }
     }
@@ -314,18 +416,27 @@ export class StrokeWorkerEngine {
     if (this.prevAnchor && this.lastControl) {
       const dist = Math.hypot(this.lastControl.x - this.prevAnchor.x, this.lastControl.y - this.prevAnchor.y);
       if (dist >= 0.05) {
+        const finalCtrl: RawPoint = unloading
+          ? { ...this.lastControl, pressure: Math.min(this.lastControl.pressure ?? 0.02, unloadTargetP) }
+          : this.lastControl;
         const midCtrl: RawPoint = {
-          x: (this.prevAnchor.x + this.lastControl.x) * 0.5,
-          y: (this.prevAnchor.y + this.lastControl.y) * 0.5,
-          pressure: ((this.prevAnchor.pressure ?? 0.02) + (this.lastControl.pressure ?? this.prevAnchor.pressure ?? 0.02)) * 0.5,
+          x: (this.prevAnchor.x + finalCtrl.x) * 0.5,
+          y: (this.prevAnchor.y + finalCtrl.y) * 0.5,
+          pressure: ((this.prevAnchor.pressure ?? 0.02) + (finalCtrl.pressure ?? this.prevAnchor.pressure ?? 0.02)) * 0.5,
         };
-        this.emitQuadraticSegment(this.prevAnchor, midCtrl, this.lastControl, generatedDabsList);
+        this.emitQuadraticSegment(this.prevAnchor, midCtrl, finalCtrl, generatedDabsList);
       }
     }
 
     this.prevAnchor = null;
     this.lastControl = null;
     this.hasFirstSegment = false;
+    this.tailTaper = 0;
+    this.prevRawPressure = 0;
+    this.lastRawPoint = null;
+    this.recentRawPeak = 0;
+    this.rawTailLow = 1;
+    this.isSettling = false;
     this.stabilizer.reset();
     return new Float32Array(generatedDabsList);
   }
@@ -346,6 +457,32 @@ export class StrokeWorkerEngine {
     const pr0 = p0.pressure ?? 0.02;
     const pr1 = ctrl.pressure ?? pr0;
     const pr2 = p2.pressure ?? pr1;
+    // A moving pen whose pressure is falling leaves a crisp CSP-like needle tip.
+    // Track taper monotonically across short settle steps so stabilizer settling never rebounds into a bulb,
+    // while decaying gently over long flat light strokes and resetting immediately on deliberate re-press.
+    const canTaper = this.isTaperCapable();
+    const taperCeiling = 0.45;
+    if (canTaper) {
+      const dp = pr0 - pr2;
+      if (dp < -0.015) {
+        this.tailTaper = 0;
+      } else {
+        const dropRate = chord > 0.15 ? dp / Math.max(0.5, chord) : 0;
+        if (dropRate > 0.003 && pr2 < taperCeiling) {
+          const segTaper = Math.min(0.95, (dropRate - 0.003) * 110);
+          this.tailTaper = Math.max(this.tailTaper, segTaper);
+        } else if (!this.isSettling && dropRate < 0.002 && pr2 >= 0.18) {
+          this.tailTaper *= Math.exp(-chord / 22);
+          if (this.tailTaper < 0.01) this.tailTaper = 0;
+        }
+      }
+    } else {
+      this.tailTaper = 0;
+    }
+    const taperStrength = this.tailTaper;
+    const configuredMin = this.config.dynamics?.size?.min === undefined
+      ? this.config.minSize : this.config.size * this.config.dynamics.size.min;
+    const minimumSize = Math.max(configuredMin <= 0.15 ? 0.15 : 0.35, configuredMin);
     let previous = { x: p0.x, y: p0.y, pressure: pr0 };
 
     for (let step = 1; step <= subdivisions; step++) {
@@ -365,7 +502,9 @@ export class StrokeWorkerEngine {
           const u = travelled / length;
           const interpP = Math.max(0, Math.min(1.0, previous.pressure + (cp - previous.pressure) * u));
           const pressure = evaluatePressureCurve(interpP, this.config.pressureCurve ?? 'linear');
-          const { size, alpha } = this.computeDabSizeAndAlpha(pressure);
+          const dab = this.computeDabSizeAndAlpha(pressure);
+          const taper = taperStrength * Math.max(0, 1 - pressure / taperCeiling);
+          const size = dab.size - Math.max(0, dab.size - minimumSize) * taper;
           let x = previous.x + dx * u;
           let y = previous.y + dy * u;
           let rotation = this.penAngle(angle);
@@ -390,7 +529,7 @@ export class StrokeWorkerEngine {
             rotation += (Math.random() - 0.5) * Math.PI * effScatter;
           }
 
-          outputDabs.push(x, y, size, pressure, alpha, rotation, this.pen.tilt);
+          outputDabs.push(x, y, size, pressure, dab.alpha, rotation, this.pen.tilt);
           this.distanceToNextDab = this.spacingForSize(size);
         }
         this.distanceToNextDab -= length - travelled;

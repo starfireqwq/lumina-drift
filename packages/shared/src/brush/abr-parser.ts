@@ -49,7 +49,7 @@ export interface ParsedBrushTip {
   tiltSize?: number;
   wetEdges?: boolean;
   dynamics?: BrushDynamicsConfig;
-  sourceFormat?: 'abr' | 'sut';
+  sourceFormat?: 'abr' | 'sut' | 'procreate';
 }
 
 export class AbrParser {

@@ -41,6 +41,7 @@ export interface PlayableAudioTrackItem {
 
 const memoryStore = new Map<string, StoredAudioAsset>();
 const decodedBuffers = new Map<string, AudioBuffer>();
+const pendingDecodes = new Map<string, Promise<AudioBuffer | null>>();
 const waveformCache = new Map<string, number[]>();
 const listeners = new Set<() => void>();
 
@@ -187,18 +188,33 @@ export async function ensureAudioBufferLoaded(id: string): Promise<AudioBuffer |
   if (!id) return null;
   const cached = decodedBuffers.get(id);
   if (cached) return cached;
-  const asset = await getStoredAudioAsset(id);
-  if (!asset) return null;
-  try {
-    const buffer = await decodeBlob(asset.blob);
-    decodedBuffers.set(id, buffer);
-    if (!waveformCache.has(id)) {
-      waveformCache.set(id, asset.peaks?.length ? asset.peaks : computeWaveformPeaks(extractMonoSamples(buffer)));
+  const pending = pendingDecodes.get(id);
+  if (pending) return pending;
+  const decode = getStoredAudioAsset(id).then(async (asset) => {
+    if (!asset) return null;
+    try {
+      const buffer = await decodeBlob(asset.blob);
+      if (pendingDecodes.get(id) !== decode) return null;
+      decodedBuffers.set(id, buffer);
+      if (!waveformCache.has(id)) {
+        const cachePeaks = () => {
+          if (decodedBuffers.get(id) !== buffer || waveformCache.has(id)) return;
+          waveformCache.set(id, asset.peaks?.length ? asset.peaks : computeWaveformPeaks(extractMonoSamples(buffer)));
+          notifyAssetListeners();
+        };
+        if (typeof requestIdleCallback === 'function') requestIdleCallback(cachePeaks);
+        else setTimeout(cachePeaks, 50);
+      }
+      return buffer;
+    } catch {
+      return null;
     }
-    notifyAssetListeners();
-    return buffer;
-  } catch {
-    return null;
+  });
+  pendingDecodes.set(id, decode);
+  try {
+    return await decode;
+  } finally {
+    if (pendingDecodes.get(id) === decode) pendingDecodes.delete(id);
   }
 }
 
@@ -227,6 +243,7 @@ export async function deleteLocalAudioAsset(id: string): Promise<void> {
   if (!id) return;
   memoryStore.delete(id);
   decodedBuffers.delete(id);
+  pendingDecodes.delete(id);
   waveformCache.delete(id);
   const db = await openDb();
   if (db) {
@@ -248,8 +265,11 @@ export class AudioTrackPlayer {
   private activeNodes: Array<{ source: AudioBufferSourceNode; gain: GainNode }> = [];
   private scrubNodes: Array<{ source: AudioBufferSourceNode; gain: GainNode }> = [];
   private lastScrubMs = 0;
+  private playbackRevision = 0;
+  private scrubRevision = 0;
 
   public stopPlayback(): void {
+    this.playbackRevision++;
     for (const node of this.activeNodes) {
       try {
         node.source.stop();
@@ -263,6 +283,7 @@ export class AudioTrackPlayer {
   }
 
   public stopScrub(): void {
+    this.scrubRevision++;
     for (const node of this.scrubNodes) {
       try {
         node.source.stop();
@@ -283,6 +304,7 @@ export class AudioTrackPlayer {
   ): Promise<void> {
     this.stopPlayback();
     this.stopScrub();
+    const revision = this.playbackRevision;
     if (!tracks.length) return;
     const ctx = getAudioContext();
     if (!ctx) return;
@@ -295,12 +317,16 @@ export class AudioTrackPlayer {
     }
 
     const now = ctx.currentTime;
-    for (const item of tracks) {
+    await Promise.all(tracks.map(async (item) => {
       const win = computeAudioPlaybackWindow(item.meta, currentFrame, fps, playbackEndFrame);
-      if (!win) continue;
+      if (!win || revision !== this.playbackRevision) return;
       const buffer = await ensureAudioBufferLoaded(item.meta.localAssetId);
-      if (!buffer) continue;
-      if (win.bufferOffsetSec >= buffer.duration) continue;
+      if (!buffer || revision !== this.playbackRevision) return;
+      const startAt = now + win.delaySec;
+      const lateBy = Math.max(0, ctx.currentTime - startAt);
+      const offset = win.bufferOffsetSec + lateBy;
+      const safeDur = Math.min(win.playDurationSec - lateBy, buffer.duration - offset);
+      if (safeDur <= 0) return;
 
       const source = ctx.createBufferSource();
       source.buffer = buffer;
@@ -309,9 +335,8 @@ export class AudioTrackPlayer {
       source.connect(gain);
       gain.connect(ctx.destination);
 
-      const safeDur = Math.min(win.playDurationSec, Math.max(0.01, buffer.duration - win.bufferOffsetSec));
       try {
-        source.start(now + win.delaySec, win.bufferOffsetSec, safeDur);
+        source.start(Math.max(ctx.currentTime, startAt), offset, safeDur);
         this.activeNodes.push({ source, gain });
       } catch {
         try {
@@ -321,7 +346,7 @@ export class AudioTrackPlayer {
           // ignore
         }
       }
-    }
+    }));
   }
 
   /** Plays a short ~80ms slice at `frame` for lip-sync scrubbing. */
@@ -334,6 +359,7 @@ export class AudioTrackPlayer {
     if (ts - this.lastScrubMs < 45) return;
     this.lastScrubMs = ts;
     this.stopScrub();
+    const revision = this.scrubRevision;
 
     const ctx = getAudioContext();
     if (!ctx) return;
@@ -352,6 +378,7 @@ export class AudioTrackPlayer {
       const range = resolveAudioClipFrameRange(item.meta, safeFps);
       if (frame < range.startFrame || frame > range.endFrame) continue;
       const buffer = await ensureAudioBufferLoaded(item.meta.localAssetId);
+      if (revision !== this.scrubRevision) return;
       if (!buffer) continue;
       const offset = (item.meta.trimStartSec ?? 0) + (frame - range.startFrame) / safeFps;
       if (offset < 0 || offset >= buffer.duration - 0.01) continue;

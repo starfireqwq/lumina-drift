@@ -33,7 +33,7 @@ import {
 } from 'pixi.js';
 import { compressTileBuffer, decompressTileBuffer, DEFAULT_TILE_SIZE, type Affine2D, type BlendMode, type LayerModel, type TileCoord, type TileData } from '@atelier/shared';
 import { normalizeTileBytes } from './TileEngine';
-import { applyMagFilter, ATLAS_MIP_LEVELS, GUTTER, TileAtlas, type MagFilter, type Slot } from './TileAtlas';
+import { applyMagFilter, ATLAS_MIP_LEVELS, GUTTER, PITCH, TileAtlas, type MagFilter, type Slot } from './TileAtlas';
 import { fullMipLevels, MipmapView } from './MipmapView';
 import { decodeTiles } from './commitWorkers';
 
@@ -344,16 +344,32 @@ export class LayerManager {
   private evictingOffscreen = false;
   private thumbsPaused = false;
   private destroyed = false;
+  private readonly hiddenTileBudget: number;
+  private readonly softGpuTileLimit: number;
+  private readonly viewThawThreshold: number;
+  private readonly prefetchLayers: number;
+  private readonly scratchIdleMs: number;
+  private readonly visiblePages = new Set<number>();
 
-  constructor(renderer: Renderer, width: number, height: number, bgColor: string = '#FFFFFF') {
+  constructor(renderer: Renderer, width: number, height: number, bgColor: string = '#FFFFFF', private readonly solo = false) {
     this.renderer = renderer;
     this.canvasWidth = width;
     this.canvasHeight = height;
     this.cols = Math.ceil(width / TS);
     this.rows = Math.ceil(height / TS);
     this.lastBgColor = bgColor || '#FFFFFF';
+    const memory = (globalThis.navigator as (Navigator & { deviceMemory?: number }) | undefined)?.deviceMemory ?? 8;
+    const screen = globalThis.screen;
+    const phone = screen && Math.min(screen.width, screen.height) < 600;
+    const constrained = solo && (phone || memory <= 4);
+    const hiddenMiB = constrained ? Math.max(12, Math.min(memory * 8, 32)) : 48;
+    this.hiddenTileBudget = solo ? Math.min(HIDDEN_TILE_BUDGET, hiddenMiB * 1048576) : HIDDEN_TILE_BUDGET;
+    this.softGpuTileLimit = constrained ? Math.max(128, Math.min(512, memory * 96)) : SOFT_GPU_TILE_LIMIT;
+    this.viewThawThreshold = constrained ? 16 : solo ? 64 : VIEW_THAW_TILE_THRESHOLD;
+    this.prefetchLayers = constrained ? 1 : solo ? 2 : Infinity;
     this.mips = new MipmapView(renderer);
-    this.atlas = new TileAtlas(renderer, this.mips);
+    this.atlas = new TileAtlas(renderer, this.mips, constrained ? 4 : undefined);
+    this.scratchIdleMs = constrained ? 3000 : SCRATCH_IDLE_MS;
 
     this.rootContainer = new Container();
 
@@ -703,11 +719,25 @@ export class LayerManager {
    */
   public prepareView(scale: number) {
     if (!this.mips.supported) return;
-    if (scale >= 1 || this.magFilter === 'nearest') {
+    // Bilinear already covers all texels cleanly near 100%; enabling trilinear mip level 1 between
+    // 85% and 99% needlessly blurs crisp lineart, so only activate mipmaps below 85%.
+    if (scale >= 0.85 || this.magFilter === 'nearest') {
+      this.mips.suspend();
       this.mips.releaseIdle(MIP_IDLE_MS);
       return;
     }
-    for (const rt of this.atlas.pageTextures()) this.mips.ensure(rt.source, ATLAS_MIP_LEVELS);
+    if (this.solo) {
+      const pages = this.visiblePages;
+      pages.clear();
+      const addPages = (item: LayerItem) => {
+        for (const tile of item.gpu?.values() ?? []) if (tile.sprite.visible) pages.add(tile.slot.page);
+      };
+      for (const item of this.layersMap.values()) if (item.shown) addPages(item);
+      addPages(this.preview);
+      for (const rt of this.atlas.pageTextures(pages)) this.mips.ensure(rt.source, ATLAS_MIP_LEVELS, PITCH);
+    } else {
+      for (const rt of this.atlas.pageTextures()) this.mips.ensure(rt.source, ATLAS_MIP_LEVELS, PITCH);
+    }
     for (const item of this.layersMap.values()) if (item.shown) this.ensureResidentMips(item);
     this.ensureResidentMips(this.preview);
   }
@@ -1377,6 +1407,20 @@ export class LayerManager {
     });
   }
 
+  /** True only when an unchanged CPU snapshot proves the current tile still matches. */
+  public matchesCachedTile(layerId: string, tile: TileData): boolean {
+    const item = this.layersMap.get(layerId);
+    if (!item || item.rt) return false;
+    const key = keyOf(tile.col, tile.row);
+    if (item.bak?.has(key)) return false;
+    const cached = item.gpu
+      ? item.cleanCache.get(key) ?? item.coldTiles.get(key)
+      : item.cpu?.get(key);
+    if (!cached || cached.w !== tile.width || cached.h !== tile.height || cached.compression !== tile.compression) return false;
+    const bytes = normalizeTileBytes(tile.data);
+    return cached.data.length === bytes.length && cached.data.every((value, index) => value === bytes[index]);
+  }
+
   /** Raw tiles (premultiplied) of a layer, read without stalling; `before` = as of the last sync */
   public readTilesAsync(layerId: string, coords: TileCoord[], which: 'after' | 'before' = 'after'): Promise<TileData[]> {
     const sizes = coords.map((c) => (c.col >= 0 && c.row >= 0 && c.col < this.cols && c.row < this.rows ? this.tileSize(c.col, c.row) : { w: 0, h: 0 }));
@@ -1624,15 +1668,15 @@ export class LayerManager {
     item.cleanCache.clear();
     const gpu = new Map<string, GpuTile>();
     const now = performance.now();
-    const viewCullWarm = Boolean(this.viewBounds && entries.length > VIEW_THAW_TILE_THRESHOLD);
+    const viewCullWarm = this.shouldThawByViewport(item, entries.length);
     entries.forEach(([key, t], i) => {
-      const raw = raws[i];
-      if (!raw) return;
       const [col, row] = key.split('_').map(Number);
       if (viewCullWarm && !this.isTileInView(col, row)) {
         item.coldTiles.set(key, t);
         return;
       }
+      const raw = raws[i] ?? (viewCullWarm ? decodeTile(t, SCRATCH) : null);
+      if (!raw || isEmpty(raw)) return;
       const tile = this.makeTile(item, col, row);
       tile.lastSeenMs = now;
       this.atlas.writePixels(tile.slot, raw, 0, 0, t.w, t.h, tile.w, tile.h);
@@ -1646,13 +1690,19 @@ export class LayerManager {
     this.rebuildDisplay(item);
   }
 
+  private shouldThawByViewport(item: LayerItem, tileCount: number) {
+    const transform = (item.model as LayerModel & { renderTransform?: Affine2D }).renderTransform;
+    return this.viewBounds !== null && tileCount > this.viewThawThreshold &&
+      (!this.solo || !transform || transform.isIdentity);
+  }
+
   /** Cold → warm now (a layer that comes on screen; prefetch() does this ahead, off the main thread) */
   private thaw(item: LayerItem) {
     item.coldTiles.clear();
     item.cleanCache.clear();
     const gpu = new Map<string, GpuTile>();
     const now = performance.now();
-    const viewCullThaw = Boolean(this.viewBounds && (item.cpu?.size ?? 0) > VIEW_THAW_TILE_THRESHOLD);
+    const viewCullThaw = this.shouldThawByViewport(item, item.cpu?.size ?? 0);
     for (const [key, t] of item.cpu ?? []) {
       const [col, row] = key.split('_').map(Number);
       if (viewCullThaw && !this.isTileInView(col, row)) {
@@ -1678,17 +1728,31 @@ export class LayerManager {
    * next animation frames). A layer shown before its decode lands is thawed on the spot instead.
    */
   public prefetch(layerIds: string[]) {
+    let available = this.prefetchLayers;
+    for (const item of this.layersMap.values()) if (item.decoding) available--;
     for (const id of layerIds) {
+      if (available <= 0) break;
       const item = this.layersMap.get(id);
       if (!item || item.rt || item.gpu || item.decoding || !item.cpu?.size) continue;
+      available--;
       item.decoding = true;
       const version = item.version;
       const entries = [...item.cpu];
-      void decodeTiles(entries.map(([, t]) => ({ data: t.data, compression: t.compression, w: t.w, h: t.h })))
+      const byViewport = this.solo && this.shouldThawByViewport(item, entries.length);
+      const selected = byViewport ? entries.filter(([key]) => {
+        const [col, row] = key.split('_').map(Number);
+        return this.isTileInView(col, row);
+      }) : entries;
+      void decodeTiles(selected.map(([, t]) => ({ data: t.data, compression: t.compression, w: t.w, h: t.h })))
         .then((raws) => {
           item.decoding = false;
           if (item.destroyed || item.rt || item.gpu || item.version !== version) return;
-          this.warmFrom(item, entries, raws);
+          if (byViewport) {
+            const decoded = new Map(selected.map(([key], index) => [key, raws[index]]));
+            this.warmFrom(item, entries, entries.map(([key]) => decoded.get(key) ?? null));
+          } else {
+            this.warmFrom(item, entries, raws);
+          }
           item.lastShown = performance.now(); // just fetched: not the first to go back to the CPU
         })
         .catch(() => {
@@ -1895,7 +1959,7 @@ export class LayerManager {
 
   private tick = () => {
     const now = performance.now();
-    if (this.compositeRT && now - this.compositeUsed > SCRATCH_IDLE_MS) {
+    if (this.compositeRT && now - this.compositeUsed > this.scratchIdleMs) {
       this.compositeRT.destroy(true);
       this.compositeRT = null;
     }
@@ -1936,12 +2000,12 @@ export class LayerManager {
       for (const t of item.gpu!.values()) hiddenBytes += t.w * t.h * 4;
       if (!freeze || item.lastShown < freeze.lastShown) freeze = item;
     }
-    if (freeze && hiddenBytes > HIDDEN_TILE_BUDGET) {
+    if (freeze && hiddenBytes > this.hiddenTileBudget) {
       // Unedited since it came from the CPU (animation playback): just let the GPU copy go
       if (freeze.cpu) {
         // …and the next least recently shown ones too while over budget, as long as they are as cheap
         for (const item of [...this.layersMap.values()].filter((i) => frozen(i) && i.cpu).sort((a, b) => a.lastShown - b.lastShown)) {
-          if (hiddenBytes <= HIDDEN_TILE_BUDGET) break;
+          if (hiddenBytes <= this.hiddenTileBudget) break;
           for (const t of item.gpu!.values()) hiddenBytes -= t.w * t.h * 4;
           this.dropGpuTiles(item);
           this.rebuildDisplay(item);
@@ -1957,8 +2021,8 @@ export class LayerManager {
     if (!this.evictingOffscreen && this.viewBounds && !this.isActivelyDrawing()) {
       let totalGpuTiles = 0;
       for (const item of this.layersMap.values()) totalGpuTiles += item.gpu?.size ?? 0;
-      if (totalGpuTiles > SOFT_GPU_TILE_LIMIT) {
-        this.evictOffscreenGpuTiles(totalGpuTiles - SOFT_GPU_TILE_LIMIT);
+      if (totalGpuTiles > this.softGpuTileLimit) {
+        this.evictOffscreenGpuTiles(totalGpuTiles - this.softGpuTileLimit);
       }
     }
   };
@@ -2852,7 +2916,7 @@ export class LayerManager {
     const prev = this.thumbQueue.get(layerId);
     // Always render thumbnails asynchronously on the queue so WebSocket/op handlers and active drawing never block
     this.thumbQueue.set(layerId, { w: thumbWidth, h: thumbHeight, local: Boolean(prev?.local || local) });
-    if (!this.thumbTimer) {
+    if (!this.thumbTimer && !this.thumbsPaused) {
       const elapsed = this.lastLocalDrawAt > 0 ? performance.now() - this.lastLocalDrawAt : Infinity;
       const waitMs = local
         ? (elapsed < 650 ? Math.max(250, 650 - elapsed) : 60)
@@ -2884,6 +2948,10 @@ export class LayerManager {
   /** Pauses background layer thumbnail generation (e.g., while playing an animation) to keep frame times flat */
   public setThumbnailsPaused(paused: boolean) {
     this.thumbsPaused = paused;
+    if (paused && this.thumbTimer) {
+      clearTimeout(this.thumbTimer);
+      this.thumbTimer = null;
+    }
     if (!paused && this.thumbQueue.size > 0 && !this.thumbTimer && !this.destroyed) {
       this.thumbTimer = setTimeout(this.drainThumbs, 60);
     }
@@ -2892,10 +2960,7 @@ export class LayerManager {
   private drainThumbs = () => {
     this.thumbTimer = null;
     if (this.destroyed) return;
-    if (this.thumbsPaused) {
-      if (this.thumbQueue.size > 0) this.thumbTimer = setTimeout(this.drainThumbs, 350);
-      return;
-    }
+    if (this.thumbsPaused) return;
     const now = performance.now();
     // Pick a local/active item first so user feedback stays snappy while remote thumbs yield
     let picked: [string, { w: number; h: number; local: boolean }] | undefined;
