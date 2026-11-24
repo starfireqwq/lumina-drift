@@ -1,8 +1,9 @@
-import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronRight, GripVertical, MoreVertical, PanelBottom, PanelLeft, PanelRight, Square, X } from 'lucide-react';
-import { DockSide, dockActions, FloatRect, getDockLayout, PanelId, PanelPlace, PANEL_TITLES, useDockLayout, useFloatsAllowed } from './dockStore';
+import { DockSide, dockActions, FloatRect, getDockLayout, isToolDockPanel, PanelId, PanelPlace, PANEL_TITLES, type ToolDockPanelId, useDockLayout, useFloatsAllowed } from './dockStore';
 import { getUiScale, useUiScale } from '../../theme/uiScale';
+import { useI18n } from '../../context/I18nContext';
 
 export interface PanelDef {
   id: PanelId;
@@ -11,6 +12,19 @@ export interface PanelDef {
   render: () => React.ReactNode;
   /** Small badge text next to the title (e.g. member count) */
   badge?: React.ReactNode;
+  onClose?: () => void;
+}
+
+export function ToolDockSlot({ host }: { host: HTMLElement }) {
+  const slot = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const node = slot.current;
+    node?.appendChild(host);
+    return () => {
+      if (node && host.parentNode === node) node.removeChild(host);
+    };
+  }, [host]);
+  return <div ref={slot} className="contents" />;
 }
 
 const PLACE_OPTIONS: Array<{ place: PanelPlace; label: string; icon: React.ReactNode }> = [
@@ -100,6 +114,7 @@ const findTarget = (x: number, y: number, source: DragSource, floats: boolean, e
   }
   const layout = getDockLayout();
   const moving: PanelId[] = source.kind === 'panel' ? [source.id] : source.ids;
+  const dockableTool = source.kind === 'panel' && isToolDockPanel(source.id);
   const myGroup = source.kind === 'group' ? source.group : null;
   // The window being moved must not hide what is under the pointer
   if (exclude) exclude.style.pointerEvents = 'none';
@@ -109,7 +124,7 @@ const findTarget = (x: number, y: number, source: DragSource, floats: boolean, e
   // 1. Another floating window: join it as a tab (a tab dropped back on its own window: nothing)
   const win = hit?.closest<HTMLElement>('[data-float-group]');
   const winGroup = win?.getAttribute('data-float-group');
-  if (win && winGroup && winGroup !== myGroup && floats) {
+  if (!dockableTool && win && winGroup && winGroup !== myGroup && floats) {
     if (source.kind === 'panel' && layout.panels[source.id].place === 'float' && layout.panels[source.id].group === winGroup) return null;
     const leader = layout.order.find((id) => layout.panels[id].place === 'float' && layout.panels[id].visible && layout.panels[id].group === winGroup);
     if (leader) return { kind: 'tab', group: winGroup, leader, zone: win.getBoundingClientRect() };
@@ -118,7 +133,7 @@ const findTarget = (x: number, y: number, source: DragSource, floats: boolean, e
   // 2. An existing dock: insert between its panels
   const dockEl = hit?.closest<HTMLElement>('[data-dock-side]');
   const dockSide = dockEl?.getAttribute('data-dock-side') as DockSide | null;
-  if (dockEl && dockSide) {
+  if (dockEl && dockSide && (!dockableTool || dockSide !== 'bottom')) {
     const vertical = dockSide !== 'bottom';
     const sections = Array.from(dockEl.querySelectorAll<HTMLElement>('[data-panel]')).filter((s) => !moving.includes(s.dataset.panel as PanelId));
     let index = sections.length;
@@ -141,7 +156,7 @@ const findTarget = (x: number, y: number, source: DragSource, floats: boolean, e
     const w = Math.min(layout.dockSize.left, 300);
     if (x < center.left + EDGE) return { kind: 'dock', side: 'left', index: 99, zone: box(center.left, center.top, w, center.height) };
     if (x > center.right - EDGE) return { kind: 'dock', side: 'right', index: 99, zone: box(center.right - w, center.top, w, center.height) };
-    if (y > center.bottom - EDGE) return { kind: 'dock', side: 'bottom', index: 99, zone: box(center.left, center.bottom - layout.dockSize.bottom, center.width, layout.dockSize.bottom) };
+    if (!dockableTool && y > center.bottom - EDGE) return { kind: 'dock', side: 'bottom', index: 99, zone: box(center.left, center.bottom - layout.dockSize.bottom, center.width, layout.dockSize.bottom) };
   }
 
   // 4. Anywhere else: a floating window (a moving window simply stays where it was dropped)
@@ -163,6 +178,14 @@ const applyDrop = (source: DragSource, target: DropTarget | null) => {
     dockActions.setActiveTab(target.group, ids[0]);
   } else if (target.kind === 'float' && source.kind === 'panel') dockActions.floatAt(source.id, target.rect);
 };
+
+export function dragDockableTool(id: ToolDockPanelId, label: string, e: PointerEvent, windowEl: HTMLElement | null, done: boolean) {
+  const source = { kind: 'panel', id } as const;
+  const hit = e.type === 'pointercancel' ? null : findTarget(e.clientX, e.clientY, source, true, windowEl);
+  const target = hit?.kind === 'dock' ? hit : null;
+  setDrag(done ? null : { source, label, x: e.clientX, y: e.clientY, target });
+  if (done) applyDrop(source, target);
+}
 
 /**
  * Pointer-down handler that turns into a panel / rail drag after a few pixels of movement, so a plain
@@ -251,13 +274,15 @@ export const RailGrip: React.FC = () => {
   );
 };
 
-const PanelMenu: React.FC<{ id: PanelId; place: PanelPlace }> = ({ id, place }) => {
+const PanelMenu: React.FC<{ id: PanelId; place: PanelPlace; onClose?: () => void }> = ({ id, place, onClose }) => {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const layout = useDockLayout();
   const floats = useFloatsAllowed();
   const myGroup = layout.panels[id].group;
   // Other floating windows this panel can join as a tab (one entry per window, named by its tabs)
-  const windows = floats ? Array.from(new Set(layout.order.filter((p) => layout.panels[p].visible && layout.panels[p].place === 'float').map((p) => layout.panels[p].group)))
+  const isTool = isToolDockPanel(id);
+  const windows = floats && !isTool ? Array.from(new Set(layout.order.filter((p) => !isToolDockPanel(p) && layout.panels[p].visible && layout.panels[p].place === 'float').map((p) => layout.panels[p].group)))
     .filter((g) => !(place === 'float' && g === myGroup))
     .map((g) => {
       const members = layout.order.filter((p) => layout.panels[p].place === 'float' && layout.panels[p].visible && layout.panels[p].group === g);
@@ -298,11 +323,11 @@ const PanelMenu: React.FC<{ id: PanelId; place: PanelPlace }> = ({ id, place }) 
             top: Math.max(4, Math.min(anchor.bottom + 4, window.innerHeight - menuHeight - 4)),
             maxHeight: menuHeight,
           }}>
-          {PLACE_OPTIONS.filter((o) => floats || o.place !== 'float').map((o) => (
+          {PLACE_OPTIONS.filter((o) => (floats || o.place !== 'float') && (!isTool || o.place !== 'bottom')).map((o) => (
             <button key={o.place} type="button" role="menuitemradio" aria-checked={place === o.place}
               onClick={() => { dockActions.moveTo(id, o.place); setOpen(false); }}
               className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs ${place === o.place ? 'bg-indigo-600 text-white' : 'text-neutral-200 hover:bg-neutral-800'}`}>
-              {o.icon}<span>{o.label}</span>
+              {o.icon}<span>{!isTool ? o.label : o.place === 'left' ? t.toolOptions.dockToolLeft : o.place === 'right' ? t.toolOptions.dockToolRight : t.toolOptions.floatTool}</span>
             </button>
           ))}
           {windows.length > 0 && (
@@ -322,8 +347,8 @@ const PanelMenu: React.FC<{ id: PanelId; place: PanelPlace }> = ({ id, place }) 
             </button>
           )}
           <div className="my-1 h-px bg-neutral-700/70" />
-          <button type="button" role="menuitem" onClick={() => { dockActions.hide(id); setOpen(false); }} className={item}>
-            <X className="h-3.5 w-3.5" /><span>隱藏</span>
+          <button type="button" role="menuitem" onClick={() => { if (onClose) onClose(); else dockActions.hide(id); setOpen(false); }} className={item}>
+            <X className="h-3.5 w-3.5" /><span>{isTool ? t.common.close : '隱藏'}</span>
           </button>
         </div>, document.body
       )}
@@ -354,9 +379,9 @@ const PanelHeader: React.FC<{
     <span className="truncate font-semibold text-neutral-100">{def.title}</span>
     {def.badge}
     <div className="ml-auto flex items-center" onPointerDown={(e) => e.stopPropagation()}>
-      <PanelMenu id={def.id} place={place} />
+      <PanelMenu id={def.id} place={place} onClose={def.onClose} />
       <button type="button" aria-label={`隱藏${def.title}`} title="隱藏（「視窗」選單可再開啟）"
-        onClick={() => dockActions.hide(def.id)} className="atelier-icon-btn h-6 w-6">
+        onClick={() => def.onClose ? def.onClose() : dockActions.hide(def.id)} className="atelier-icon-btn h-6 w-6">
         <X className="h-3.5 w-3.5" />
       </button>
     </div>
@@ -370,7 +395,7 @@ const placeOf = (layout: ReturnType<typeof useDockLayout>, id: PanelId, floats: 
 const visiblePanels = (panels: PanelDef[], place: PanelPlace, layout: ReturnType<typeof useDockLayout>, floats = true) =>
   layout.order
     .map((id) => panels.find((p) => p.id === id))
-    .filter((p): p is PanelDef => Boolean(p && layout.panels[p.id].visible && placeOf(layout, p.id, floats) === place));
+    .filter((p): p is PanelDef => Boolean(p && (isToolDockPanel(p.id) || layout.panels[p.id].visible) && placeOf(layout, p.id, floats) === place));
 
 /** Splitter between two expanded panels: drags their flex weights. */
 const Splitter: React.FC<{ a: PanelId; b: PanelId; vertical: boolean; containerRef: React.RefObject<HTMLDivElement | null> }> = ({ a, b, vertical, containerRef }) => {
@@ -696,22 +721,78 @@ export const FloatingPanels: React.FC<{ panels: PanelDef[] }> = ({ panels }) => 
   );
 };
 
-/** Phone layout: one panel at a time in a bottom sheet. */
-export const MobilePanelSheet: React.FC<{ def: PanelDef | null; onClose: () => void }> = ({ def, onClose }) => {
+/** Phone & non-desktop tablet layout: one panel at a time in a frosted slide-up or slide-out drawer. */
+export type MobilePanelDef = Omit<PanelDef, 'id'> & { id: PanelId | 'toolPicker' };
+
+export const MobilePanelSheet: React.FC<{
+  def: MobilePanelDef | null;
+  placement?: 'bottom' | 'right';
+  quickTabs?: Array<{ id: MobilePanelDef['id']; label: string; icon: React.ReactNode }>;
+  onSelectTab?: (id: MobilePanelDef['id']) => void;
+  onClose: () => void;
+}> = ({ def, placement = 'bottom', quickTabs, onSelectTab, onClose }) => {
+  const { t } = useI18n();
   if (!def) return null;
+  const isRight = placement === 'right';
   return (
-    <div className="fixed inset-0 z-[60] flex flex-col justify-end" role="dialog" aria-label={def.title}>
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div className="relative flex max-h-[70dvh] min-h-[40dvh] flex-col rounded-t-2xl border-t border-neutral-700 bg-neutral-900 shadow-2xl"
-        style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
-        <div className="mx-auto mt-2 h-1 w-10 rounded-full bg-neutral-600" />
-        <div className="flex h-10 items-center gap-2 border-b border-neutral-700/70 px-3 text-sm font-semibold text-neutral-100">
-          <span className="text-indigo-400 [&>svg]:h-4 [&>svg]:w-4">{def.icon}</span>
-          <span>{def.title}</span>
-          <button type="button" onClick={onClose} aria-label="關閉" className="atelier-icon-btn ml-auto h-8 w-8">
+    <div
+      data-mobile-panel={def.id}
+      data-drawer-placement={placement}
+      className={`fixed inset-0 z-[60] flex ${isRight ? 'justify-end' : 'flex-col justify-end'}`}
+      role="dialog"
+      aria-label={def.title}
+    >
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-[1px]" onClick={onClose} />
+      <div
+        className={
+          isRight
+            ? 'atelier-popover relative flex h-full w-[min(360px,88vw)] min-h-0 flex-col border-l border-neutral-700/80 bg-neutral-900/92 backdrop-blur-xl shadow-2xl'
+            : 'atelier-popover relative flex max-h-[min(78dvh,100%)] min-h-0 flex-col rounded-t-2xl border-t border-neutral-700/80 bg-neutral-900/92 backdrop-blur-xl shadow-2xl'
+        }
+        style={
+          isRight
+            ? {
+                paddingTop: 'env(safe-area-inset-top, 0px)',
+                paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+                paddingRight: 'env(safe-area-inset-right, 0px)',
+              }
+            : {
+                paddingBottom: 'env(safe-area-inset-bottom, 0px)',
+                paddingLeft: 'env(safe-area-inset-left, 0px)',
+                paddingRight: 'env(safe-area-inset-right, 0px)',
+              }
+        }
+      >
+        {!isRight && <div className="mx-auto mt-2 h-1 w-10 rounded-full bg-neutral-600" />}
+        <div className="flex h-11 shrink-0 items-center gap-2 border-b border-neutral-700/70 px-3 text-sm font-semibold text-neutral-100">
+          <span className="shrink-0 text-indigo-400 [&>svg]:h-4 [&>svg]:w-4">{def.icon}</span>
+          <span className="min-w-0 truncate">{def.title}</span>
+          <button type="button" onClick={onClose} aria-label={t.common.close} className="atelier-icon-btn ml-auto h-8 w-8 shrink-0">
             <X className="h-4 w-4" />
           </button>
         </div>
+        {quickTabs && quickTabs.length > 0 && onSelectTab && (
+          <div className="no-scrollbar flex shrink-0 items-center gap-1 overflow-x-auto border-b border-neutral-800/80 px-2 py-1.5">
+            {quickTabs.map((tab) => {
+              const active = tab.id === def.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => onSelectTab(tab.id)}
+                  className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-medium transition ${
+                    active
+                      ? 'bg-indigo-500/25 text-white ring-1 ring-indigo-400/70'
+                      : 'text-neutral-400 hover:bg-white/5 hover:text-neutral-200'
+                  }`}
+                >
+                  <span className="[&>svg]:h-3.5 [&>svg]:w-3.5">{tab.icon}</span>
+                  <span>{tab.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
         <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">{def.render()}</div>
       </div>
     </div>

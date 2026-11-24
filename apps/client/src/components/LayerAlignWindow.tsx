@@ -135,6 +135,7 @@ export const AlignWindowIcon: React.FC<{ className?: string }> = ({ className = 
 const EMPTY_GUIDES: AlignGuideSummary = { xs: [], ys: [], usingSelection: false, totalCount: 0 };
 
 interface LayerAlignWindowProps {
+  embedded?: boolean;
   targetLabel: string | null;
   targetCount: number;
   blocker: AlignBlocker | null;
@@ -197,6 +198,7 @@ function CompactToggle<T extends string>({
  * 2+ targets evenly along edges, centres, or equal gaps.
  */
 export default function LayerAlignWindow({
+  embedded,
   targetLabel,
   targetCount,
   blocker,
@@ -333,7 +335,7 @@ export default function LayerAlignWindow({
 
   return (
     <>
-      <ToolWindow id="layer-align" icon={<AlignWindowIcon />}
+      <ToolWindow id="layer-align" icon={<AlignWindowIcon />} dockPanel="align" embedded={embedded}
         title={
           <span className="inline-flex min-w-0 max-w-full items-baseline gap-1.5">
             <span className="shrink-0">{t.align.title}</span>

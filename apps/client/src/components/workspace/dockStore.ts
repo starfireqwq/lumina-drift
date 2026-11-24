@@ -6,7 +6,9 @@ import { getUiScale, onUiRescale } from '../../theme/uiScale';
  * Panel docking layout (CSP / Krita style): every panel lives in the left, right or bottom dock,
  * or floats as a resizable window. Shared by the top bar's 視窗 menu and the workspace.
  */
-export type PanelId = 'color' | 'brushToolset' | 'toolProps' | 'layers' | 'members' | 'oplog' | 'quickKeys';
+export type ToolDockPanelId = 'filters' | 'align';
+export type PanelId = 'color' | 'brushToolset' | 'toolProps' | 'layers' | 'members' | 'oplog' | 'quickKeys' | ToolDockPanelId;
+export const isToolDockPanel = (id: PanelId): id is ToolDockPanelId => id === 'filters' || id === 'align';
 export type DockSide = 'left' | 'right' | 'bottom';
 export type PanelPlace = DockSide | 'float';
 
@@ -48,6 +50,7 @@ export const TOOL_RAIL_WIDTH_MAX = 220;
 const clampNum = (v: number, min: number, max: number) => Math.max(min, Math.min(max, Math.round(v)));
 
 export const PANEL_IDS: PanelId[] = ['color', 'brushToolset', 'toolProps', 'layers', 'members', 'oplog', 'quickKeys'];
+const LAYOUT_PANEL_IDS: PanelId[] = [...PANEL_IDS, 'filters', 'align'];
 
 const LAYOUT_VERSION = 4;
 const STORAGE_KEY = 'atelier_dock_layout';
@@ -63,8 +66,10 @@ const defaultLayout = (): DockLayoutState => ({
     oplog: { visible: false, place: 'bottom', collapsed: false, weight: 1, float: { x: 240, y: 200, w: 320, h: 260 }, group: 'oplog' },
     // CSP's edge keyboard: big shortcut buttons, off until opened from 視窗
     quickKeys: { visible: false, place: 'left', collapsed: false, weight: 1, float: { x: 80, y: 140, w: 240, h: 320 }, group: 'quickKeys' },
+    filters: { visible: false, place: 'float', collapsed: false, weight: 1, float: { x: -352, y: 96, w: 340, h: 420 }, group: 'filters' },
+    align: { visible: false, place: 'float', collapsed: false, weight: 1, float: { x: -304, y: 132, w: 280, h: 420 }, group: 'align' },
   },
-  order: [...PANEL_IDS],
+  order: [...LAYOUT_PANEL_IDS],
   dockSize: { left: 260, right: 300, bottom: 190 },
   activeTab: {},
   desktopMode: false,
@@ -82,7 +87,7 @@ const load = (): DockLayoutState => {
     const base = defaultLayout();
     const scale = getUiScale();
     const mergedPanels = { ...base.panels, ...parsed.panels };
-    const order = parsed.order.filter((id) => PANEL_IDS.includes(id));
+    const order = parsed.order.filter((id) => LAYOUT_PANEL_IDS.includes(id));
     if (!parsed.panels.brushToolset) {
       const props = mergedPanels.toolProps;
       mergedPanels.brushToolset = { ...base.panels.brushToolset, place: props.place, group: props.group, float: props.float };
@@ -104,7 +109,7 @@ const load = (): DockLayoutState => {
       ...base,
       ...parsed,
       panels: mergedPanels,
-      order: [...order, ...PANEL_IDS.filter((id) => !order.includes(id))],
+      order: [...order, ...LAYOUT_PANEL_IDS.filter((id) => !order.includes(id))],
       dockSize: { ...base.dockSize, ...parsed.dockSize },
       activeTab: parsed.activeTab ?? {},
       desktopMode: Boolean(parsed.desktopMode),
@@ -199,7 +204,7 @@ export const dockActions = {
   /** Left and right docks trade places (the whole panel column moves to the other side) */
   swapDocks: () => {
     const panels = { ...state.panels };
-    for (const id of PANEL_IDS) {
+    for (const id of LAYOUT_PANEL_IDS) {
       const place = panels[id].place;
       if (place === 'left' || place === 'right') panels[id] = { ...panels[id], place: place === 'left' ? 'right' : 'left' };
     }
@@ -229,7 +234,7 @@ export const dockActions = {
 const scaledLayout = (s: DockLayoutState, factor: number): DockLayoutState => {
   if (factor === 1) return s;
   const panels = { ...s.panels };
-  for (const id of PANEL_IDS) {
+  for (const id of LAYOUT_PANEL_IDS) {
     const f = panels[id].float;
     panels[id] = { ...panels[id], float: { ...f, w: Math.round(f.w * factor), h: Math.round(f.h * factor) } };
   }
@@ -261,7 +266,8 @@ const isPhoneScreen = () => typeof window !== 'undefined' && Math.min(window.scr
 export const usePhoneLayout = () => {
   const layout = useDockLayout();
   const narrow = useMediaQuery('(max-width: 767px)');
-  return isPhoneScreen() ? !layout.desktopMode : narrow;
+  const touchLandscape = useMediaQuery('(any-pointer: coarse) and (max-height: 599px) and (orientation: landscape) and (max-width: 1100px)');
+  return isPhoneScreen() || touchLandscape ? !layout.desktopMode : narrow;
 };
 
 /**
@@ -275,6 +281,24 @@ export const useFloatsAllowed = () => {
   return layout.desktopMode || !touchUnder1280;
 };
 
+/**
+ * Touch tablet canvas-first layout: active on touch tablets (`(pointer: coarse)` under 1280px)
+ * when not in 桌面模式 and not already using phone layout. Never active on desktop/mouse screens.
+ */
+export const useTouchTabletLayout = () => {
+  const layout = useDockLayout();
+  const phone = usePhoneLayout();
+  const touchUnder1280 = useMediaQuery(TOUCH_UNDER_1280);
+  return !layout.desktopMode && !phone && touchUnder1280;
+};
+
+/** True when either phone layout or non-desktop touch tablet canvas-first mode is active. */
+export const useTouchCanvasMode = () => {
+  const phone = usePhoneLayout();
+  const tablet = useTouchTabletLayout();
+  return phone || tablet;
+};
+
 /** 桌面模式 matters on phones (layout) and touch tablets (floating); a mouse screen never needs it. */
 export const useDesktopModeAvailable = () => useMediaQuery(TOUCH_UNDER_1280) || isPhoneScreen();
 
@@ -286,4 +310,6 @@ export const PANEL_TITLES: Record<PanelId, string> = {
   members: '成員',
   oplog: '操作日誌',
   quickKeys: '快捷鍵面板',
+  filters: '濾鏡',
+  align: '對齊',
 };

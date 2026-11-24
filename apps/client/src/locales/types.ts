@@ -182,6 +182,14 @@ export interface Translations {
   };
 
   toolOptions: {
+    title: string;
+    confirmSoloFullFill: string;
+    fullFillTitle: string;
+    fullFillMessage: string;
+    applyFill: string;
+    dockToolLeft: string;
+    dockToolRight: string;
+    floatTool: string;
     size: string;
     opacity: string;
     flow: string;
@@ -378,6 +386,8 @@ export interface Translations {
     myCanvas: string;
     otherCanvas: string;
     renameCanvas: string;
+    closeCanvas: string;
+    closeCanvasHint: string;
     deleteCanvas: string;
     deleteCanvasTitle: string;
     deleteCanvasWarning: string;
@@ -521,6 +531,19 @@ export interface Translations {
     mergeBlockTextVector: string;
     mergeBlockOtherOwner: string;
     guestCannotPaste: string;
+    painterPrefix: string;
+    guidanceGuest: string;
+    guidanceLoginBtn: string;
+    guidanceViewer: string;
+    guidanceClaimPublic: string;
+    guidanceClaimBtn: string;
+    guidanceSwitchBtn: string;
+    guidanceLocked: string;
+    guidanceGroup: string;
+    guidanceOtherOwner: string;
+    guidanceNotDrawable: string;
+    guidanceNoDrawable: string;
+    guidanceCreateMyLayerBtn: string;
   };
 
   blendModes: {
@@ -1508,6 +1531,53 @@ export interface Translations {
     serverRemoteDesc: string;
     serverPlaceholder: string;
     tablistAria: string;
+    canvasCursorTitle: string;
+    showBrushCrosshair: string;
+    showBrushCrosshairDesc: string;
+    touchSimulatedPressure: string;
+    touchSimulatedPressureDesc: string;
+    motionTitle: string;
+    motionDesc: string;
+    motionOn: string;
+    motionAuto: string;
+    motionOff: string;
+    surfaceStyle: string;
+    surfaceStyleDesc: string;
+    surfaceSolid: string;
+    surfaceLiquidGlass: string;
+    surfaceFrostedMatte: string;
+    surfaceLuminaGlow: string;
+    surfaceSoftPaper: string;
+    themeAria: string;
+    themeCustom: string;
+    themePresetDark: string;
+    themePresetGray: string;
+    themePresetLight: string;
+    themePresetSakura: string;
+    themePresetMatcha: string;
+    themePresetMidnight: string;
+    themeBaseLabel: string;
+    themeBaseDark: string;
+    themeBaseGray: string;
+    themeBaseLight: string;
+    themeTintLabel: string;
+    themeTintStrengthAria: string;
+    themeTintColorAria: string;
+    themeAccentLabel: string;
+    themeAccentPresetsAria: string;
+    themeLowContrastWarn: string;
+    themeTransitionLabel: string;
+    themeAnimRipple: string;
+    themeAnimJelly: string;
+    themeAnimFade: string;
+    themeAnimNone: string;
+  };
+
+  touchUi: {
+    collapseSideControls: string;
+    expandSideControls: string;
+    collapseToolIsland: string;
+    expandToolIsland: string;
   };
 
   gateway: {

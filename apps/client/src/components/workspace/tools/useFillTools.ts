@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Container, Graphics, RenderTexture, Sprite, Texture } from 'pixi.js';
 import {
   compressTileBuffer,
@@ -6,7 +6,6 @@ import {
   getTileBounds,
   hexToRgb,
   LayerModel,
-  rasterizeLassoMask,
   ScopedUndoOp,
   TileData,
   ToolType,
@@ -14,8 +13,50 @@ import {
 import { applyColorOutline, type OutlineSettings } from '../../../engine/colorOutline';
 import { calculateBucketMask } from '../../../engine/commitWorkers';
 import { RulerManager } from '../../../engine/RulerManager';
+import type { AntiAliasLevel } from '../../../engine/BrushRenderer';
+import { OfflineSessionStore } from '../../../services/offlineStore';
 import type { ToolContext } from './toolContext';
 import { commitInOrder, diffTilesAsync } from './asyncTiles';
+
+function lassoCoverage(points: { x: number; y: number }[], width: number, height: number, antialias: AntiAliasLevel) {
+  let minX = width, minY = height, maxX = 0, maxY = 0;
+  for (const { x, y } of points) {
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  minX = Math.max(0, Math.floor(minX));
+  minY = Math.max(0, Math.floor(minY));
+  maxX = Math.min(width, Math.ceil(maxX));
+  maxY = Math.min(height, Math.ceil(maxY));
+  const w = maxX - minX;
+  const h = maxY - minY;
+  if (w < 1 || h < 1) return null;
+  const surface = document.createElement('canvas');
+  surface.width = w;
+  surface.height = h;
+  const context = surface.getContext('2d', { willReadFrequently: true });
+  if (!context) return null;
+  context.beginPath();
+  context.moveTo(points[0].x - minX, points[0].y - minY);
+  for (let i = 1; i < points.length; i++) context.lineTo(points[i].x - minX, points[i].y - minY);
+  context.closePath();
+  context.fill('evenodd');
+  const pixels = context.getImageData(0, 0, w, h).data;
+  surface.width = 0;
+  const coverage = new Uint8Array(w * h);
+  let painted = false;
+  for (let i = 0; i < coverage.length; i++) {
+    const alpha = pixels[i * 4 + 3];
+    coverage[i] = antialias === 'none' ? (alpha >= 128 ? 255 : 0)
+      : antialias === 'weak' ? Math.max(0, Math.min(255, (alpha - 64) * 2))
+      : antialias === 'strong' && alpha > 0 && alpha < 255 ? Math.round(alpha / 2 + 64)
+      : alpha;
+    painted ||= coverage[i] > 0;
+  }
+  return painted ? { x: minX, y: minY, w, h, coverage } : null;
+}
 
 /** Paint bucket (click flood fill or lasso fill, like CSP's fill sub tools) and AI smart fill. */
 export function useFillTools(ctx: ToolContext) {
@@ -32,6 +73,28 @@ export function useFillTools(ctx: ToolContext) {
   const [bucketExpand, setBucketExpand] = useState<number>(1);
   // 點擊填色 (flood fill) or 套索填色 (fill the drawn lasso shape), like CSP's fill sub tools
   const [bucketMode, setBucketMode] = useState<'click' | 'lasso'>('click');
+  const [confirmSoloFullFill, setConfirmSoloFullFill] = useState(() => {
+    try { return localStorage.getItem('atelier_confirm_solo_full_fill') === '1'; } catch { return false; }
+  });
+  const [fullFillLayer, setFullFillLayer] = useState<string | null>(null);
+  const resolveFullFill = useRef<((accepted: boolean) => void) | null>(null);
+  const finishFullFill = (accepted: boolean) => {
+    const resolve = resolveFullFill.current;
+    resolveFullFill.current = null;
+    setFullFillLayer(null);
+    resolve?.(accepted);
+  };
+  useEffect(() => {
+    finishFullFill(false);
+    return () => {
+      resolveFullFill.current?.(false);
+      resolveFullFill.current = null;
+    };
+  }, [canvas?.id, activeLayer?.id, ctx.currentTool]);
+  const updateConfirmSoloFullFill = (enabled: boolean) => {
+    setConfirmSoloFullFill(enabled);
+    try { localStorage.setItem('atelier_confirm_solo_full_fill', enabled ? '1' : '0'); } catch { /* use the current session */ }
+  };
   // AI Smart Enclose & Fill configuration
   const [referenceLayerId, setReferenceLayerId] = useState<string | null>(null);
   const [gapClosingRadius, setGapClosingRadius] = useState<number>(4);
@@ -57,19 +120,20 @@ export function useFillTools(ctx: ToolContext) {
     }
     const item = layerManagerRef.current.getLayerItem(layer.id);
     if (!item) return;
-    const mask = rasterizeLassoMask(pts, canvas.width, canvas.height);
-    if (!mask.activePixelCount) return;
+    const props = brushPropsRef.current || brushProps;
+    const mask = lassoCoverage(pts, canvas.width, canvas.height, props.antiAlias ?? 'medium');
+    if (!mask) return;
+    const { x: maskX, y: maskY, w: maskWidth, h: maskHeight, coverage } = mask;
     // α lock only recolours what is there: no ring around it
     const ring = outline?.enabled && !layer.alphaLocked ? outline : null;
     const margin = ring ? ring.width + 2 : 0;
-    const x = Math.max(0, mask.bounds.minX - margin);
-    const y = Math.max(0, mask.bounds.minY - margin);
-    const w = Math.min(canvas.width - 1, mask.bounds.maxX + margin) - x + 1;
-    const h = Math.min(canvas.height - 1, mask.bounds.maxY + margin) - y + 1;
+    const x = Math.max(0, mask.x - margin);
+    const y = Math.max(0, mask.y - margin);
+    const w = Math.min(canvas.width, mask.x + mask.w + margin) - x;
+    const h = Math.min(canvas.height, mask.y + mask.h + margin) - y;
     const coords = te.getDirtyTilesForBounds(x, y, x + w, y + h);
     const lm = layerManagerRef.current;
     const layerId = layer.id;
-    const props = brushPropsRef.current || brushProps;
     const selMask = sel.hasSelection() ? sel.getMaskArray() : null;
     // Read without stalling (a sparse layer stays sparse), fill on the CPU, write back; in order
     commitInOrder(
@@ -101,13 +165,13 @@ export function useFillTools(ctx: ToolContext) {
     const alphaLocked = Boolean(layer.alphaLocked);
     function fillLasso(px: Uint8Array) {
     const { r, g, b } = hexToRgb(props.color);
-    for (let row = 0; row < h; row++) {
-      for (let col = 0; col < w; col++) {
-        const ci = (y + row) * cw + (x + col);
-        let m = (mask.data[ci] / 255) * props.opacity;
+    for (let row = 0; row < maskHeight; row++) {
+      for (let col = 0; col < maskWidth; col++) {
+        const ci = (maskY + row) * cw + maskX + col;
+        let m = (coverage[row * maskWidth + col] / 255) * props.opacity;
         if (selMask) m *= selMask[ci] / 255;
         if (m <= 0) continue;
-        const i = (row * w + col) * 4;
+        const i = ((maskY - y + row) * w + maskX - x + col) * 4;
         const dstA = px[i + 3];
         if (alphaLocked) {
           // Recolour only: keep the existing alpha (premultiplied colour scaled to it)
@@ -250,7 +314,7 @@ export function useFillTools(ctx: ToolContext) {
 
   // Paint Bucket (Flood Fill) Tool
   const handleBucketFill = (screenX: number, screenY: number, targetLayer: LayerModel) => {
-    if (!canvas || !layerManagerRef.current || !viewportRef.current || !tileEngineRef.current || !pixiAppRef.current) return;
+    if (!canvas || resolveFullFill.current || !layerManagerRef.current || !viewportRef.current || !tileEngineRef.current || !pixiAppRef.current) return;
     const activeItem = layerManagerRef.current.getLayerItem(targetLayer.id);
     if (!activeItem) return;
 
@@ -269,6 +333,7 @@ export function useFillTools(ctx: ToolContext) {
     const reference = bucketReference;
     const refLayerId = bucketReference === 'specific' && bucketRefLayerId && lm.getLayerItem(bucketRefLayerId) ? bucketRefLayerId : layerId;
     const sel = selectionEngineRef.current;
+    const confirmWholeCanvas = !OfflineSessionStore.isOfflineCanvas(canvas.id) || confirmSoloFullFill;
 
     // Read → flood fill → paint → before/after, one fill after another (two quick clicks never
     // both read the layer from before the first). Reads never stall the page (they used to read the
@@ -313,6 +378,17 @@ export function useFillTools(ctx: ToolContext) {
       }
 
       const { minX, minY, maxX, maxY } = bounds;
+      if (confirmWholeCanvas && !maskArray && !selectionMask && opacity > 0) {
+        if (ctx.currentToolRef.current !== 'bucket' || activeLayerRef.current?.id !== layerId) return null;
+        const version = activeItem.version;
+        const accepted = await new Promise<boolean>((resolve) => {
+          resolveFullFill.current = resolve;
+          setFullFillLayer(targetLayer.name);
+        });
+        const liveLayer = activeLayerRef.current;
+        if (!accepted || layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== activeItem ||
+          activeItem.version !== version || !liveLayer || liveLayer.id !== layerId || !canEditPixels(liveLayer)) return null;
+      }
       const patchW = maxX - minX + 1;
       const patchH = maxY - minY + 1;
       if (patchW <= 0 || patchH <= 0) return null;
@@ -424,6 +500,8 @@ export function useFillTools(ctx: ToolContext) {
     bucketTolerance, setBucketTolerance,
     bucketExpand, setBucketExpand,
     bucketMode, setBucketMode,
+    confirmSoloFullFill, updateConfirmSoloFullFill,
+    fullFillLayer, finishFullFill,
     referenceLayerId, setReferenceLayerId,
     gapClosingRadius, setGapClosingRadius,
     expandRadius, setExpandRadius,

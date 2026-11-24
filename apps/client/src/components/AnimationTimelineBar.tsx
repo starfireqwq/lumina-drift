@@ -38,6 +38,7 @@ import { OverlayPresence } from './OverlayPresence';
 import { usePhoneLayout } from './workspace/dockStore';
 import { getUserColor } from '../utils/userColors';
 import { useI18n } from '../context/I18nContext';
+import { isReducedMotion } from '../theme/motion';
 
 /** What to put in a GIF / video / sequence: one folder (solo), every animation folder (team), or the whole picture */
 export type AnimationExportScope = 'folder' | 'folders' | 'all';
@@ -193,7 +194,7 @@ const onionSwatch = (mode: OnionMode, color: string) =>
     : mode === 'shade'
       ? `linear-gradient(135deg, color-mix(in srgb, ${color} 30%, black), ${color} 50%, color-mix(in srgb, ${color} 25%, white))`
       : 'linear-gradient(135deg, #262626, #a3a3a3 55%, #f5f5f5)';
-const prefersReducedMotion = () => typeof window !== 'undefined' && Boolean(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches);
+const prefersReducedMotion = isReducedMotion;
 
 /**
  * CSP-style timeline: one row per animation folder, one column per frame. A cel spans as many
@@ -214,7 +215,7 @@ const AnimThumbImg: React.FC<{
     subscribeThumbnails ?? noopSubscribe,
     () => (getThumbnailsSnapshot ? getThumbnailsSnapshot()[layerId] : thumbnails[layerId]),
   );
-  return url ? <img src={url} alt="" className={className} /> : null;
+  return url ? <img src={url} alt="" loading="lazy" decoding="async" className={className} /> : null;
 };
 
 export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({

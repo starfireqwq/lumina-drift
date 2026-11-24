@@ -4,6 +4,27 @@
  */
 export type ThemeBase = 'dark' | 'gray' | 'light';
 export type ThemeId = 'dark' | 'gray' | 'light' | 'sakura' | 'matcha' | 'midnight' | 'custom';
+export type SurfaceStyle = 'solid' | 'liquid-glass' | 'frosted-matte' | 'lumina-glow' | 'soft-paper';
+
+export interface SurfaceStylePreset {
+  id: SurfaceStyle;
+  fallbackLabel: string;
+}
+
+export const DEFAULT_SURFACE_STYLE: SurfaceStyle = 'solid';
+
+export const SURFACE_STYLES: SurfaceStylePreset[] = [
+  { id: 'solid', fallbackLabel: '經典純淨' },
+  { id: 'liquid-glass', fallbackLabel: '液態玻璃' },
+  { id: 'frosted-matte', fallbackLabel: '柔霧磨砂' },
+  { id: 'lumina-glow', fallbackLabel: '流光霓虹' },
+  { id: 'soft-paper', fallbackLabel: '紙感軟擬態' },
+];
+
+export const SURFACE_STYLE_KEY = 'atelier_surface_style';
+
+export const isSurfaceStyle = (value: unknown): value is SurfaceStyle =>
+  typeof value === 'string' && SURFACE_STYLES.some((s) => s.id === value);
 
 export interface CustomThemeSettings {
   base: ThemeBase;
@@ -129,7 +150,13 @@ const channelsToHex = (channelsStr: string) => {
 
 let titleBarTimer: ReturnType<typeof setTimeout> | undefined;
 
-export const applyTheme = (id: ThemeId, custom: CustomThemeSettings) => {
+export const applySurfaceStyle = (surface: SurfaceStyle) => {
+  if (typeof document === 'undefined' || !document.documentElement) return;
+  const next: SurfaceStyle = isSurfaceStyle(surface) ? surface : DEFAULT_SURFACE_STYLE;
+  document.documentElement.dataset.surface = next;
+};
+
+export const applyTheme = (id: ThemeId, custom: CustomThemeSettings, surface?: SurfaceStyle) => {
   if (typeof document === 'undefined') return;
   const { base, vars } = resolveTheme(id, custom);
   const root = document.documentElement;
@@ -138,7 +165,8 @@ export const applyTheme = (id: ThemeId, custom: CustomThemeSettings) => {
   root.classList.toggle('dark', base !== 'light');
   root.dataset.theme = id;
   root.style.colorScheme = base === 'light' ? 'light' : 'dark';
-  const desktop = (window as any).atelierDesktop;
+  if (surface !== undefined) applySurfaceStyle(surface);
+  const desktop = typeof window !== 'undefined' ? (window as any).atelierDesktop : undefined;
   if (desktop?.setTitleBarTheme) {
     const color = channelsToHex(vars['--n-950'] || '13 14 18');
     const symbolColor = channelsToHex(vars['--n-100'] || '236 238 242');
@@ -146,6 +174,26 @@ export const applyTheme = (id: ThemeId, custom: CustomThemeSettings) => {
     titleBarTimer = setTimeout(() => {
       void desktop.setTitleBarTheme({ color, symbolColor, backgroundColor: color });
     }, 150);
+  }
+};
+
+export const loadSurfaceStyle = (): SurfaceStyle => {
+  try {
+    if (typeof localStorage === 'undefined') return DEFAULT_SURFACE_STYLE;
+    const saved = localStorage.getItem(SURFACE_STYLE_KEY);
+    if (isSurfaceStyle(saved)) return saved;
+  } catch {
+    // Storage blocked: fall back to default solid surface
+  }
+  return DEFAULT_SURFACE_STYLE;
+};
+
+export const saveSurfaceStyle = (surface: SurfaceStyle) => {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(SURFACE_STYLE_KEY, isSurfaceStyle(surface) ? surface : DEFAULT_SURFACE_STYLE);
+  } catch {
+    // ignore
   }
 };
 

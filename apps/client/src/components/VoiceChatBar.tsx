@@ -111,9 +111,9 @@ export const VoiceMemberStatus: React.FC<{ isMuted: boolean; isSpeaking: boolean
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-1.5 py-0.5 font-medium text-emerald-300">
         <span aria-hidden="true" className="flex h-3 items-center gap-px">
-          <span className="h-2 w-0.5 rounded-full bg-current motion-safe:animate-[voiceWave_720ms_ease-in-out_infinite]" />
-          <span className="h-3 w-0.5 rounded-full bg-current motion-safe:animate-[voiceWave_530ms_ease-in-out_infinite]" />
-          <span className="h-1.5 w-0.5 rounded-full bg-current motion-safe:animate-[voiceWave_640ms_ease-in-out_infinite]" />
+          <span className="atelier-voice-wave h-2 w-0.5 rounded-full bg-current" style={{ '--wave-duration': '720ms' } as React.CSSProperties} />
+          <span className="atelier-voice-wave h-3 w-0.5 rounded-full bg-current" style={{ '--wave-duration': '530ms' } as React.CSSProperties} />
+          <span className="atelier-voice-wave h-1.5 w-0.5 rounded-full bg-current" style={{ '--wave-duration': '640ms' } as React.CSSProperties} />
         </span>
         {t.collab.speaking}
       </span>
@@ -144,7 +144,7 @@ export const VoiceChatBar: React.FC<VoiceChatBarProps> = ({
           title={t.collab.joinVoice}
           aria-label={t.collab.joinVoice}
         >
-          <Radio className="w-3.5 h-3.5 text-indigo-400 animate-pulse shrink-0" />
+          <Radio className="w-3.5 h-3.5 text-indigo-400 animate-pulse atelier-motion-animate shrink-0" />
           {!compact && <span className={compact === undefined ? 'hidden sm:inline' : ''}>{t.collab.joinVoice}</span>}
           {!compact && <span className={compact === undefined ? 'sm:hidden' : 'hidden'}>{t.collab.voiceChat}</span>}
         </button>
@@ -158,7 +158,7 @@ export const VoiceChatBar: React.FC<VoiceChatBarProps> = ({
       {/* 1. Live Voice Indicator & Total In Voice */}
       <div className="flex items-center gap-1 font-medium text-emerald-400 pr-1.5 border-r border-neutral-800 shrink-0">
         <span className="relative flex h-2 w-2">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+          <span className="animate-ping atelier-motion-animate absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
           <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
         </span>
         {!compact && <span className={`text-[11px] font-semibold ${compact === undefined ? 'hidden sm:inline' : ''}`}>{t.collab.voiceChat}</span>}

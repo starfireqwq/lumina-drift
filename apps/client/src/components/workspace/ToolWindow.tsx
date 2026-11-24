@@ -1,7 +1,8 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
-import { X } from 'lucide-react';
-import { EDGE_HANDLES, Edge, resizeRect, startDrag } from './DockSystem';
-import { usePhoneLayout } from './dockStore';
+import { PanelLeft, PanelRight, X } from 'lucide-react';
+import { dragDockableTool, EDGE_HANDLES, Edge, resizeRect, startDrag } from './DockSystem';
+import { dockActions, type ToolDockPanelId, usePhoneLayout } from './dockStore';
+import { useI18n } from '../../context/I18nContext';
 import { getUiScale, onUiRescale } from '../../theme/uiScale';
 
 interface Rect { x: number; y: number; w: number; h: number }
@@ -24,6 +25,8 @@ interface ToolWindowProps {
   /** Esc closes it (default true) */
   closeOnEsc?: boolean;
   bodyClassName?: string;
+  dockPanel?: ToolDockPanelId;
+  embedded?: boolean;
 }
 
 const KEY = (id: string) => `atelier_toolwin_${id}`;
@@ -75,8 +78,10 @@ const clampTo = (r: Rect, minW: number, minH: number, keepInside = false): Rect 
  */
 export const ToolWindow: React.FC<ToolWindowProps> = ({
   id, title, icon, onClose, children, footer, actions, initial, minW = 260, minH = 160, closeOnEsc = true, bodyClassName = 'p-3',
+  dockPanel, embedded = false,
 }) => {
   const phone = usePhoneLayout();
+  const { t } = useI18n();
   const titleId = useId();
   const [zIndex, setZIndex] = useState<number>(() => claimTopZ());
   const [rect, setRect] = useState<Rect>(() => clampTo(loadRect(id, initial), minW, minH, true));
@@ -124,9 +129,20 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
   };
 
   const move = (e: React.PointerEvent) => {
-    if (e.button !== 0 || phone) return;
+    if (e.button !== 0 || phone || embedded) return;
     const start = rectRef.current;
-    startDrag(e, (dx, dy) => setRect(clampTo({ ...start, x: start.x + dx, y: start.y + dy }, minW, minH)), save);
+    let movingDock = false;
+    const label = dockPanel === 'align' ? t.align.title : t.filters.title;
+    startDrag(e, (dx, dy, ev) => {
+      setRect(clampTo({ ...start, x: start.x + dx, y: start.y + dy }, minW, minH));
+      if (dockPanel && (movingDock || Math.hypot(dx, dy) >= 6)) {
+        movingDock = true;
+        dragDockableTool(dockPanel, label, ev, boxRef.current, false);
+      }
+    }, (ev) => {
+      save();
+      if (dockPanel && movingDock) dragDockableTool(dockPanel, label, ev, boxRef.current, true);
+    });
   };
 
   const resize = (edge: Edge) => (e: React.PointerEvent) => {
@@ -139,14 +155,22 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
   };
 
   const header = (
-    <div onPointerDown={move} onDoubleClick={() => { if (!phone) { setRect((r) => clampTo(loadRect('__none__', initial), minW, minH)); try { localStorage.removeItem(KEY(id)); } catch { /* ignore */ } } }}
+    <div onPointerDown={move} onDoubleClick={() => { if (!phone && !embedded) { setRect((r) => clampTo(loadRect('__none__', initial), minW, minH)); try { localStorage.removeItem(KEY(id)); } catch { /* ignore */ } } }}
       style={{ touchAction: 'none' }}
-      className={`flex h-9 shrink-0 items-center gap-2 border-b border-neutral-700/70 bg-neutral-800/60 pl-3 pr-1 ${phone ? '' : 'cursor-grab active:cursor-grabbing'}`}>
+      className={`flex h-9 shrink-0 items-center gap-2 border-b border-neutral-700/70 bg-neutral-800/60 pl-3 pr-1 ${phone || embedded ? '' : 'cursor-grab active:cursor-grabbing'}`}>
       {icon && <span className="shrink-0 text-indigo-400 [&>svg]:h-4 [&>svg]:w-4">{icon}</span>}
       <h2 id={titleId} className="min-w-0 flex-1 truncate text-xs font-semibold text-neutral-100">{title}</h2>
       <div className="flex shrink-0 items-center" onPointerDown={(e) => e.stopPropagation()}>
         {actions}
-        <button type="button" onClick={onClose} aria-label="關閉" className="atelier-icon-btn h-7 w-7"><X className="h-4 w-4" /></button>
+        {dockPanel && !phone && !embedded && (
+          <>
+            <button type="button" onClick={() => dockActions.moveTo(dockPanel, 'left')} aria-label={t.toolOptions.dockToolLeft}
+              title={t.toolOptions.dockToolLeft} className="atelier-icon-btn h-7 w-7"><PanelLeft className="h-4 w-4" /></button>
+            <button type="button" onClick={() => dockActions.moveTo(dockPanel, 'right')} aria-label={t.toolOptions.dockToolRight}
+              title={t.toolOptions.dockToolRight} className="atelier-icon-btn h-7 w-7"><PanelRight className="h-4 w-4" /></button>
+          </>
+        )}
+        {!embedded && <button type="button" onClick={onClose} aria-label={t.common.close} className="atelier-icon-btn h-7 w-7"><X className="h-4 w-4" /></button>}
       </div>
     </div>
   );
@@ -158,6 +182,14 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
       {footer && <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-neutral-800 bg-neutral-950/40 px-3 py-2">{footer}</div>}
     </>
   );
+
+  if (embedded) {
+    return (
+      <section aria-labelledby={titleId} data-tool-window={id} className="flex min-w-0 flex-col">
+        {body}
+      </section>
+    );
+  }
 
   if (phone) {
     return (

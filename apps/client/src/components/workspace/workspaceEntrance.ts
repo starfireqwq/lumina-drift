@@ -1,8 +1,9 @@
+import { isReducedMotion, subscribeMotionChange } from '../../theme/motion';
+
 const STAGGER_MS = 55;
 
 export function playWorkspaceEntrance(workspace: HTMLElement) {
-  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
-  if (reduceMotion.matches || typeof workspace.animate !== 'function') return;
+  if (isReducedMotion() || typeof workspace.animate !== 'function') return;
 
   const animations: Animation[] = [];
   const reveal = (selector: string, x: number, y: number, delay: number, scale = 1) => {
@@ -38,7 +39,10 @@ export function playWorkspaceEntrance(workspace: HTMLElement) {
   const capture = { capture: true, signal: listeners.signal };
   window.addEventListener('pointerdown', stop, capture);
   window.addEventListener('keydown', stop, capture);
-  reduceMotion.addEventListener('change', stop, { signal: listeners.signal });
+  const unsubscribeMotion = subscribeMotionChange(() => {
+    if (isReducedMotion()) stop();
+  });
+  listeners.signal.addEventListener('abort', unsubscribeMotion, { once: true });
   void Promise.allSettled(animations.map((animation) => animation.finished)).then(() => listeners.abort());
   return stop;
 }

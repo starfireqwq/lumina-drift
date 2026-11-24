@@ -1,4 +1,5 @@
 import React, { useLayoutEffect, useState } from 'react';
+import { isReducedMotion } from '../theme/motion';
 
 const EXIT_MS = 180;
 
@@ -12,7 +13,7 @@ export function OverlayPresence({ open, kind = 'dialog', children }: {
     if (open) {
       setRetained(true);
     } else if (retained) {
-      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      if (isReducedMotion()) {
         setRetained(false);
         return;
       }

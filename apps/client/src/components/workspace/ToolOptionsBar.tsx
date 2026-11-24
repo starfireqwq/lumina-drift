@@ -236,6 +236,8 @@ const SliderField: React.FC<{
 export interface ToolOptionsBarProps {
   currentTool: ToolType;
   compact: boolean;
+  onOpenOptions?: () => void;
+  inPanel?: boolean;
   brushProps: BrushProperties;
   onBrushProps: (p: Partial<BrushProperties>) => void;
   canUndo: boolean;
@@ -274,6 +276,8 @@ export interface ToolOptionsBarProps {
   bucketReference: 'current' | 'all' | 'specific' | 'none';
   onBucketReference: (r: 'current' | 'all' | 'specific' | 'none') => void;
   bucketMode: 'click' | 'lasso';
+  confirmSoloFullFill?: boolean;
+  onConfirmSoloFullFill?: (enabled: boolean) => void;
   onBucketMode: (m: 'click' | 'lasso') => void;
   outline: OutlineSettings;
   onOutline: (patch: Partial<OutlineSettings>) => void;
@@ -342,7 +346,33 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
 
   const barRef = useRef<HTMLDivElement>(null);
   const { viewportWidth } = useEffectiveWidth(barRef);
-  const isNarrowMobile = viewportWidth < 600;
+  const isNarrowMobile = !p.inPanel && viewportWidth < 600;
+  const historyButtons = (
+    <>
+      <button type="button" onClick={p.onUndo} disabled={!p.canUndo} title={`${tr.common.undo} (${shortcut('action_undo')})`} aria-label={tr.common.undo} className="atelier-icon-btn h-8 w-8 shrink-0">
+        <Undo2 className="h-4 w-4" />
+      </button>
+      <button type="button" onClick={p.onRedo} disabled={!p.canRedo} title={`${tr.common.redo} (${shortcut('action_redo')})`} aria-label={tr.common.redo} className="atelier-icon-btn h-8 w-8 shrink-0">
+        <Redo2 className="h-4 w-4" />
+      </button>
+    </>
+  );
+
+  if (p.onOpenOptions) {
+    return (
+      <div role="toolbar" aria-label={tr.toolOptions.title} data-workspace-entry="options"
+        className="atelier-chrome flex h-10 min-w-0 shrink-0 items-center gap-1 border-b px-2">
+        {historyButtons}
+        <button type="button" onClick={p.onOpenOptions} aria-haspopup="dialog" aria-label={tr.toolOptions.title}
+          className="atelier-icon-btn ml-auto flex h-8 min-w-0 items-center gap-1.5 px-2 text-xs">
+          <SlidersHorizontal className="h-4 w-4 shrink-0" />
+          <span className="truncate">{p.activePluginTool
+            ? resolvePluginText(p.activePluginTool.tool.label, p.activePluginTool.tool.i18nLabel, language)
+            : locTool.label}</span>
+        </button>
+      </div>
+    );
+  }
 
   if (p.activePluginTool) {
     const activeTool = p.activePluginTool;
@@ -366,13 +396,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
           isNarrowMobile ? 'h-11 overflow-x-auto no-scrollbar touch-pan-x' : 'min-h-11 flex-wrap py-1 content-center'
         }`}
       >
-        <button type="button" onClick={p.onUndo} disabled={!p.canUndo} title={`${tr.common.undo} (${shortcut('action_undo')})`} aria-label={tr.common.undo} className="atelier-icon-btn h-8 w-8 shrink-0">
-          <Undo2 className="h-4 w-4" />
-        </button>
-        <button type="button" onClick={p.onRedo} disabled={!p.canRedo} title={`${tr.common.redo} (${shortcut('action_redo')})`} aria-label={tr.common.redo} className="atelier-icon-btn h-8 w-8 shrink-0">
-          <Redo2 className="h-4 w-4" />
-        </button>
-        <Sep />
+        {!p.inPanel && <>{historyButtons}<Sep /></>}
         <div className="flex shrink-0 items-center gap-1.5 pr-1" title={toolHint}>
           <span className="flex h-7 w-7 items-center justify-center rounded-md border border-cyan-500/40 bg-cyan-500/15 text-cyan-200">
             <PluginIcon className="h-4 w-4" />
@@ -484,13 +508,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
       className={`atelier-chrome flex shrink-0 items-center gap-1.5 border-b px-2 text-xs ${
         isNarrowMobile ? 'h-11 overflow-x-auto no-scrollbar touch-pan-x' : 'min-h-11 flex-wrap py-1 content-center'
       }`}>
-      <button type="button" onClick={p.onUndo} disabled={!p.canUndo} title={`${tr.common.undo} (${shortcut('action_undo')})`} aria-label={tr.common.undo} className="atelier-icon-btn h-8 w-8 shrink-0">
-        <Undo2 className="h-4 w-4" />
-      </button>
-      <button type="button" onClick={p.onRedo} disabled={!p.canRedo} title={`${tr.common.redo} (${shortcut('action_redo')})`} aria-label={tr.common.redo} className="atelier-icon-btn h-8 w-8 shrink-0">
-        <Redo2 className="h-4 w-4" />
-      </button>
-      <Sep />
+      {!p.inPanel && <>{historyButtons}<Sep /></>}
 
       {tool && Icon && (
         <div className="flex shrink-0 items-center gap-1.5 pr-1" title={tool.hint}>
@@ -636,7 +654,20 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
                 ]} />
               <Sep />
               <SliderField label={tr.toolOptions.tolerance} value={p.bucketTolerance} max={255} suffix="" onChange={p.onBucketTolerance} />
+              {p.onConfirmSoloFullFill && (
+                <label className="flex max-w-full items-center gap-1.5 text-[11px] text-neutral-300">
+                  <input type="checkbox" checked={p.confirmSoloFullFill}
+                    onChange={(e) => p.onConfirmSoloFullFill?.(e.target.checked)} />
+                  {tr.toolOptions.confirmSoloFullFill}
+                </label>
+              )}
             </>
+          )}
+          {p.bucketMode === 'lasso' && (
+            <div className="flex max-w-full flex-wrap items-center gap-1.5">
+              <span className="text-[11px] text-neutral-400">{tr.studio.antiAlias}</span>
+              <AntiAliasSelector compact value={p.brushProps.antiAlias} onChange={(antiAlias) => p.onBrushProps({ antiAlias })} />
+            </div>
           )}
         </>
       )}

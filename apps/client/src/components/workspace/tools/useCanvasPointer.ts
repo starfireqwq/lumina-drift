@@ -673,7 +673,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     if (isPanningRef.current) {
       isPanningRef.current = false;
       if (containerRef.current) {
-        containerRef.current.style.cursor = isSpacePressedRef.current ? 'grab' : 'crosshair';
+        containerRef.current.style.cursor = isSpacePressedRef.current ? 'grab' : '';
       }
       return;
     }

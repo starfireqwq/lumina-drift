@@ -1,13 +1,100 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Check } from 'lucide-react';
-import { useI18n } from '../context/I18nContext';
-import { applyTheme, contrastRatio, CustomThemeSettings, resolveTheme, THEME_PRESETS, ThemeBase, ThemeId } from '../theme/themes';
+import { useI18n, type Translations } from '../context/I18nContext';
+import {
+  applyTheme,
+  contrastRatio,
+  CustomThemeSettings,
+  resolveTheme,
+  SURFACE_STYLES,
+  SurfaceStyle,
+  THEME_PRESETS,
+  ThemeBase,
+  ThemeId,
+} from '../theme/themes';
 import { loadThemeAnim, runThemeTransition, saveThemeAnim, ThemeAnim, THEME_ANIMS } from '../theme/themeTransition';
 
 const swatchFor = (id: ThemeId, custom: CustomThemeSettings) => {
-  const { vars } = resolveTheme(id, custom);
-  const rgb = (v: string) => `rgb(${v})`;
-  return { bg: rgb(vars['--n-900']), panel: rgb(vars['--n-800']), text: rgb(vars['--n-200']), accent: rgb(vars['--a-500']) };
+  const { base, vars } = resolveTheme(id, custom);
+  const rgb = (v: string, alpha?: number) => (alpha === undefined ? `rgb(${v})` : `rgb(${v} / ${alpha})`);
+  return {
+    isLight: base === 'light',
+    bg: rgb(vars['--n-900']),
+    bgDeep: rgb(vars['--n-950']),
+    panel: rgb(vars['--n-800']),
+    border: rgb(vars['--n-700']),
+    text: rgb(vars['--n-200']),
+    accent: rgb(vars['--a-500']),
+    accentGlow: rgb(vars['--a-400'], 0.55),
+    glassPanel: rgb(vars['--n-900'], base === 'light' ? 0.78 : 0.62),
+    mattePanel: rgb(vars['--n-900'], base === 'light' ? 0.9 : 0.82),
+  };
+};
+
+const THEME_LABEL_KEYS: Record<ThemeId, keyof Translations['settings']> = {
+  dark: 'themePresetDark',
+  gray: 'themePresetGray',
+  light: 'themePresetLight',
+  sakura: 'themePresetSakura',
+  matcha: 'themePresetMatcha',
+  midnight: 'themePresetMidnight',
+  custom: 'themeCustom',
+};
+
+const SURFACE_LABEL_KEYS: Record<SurfaceStyle, keyof Translations['settings']> = {
+  solid: 'surfaceSolid',
+  'liquid-glass': 'surfaceLiquidGlass',
+  'frosted-matte': 'surfaceFrostedMatte',
+  'lumina-glow': 'surfaceLuminaGlow',
+  'soft-paper': 'surfaceSoftPaper',
+};
+
+const THEME_ANIM_KEYS: Record<ThemeAnim, keyof Translations['settings']> = {
+  ripple: 'themeAnimRipple',
+  jelly: 'themeAnimJelly',
+  fade: 'themeAnimFade',
+  none: 'themeAnimNone',
+};
+
+const surfacePreviewStyle = (surface: SurfaceStyle, themeColors: ReturnType<typeof swatchFor>): React.CSSProperties => {
+  switch (surface) {
+    case 'liquid-glass':
+      return {
+        background: `linear-gradient(135deg, ${themeColors.isLight ? 'rgba(255,255,255,0.72)' : 'rgba(255,255,255,0.18)'}, ${themeColors.glassPanel})`,
+        border: `1px solid ${themeColors.isLight ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.28)'}`,
+        boxShadow: themeColors.isLight
+          ? 'inset 0 1px 0 rgba(255,255,255,0.9), 0 4px 10px -4px rgba(15,23,42,0.18)'
+          : 'inset 0 1px 0 rgba(255,255,255,0.28), 0 6px 12px -4px rgba(0,0,0,0.55)',
+      };
+    case 'frosted-matte':
+      return {
+        background: themeColors.mattePanel,
+        border: `1px solid ${themeColors.isLight ? 'rgba(148,163,184,0.45)' : 'rgba(255,255,255,0.14)'}`,
+        boxShadow: themeColors.isLight
+          ? 'inset 0 1px 0 rgba(255,255,255,0.65), 0 3px 8px -3px rgba(15,23,42,0.12)'
+          : 'inset 0 1px 0 rgba(255,255,255,0.08), 0 4px 10px -4px rgba(0,0,0,0.45)',
+      };
+    case 'lumina-glow':
+      return {
+        background: themeColors.bg,
+        border: `1px solid ${themeColors.accent}`,
+        boxShadow: `0 0 10px -1px ${themeColors.accentGlow}, inset 0 0 8px -4px ${themeColors.accentGlow}`,
+      };
+    case 'soft-paper':
+      return {
+        background: `linear-gradient(180deg, ${themeColors.panel}, ${themeColors.bg})`,
+        border: `1px solid ${themeColors.border}`,
+        boxShadow: themeColors.isLight
+          ? 'inset 0 1px 0 rgba(255,255,255,0.92), inset 0 -1px 0 rgba(0,0,0,0.08), 0 3px 8px -3px rgba(15,23,42,0.14)'
+          : 'inset 0 1px 0 rgba(255,255,255,0.1), inset 0 -1px 0 rgba(0,0,0,0.42), 0 4px 10px -4px rgba(0,0,0,0.55)',
+      };
+    case 'solid':
+    default:
+      return {
+        background: themeColors.bg,
+        border: `1px solid ${themeColors.border}`,
+      };
+  }
 };
 
 const toHex = (channels: string) => `#${channels.split(' ').map((n) => Number(n).toString(16).padStart(2, '0')).join('')}`;
@@ -20,13 +107,13 @@ const centerOf = (e: React.MouseEvent) => {
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 };
 
-/** Theme presets plus a custom theme (base, tint, accent). `compact` is the top-bar dropdown. */
+/** Theme presets plus a custom theme (base, tint, accent) and surface style. `compact` is the top-bar dropdown. */
 export const ThemePicker: React.FC<{ compact?: boolean }> = ({ compact }) => {
-  const { themeId, setThemeId, customTheme, setCustomTheme } = useI18n();
+  const { t, themeId, setThemeId, customTheme, setCustomTheme, surfaceStyle, setSurfaceStyle } = useI18n();
   const ids: ThemeId[] = [...THEME_PRESETS.map((p) => p.id), 'custom'];
-  const labels: Record<ThemeId, string> = Object.fromEntries([...THEME_PRESETS.map((p) => [p.id, p.label]), ['custom', '自訂色調']]) as Record<ThemeId, string>;
   const [anim, setAnim] = useState<ThemeAnim>(loadThemeAnim);
   const [bounce, setBounce] = useState<ThemeId | null>(null);
+  const [surfaceBounce, setSurfaceBounce] = useState<SurfaceStyle | null>(null);
 
   // The custom colours being dragged: shown at once through the CSS variables (one rAF per frame),
   // written to the app state (and storage) only once the drag pauses, so the app does not re-render
@@ -61,14 +148,19 @@ export const ThemePicker: React.FC<{ compact?: boolean }> = ({ compact }) => {
   };
 
   /** Switch with the chosen animation (and a little jelly on the card that was tapped) */
-  const switchTo = (apply: () => void, e: React.MouseEvent, id?: ThemeId) => {
+  const switchTo = (apply: () => void, e: React.MouseEvent, id?: ThemeId, surface?: SurfaceStyle) => {
     if (id) {
       setBounce(null);
       requestAnimationFrame(() => setBounce(id));
     }
+    if (surface) {
+      setSurfaceBounce(null);
+      requestAnimationFrame(() => setSurfaceBounce(surface));
+    }
     runThemeTransition(apply, centerOf(e), anim);
   };
 
+  const activeColors = swatchFor(themeId, draft);
   const { vars } = resolveTheme('custom', draft);
   const textContrast = contrastRatio(toHex(vars['--n-200']), toHex(vars['--n-900']));
   const accentContrast = contrastRatio(toHex(vars['--a-300']), toHex(vars['--n-900']));
@@ -76,7 +168,7 @@ export const ThemePicker: React.FC<{ compact?: boolean }> = ({ compact }) => {
 
   return (
     <div className="flex flex-col gap-3">
-      <div className={`grid gap-2 ${compact ? 'grid-cols-2' : 'grid-cols-2 sm:grid-cols-4'}`} role="radiogroup" aria-label="介面主題">
+      <div className={`grid gap-2 ${compact ? 'grid-cols-2' : 'grid-cols-2 sm:grid-cols-4'}`} role="radiogroup" aria-label={t.settings.themeAria}>
         {ids.map((id) => {
           const s = swatchFor(id, draft);
           const active = themeId === id;
@@ -93,7 +185,7 @@ export const ThemePicker: React.FC<{ compact?: boolean }> = ({ compact }) => {
                 </div>
               </div>
               <div className="flex w-full items-center justify-between bg-neutral-900 px-2 py-1 text-[11px] font-medium text-neutral-200">
-                <span>{labels[id]}</span>
+                <span>{String(t.settings[THEME_LABEL_KEYS[id]])}</span>
                 {active && <Check className="h-3.5 w-3.5 text-indigo-400" />}
               </div>
             </button>
@@ -104,33 +196,33 @@ export const ThemePicker: React.FC<{ compact?: boolean }> = ({ compact }) => {
       {themeId === 'custom' && (
         <div className="flex flex-col gap-2.5 rounded-lg border border-neutral-700 bg-neutral-950/50 p-3 text-xs">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-neutral-300">明暗</span>
+            <span className="text-neutral-300">{t.settings.themeBaseLabel}</span>
             <div className="flex shrink-0 rounded-md border border-neutral-700 p-0.5">
               {(['dark', 'gray', 'light'] as ThemeBase[]).map((b) => (
                 <button key={b} type="button" aria-pressed={draft.base === b}
                   onClick={(e) => { if (draft.base !== b) switchTo(() => { const next = { ...draftRef.current, base: b }; draftRef.current = next; setDraft(next); setCustomTheme(next); }, e); }}
                   className={`rounded px-2 py-0.5 text-[11px] ${draft.base === b ? 'bg-indigo-600 text-white' : 'text-neutral-300 hover:bg-neutral-800'}`}>
-                  {b === 'dark' ? '深' : b === 'gray' ? '灰' : '淺'}
+                  {b === 'dark' ? t.settings.themeBaseDark : b === 'gray' ? t.settings.themeBaseGray : t.settings.themeBaseLight}
                 </button>
               ))}
             </div>
           </div>
           <label className="flex items-center justify-between gap-2">
-            <span className="text-neutral-300">色調</span>
+            <span className="text-neutral-300">{t.settings.themeTintLabel}</span>
             <span className="flex items-center gap-2">
-              <input type="range" min={0} max={40} value={Math.round(draft.tintStrength * 100)} aria-label="色調濃度"
+              <input type="range" min={0} max={40} value={Math.round(draft.tintStrength * 100)} aria-label={t.settings.themeTintStrengthAria}
                 onChange={(e) => update({ tintStrength: Number(e.target.value) / 100 })} className="w-24" />
-              <input type="color" value={draft.tint} aria-label="色調顏色" onChange={(e) => update({ tint: e.target.value })}
+              <input type="color" value={draft.tint} aria-label={t.settings.themeTintColorAria} onChange={(e) => update({ tint: e.target.value })}
                 className="h-7 w-9 cursor-pointer rounded border border-neutral-700 bg-transparent" />
             </span>
           </label>
           <div className="flex flex-col gap-1.5">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-neutral-300">強調色</span>
-              <input type="color" value={draft.accent} aria-label="強調色" onChange={(e) => update({ accent: e.target.value })}
+              <span className="text-neutral-300">{t.settings.themeAccentLabel}</span>
+              <input type="color" value={draft.accent} aria-label={t.settings.themeAccentLabel} onChange={(e) => update({ accent: e.target.value })}
                 className="h-7 w-9 cursor-pointer rounded border border-neutral-700 bg-transparent" />
             </div>
-            <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label="常用強調色">
+            <div className="flex flex-wrap gap-1.5" role="radiogroup" aria-label={t.settings.themeAccentPresetsAria}>
               {ACCENTS.map((c) => (
                 <button key={c} type="button" role="radio" aria-checked={draft.accent.toLowerCase() === c} aria-label={c}
                   onClick={(e) => switchTo(() => { const next = { ...draftRef.current, accent: c }; draftRef.current = next; setDraft(next); setCustomTheme(next); }, e)}
@@ -139,18 +231,67 @@ export const ThemePicker: React.FC<{ compact?: boolean }> = ({ compact }) => {
               ))}
             </div>
           </div>
-          {!readable && <p className="text-[11px] text-amber-300">對比偏低，建議調淡色調或換強調色</p>}
+          {!readable && <p className="text-[11px] text-amber-300">{t.settings.themeLowContrastWarn}</p>}
         </div>
       )}
 
+      {/* Surface style branch (5 UI material presets that pair with any theme) */}
+      <div className="flex flex-col gap-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] font-semibold text-neutral-300">{t.settings.surfaceStyle}</span>
+        </div>
+        <div className={`grid ${compact ? 'grid-cols-2 gap-1.5' : 'grid-cols-2 gap-2 sm:grid-cols-5'}`} role="radiogroup" aria-label={t.settings.surfaceStyle}>
+          {SURFACE_STYLES.map((s) => {
+            const active = surfaceStyle === s.id;
+            const label = String(t.settings[SURFACE_LABEL_KEYS[s.id]] || s.fallbackLabel);
+            return (
+              <button
+                key={s.id}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                data-surface-option={s.id}
+                onClick={(e) => { if (!active) switchTo(() => setSurfaceStyle(s.id), e, undefined, s.id); }}
+                onAnimationEnd={() => setSurfaceBounce(null)}
+                className={`group flex flex-col items-stretch overflow-hidden rounded-lg border text-left transition ${surfaceBounce === s.id ? 'animate-jelly' : ''} ${
+                  active ? 'border-indigo-500 ring-2 ring-indigo-500/40' : 'border-neutral-700 hover:border-neutral-500'
+                }`}
+              >
+                <div
+                  className="relative flex h-8 w-full items-center justify-center overflow-hidden px-1.5"
+                  style={{
+                    background: s.id === 'liquid-glass' || s.id === 'frosted-matte'
+                      ? `radial-gradient(circle at 20% 30%, ${activeColors.accentGlow}, transparent 60%), ${activeColors.bgDeep}`
+                      : activeColors.bgDeep,
+                  }}
+                >
+                  <div
+                    className="flex h-5 w-full items-center justify-between rounded px-1.5"
+                    style={surfacePreviewStyle(s.id, activeColors)}
+                  >
+                    <span className="h-1 w-5 rounded-full" style={{ background: activeColors.text }} />
+                    <span className="h-1.5 w-2 rounded-full" style={{ background: activeColors.accent }} />
+                  </div>
+                </div>
+                <div className="flex w-full items-center justify-between gap-1 bg-neutral-900/90 px-2 py-1 text-[11px] font-medium text-neutral-200">
+                  <span className="truncate">{label}</span>
+                  {active && <Check className="h-3.5 w-3.5 shrink-0 text-indigo-400" />}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        {!compact && <p className="text-[11px] text-neutral-400">{t.settings.surfaceStyleDesc}</p>}
+      </div>
+
       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
-        <span className="text-neutral-400">切換動畫</span>
-        <div className="flex shrink-0 rounded-md border border-neutral-700 p-0.5" role="radiogroup" aria-label="切換動畫">
+        <span className="text-neutral-400">{t.settings.themeTransitionLabel}</span>
+        <div className="flex shrink-0 rounded-md border border-neutral-700 p-0.5" role="radiogroup" aria-label={t.settings.themeTransitionLabel}>
           {THEME_ANIMS.map((a) => (
             <button key={a.id} type="button" role="radio" aria-checked={anim === a.id}
               onClick={() => { setAnim(a.id); saveThemeAnim(a.id); }}
               className={`rounded px-2 py-0.5 text-[11px] ${anim === a.id ? 'bg-indigo-600 text-white' : 'text-neutral-300 hover:bg-neutral-800'}`}>
-              {a.label}
+              {String(t.settings[THEME_ANIM_KEYS[a.id]])}
             </button>
           ))}
         </div>

@@ -40,6 +40,7 @@ interface Props {
   /** Applies an arbitrary filter job (used by the Filter Library card browser) */
   onApplyJob?: (job: FilterJob) => Promise<boolean>;
   onClose: () => void;
+  embedded?: boolean;
 }
 
 /** The group the menu last showed (this browser only) */
@@ -55,7 +56,7 @@ const readGroup = (groups: FilterGroup[]) => {
 
 export function LayerFilterDialog({
   filterId, layerName, layerType, histogram, busy, refining = false, target,
-  onReadThumbnail, onStartPoint, onChoose, onBack, onPreview, onPreviewJob, onApply, onApplyJob, onClose,
+  onReadThumbnail, onStartPoint, onChoose, onBack, onPreview, onPreviewJob, onApply, onApplyJob, onClose, embedded,
 }: Props) {
   const { t, language } = useI18n();
   const phone = usePhoneLayout();
@@ -344,7 +345,7 @@ export function LayerFilterDialog({
   ) : undefined;
 
   return (
-    <ToolWindow id="layer-filter" icon={<SlidersHorizontal />}
+    <ToolWindow id="layer-filter" icon={<SlidersHorizontal />} dockPanel="filters" embedded={embedded}
       title={<>{definition ? filterLabel(definition, t, language) : t.filters.title}<span className="ml-1.5 font-normal text-neutral-500">{layerName}</span></>}
       actions={actions} onClose={onClose} initial={{ x: -352, y: 96, w: 340, h: 0 }} minW={270}
       footer={activeDef ? (

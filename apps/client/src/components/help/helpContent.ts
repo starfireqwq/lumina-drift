@@ -108,7 +108,7 @@ export const HELP_TOPICS: HelpTopic[] = [
       '筆跡動態：可分別開關大小、不透明度、流量隨筆壓、傾斜或運筆速度變化，並調整動態下限與隨機抖動',
       '色彩混合：支援「混色」（與畫布底色融合並補充顏料）、「純塗抹」（不補新色、純推移底色）與「濕染稀釋」（水彩暈開），並可開啟「水彩濕邊緣」與「主副色混合」',
       '紙紋與雙重筆刷：可切換紙紋混合模式（鏤空／相乘／覆蓋）、反轉紙紋、上傳自訂紙紋圖，並可替雙重筆刷指定獨立副筆尖與交集／挖空／變暗模式',
-      '匯入外部筆刷檔（.abr／.sut）時，會自動還原筆尖貼圖與內嵌的尺寸、間距、動態、混色及紙紋設定',
+      '匯入外部筆刷檔（.abr／.sut／.brush／.brushset）時，會自動還原筆尖貼圖與內嵌的尺寸、間距、動態、混色及紙紋設定',
       '筆刷、鉛筆、橡皮擦各自記住自己的設定；既有防手震演算法維持獨立運作',
     ],
     keywords: ['筆刷設定', '硬度', '防手震', '穩定', '間距', '散佈', '動態', '筆壓', '不透明度', '流量', '傾斜', '速度', '紋理', '紙紋', '混色', '純塗抹', '稀釋', '濕邊緣', '主副色', '雙重筆刷', '筆尖', '匯入', 'abr', 'sut', 'stabilizer', 'spacing', 'texture', 'hardness', 'dynamics', 'wet mix'],
@@ -148,12 +148,14 @@ export const HELP_TOPICS: HelpTopic[] = [
   {
     id: 'bucket', category: 'fill', title: '油漆桶',
     summary: '點封閉區域填滿。可參照目前圖層、所有圖層或只填選區；容差控制顏色範圍。',
+    steps: ['多人畫布即將整張填色時會先詢問，確認後才套用與同步。單機可在油漆桶工具選項隨時開關「整張填色前確認」。'],
     keys: [{ action: 'tool_bucket', label: '油漆桶' }],
     keywords: ['油漆桶', '填色', '填滿', '上色', 'bucket', 'fill', '容差', 'tolerance'],
   },
   {
     id: 'lasso-fill', category: 'fill', title: '套索填色',
     summary: '油漆桶切到「套索填色」後，圈出形狀就直接填滿目前顏色。',
+    steps: ['調整消除鋸齒可改變填色邊緣。關閉時為硬邊，開啟時保留邊緣像素的部分覆蓋率。'],
     keywords: ['套索填色', '圈選填色', 'lasso fill'],
   },
   {
@@ -579,7 +581,7 @@ export const HELP_TOPICS: HelpTopic[] = [
   {
     id: 'docking', category: 'ui', title: '拖曳面板：停靠、浮動、合併',
     summary: '拖住面板標題就能移動：拖到畫面邊緣或其他面板之間停靠，拖到空白處變浮動視窗，拖到另一個浮動視窗上合併成分頁。',
-    steps: ['把分頁拖出視窗即可分離', '浮動視窗四邊與四角都能調整大小', '雙擊標題列收合'],
+    steps: ['把分頁拖出視窗即可分離', '浮動視窗四邊與四角都能調整大小', '濾鏡與對齊可拖曳標題或用標題列按鈕停靠左、右側，再從面板位置選單切回浮動。'],
     art: 'dock',
     keywords: ['面板', '停靠', '浮動', '視窗', '分頁', '拖曳', '合併', '分離', '移動面板', 'dock', 'panel', 'float', 'window', 'tab'],
   },
@@ -606,6 +608,7 @@ export const HELP_TOPICS: HelpTopic[] = [
   {
     id: 'tablet-desktop', category: 'ui', title: '手機與平板的桌面模式',
     summary: '手機打橫仍是手機版介面；「視窗 → 桌面模式」打開後改用電腦版介面，關掉就回到手機版。觸控平板打開後可使用浮動視窗。',
+    steps: ['從畫布下方的工具按鈕展開分類工具，選取後回到畫布。點上方的目前工具按鈕可調整筆刷大小、不透明度和工具設定，橫向時兩條滑桿會並排。'],
     keywords: ['手機', '打橫', '橫向', '電腦版', '平板', 'ipad', 'dex', '桌面模式', '浮動'],
   },
   {
@@ -651,7 +654,7 @@ export const HELP_TOPICS: HelpTopic[] = [
   {
     id: 'export', category: 'files', title: '匯出 PNG / PSD',
     summary: '檔案 → 匯出：PNG、PSD（保留圖層、資料夾、蒙版與剪裁）、ORA、ZIP。',
-    keywords: ['匯出', '下載', '存檔', 'png', 'psd', 'photoshop', 'export', 'save'],
+    keywords: ['匯出', '下載', '存檔', 'png', 'psd', 'export', 'save'],
   },
   {
     id: 'autosave', category: 'files', title: '自動儲存',

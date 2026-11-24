@@ -1,4 +1,5 @@
 import { flushSync } from 'react-dom';
+import { isReducedMotion } from './motion';
 
 /**
  * Animated theme switch. The browser snapshots the old UI, we apply the new theme synchronously,
@@ -39,7 +40,7 @@ let running = false;
 
 export const runThemeTransition = (apply: () => void, origin?: { x: number; y: number }, style: ThemeAnim = loadThemeAnim()) => {
   const doc = document as ViewTransitionDoc;
-  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+  const reduced = isReducedMotion();
   if (running) return;
   if (style === 'none' || reduced || !doc.startViewTransition) {
     apply();
@@ -58,11 +59,20 @@ export const runThemeTransition = (apply: () => void, origin?: { x: number; y: n
   for (const type of ['pointerdown', 'click', 'dblclick', 'contextmenu']) {
     window.addEventListener(type, consume, { capture: true, signal: guard.signal });
   }
+  let settled = false;
+  let safetyTimer: ReturnType<typeof setTimeout> | undefined;
   const done = () => {
+    if (settled) return;
+    settled = true;
+    if (safetyTimer !== undefined) {
+      clearTimeout(safetyTimer);
+      safetyTimer = undefined;
+    }
     guard.abort();
     running = false;
     root.classList.remove('atelier-theme-vt');
   };
+  safetyTimer = setTimeout(done, 1500);
   let vt: ReturnType<NonNullable<ViewTransitionDoc['startViewTransition']>>;
   try {
     vt = doc.startViewTransition(() => flushSync(apply));

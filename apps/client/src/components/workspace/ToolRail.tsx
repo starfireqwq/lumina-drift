@@ -26,7 +26,7 @@ interface ToolRailProps {
   pluginTools?: readonly RegisteredPluginTool[];
   activePluginToolKey?: string | null;
   onSelectPluginTool?: (pluginId: string, toolId: string) => void;
-  orientation: 'vertical' | 'horizontal';
+  orientation: 'vertical' | 'horizontal' | 'grid';
   /** Vertical rail: which screen edge it is on (tooltips open toward the canvas) */
   side?: 'left' | 'right';
   width?: number;
@@ -205,6 +205,24 @@ export const ToolRail: React.FC<ToolRailProps> = ({
       {tip.hint && <span className="max-w-[220px] whitespace-normal text-neutral-400">{tip.hint}</span>}
     </div>
   );
+
+  if (orientation === 'grid') {
+    return (
+      <nav ref={navRef} aria-label={t.navbar.tools} className="grid gap-3 p-3 sm:grid-cols-2">
+        {toolGroups.map((group) => (
+          <div key={group.id} role="group" aria-label={group.label} className="min-w-0 space-y-1">
+            <div aria-hidden className="text-xs font-medium text-neutral-300">{group.label}</div>
+            <div className="flex flex-wrap gap-1">{group.tools.map(button)}</div>
+          </div>
+        ))}
+        {pluginTools.length > 0 && (
+          <div role="group" aria-label={pluginStrings.toolsBadge} className="flex min-w-0 flex-wrap gap-1">
+            {pluginTools.map(pluginToolButton)}
+          </div>
+        )}
+      </nav>
+    );
+  }
 
   if (!vertical) {
     return (

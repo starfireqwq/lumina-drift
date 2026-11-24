@@ -5,6 +5,7 @@ import { startDrag } from './DockSystem';
 import { SLIDERS_WIDTH_MAX, SLIDERS_WIDTH_MIN } from './dockStore';
 import { useWheelStep } from '../../hooks/useWheelStep';
 import { useUiScale } from '../../theme/uiScale';
+import { useI18n } from '../../context/I18nContext';
 
 interface VerticalSliderProps {
   label: string;
@@ -94,6 +95,47 @@ interface BrushSideSlidersProps {
 const LOG_MAX = Math.log(MAX_BRUSH_SIZE);
 const sizeToPos = (size: number) => Math.log(Math.max(1, size)) / LOG_MAX;
 const posToSize = (pos: number) => Math.max(1, Math.min(MAX_BRUSH_SIZE, Math.round(Math.exp(pos * LOG_MAX))));
+
+export function MobileBrushSliders({ size, onSize, opacity, onOpacity, onSizeDrag }: Pick<
+  BrushSideSlidersProps, 'size' | 'onSize' | 'opacity' | 'onOpacity' | 'onSizeDrag'
+>) {
+  const { t } = useI18n();
+  const percent = Math.round(opacity * 100);
+  return (
+    <div data-mobile-brush-sliders="" className="grid min-w-0 gap-2 pb-2 landscape:grid-cols-2">
+      <label className="grid min-w-0 grid-cols-[1fr_auto] items-center gap-x-2 rounded-lg border border-neutral-700 px-3 pt-2 text-xs">
+        <span className="min-w-0 break-words">{t.studio.brushSize}</span>
+        <output className="tabular-nums">{size} px</output>
+        <input type="range" aria-label={t.studio.brushSize} min={0} max={1000}
+          value={Math.round(sizeToPos(size) * 1000)} aria-valuetext={`${size} px`}
+          className="col-span-2 h-9 w-full min-w-0 touch-none accent-indigo-400"
+          onChange={(e) => onSize(posToSize(e.currentTarget.valueAsNumber / 1000))}
+          onKeyDown={(e) => {
+            const change = e.key === 'ArrowLeft' || e.key === 'ArrowDown' ? -1
+              : e.key === 'ArrowRight' || e.key === 'ArrowUp' ? 1 : 0;
+            if (!change) return;
+            e.preventDefault();
+            e.stopPropagation();
+            onSize(Math.max(1, Math.min(MAX_BRUSH_SIZE, size + change)));
+          }}
+          onPointerDown={(e) => {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            onSizeDrag(true);
+          }}
+          onPointerUp={() => onSizeDrag(false)} onPointerCancel={() => onSizeDrag(false)}
+          onLostPointerCapture={() => onSizeDrag(false)}
+          onBlur={() => onSizeDrag(false)} />
+      </label>
+      <label className="grid min-w-0 grid-cols-[1fr_auto] items-center gap-x-2 rounded-lg border border-neutral-700 px-3 pt-2 text-xs">
+        <span className="min-w-0 break-words">{t.studio.opacity}</span>
+        <output className="tabular-nums">{percent}%</output>
+        <input type="range" aria-label={t.studio.opacity} min={1} max={100} value={percent}
+          className="col-span-2 h-9 w-full min-w-0 touch-none accent-indigo-400"
+          onChange={(e) => onOpacity(e.currentTarget.valueAsNumber / 100)} />
+      </label>
+    </div>
+  );
+}
 
 /** CSP-style strip at the far left: brush size on the top half, opacity on the bottom half */
 export const BrushSideSliders: React.FC<BrushSideSlidersProps> = ({ size, onSize, opacity, onOpacity, color, onSizeDrag, width, side = 'left', onResizeWidth }) => {

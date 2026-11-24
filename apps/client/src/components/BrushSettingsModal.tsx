@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useSyncExternalStore } from 'react';
 import { MAX_STABILIZER_LEVEL, STABILIZER_LEVEL_STEP, MIN_BRUSH_SPACING } from '@atelier/shared';
 import { Paintbrush, RotateCcw, Upload } from 'lucide-react';
 import { AtelierModal, modalButton } from './AtelierModal';
@@ -7,6 +7,11 @@ import { BrushEnginePanel } from './BrushEnginePanel';
 import { useWheelStep } from '../hooks/useWheelStep';
 import type { BrushProperties } from '../engine/BrushRenderer';
 import type { BrushToolId } from '../engine/brushToolSettings';
+import {
+  getTouchSimulatedPressure,
+  setTouchSimulatedPressure,
+  subscribeTouchSimulatedPressure,
+} from '../engine/inputPreferences';
 import { MAX_BRUSH_SIZE } from './workspace/toolCatalog';
 import { useI18n } from '../context/I18nContext';
 
@@ -47,6 +52,11 @@ export const BrushSettingsModal: React.FC<BrushSettingsModalProps> = ({
 }) => {
   const { t } = useI18n();
   const fileRef = useRef<HTMLInputElement>(null);
+  const touchSimulatedPressure = useSyncExternalStore(
+    subscribeTouchSimulatedPressure,
+    getTouchSimulatedPressure,
+    getTouchSimulatedPressure,
+  );
   const pct = (v: number) => `${Math.round(v * 100)}%`;
 
   const isEraser = tool === 'eraser';
@@ -74,8 +84,16 @@ export const BrushSettingsModal: React.FC<BrushSettingsModalProps> = ({
           <section className="space-y-2">
             <h3 className="text-xs font-semibold text-white">{t.studio.sizeAndPressure}</h3>
             <Field label={t.toolOptions.size} hint="" value={p.size} min={1} max={MAX_BRUSH_SIZE} format={(v) => `${v}px`} onChange={(v) => onChange({ size: v })} />
-            <Field label={t.studio.minSize} hint={t.studio.minSizeHint} value={Math.round((p.minSize / Math.max(1, p.size)) * 100)} min={0} max={100}
-              format={(v) => `${v}%`} onChange={(v) => onChange({ minSize: Math.max(0, Math.round(((p.size * v) / 100) * 10) / 10) })} />
+            <Field label={t.studio.minSize} hint={t.studio.minSizeHint}
+              value={p.dynamics?.size?.min !== undefined ? Math.round(p.dynamics.size.min * 100) : Math.round((p.minSize / Math.max(1, p.size)) * 100)}
+              min={0} max={100}
+              format={(v) => `${v}%`}
+              onChange={(v) => {
+                const nextMinSize = Math.max(0, Math.round(((p.size * v) / 100) * 10) / 10);
+                onChange(p.dynamics?.size
+                  ? { minSize: nextMinSize, dynamics: { ...p.dynamics, size: { ...p.dynamics.size, min: v / 100 } } }
+                  : { minSize: nextMinSize });
+              }} />
           </section>
           <section className="space-y-2">
             <h3 className="text-xs font-semibold text-white">{t.studio.density}</h3>
@@ -98,6 +116,22 @@ export const BrushSettingsModal: React.FC<BrushSettingsModalProps> = ({
             <Field label={t.toolOptions.stabilizer} hint={t.studio.stabilizerHint} value={p.stabilizerLevel}
               min={0} max={MAX_STABILIZER_LEVEL} step={STABILIZER_LEVEL_STEP} format={String}
               onChange={(v) => onChange({ stabilizerLevel: v })} />
+            <label
+              className="flex items-start justify-between gap-2 rounded-lg border border-neutral-800 bg-neutral-900/60 px-2.5 py-2 text-[11px] text-neutral-200 cursor-pointer"
+              title={t.settings.touchSimulatedPressureDesc}
+            >
+              <span className="flex flex-col gap-0.5">
+                <span className="font-medium text-neutral-100">{t.settings.touchSimulatedPressure}</span>
+                <span className="text-[10px] text-neutral-400">{t.settings.touchSimulatedPressureDesc}</span>
+              </span>
+              <input
+                type="checkbox"
+                data-setting="touch-simulated-pressure"
+                checked={touchSimulatedPressure}
+                onChange={(e) => setTouchSimulatedPressure(e.target.checked)}
+                className="mt-0.5 shrink-0"
+              />
+            </label>
           </section>
           {!isEraser && <section className="space-y-1.5">
             <h3 className="text-xs font-semibold text-white">{t.studio.brushTipShape}</h3>

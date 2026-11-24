@@ -19,6 +19,7 @@ import { useEffectiveWidth } from '../hooks/useEffectiveWidth';
 
 interface ViewportToolbarProps {
   viewportState: ViewportState;
+  displayScale?: number;
   width: number;
   height: number;
   onZoomIn: () => void;
@@ -50,6 +51,7 @@ const Sep = () => <div aria-hidden className="mx-0.5 h-4 w-px shrink-0 bg-neutra
 /** Status bar under the canvas: size, zoom, rotation, mirror and canvas utilities. */
 export const ViewportToolbar: React.FC<ViewportToolbarProps> = ({
   viewportState,
+  displayScale = 1,
   width,
   height,
   onZoomIn,
@@ -77,7 +79,7 @@ export const ViewportToolbar: React.FC<ViewportToolbarProps> = ({
   const showFilterLabel = effectiveWidth >= 720;
   const showAlignLabel = effectiveWidth >= 780;
   const rotationDeg = Math.round(((viewportState.rotation * 180) / Math.PI) % 360);
-  const zoomPercent = Math.round(viewportState.zoom * 100);
+  const zoomPercent = Math.round(viewportState.zoom * displayScale * 100);
 
   return (
     <div ref={toolbarRef} role="toolbar" aria-label={t.canvas.viewToolbar}

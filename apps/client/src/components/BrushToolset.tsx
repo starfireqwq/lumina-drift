@@ -201,8 +201,11 @@ export function BrushToolset({ currentBrushProps, selectedId, onApplyPreset }: B
     try {
       const parsed = await BrushPackageManager.parseBrushFile(await file.arrayBuffer(), file.name);
       const abrGroup = /\.abr$/i.test(file.name) ? file.name.slice(0, -4).trim() : '';
+      const procreateSetGroup = /\.brushset$/i.test(file.name)
+        ? (parsed[0]?.category?.trim() || file.name.slice(0, -9).trim())
+        : '';
       const brushes = parsed.filter((brush) => typeof brush?.name === 'string' && brush.name.trim() && brush.properties)
-        .map((brush) => ({ ...brush, id: newBrushId(), category: abrGroup || (displayGroup ?? brushGroup(brush)) }));
+        .map((brush) => ({ ...brush, id: newBrushId(), category: abrGroup || procreateSetGroup || (displayGroup ?? brushGroup(brush)) }));
       if (!brushes.length) throw new Error('No brush tips');
       if (await mutate((state) => ({
         brushes: [...state.brushes, ...brushes],
@@ -319,7 +322,7 @@ export function BrushToolset({ currentBrushProps, selectedId, onApplyPreset }: B
           title={labels.saveCurrentBrush} onClick={() => beginEdit({ kind: 'save' })}><Plus size={16} /></button>
         <button type="button" className="atelier-icon-btn h-7 w-7" aria-label={labels.importBrushes}
           title={labels.importBrushes} disabled={importing} onClick={() => input.current?.click()}><Upload size={14} /></button>
-        <input ref={input} type="file" hidden accept=".abr,.sut,.asbrush,.asbrushpack,.json,image/*" onChange={(e) => {
+        <input ref={input} type="file" hidden accept=".abr,.sut,.brush,.brushset,.asbrush,.asbrushpack,.json,image/*" onChange={(e) => {
           const file = e.currentTarget.files?.[0];
           e.currentTarget.value = '';
           if (file) void importFile(file);

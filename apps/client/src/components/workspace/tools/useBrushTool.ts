@@ -396,7 +396,9 @@ export function useBrushTool(ctx: ToolContext) {
           scopedUndoRef.current.push(undoOp);
           ctx.updateUndoRedoState();
           // The ping-pong copy was synced when the tiles were read (a newer stroke may be under way now)
-          ctx.commitOp(layerId, opType, { ...strokeData, tiles: afterTiles, inkTiles }, true);
+          const { allPoints: _allPoints, ...payload } = strokeData;
+          const commitPayload = OfflineSessionStore.isOfflineCanvas(canvas.id) ? payload : strokeData;
+          ctx.commitOp(layerId, opType, { ...commitPayload, tiles: afterTiles, inkTiles }, true);
         })
         .catch((err) => console.warn('[useBrushTool] Stroke commit failed:', err))
         .finally(() => {

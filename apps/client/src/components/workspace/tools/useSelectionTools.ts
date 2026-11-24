@@ -355,7 +355,7 @@ export function useSelectionTools(ctx: ToolContext) {
   /** Starts a lasso outline: the lasso selection (with its add / subtract mode) or a fill tool's shape */
   const startLasso = (e: ModifierKeys, local: Point, tool: ToolType) => {
     lassoModeRef.current = tool === 'lasso' ? selectionModeFor(e) : 'replace';
-    selectionEngineRef.current?.startLasso(local.x, local.y);
+    selectionEngineRef.current?.startLasso(local.x, local.y, tool === 'bucket');
   };
 
   const addLassoPoint = (local: Point) => selectionEngineRef.current?.addLassoPoint(local.x, local.y);

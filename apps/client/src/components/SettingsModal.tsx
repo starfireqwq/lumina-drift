@@ -2,7 +2,9 @@ import React, { useCallback, useRef, useState, useEffect, useSyncExternalStore }
 import {
   AlertCircle,
   Check,
+  Crosshair,
   Globe,
+  Hand,
   Keyboard,
   Minus,
   Moon,
@@ -13,16 +15,26 @@ import {
   Search,
   Server,
   Sliders,
+  Sparkles,
   Sun,
   X,
   ZoomIn,
 } from 'lucide-react';
 import { setUiScale, UI_SCALE_MAX, UI_SCALE_MIN, useUiScale } from '../theme/uiScale';
+import { setMotionMode, useMotionMode, type MotionMode } from '../theme/motion';
 import { useI18n, Language } from '../context/I18nContext';
 import { ShortcutItem, ShortcutManager } from '../engine/ShortcutManager';
 import { ThemePicker } from './ThemePicker';
 import { evaluatePressureCurve, type PressureCurveConfig } from '@atelier/shared';
 import { DEFAULT_PRESSURE_CURVE, readStylusPressureCurve, saveStylusPressureCurve } from '../engine/stylusPressure';
+import {
+  getShowBrushCrosshair,
+  getTouchSimulatedPressure,
+  setShowBrushCrosshair,
+  setTouchSimulatedPressure,
+  subscribeShowBrushCrosshair,
+  subscribeTouchSimulatedPressure,
+} from '../engine/inputPreferences';
 import {
   getTabletSnapshot, hasNativeTabletModes, setTabletPreference, startTabletStroke, subscribeTablet, type TabletMotion, type TabletPoint, type TabletStroke,
 } from '../engine/tabletInput';
@@ -86,6 +98,51 @@ const UiScaleControl: React.FC = () => {
   );
 };
 
+/** Controls html[data-motion] independently of the OS reduced-motion flag (defaults to 'on'). */
+const MotionModeControl: React.FC = () => {
+  const { t } = useI18n();
+  const motionMode = useMotionMode();
+  const options: Array<{ id: MotionMode; label: string }> = [
+    { id: 'on', label: t.settings.motionOn },
+    { id: 'auto', label: t.settings.motionAuto },
+    { id: 'off', label: t.settings.motionOff },
+  ];
+
+  return (
+    <div className="flex flex-col gap-2.5">
+      <span className="text-xs font-bold text-neutral-300 uppercase tracking-wider flex items-center gap-1.5">
+        <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
+        {t.settings.motionTitle}
+      </span>
+      <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label={t.settings.motionTitle}>
+        {options.map((opt) => {
+          const active = motionMode === opt.id;
+          return (
+            <button
+              key={opt.id}
+              type="button"
+              role="radio"
+              aria-checked={active}
+              data-setting="motion-mode"
+              data-motion-mode={opt.id}
+              onClick={() => setMotionMode(opt.id)}
+              className={`flex items-center justify-between gap-1.5 px-3 py-2 rounded-xl border text-xs font-medium transition ${
+                active
+                  ? 'bg-indigo-600/20 border-indigo-500 text-white'
+                  : 'bg-neutral-900/60 border-neutral-800 text-neutral-400 hover:text-white hover:border-neutral-700'
+              }`}
+            >
+              <span className="truncate">{opt.label}</span>
+              {active && <Check className="w-3.5 h-3.5 shrink-0 text-indigo-400" />}
+            </button>
+          );
+        })}
+      </div>
+      <p className="text-[11px] text-neutral-400">{t.settings.motionDesc}</p>
+    </div>
+  );
+};
+
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -126,6 +183,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     saveStylusPressureCurve(curve);
   }, []);
   const tablet = useSyncExternalStore(subscribeTablet, getTabletSnapshot);
+  const showBrushCrosshair = useSyncExternalStore(subscribeShowBrushCrosshair, getShowBrushCrosshair, getShowBrushCrosshair);
+  const touchSimulatedPressure = useSyncExternalStore(subscribeTouchSimulatedPressure, getTouchSimulatedPressure, getTouchSimulatedPressure);
   const settings = t.settings;
   const modeLabel = { browser: settings.tabletBrowser, ink: settings.tabletInk, wintab: 'WinTab' };
   const driverMessage = {
@@ -839,6 +898,29 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <ThemePicker />
               </div>
 
+              <MotionModeControl />
+
+              {/* Canvas Cursor */}
+              <div className="flex flex-col gap-2.5">
+                <span className="text-xs font-bold text-neutral-300 uppercase tracking-wider flex items-center gap-1.5">
+                  <Crosshair className="w-3.5 h-3.5 text-indigo-400" />
+                  {t.settings.canvasCursorTitle}
+                </span>
+                <label className="flex items-start justify-between gap-3 rounded-xl border border-neutral-800 bg-neutral-900/60 px-3 py-2.5 text-xs text-neutral-200 cursor-pointer">
+                  <span className="flex flex-col gap-0.5">
+                    <span className="font-medium text-white">{t.settings.showBrushCrosshair}</span>
+                    <span className="text-[11px] text-neutral-400">{t.settings.showBrushCrosshairDesc}</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    data-setting="show-brush-crosshair"
+                    checked={showBrushCrosshair}
+                    onChange={(e) => setShowBrushCrosshair(e.target.checked)}
+                    className="mt-0.5 shrink-0"
+                  />
+                </label>
+              </div>
+
               {/* Panels (same switches as the 視窗 menu) */}
               <div className="flex flex-col gap-2.5">
                 <span className="text-xs font-bold text-neutral-300 uppercase tracking-wider flex items-center gap-1.5">
@@ -919,6 +1001,24 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   (tablet.driver !== 'ready' || tablet.preference === 'wintab') && (
                   <p className="mt-2 text-neutral-400" role="status">{driverMessage}</p>
                 )}
+              </section>
+              <section className="rounded-xl border border-neutral-800 p-3 text-xs" aria-label={t.settings.touchSimulatedPressure}>
+                <label className="flex items-start justify-between gap-3 cursor-pointer">
+                  <span className="flex flex-col gap-0.5">
+                    <span className="font-bold text-white flex items-center gap-1.5">
+                      <Hand className="w-3.5 h-3.5 text-indigo-400" />
+                      {t.settings.touchSimulatedPressure}
+                    </span>
+                    <span className="text-[11px] text-neutral-400">{t.settings.touchSimulatedPressureDesc}</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    data-setting="touch-simulated-pressure"
+                    checked={touchSimulatedPressure}
+                    onChange={(e) => setTouchSimulatedPressure(e.target.checked)}
+                    className="mt-0.5 shrink-0"
+                  />
+                </label>
               </section>
               <PressureCurveEditor curve={pressureCurve} onChange={updatePressureCurve} />
               <div className="flex items-center justify-between">

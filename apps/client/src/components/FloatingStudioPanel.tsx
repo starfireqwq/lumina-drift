@@ -244,7 +244,7 @@ export const FloatingStudioPanel: React.FC<FloatingStudioPanelProps> = ({
             <Sparkles className="w-3.5 h-3.5 text-indigo-400 group-hover:rotate-12 transition-transform" />
             <span>{t.brushPreset.title}</span>
           </div>
-          <span className="text-[10px] text-neutral-400">.abr / .sut</span>
+          <span className="text-[10px] text-neutral-400">.abr / .sut / .brush</span>
         </button>
       )}
 

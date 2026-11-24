@@ -109,11 +109,17 @@ export const BrushEnginePanel: React.FC<BrushEnginePanelProps> = ({ brushProps: 
 
   const patchChannel = (key: keyof BrushDynamicsConfig, patch: Partial<BrushDynamicChannel>) => {
     const nextChannel: BrushDynamicChannel = { ...(dyn[key] ?? {}), ...patch };
+    const nextDynamics: BrushDynamicsConfig = {
+      ...dyn,
+      [key]: nextChannel,
+    };
+    // Keep size.min bound to BrushSettingsModal's minSize slider unless explicitly set on the brush.
+    if (p.dynamics?.size?.min === undefined && nextDynamics.size) {
+      const { min: _omit, ...sizeWithoutMin } = nextDynamics.size;
+      nextDynamics.size = sizeWithoutMin;
+    }
     onChange({
-      dynamics: {
-        ...dyn,
-        [key]: nextChannel,
-      },
+      dynamics: nextDynamics,
     });
   };
 
