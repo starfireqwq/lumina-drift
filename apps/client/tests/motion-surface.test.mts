@@ -180,11 +180,12 @@ test('motion.ts persists mode changes, reacts to matchMedia in auto mode only, a
   }
 });
 
-test('themes.ts defines exactly 5 surface styles and safely handles storage/SSR edge cases', () => {
-  const expected: SurfaceStyle[] = ['solid', 'liquid-glass', 'frosted-matte', 'lumina-glow', 'soft-paper'];
+test('themes.ts defines exactly 6 surface styles and safely handles storage/SSR edge cases', () => {
+  const expected: SurfaceStyle[] = ['solid', 'liquid-glass', 'chromatic-glass', 'frosted-matte', 'lumina-glow', 'soft-paper'];
   assert.deepEqual(SURFACE_STYLES.map((s) => s.id), expected);
   assert.equal(DEFAULT_SURFACE_STYLE, 'solid');
   assert.equal(isSurfaceStyle('liquid-glass'), true);
+  assert.equal(isSurfaceStyle('chromatic-glass'), true);
   assert.equal(isSurfaceStyle('glassmorphism-unknown'), false);
 
   // Safe no-op without document/localStorage
@@ -213,12 +214,12 @@ test('themes.ts defines exactly 5 surface styles and safely handles storage/SSR 
   }
 });
 
-test('applyTheme and applySurfaceStyle support all 7 themes x 5 surface styles without overwriting each other', () => {
+test('applyTheme and applySurfaceStyle support all 7 themes x 6 surface styles without overwriting each other', () => {
   const mock = installDomMock({}, false);
   try {
     const themeIds: ThemeId[] = [...THEME_PRESETS.map((p) => p.id), 'custom'];
     const surfaceIds: SurfaceStyle[] = SURFACE_STYLES.map((s) => s.id);
-    assert.equal(themeIds.length * surfaceIds.length, 35);
+    assert.equal(themeIds.length * surfaceIds.length, 42);
 
     for (const surfaceId of surfaceIds) {
       for (const themeId of themeIds) {
@@ -273,9 +274,14 @@ test('index.css enforces motion decoupling and strictly isolates canvas containe
   }
 });
 
-test('index.css defines paired dark/light rules for all 5 surface styles and keeps lumina-glow light header readable', () => {
+test('index.css defines paired dark/light rules for all 6 surface styles, chromatic RGB flow, and keeps lumina-glow light header readable', () => {
   const cssPath = path.resolve(import.meta.dirname, '..', 'src', 'index.css');
   const css = fs.readFileSync(cssPath, 'utf8');
+
+  assert.ok(css.includes('@property --atelier-rgb-angle'), 'index.css must register --atelier-rgb-angle @property');
+  assert.ok(css.includes('@keyframes atelierChromaticFlow'), 'index.css must define @keyframes atelierChromaticFlow');
+  assert.ok(css.includes('html[data-surface="chromatic-glass"][data-motion="on"]'),
+    'chromatic-glass RGB animation must be gated by html[data-motion="on"]');
 
   for (const surface of SURFACE_STYLES) {
     const darkRe = new RegExp(`html\\[data-surface="${surface.id}"\\]\\s*\\{([\\s\\S]*?)\\}`);

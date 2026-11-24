@@ -4,7 +4,7 @@
  */
 export type ThemeBase = 'dark' | 'gray' | 'light';
 export type ThemeId = 'dark' | 'gray' | 'light' | 'sakura' | 'matcha' | 'midnight' | 'custom';
-export type SurfaceStyle = 'solid' | 'liquid-glass' | 'frosted-matte' | 'lumina-glow' | 'soft-paper';
+export type SurfaceStyle = 'solid' | 'liquid-glass' | 'chromatic-glass' | 'frosted-matte' | 'lumina-glow' | 'soft-paper';
 
 export interface SurfaceStylePreset {
   id: SurfaceStyle;
@@ -16,6 +16,7 @@ export const DEFAULT_SURFACE_STYLE: SurfaceStyle = 'solid';
 export const SURFACE_STYLES: SurfaceStylePreset[] = [
   { id: 'solid', fallbackLabel: '經典純淨' },
   { id: 'liquid-glass', fallbackLabel: '液態玻璃' },
+  { id: 'chromatic-glass', fallbackLabel: '炫彩玻璃' },
   { id: 'frosted-matte', fallbackLabel: '柔霧磨砂' },
   { id: 'lumina-glow', fallbackLabel: '流光霓虹' },
   { id: 'soft-paper', fallbackLabel: '紙感軟擬態' },

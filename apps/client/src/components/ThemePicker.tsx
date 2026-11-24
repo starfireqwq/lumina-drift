@@ -44,6 +44,7 @@ const THEME_LABEL_KEYS: Record<ThemeId, keyof Translations['settings']> = {
 const SURFACE_LABEL_KEYS: Record<SurfaceStyle, keyof Translations['settings']> = {
   solid: 'surfaceSolid',
   'liquid-glass': 'surfaceLiquidGlass',
+  'chromatic-glass': 'surfaceChromaticGlass',
   'frosted-matte': 'surfaceFrostedMatte',
   'lumina-glow': 'surfaceLuminaGlow',
   'soft-paper': 'surfaceSoftPaper',
@@ -60,11 +61,23 @@ const surfacePreviewStyle = (surface: SurfaceStyle, themeColors: ReturnType<type
   switch (surface) {
     case 'liquid-glass':
       return {
-        background: `linear-gradient(135deg, ${themeColors.isLight ? 'rgba(255,255,255,0.72)' : 'rgba(255,255,255,0.18)'}, ${themeColors.glassPanel})`,
-        border: `1px solid ${themeColors.isLight ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.28)'}`,
+        background: themeColors.isLight
+          ? 'radial-gradient(120% 90% at 15% 0%, rgba(255,255,255,0.92), transparent 55%), linear-gradient(145deg, rgba(255,255,255,0.68), rgba(226,238,255,0.34) 55%, rgba(255,255,255,0.52))'
+          : 'radial-gradient(120% 90% at 15% 0%, rgba(255,255,255,0.44), transparent 55%), linear-gradient(145deg, rgba(255,255,255,0.22), rgba(24,28,42,0.38) 55%, rgba(190,230,255,0.16))',
+        border: `1px solid ${themeColors.isLight ? 'rgba(255,255,255,0.92)' : 'rgba(255,255,255,0.45)'}`,
         boxShadow: themeColors.isLight
-          ? 'inset 0 1px 0 rgba(255,255,255,0.9), 0 4px 10px -4px rgba(15,23,42,0.18)'
-          : 'inset 0 1px 0 rgba(255,255,255,0.28), 0 6px 12px -4px rgba(0,0,0,0.55)',
+          ? 'inset 0 1.5px 0 rgba(255,255,255,0.96), inset 0 -1px 0 rgba(125,211,252,0.45), 0 4px 12px -4px rgba(15,23,42,0.22)'
+          : 'inset 0 1.5px 0 rgba(255,255,255,0.58), inset 0 -1px 0 rgba(186,230,253,0.3), 0 6px 14px -4px rgba(0,0,0,0.6)',
+      };
+    case 'chromatic-glass':
+      return {
+        background: `${themeColors.isLight
+          ? 'linear-gradient(145deg, rgba(255,255,255,0.74), rgba(240,246,255,0.48))'
+          : 'linear-gradient(145deg, rgba(255,255,255,0.22), rgba(20,24,38,0.48))'} padding-box, conic-gradient(from var(--atelier-rgb-angle, 24deg), #ff5ea8, #ffb84d, #5eead4, #60a5fa, #a78bfa, #ff5ea8) border-box`,
+        border: '1.5px solid transparent',
+        boxShadow: themeColors.isLight
+          ? 'inset 0 1.5px 0 rgba(255,255,255,0.92), 0 4px 12px -3px rgba(129,140,248,0.32)'
+          : 'inset 0 1.5px 0 rgba(255,255,255,0.5), 0 4px 14px -3px rgba(96,165,250,0.38)',
       };
     case 'frosted-matte':
       return {
@@ -235,12 +248,12 @@ export const ThemePicker: React.FC<{ compact?: boolean }> = ({ compact }) => {
         </div>
       )}
 
-      {/* Surface style branch (5 UI material presets that pair with any theme) */}
+      {/* Surface style branch (6 UI material presets that pair with any theme) */}
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center justify-between gap-2">
           <span className="text-[11px] font-semibold text-neutral-300">{t.settings.surfaceStyle}</span>
         </div>
-        <div className={`grid ${compact ? 'grid-cols-2 gap-1.5' : 'grid-cols-2 gap-2 sm:grid-cols-5'}`} role="radiogroup" aria-label={t.settings.surfaceStyle}>
+        <div className={`grid ${compact ? 'grid-cols-2 gap-1.5' : 'grid-cols-2 gap-2 sm:grid-cols-3'}`} role="radiogroup" aria-label={t.settings.surfaceStyle}>
           {SURFACE_STYLES.map((s) => {
             const active = surfaceStyle === s.id;
             const label = String(t.settings[SURFACE_LABEL_KEYS[s.id]] || s.fallbackLabel);
@@ -260,7 +273,9 @@ export const ThemePicker: React.FC<{ compact?: boolean }> = ({ compact }) => {
                 <div
                   className="relative flex h-8 w-full items-center justify-center overflow-hidden px-1.5"
                   style={{
-                    background: s.id === 'liquid-glass' || s.id === 'frosted-matte'
+                    background: s.id === 'chromatic-glass'
+                      ? `radial-gradient(circle at 20% 25%, rgba(255,94,168,0.45), transparent 52%), radial-gradient(circle at 82% 75%, rgba(94,234,212,0.45), transparent 55%), ${activeColors.bgDeep}`
+                      : s.id === 'liquid-glass' || s.id === 'frosted-matte'
                       ? `radial-gradient(circle at 20% 30%, ${activeColors.accentGlow}, transparent 60%), ${activeColors.bgDeep}`
                       : activeColors.bgDeep,
                   }}

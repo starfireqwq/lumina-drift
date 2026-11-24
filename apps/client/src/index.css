@@ -504,40 +504,193 @@ html.light[data-surface="solid"] {
   --surface-btn-shadow: 0 1px 2px rgb(15 23 42 / .06);
 }
 
+@property --atelier-rgb-angle {
+  syntax: '<angle>';
+  initial-value: 18deg;
+  inherits: true;
+}
+
+@keyframes atelierChromaticFlow {
+  from { --atelier-rgb-angle: 0deg; }
+  to { --atelier-rgb-angle: 360deg; }
+}
+
+/* Upgraded Liquid Glass: crystalline optical translucency, curved specular meniscus, caustic edge bounce */
 html[data-surface="liquid-glass"] {
-  --surface-chrome-bg: rgb(var(--n-900) / .72);
-  --surface-popover-bg: linear-gradient(155deg, rgb(255 255 255 / .09), rgb(var(--n-900) / .68) 45%, rgb(var(--n-950) / .76));
-  --surface-modal-bg: linear-gradient(160deg, rgb(255 255 255 / .08), rgb(var(--n-900) / .78) 42%, rgb(var(--n-950) / .84));
-  --surface-card-bg: linear-gradient(155deg, rgb(255 255 255 / .07), rgb(var(--n-900) / .56));
-  --surface-header-bg: rgb(255 255 255 / .06);
-  --surface-field-bg: rgb(var(--n-950) / .65);
-  --surface-btn-bg: rgb(255 255 255 / .08);
-  --surface-border: rgb(255 255 255 / .18);
-  --surface-backdrop: blur(18px) saturate(1.65);
-  --surface-modal-backdrop: rgb(6 8 14 / .46);
-  --surface-modal-backdrop-blur: blur(6px);
-  --surface-chrome-shadow: inset 0 1px 0 rgb(255 255 255 / .14);
-  --surface-shadow: inset 0 1px 0 rgb(255 255 255 / .24), inset 0 -1px 0 rgb(0 0 0 / .2), 0 20px 48px -14px rgb(0 0 0 / .62);
-  --surface-modal-shadow: inset 0 1px 0 rgb(255 255 255 / .22), 0 28px 72px -18px rgb(0 0 0 / .68);
-  --surface-btn-shadow: inset 0 1px 0 rgb(255 255 255 / .16);
-  --surface-field-shadow: inset 0 1px 0 rgb(255 255 255 / .08);
+  --surface-chrome-bg:
+    linear-gradient(180deg, rgb(255 255 255 / .16) 0%, rgb(255 255 255 / .03) 42%, rgb(170 220 255 / .04) 100%),
+    rgb(var(--n-900) / .48);
+  --surface-popover-bg:
+    radial-gradient(130% 75% at 14% 0%, rgb(255 255 255 / .30) 0%, rgb(255 255 255 / .08) 28%, transparent 58%),
+    linear-gradient(148deg, rgb(255 255 255 / .16) 0%, rgb(var(--n-900) / .38) 38%, rgb(var(--n-950) / .52) 78%, rgb(175 225 255 / .10) 100%);
+  --surface-modal-bg:
+    radial-gradient(120% 65% at 12% 0%, rgb(255 255 255 / .24) 0%, rgb(255 255 255 / .06) 28%, transparent 56%),
+    linear-gradient(155deg, rgb(255 255 255 / .14) 0%, rgb(var(--n-900) / .56) 36%, rgb(var(--n-950) / .68) 82%, rgb(175 225 255 / .08) 100%);
+  --surface-card-bg:
+    radial-gradient(125% 80% at 15% 0%, rgb(255 255 255 / .26) 0%, transparent 52%),
+    linear-gradient(150deg, rgb(255 255 255 / .14) 0%, rgb(var(--n-900) / .36) 55%, rgb(var(--n-950) / .48) 100%);
+  --surface-header-bg: linear-gradient(180deg, rgb(255 255 255 / .12), rgb(255 255 255 / .03));
+  --surface-field-bg: rgb(var(--n-950) / .46);
+  --surface-btn-bg: linear-gradient(180deg, rgb(255 255 255 / .18), rgb(255 255 255 / .06));
+  --surface-border: rgb(255 255 255 / .34);
+  --surface-backdrop: blur(12px) saturate(2.05) contrast(1.08) brightness(1.06);
+  --surface-modal-backdrop: rgb(5 8 16 / .40);
+  --surface-modal-backdrop-blur: blur(5px);
+  --surface-chrome-shadow:
+    inset 0 1px 0 rgb(255 255 255 / .38),
+    inset 0 -1px 0 rgb(186 230 253 / .18),
+    0 8px 24px -12px rgb(0 0 0 / .45);
+  --surface-shadow:
+    inset 0 1.5px 0 rgb(255 255 255 / .56),
+    inset 1px 0 0 rgb(255 255 255 / .24),
+    inset 0 -1px 0 rgb(186 230 253 / .24),
+    inset 0 18px 34px -22px rgb(255 255 255 / .34),
+    0 0 0 0.5px rgb(255 255 255 / .18),
+    0 22px 52px -14px rgb(0 0 0 / .62);
+  --surface-modal-shadow:
+    inset 0 1.5px 0 rgb(255 255 255 / .52),
+    inset 1px 0 0 rgb(255 255 255 / .20),
+    inset 0 -1px 0 rgb(186 230 253 / .20),
+    inset 0 22px 42px -26px rgb(255 255 255 / .28),
+    0 0 0 0.5px rgb(255 255 255 / .16),
+    0 30px 76px -18px rgb(0 0 0 / .70);
+  --surface-btn-shadow:
+    inset 0 1px 0 rgb(255 255 255 / .42),
+    inset 0 -1px 0 rgb(186 230 253 / .14),
+    0 4px 12px -4px rgb(0 0 0 / .35);
+  --surface-field-shadow: inset 0 1px 0 rgb(255 255 255 / .18), inset 0 2px 6px rgb(0 0 0 / .24);
 }
 html.light[data-surface="liquid-glass"] {
-  --surface-chrome-bg: rgb(var(--n-900) / .82);
-  --surface-popover-bg: linear-gradient(155deg, rgb(255 255 255 / .88), rgb(var(--n-900) / .84) 55%, rgb(var(--n-800) / .78));
-  --surface-modal-bg: linear-gradient(160deg, rgb(255 255 255 / .94), rgb(var(--n-900) / .9) 55%, rgb(var(--n-800) / .86));
-  --surface-card-bg: linear-gradient(155deg, rgb(255 255 255 / .84), rgb(var(--n-900) / .76));
-  --surface-header-bg: rgb(255 255 255 / .52);
-  --surface-field-bg: rgb(255 255 255 / .78);
-  --surface-btn-bg: rgb(255 255 255 / .68);
-  --surface-border: rgb(255 255 255 / .72);
-  --surface-backdrop: blur(18px) saturate(1.5);
-  --surface-modal-backdrop: rgb(232 238 248 / .42);
-  --surface-chrome-shadow: inset 0 1px 0 rgb(255 255 255 / .82), 0 1px 0 rgb(15 23 42 / .06);
-  --surface-shadow: inset 0 1px 0 rgb(255 255 255 / .85), 0 18px 40px -14px rgb(15 23 42 / .2), 0 2px 8px -2px rgb(15 23 42 / .1);
-  --surface-modal-shadow: inset 0 1px 0 rgb(255 255 255 / .9), 0 24px 60px -16px rgb(15 23 42 / .25);
-  --surface-btn-shadow: inset 0 1px 0 rgb(255 255 255 / .85), 0 1px 2px rgb(15 23 42 / .08);
-  --surface-field-shadow: inset 0 1px 2px rgb(15 23 42 / .08);
+  --surface-chrome-bg:
+    linear-gradient(180deg, rgb(255 255 255 / .76) 0%, rgb(245 250 255 / .54) 100%);
+  --surface-popover-bg:
+    radial-gradient(130% 75% at 14% 0%, rgb(255 255 255 / .94) 0%, rgb(255 255 255 / .46) 32%, transparent 62%),
+    linear-gradient(148deg, rgb(255 255 255 / .72) 0%, rgb(242 248 255 / .48) 54%, rgb(224 238 255 / .56) 100%);
+  --surface-modal-bg:
+    radial-gradient(120% 65% at 12% 0%, rgb(255 255 255 / .96) 0%, rgb(255 255 255 / .56) 32%, transparent 60%),
+    linear-gradient(155deg, rgb(255 255 255 / .82) 0%, rgb(244 248 255 / .68) 60%, rgb(232 242 255 / .72) 100%);
+  --surface-card-bg:
+    radial-gradient(125% 80% at 15% 0%, rgb(255 255 255 / .92) 0%, transparent 56%),
+    linear-gradient(150deg, rgb(255 255 255 / .70) 0%, rgb(238 245 255 / .52) 100%);
+  --surface-header-bg: linear-gradient(180deg, rgb(255 255 255 / .68), rgb(255 255 255 / .34));
+  --surface-field-bg: rgb(255 255 255 / .62);
+  --surface-btn-bg: linear-gradient(180deg, rgb(255 255 255 / .88), rgb(240 246 255 / .58));
+  --surface-border: rgb(255 255 255 / .88);
+  --surface-backdrop: blur(12px) saturate(1.9) contrast(1.05) brightness(1.06);
+  --surface-modal-backdrop: rgb(224 234 248 / .34);
+  --surface-chrome-shadow:
+    inset 0 1.5px 0 rgb(255 255 255 / .96),
+    inset 0 -1px 0 rgb(148 188 232 / .28),
+    0 6px 18px -10px rgb(15 23 42 / .14);
+  --surface-shadow:
+    inset 0 1.5px 0 rgb(255 255 255 / .98),
+    inset 1px 0 0 rgb(255 255 255 / .72),
+    inset 0 -1px 0 rgb(125 186 248 / .34),
+    inset 0 16px 28px -18px rgb(255 255 255 / .85),
+    0 0 0 0.5px rgb(15 23 42 / .08),
+    0 20px 44px -14px rgb(15 23 42 / .20);
+  --surface-modal-shadow:
+    inset 0 1.5px 0 rgb(255 255 255 / .98),
+    inset 1px 0 0 rgb(255 255 255 / .74),
+    inset 0 -1px 0 rgb(125 186 248 / .28),
+    0 0 0 0.5px rgb(15 23 42 / .08),
+    0 26px 64px -16px rgb(15 23 42 / .24);
+  --surface-btn-shadow:
+    inset 0 1.5px 0 rgb(255 255 255 / .96),
+    0 2px 6px -1px rgb(15 23 42 / .10);
+  --surface-field-shadow: inset 0 1px 2px rgb(15 23 42 / .08), inset 0 -1px 0 rgb(255 255 255 / .7);
+}
+
+/* Chromatic Liquid Glass (炫彩模式): Liquid Glass optics + slow silky RGB prismatic flow */
+html[data-surface="chromatic-glass"] {
+  --atelier-rgb-angle: 18deg;
+  --surface-chrome-bg:
+    linear-gradient(calc(var(--atelier-rgb-angle) + 90deg), rgb(255 94 176 / .10), rgb(94 234 212 / .08) 38%, rgb(96 165 250 / .10) 70%, rgb(167 139 250 / .10)),
+    rgb(var(--n-900) / .48);
+  --surface-popover-bg:
+    radial-gradient(130% 75% at 14% 0%, rgb(255 255 255 / .28) 0%, rgb(255 255 255 / .06) 28%, transparent 56%) padding-box,
+    linear-gradient(calc(var(--atelier-rgb-angle) + 35deg), rgb(255 94 176 / .10), rgb(255 184 77 / .06) 26%, rgb(94 234 212 / .09) 54%, rgb(96 165 250 / .10) 78%, rgb(167 139 250 / .10)) padding-box,
+    linear-gradient(150deg, rgb(var(--n-900) / .52), rgb(var(--n-950) / .68)) padding-box,
+    linear-gradient(var(--atelier-rgb-angle), rgb(255 94 176 / .86), rgb(255 184 77 / .80) 22%, rgb(94 234 212 / .86) 46%, rgb(96 165 250 / .90) 70%, rgb(167 139 250 / .88) 88%, rgb(255 94 176 / .86)) border-box;
+  --surface-modal-bg:
+    radial-gradient(120% 65% at 12% 0%, rgb(255 255 255 / .22) 0%, transparent 54%) padding-box,
+    linear-gradient(calc(var(--atelier-rgb-angle) + 25deg), rgb(255 94 176 / .08), rgb(94 234 212 / .06) 45%, rgb(96 165 250 / .08) 75%, rgb(167 139 250 / .08)) padding-box,
+    linear-gradient(155deg, rgb(var(--n-900) / .70), rgb(var(--n-950) / .82)) padding-box,
+    linear-gradient(var(--atelier-rgb-angle), rgb(255 94 176 / .86), rgb(255 184 77 / .78) 22%, rgb(94 234 212 / .86) 46%, rgb(96 165 250 / .90) 70%, rgb(167 139 250 / .88) 88%, rgb(255 94 176 / .86)) border-box;
+  --surface-card-bg:
+    radial-gradient(125% 80% at 15% 0%, rgb(255 255 255 / .24) 0%, transparent 52%) padding-box,
+    linear-gradient(calc(var(--atelier-rgb-angle) + 30deg), rgb(255 94 176 / .09), rgb(94 234 212 / .07) 50%, rgb(96 165 250 / .09)) padding-box,
+    linear-gradient(150deg, rgb(var(--n-900) / .48), rgb(var(--n-950) / .62)) padding-box,
+    linear-gradient(var(--atelier-rgb-angle), rgb(255 94 176 / .80), rgb(255 184 77 / .72) 22%, rgb(94 234 212 / .80) 46%, rgb(96 165 250 / .84) 70%, rgb(167 139 250 / .82) 88%, rgb(255 94 176 / .80)) border-box;
+  --surface-header-bg: linear-gradient(calc(var(--atelier-rgb-angle) + 90deg), rgb(255 94 176 / .10), rgb(94 234 212 / .08), rgb(167 139 250 / .10));
+  --surface-field-bg: rgb(var(--n-950) / .48);
+  --surface-btn-bg: linear-gradient(180deg, rgb(255 255 255 / .18), rgb(255 255 255 / .06));
+  --surface-border: transparent;
+  --surface-backdrop: blur(12px) saturate(2.1) contrast(1.08) brightness(1.06);
+  --surface-modal-backdrop: rgb(6 8 18 / .42);
+  --surface-modal-backdrop-blur: blur(5px);
+  --surface-chrome-shadow:
+    inset 0 1px 0 rgb(255 255 255 / .36),
+    inset 0 -1px 0 rgb(125 211 252 / .42),
+    0 8px 26px -12px rgb(96 165 250 / .35);
+  --surface-shadow:
+    inset 0 1.5px 0 rgb(255 255 255 / .52),
+    inset 0 16px 32px -20px rgb(255 255 255 / .28),
+    0 0 24px -8px rgb(96 165 250 / .32),
+    0 22px 52px -14px rgb(0 0 0 / .62);
+  --surface-modal-shadow:
+    inset 0 1.5px 0 rgb(255 255 255 / .48),
+    0 0 32px -8px rgb(167 139 250 / .36),
+    0 30px 76px -18px rgb(0 0 0 / .70);
+  --surface-btn-shadow:
+    inset 0 1px 0 rgb(255 255 255 / .40),
+    0 4px 14px -5px rgb(96 165 250 / .35);
+  --surface-field-shadow: inset 0 1px 0 rgb(255 255 255 / .20), 0 0 0 1px rgb(255 255 255 / .18);
+}
+html[data-surface="chromatic-glass"][data-motion="on"] {
+  animation: atelierChromaticFlow 16s linear infinite;
+}
+html.light[data-surface="chromatic-glass"] {
+  --surface-chrome-bg:
+    linear-gradient(calc(var(--atelier-rgb-angle) + 90deg), rgb(255 94 176 / .12), rgb(94 234 212 / .12) 40%, rgb(96 165 250 / .12) 72%, rgb(167 139 250 / .12)),
+    rgb(255 255 255 / .68);
+  --surface-popover-bg:
+    radial-gradient(130% 75% at 14% 0%, rgb(255 255 255 / .94) 0%, rgb(255 255 255 / .44) 32%, transparent 62%) padding-box,
+    linear-gradient(calc(var(--atelier-rgb-angle) + 35deg), rgb(255 94 176 / .10), rgb(255 184 77 / .08) 26%, rgb(94 234 212 / .10) 54%, rgb(96 165 250 / .10) 78%, rgb(167 139 250 / .10)) padding-box,
+    linear-gradient(150deg, rgb(255 255 255 / .74), rgb(242 248 255 / .64)) padding-box,
+    linear-gradient(var(--atelier-rgb-angle), rgb(244 63 148 / .76), rgb(245 158 11 / .70) 22%, rgb(20 184 166 / .76) 46%, rgb(59 130 246 / .80) 70%, rgb(139 92 246 / .78) 88%, rgb(244 63 148 / .76)) border-box;
+  --surface-modal-bg:
+    radial-gradient(120% 65% at 12% 0%, rgb(255 255 255 / .96) 0%, transparent 56%) padding-box,
+    linear-gradient(calc(var(--atelier-rgb-angle) + 25deg), rgb(255 94 176 / .08), rgb(94 234 212 / .08) 48%, rgb(96 165 250 / .08) 76%, rgb(167 139 250 / .08)) padding-box,
+    linear-gradient(155deg, rgb(255 255 255 / .84), rgb(240 246 255 / .78)) padding-box,
+    linear-gradient(var(--atelier-rgb-angle), rgb(244 63 148 / .76), rgb(245 158 11 / .70) 22%, rgb(20 184 166 / .76) 46%, rgb(59 130 246 / .80) 70%, rgb(139 92 246 / .78) 88%, rgb(244 63 148 / .76)) border-box;
+  --surface-card-bg:
+    radial-gradient(125% 80% at 15% 0%, rgb(255 255 255 / .92) 0%, transparent 56%) padding-box,
+    linear-gradient(calc(var(--atelier-rgb-angle) + 30deg), rgb(255 94 176 / .09), rgb(94 234 212 / .09) 50%, rgb(96 165 250 / .09)) padding-box,
+    linear-gradient(150deg, rgb(255 255 255 / .76), rgb(242 248 255 / .66)) padding-box,
+    linear-gradient(var(--atelier-rgb-angle), rgb(244 63 148 / .70), rgb(245 158 11 / .64) 22%, rgb(20 184 166 / .70) 46%, rgb(59 130 246 / .74) 70%, rgb(139 92 246 / .72) 88%, rgb(244 63 148 / .70)) border-box;
+  --surface-header-bg: linear-gradient(calc(var(--atelier-rgb-angle) + 90deg), rgb(255 94 176 / .12), rgb(94 234 212 / .10), rgb(167 139 250 / .12));
+  --surface-field-bg: rgb(255 255 255 / .64);
+  --surface-btn-bg: linear-gradient(180deg, rgb(255 255 255 / .88), rgb(240 246 255 / .58));
+  --surface-border: transparent;
+  --surface-backdrop: blur(12px) saturate(1.95) contrast(1.05) brightness(1.06);
+  --surface-modal-backdrop: rgb(224 234 248 / .34);
+  --surface-chrome-shadow:
+    inset 0 1.5px 0 rgb(255 255 255 / .96),
+    inset 0 -1.5px 0 rgb(96 165 250 / .35),
+    0 6px 20px -10px rgb(96 165 250 / .24);
+  --surface-shadow:
+    inset 0 1.5px 0 rgb(255 255 255 / .96),
+    0 0 22px -8px rgb(96 165 250 / .28),
+    0 20px 44px -14px rgb(15 23 42 / .20);
+  --surface-modal-shadow:
+    inset 0 1.5px 0 rgb(255 255 255 / .96),
+    0 0 28px -8px rgb(139 92 246 / .28),
+    0 26px 64px -16px rgb(15 23 42 / .24);
+  --surface-btn-shadow:
+    inset 0 1.5px 0 rgb(255 255 255 / .94),
+    0 2px 8px -2px rgb(96 165 250 / .22);
+  --surface-field-shadow: inset 0 1px 2px rgb(15 23 42 / .08), 0 0 0 1px rgb(148 163 184 / .36);
 }
 
 html[data-surface="frosted-matte"] {
@@ -708,6 +861,28 @@ html[data-surface="lumina-glow"] .atelier-btn--primary,
 html[data-surface="lumina-glow"] .atelier-btn[aria-pressed='true'],
 html[data-surface="lumina-glow"] .atelier-icon-btn[aria-pressed='true'] {
   box-shadow: 0 0 0 1px rgb(var(--a-400) / .6), 0 0 16px -3px rgb(var(--a-500) / .55);
+}
+html[data-surface="chromatic-glass"] .atelier-chrome {
+  border-color: rgb(255 255 255 / .22);
+}
+html.light[data-surface="chromatic-glass"] .atelier-chrome {
+  border-color: rgb(255 255 255 / .78);
+}
+html[data-surface="chromatic-glass"] .atelier-btn:not(.atelier-btn--primary):not(.atelier-btn--ghost):not([aria-pressed='true']):not(:hover),
+html[data-surface="chromatic-glass"] .atelier-field {
+  border-color: rgb(255 255 255 / .24);
+}
+html.light[data-surface="chromatic-glass"] .atelier-btn:not(.atelier-btn--primary):not(.atelier-btn--ghost):not([aria-pressed='true']):not(:hover),
+html.light[data-surface="chromatic-glass"] .atelier-field {
+  border-color: rgb(148 163 184 / .42);
+}
+html[data-surface="chromatic-glass"] .atelier-btn--primary,
+html[data-surface="chromatic-glass"] .atelier-btn[aria-pressed='true'],
+html[data-surface="chromatic-glass"] .atelier-icon-btn[aria-pressed='true'] {
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / .45),
+    0 0 0 1px rgb(96 165 250 / .55),
+    0 0 16px -3px rgb(167 139 250 / .58);
 }
 html[data-surface] :is(.atelier-chrome, .atelier-window, .atelier-popover) [class*="bg-neutral-800/60"],
 html[data-surface] .atelier-chat-panel > div:first-child,
