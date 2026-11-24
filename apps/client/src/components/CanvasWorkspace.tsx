@@ -82,6 +82,9 @@ import {
   CelMark,
   TimelineLabel,
   clampDpi,
+  computeTidiedAscendingNonMaskIds,
+  filterTopLevelSelectedLayers,
+  findTopAnchorForParent,
 } from '@atelier/shared';
 import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
@@ -5348,17 +5351,29 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
   /** 群組: a new group (inside the layers' common group, so groups nest) holding these layers */
   const groupLayers = async (ids: string[]) => {
-    const ls = layersRef.current.filter((l) => ids.includes(l.id) && l.layerType !== 'mask');
+    const current = layersRef.current;
+    const ls = filterTopLevelSelectedLayers(current, ids);
     if (!ls.length || !onCreateLayer) return;
     const blocked = ls.filter((l) => !canManageLayer(l));
     if (blocked.length) return warn(`不能群組別人的圖層：${blocked.map((b) => b.name).join('、')}`);
     const parents = new Set(ls.map((l) => l.parentId ?? null));
     const parent = parents.size === 1 ? [...parents][0] : null;
-    const top = [...ls].sort((a, b) => b.sortOrder - a.sortOrder)[0];
+    const top = ls[ls.length - 1];
+    const anchor = findTopAnchorForParent(current, top, parent);
     // Ctrl+Z ungroups (the group goes, the layers stay)
-    const group = await createLayerWithUndo(nextGroupName(layersRef.current), 'normal', 'group', top.id, parent, { select: false });
+    const group = await createLayerWithUndo(nextGroupName(current), 'normal', 'group', anchor.id, parent, { select: false });
     if (!group) return;
-    for (const l of ls) onUpdateLayerProps?.(l.id, { parentId: group.id });
+    const selectedRootIds = new Set(ls.map((l) => l.id));
+    for (const l of ls) {
+      await Promise.resolve(onUpdateLayerProps?.(l.id, { parentId: group.id }));
+    }
+    const latest = layersRef.current;
+    const hasGroup = latest.some((l) => l.id === group.id);
+    const snapshot = (hasGroup ? latest : [...latest, group]).map((l) =>
+      selectedRootIds.has(l.id) ? { ...l, parentId: group.id } : l
+    );
+    const ascendingIds = computeTidiedAscendingNonMaskIds(snapshot);
+    await Promise.resolve(onReorderLayer?.(group.id, 0, ascendingIds));
     onSelectLayer?.(group.id);
   };
 
@@ -6044,17 +6059,16 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       if (e.defaultPrevented || !Array.from(e.dataTransfer?.types ?? []).includes('Files')) return;
       if ((e.target as Element | null)?.closest?.('input[type="file"]')) return;
       e.preventDefault();
-      if (e.type === 'dragover' && e.dataTransfer) e.dataTransfer.dropEffect = 'none';
     };
     const hide = () => setImageDragOver(false);
     window.addEventListener('dragover', guard);
     window.addEventListener('drop', guard);
-    window.addEventListener('drop', hide);
+    window.addEventListener('drop', hide, true);
     window.addEventListener('dragend', hide);
     return () => {
       window.removeEventListener('dragover', guard);
       window.removeEventListener('drop', guard);
-      window.removeEventListener('drop', hide);
+      window.removeEventListener('drop', hide, true);
       window.removeEventListener('dragend', hide);
     };
   }, []);

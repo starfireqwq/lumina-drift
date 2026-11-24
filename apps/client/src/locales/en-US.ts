@@ -98,8 +98,8 @@ export const enUS: Translations = {
     projectLoading: 'Wait for the canvas to load before saving.',
     projectSaveFailed: 'Could not save the .lumina project.',
     saveProjectAs: 'Save Lumina Project As (.lumina)…',
-    openProject: 'Open Lumina Project (.lumina)…',
-    importCollaborativeProject: 'Import .lumina as a collaborative canvas…',
+    openProject: 'Open Project (.lumina / .psd / .kra)…',
+    importCollaborativeProject: 'Import (.lumina / .psd / .kra) as a collaborative canvas…',
     offlineBadge: 'Solo Offline',
   },
 
@@ -1723,7 +1723,7 @@ export const enUS: Translations = {
     resumeRetry: 'Check again',
     resumeForget: 'Remove from recent',
     canvasPreview: 'Canvas preview',
-    offlineOpenLuminaButton: 'Open .lumina Project…',
+    offlineOpenLuminaButton: 'Open Project (.lumina / .psd / .kra)…',
     offlineZeroNetworkHint: 'Solo offline mode runs 100% locally without any backend server; strokes and layers auto-save locally and export to .lumina / .psd / .ora anytime.',
   },
 

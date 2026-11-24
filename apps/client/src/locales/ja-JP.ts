@@ -98,8 +98,8 @@ export const jaJP: Translations = {
     projectLoading: 'キャンバスの読み込みが完了してから保存してください。',
     projectSaveFailed: '.lumina プロジェクトを保存できませんでした。',
     saveProjectAs: '別名でLuminaプロジェクトを保存 (.lumina)…',
-    openProject: 'Luminaプロジェクトを開く (.lumina)…',
-    importCollaborativeProject: '.lumina を共同キャンバスとして読み込む…',
+    openProject: 'プロジェクトを開く (.lumina / .psd / .kra)…',
+    importCollaborativeProject: '(.lumina / .psd / .kra) を共同キャンバスとして読み込む…',
     offlineBadge: 'ソロ・オフライン',
   },
 
@@ -1723,7 +1723,7 @@ export const jaJP: Translations = {
     resumeRetry: '再確認',
     resumeForget: '履歴から削除',
     canvasPreview: 'キャンバスのプレビュー',
-    offlineOpenLuminaButton: '.lumina プロジェクトを開く…',
+    offlineOpenLuminaButton: 'プロジェクトを開く (.lumina / .psd / .kra)…',
     offlineZeroNetworkHint: 'オフラインモードはサーバー不要で動作し、描線やレイヤーは自動保存され、いつでも .lumina / .psd / .ora に書き出せます。',
   },
 

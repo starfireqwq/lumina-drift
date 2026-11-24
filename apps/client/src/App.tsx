@@ -1,8 +1,9 @@
 import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { BlendMode, CanvasMemberModel, CanvasModel, CanvasUnit, CreateCanvasDto, LayerMeta, LayerModel, LayerType, clampDpi, getCanvasRoleCapabilities } from '@atelier/shared';
+import { BlendMode, CanvasMemberModel, CanvasModel, CanvasUnit, CreateCanvasDto, LayerMeta, LayerModel, LayerType, clampDpi, getCanvasRoleCapabilities, tidyLayerModels } from '@atelier/shared';
 import { ApiService } from './services/api';
 import { OfflineSessionStore } from './services/offlineStore';
 import { LuminaProjectEngine } from './engine/LuminaProjectEngine';
+import { isSupportedProjectFileName } from './engine/kraDecoder';
 import { useAuth } from './context/AuthContext';
 import { useI18n } from './context/I18nContext';
 import { useSocket } from './context/SocketContext';
@@ -1165,14 +1166,15 @@ export const App: React.FC = () => {
       if (ascendingIds) {
         // The layer panel's list has no masks: each stays right above its layer
         const at = new Map(ascendingIds.map((id, idx) => [id, (idx + 1) * 10]));
-        return copy.map((l) => {
+        const next = copy.map((l) => {
           const own = at.get(l.id);
           if (own !== undefined) return { ...l, sortOrder: own };
           const owner = l.layerType === 'mask' && l.parentId ? at.get(l.parentId) : undefined;
           return owner !== undefined ? { ...l, sortOrder: owner + 5 } : l;
         });
+        return tidyLayerModels(next).layers;
       }
-      return copy.map((l) => (l.id === layerId ? { ...l, sortOrder: newSortOrder } : l));
+      return tidyLayerModels(copy.map((l) => (l.id === layerId ? { ...l, sortOrder: newSortOrder } : l))).layers;
     });
 
     // 2. Emit over socket AND REST API for rock-solid persistence
@@ -1194,7 +1196,12 @@ export const App: React.FC = () => {
     if (!activeCanvasId) return;
     try {
       const updated = await ApiService.updateLayer(activeCanvasId, layerId, props);
-      setLayers((prev) => prev.map((l) => (l.id === layerId ? updated : l)));
+      setLayers((prev) => {
+        const next = prev.map((l) => (l.id === layerId ? updated : l));
+        return props.parentId !== undefined || props.sortOrder !== undefined
+          ? tidyLayerModels(next).layers
+          : next;
+      });
     } catch (err: any) {
       console.error('Update layer props error:', err);
     }
@@ -1302,17 +1309,33 @@ export const App: React.FC = () => {
       importingLumina.current = true;
       try {
         const collaborative = !OfflineSessionStore.canUseOfflineMode() || (!locally && !showGateway && !OfflineSessionStore.isOfflineMode());
-        const unpacked = await LuminaProjectEngine.unpackProject(data, filePath);
+        const fileName = (data instanceof File ? data.name : undefined) || filePath;
+        const displayName = (fileName?.split(/[/\\]/).pop() || '專案檔').trim();
+        showProjectToast(`⏳ 正在解析「${displayName}」…`);
+        const { unpackSupportedProject } = await import('./engine/ExternalProjectImporter');
+        const { format, project: unpacked } = await unpackSupportedProject(data, fileName, filePath);
         if (!collaborative && !OfflineSessionStore.isOfflineMode()) {
           clearActiveCanvas();
           OfflineSessionStore.setSessionMode('offline');
           reconnectServer('offline');
         }
         const group = currentCanvas?.group;
-        const restored = await LuminaProjectEngine.restoreToCanvas(unpacked, undefined, {
-          shareEditableLayers: collaborative,
-          groupId: collaborative && group?.ownerId === user?.id ? group?.id : undefined,
-        });
+        let lastProgressAt = 0;
+        const formatLabel = format === 'psd' ? 'PSD' : format === 'kra' ? 'KRA' : '流光專案';
+        const restored = await LuminaProjectEngine.restoreToCanvas(
+          unpacked,
+          (done, total) => {
+            const now = Date.now();
+            if (done === total || now - lastProgressAt > 180) {
+              lastProgressAt = now;
+              showProjectToast(`⏳ 正在匯入 ${formatLabel}「${unpacked.meta.canvas.title}」（${done}/${total}）…`);
+            }
+          },
+          {
+            shareEditableLayers: collaborative,
+            groupId: collaborative && group?.ownerId === user?.id ? group?.id : undefined,
+          }
+        );
         uncloseOfflineCanvas(restored.id);
         if (unpacked.previewDataUrl) {
           handleCanvasThumbnail(restored.id, unpacked.previewDataUrl);
@@ -1321,9 +1344,13 @@ export const App: React.FC = () => {
         joinCanvas(restored.id);
         setShowGateway(false);
         await fetchLayers(restored.id, null, () => false, false);
-        showProjectToast(`📂 已開啟流光專案：${restored.title}`);
+        showProjectToast(
+          collaborative
+            ? `📂 已匯入多人 ${formatLabel} 畫布：${restored.title}`
+            : `📂 已開啟 ${formatLabel} 畫布：${restored.title}`
+        );
       } catch (err: any) {
-        alert(err?.message || '無法開啟 .lumina 專案檔');
+        alert(err?.message || '無法開啟專案檔（支援 .lumina / .psd / .kra）');
       } finally {
         importingLumina.current = false;
       }
@@ -1364,19 +1391,26 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Drag & drop .lumina file anywhere in window + Electron file association open handler
+  // Drag & drop .lumina / .psd / .kra file anywhere in window + Electron file association open handler
   const loadLuminaRef = useRef(handleLoadLuminaData);
   loadLuminaRef.current = handleLoadLuminaData;
   useEffect(() => {
+    const onDragOver = (e: DragEvent) => {
+      if (e.defaultPrevented || !Array.from(e.dataTransfer?.types ?? []).includes('Files')) return;
+      if ((e.target as Element | null)?.closest?.('input[type="file"]')) return;
+      e.preventDefault();
+      if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    };
     const onDropCapture = (e: DragEvent) => {
       const files = Array.from(e.dataTransfer?.files ?? []);
-      const luminaFile = files.find((f) => f.name.toLowerCase().endsWith('.lumina'));
-      if (!luminaFile) return;
+      const projectFile = files.find((f) => isSupportedProjectFileName(f.name));
+      if (!projectFile) return;
       e.preventDefault();
       e.stopPropagation();
-      const filePath = (luminaFile as any).path as string | undefined;
-      void loadLuminaRef.current(luminaFile, filePath);
+      const filePath = (projectFile as any).path as string | undefined;
+      void loadLuminaRef.current(projectFile, filePath);
     };
+    window.addEventListener('dragover', onDragOver);
     window.addEventListener('drop', onDropCapture, true);
 
     const desktop = typeof window !== 'undefined' ? (window as any).atelierDesktop : undefined;
@@ -1396,6 +1430,7 @@ export const App: React.FC = () => {
       });
     }
     return () => {
+      window.removeEventListener('dragover', onDragOver);
       window.removeEventListener('drop', onDropCapture, true);
       unsubElectronOpen?.();
     };
@@ -1426,7 +1461,7 @@ export const App: React.FC = () => {
         <input
           ref={luminaInputRef}
           type="file"
-          accept=".lumina"
+          accept=".lumina,.psd,.kra"
           hidden
           onChange={(e) => {
             const file = e.target.files?.[0];
@@ -1485,7 +1520,7 @@ export const App: React.FC = () => {
       <input
         ref={luminaInputRef}
         type="file"
-        accept=".lumina"
+        accept=".lumina,.psd,.kra"
         hidden
         onChange={(e) => {
           const file = e.target.files?.[0];

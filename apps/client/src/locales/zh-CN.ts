@@ -98,8 +98,8 @@ export const zhCN: Translations = {
     projectLoading: '请等待画布加载完成后再保存。',
     projectSaveFailed: '无法保存 .lumina 工程。',
     saveProjectAs: '另存流光工程 (.lumina)…',
-    openProject: '打开流光工程 (.lumina)…',
-    importCollaborativeProject: '导入 .lumina 为多人画布…',
+    openProject: '打开工程 (.lumina / .psd / .kra)…',
+    importCollaborativeProject: '导入工程 (.lumina / .psd / .kra) 为多人画布…',
     offlineBadge: '单机离线',
   },
 
@@ -1723,7 +1723,7 @@ export const zhCN: Translations = {
     resumeRetry: '重新确认',
     resumeForget: '从最近移除',
     canvasPreview: '画布预览',
-    offlineOpenLuminaButton: '打开 .lumina 工程档…',
+    offlineOpenLuminaButton: '打开工程 (.lumina / .psd / .kra)…',
     offlineZeroNetworkHint: '单人离线模式无需启动后端服务器，笔迹与图层均自动保存在本机并支持随时导出 .lumina / .psd / .ora。',
   },
 

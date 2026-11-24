@@ -98,8 +98,8 @@ export const zhTW: Translations = {
     projectLoading: '請等畫布載入完成後再儲存。',
     projectSaveFailed: '儲存 .lumina 專案失敗。',
     saveProjectAs: '另存流光專案 (.lumina)…',
-    openProject: '開啟流光專案 (.lumina)…',
-    importCollaborativeProject: '匯入 .lumina 為多人畫布…',
+    openProject: '開啟專案 (.lumina / .psd / .kra)…',
+    importCollaborativeProject: '匯入專案 (.lumina / .psd / .kra) 為多人畫布…',
     offlineBadge: '單機離線',
   },
 
@@ -1723,7 +1723,7 @@ export const zhTW: Translations = {
     resumeRetry: '重新確認',
     resumeForget: '從最近移除',
     canvasPreview: '畫布預覽',
-    offlineOpenLuminaButton: '開啟 .lumina 專案檔…',
+    offlineOpenLuminaButton: '開啟專案 (.lumina / .psd / .kra)…',
     offlineZeroNetworkHint: '單人離線模式不需啟動後端伺服器，筆跡與圖層皆自動保存在本機並支援隨時匯出 .lumina / .psd / .ora。',
   },
 

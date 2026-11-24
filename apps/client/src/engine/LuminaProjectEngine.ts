@@ -5,6 +5,7 @@ import {
   LayerModel,
   TileData,
   VectorStroke,
+  computeTidiedAscendingNonMaskIds,
 } from '@atelier/shared';
 import { ApiService } from '../services/api';
 import { OfflineSessionStore } from '../services/offlineStore';
@@ -456,7 +457,18 @@ export class LuminaProjectEngine {
         }
       }
 
-      if (filePath && !shareEditableLayers) OfflineSessionStore.setCanvasFilePath(canvas.id, filePath);
+      // Enforce exact tidied bottom-to-top order on server and offline store
+      const ascendingOldIds = computeTidiedAscendingNonMaskIds(layers);
+      const ascendingNewIds = ascendingOldIds
+        .map((oldId) => idMap.get(oldId))
+        .filter((id): id is string => Boolean(id));
+      if (ascendingNewIds.length > 1) {
+        await ApiService.reorderLayers(canvas.id, ascendingNewIds).catch(() => undefined);
+      }
+
+      if (filePath && /\.lumina$/i.test(filePath) && !shareEditableLayers) {
+        OfflineSessionStore.setCanvasFilePath(canvas.id, filePath);
+      }
       return canvas;
     } catch (error) {
       if (serverUrl === ApiService.getServerUrl() && offline === OfflineSessionStore.isOfflineMode()) {

@@ -43,7 +43,8 @@ const SERVER_PORT = 3000;
 function extractLuminaPathFromArgs(args: string[]): string | null {
   for (const arg of args) {
     if (!arg || arg.startsWith('-')) continue;
-    if (arg.toLowerCase().endsWith('.lumina') && fs.existsSync(arg)) {
+    const lower = arg.toLowerCase();
+    if ((lower.endsWith('.lumina') || lower.endsWith('.psd') || lower.endsWith('.kra')) && fs.existsSync(arg)) {
       return path.resolve(arg);
     }
   }
@@ -508,10 +509,13 @@ ipcMain.handle(
   'lumina:open-file',
   async (): Promise<{ opened: boolean; filePath?: string; data?: Uint8Array }> => {
     const result = await dialog.showOpenDialog(mainWindow!, {
-      title: '開啟流光專案 (.lumina)',
+      title: '開啟專案 (.lumina / .psd / .kra)',
       properties: ['openFile'],
       filters: [
+        { name: '支援的繪圖專案 (.lumina, .psd, .kra)', extensions: ['lumina', 'psd', 'kra'] },
         { name: 'Lumina Drift Project (.lumina)', extensions: ['lumina'] },
+        { name: 'Adobe Photoshop (.psd)', extensions: ['psd'] },
+        { name: 'Krita Document (.kra)', extensions: ['kra'] },
       ],
     });
     if (result.canceled || result.filePaths.length === 0) {
