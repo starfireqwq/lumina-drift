@@ -7237,6 +7237,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                     stickers={stickers}
                     currentUserId={user?.id}
                     readOnly={isGuest || isCanvasViewer}
+                    avoidBottomDock={isTouchCanvasMode && !isTouchTablet}
                     zoom={viewportState.zoom}
                     pan={{ x: viewportState.panX, y: viewportState.panY }}
                     onAddSticker={addSticker}
@@ -7335,6 +7336,36 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                   重新載入畫布
                 </button>
               </div>
+            )}
+            {isTouchCanvasMode && (
+              <>
+                <TouchSideIsland
+                  side={dockLayout.railSide === 'right' ? 'right' : 'left'}
+                  size={sizeValue}
+                  opacity={brushProps.opacity}
+                  color={brushProps.color}
+                  currentTool={currentTool}
+                  canUndo={canUndoState}
+                  canRedo={canRedoState}
+                  onSize={setSizeValue}
+                  onOpacity={(opacity) => handleBrushPropsChange({ opacity })}
+                  onSizeDrag={setSizeDragging}
+                  onToggleEyedropper={() => handleSelectTool(currentTool === 'eyedropper' ? 'brush' : 'eyedropper')}
+                  onUndo={handleScopedUndo}
+                  onRedo={handleScopedRedo}
+                />
+                <TouchToolIsland
+                  isTablet={isTouchTablet}
+                  currentTool={currentTool}
+                  color={brushProps.color}
+                  activeSheet={mobileSheet}
+                  showMembers={!OfflineSessionStore.isOfflineCanvas(canvas.id)}
+                  onSelectTool={handleSelectTool}
+                  onOpenSheet={openMobileSheet}
+                  onOpenBrushToolset={openBrushToolset}
+                  onToggleMembers={() => dockActions.toggle('members')}
+                />
+              </>
             )}
           </div>
 
@@ -7540,37 +7571,6 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
         {!isTouchCanvasMode && <DockColumn side="right" panels={panelDefs} />}
       </div>
-
-      {isTouchCanvasMode && (
-        <>
-          <TouchSideIsland
-            side={dockLayout.railSide === 'right' ? 'right' : 'left'}
-            size={sizeValue}
-            opacity={brushProps.opacity}
-            color={brushProps.color}
-            currentTool={currentTool}
-            canUndo={canUndoState}
-            canRedo={canRedoState}
-            onSize={setSizeValue}
-            onOpacity={(opacity) => handleBrushPropsChange({ opacity })}
-            onSizeDrag={setSizeDragging}
-            onToggleEyedropper={() => handleSelectTool(currentTool === 'eyedropper' ? 'brush' : 'eyedropper')}
-            onUndo={handleScopedUndo}
-            onRedo={handleScopedRedo}
-          />
-          <TouchToolIsland
-            isTablet={isTouchTablet}
-            currentTool={currentTool}
-            color={brushProps.color}
-            activeSheet={mobileSheet}
-            showMembers={!OfflineSessionStore.isOfflineCanvas(canvas.id)}
-            onSelectTool={handleSelectTool}
-            onOpenSheet={openMobileSheet}
-            onOpenBrushToolset={openBrushToolset}
-            onToggleMembers={() => dockActions.toggle('members')}
-          />
-        </>
-      )}
 
       {/* Floating windows: phones & non-desktop touch tablets use frosted slide-out drawers; desktops float */}
       <FloatingPanels panels={isTouchCanvasMode ? [] : panelDefs} />

@@ -7,7 +7,6 @@ import {
   ChevronUp,
   Eraser,
   Grid2x2,
-  Hand,
   Keyboard,
   Layers,
   Paintbrush,
@@ -317,7 +316,7 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
   };
 
   const toolBtnClass = (active: boolean) =>
-    `atelier-icon-btn h-10 w-10 shrink-0 rounded-xl transition ${
+    `atelier-icon-btn ${isTablet ? 'h-10 w-10' : 'h-9 w-8'} shrink-0 rounded-xl transition ${
       active
         ? 'bg-indigo-500/30 text-white ring-1 ring-indigo-400/80'
         : 'text-neutral-200 hover:bg-white/10'
@@ -329,7 +328,6 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
         data-workspace-entry="mobile-tools"
         data-touch-island="dock-collapsed"
         className="pointer-events-none absolute inset-x-0 bottom-2 z-30 flex justify-center px-3"
-        style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
       >
         <div
           className="atelier-popover pointer-events-auto flex items-center gap-1.5 rounded-full border border-neutral-700/80 bg-neutral-900/88 px-2.5 py-1 backdrop-blur-md shadow-2xl"
@@ -371,10 +369,11 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
       data-workspace-entry="mobile-tools"
       data-touch-island="dock"
       className="pointer-events-none absolute inset-x-0 bottom-2 z-30 flex justify-center px-2"
-      style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
     >
       <div
-        className="atelier-popover no-scrollbar pointer-events-auto flex max-w-full items-center gap-1 overflow-x-auto rounded-2xl border border-neutral-700/80 bg-neutral-900/86 px-2 py-1.5 backdrop-blur-md shadow-2xl"
+        className={`atelier-popover no-scrollbar pointer-events-auto flex max-w-full items-center overflow-x-auto rounded-2xl border border-neutral-700/80 bg-neutral-900/86 backdrop-blur-md shadow-2xl ${
+          isTablet ? 'gap-1 px-2 py-1.5' : 'gap-0.5 px-1.5 py-1.5'
+        }`}
         onPointerDown={(e) => e.stopPropagation()}
       >
         {/* All Tools Drawer */}
@@ -385,7 +384,7 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
           aria-haspopup="dialog"
           className={toolBtnClass(activeSheet === 'toolPicker')}
         >
-          <Grid2x2 className="h-5 w-5" />
+          <Grid2x2 className={isTablet ? 'h-5 w-5' : 'h-4 w-4'} />
         </button>
 
         {/* Primary direct tools */}
@@ -418,17 +417,16 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
         >
           <Eraser className="h-4 w-4" />
         </button>
-        {isTablet && (
-          <button
-            type="button"
-            onClick={() => onSelectTool('hand')}
-            aria-label={t.tools.hand}
-            title={t.tools.hand}
-            className={toolBtnClass(currentTool === 'hand')}
-          >
-            <Hand className="h-4 w-4" />
-          </button>
-        )}
+        <button
+          type="button"
+          onClick={() => onSelectTool(currentTool === 'eyedropper' ? 'brush' : 'eyedropper')}
+          aria-label={t.tools.eyedropper}
+          title={t.tools.eyedropper}
+          aria-pressed={currentTool === 'eyedropper'}
+          className={toolBtnClass(currentTool === 'eyedropper')}
+        >
+          <Pipette className="h-4 w-4" />
+        </button>
 
         <div className="mx-0.5 h-6 w-px shrink-0 bg-white/12" />
 
@@ -439,7 +437,7 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
           aria-label="色彩"
           className={toolBtnClass(activeSheet === 'color')}
         >
-          <span className="h-6 w-6 rounded-full border-2 border-white/85 shadow" style={{ backgroundColor: color }} />
+          <span className={`${isTablet ? 'h-6 w-6' : 'h-5 w-5'} rounded-full border-2 border-white/85 shadow`} style={{ backgroundColor: color }} />
         </button>
         <button
           type="button"
@@ -447,7 +445,7 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
           aria-label={t.brushPreset.toolset}
           className={toolBtnClass(activeSheet === 'brushToolset')}
         >
-          <Paintbrush className="h-5 w-5" />
+          <Paintbrush className={isTablet ? 'h-5 w-5' : 'h-4 w-4'} />
         </button>
         <button
           type="button"
@@ -455,7 +453,7 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
           aria-label="圖層"
           className={toolBtnClass(activeSheet === 'layers')}
         >
-          <Layers className="h-5 w-5" />
+          <Layers className={isTablet ? 'h-5 w-5' : 'h-4 w-4'} />
         </button>
         <button
           type="button"
@@ -472,7 +470,7 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
             aria-label="成員"
             className={toolBtnClass(activeSheet === 'members')}
           >
-            <Users className="h-5 w-5" />
+            <Users className={isTablet ? 'h-5 w-5' : 'h-4 w-4'} />
           </button>
         )}
         <button
@@ -481,7 +479,7 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
           aria-label="快捷鍵面板"
           className={toolBtnClass(activeSheet === 'quickKeys')}
         >
-          <Keyboard className="h-5 w-5" />
+          <Keyboard className={isTablet ? 'h-5 w-5' : 'h-4 w-4'} />
         </button>
 
         <div className="mx-0.5 h-6 w-px shrink-0 bg-white/12" />
@@ -491,7 +489,7 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
           onClick={toggleCollapsed}
           aria-label={t.touchUi.collapseToolIsland}
           title={t.touchUi.collapseToolIsland}
-          className="atelier-icon-btn h-9 w-8 shrink-0 rounded-xl text-neutral-400 hover:bg-white/10 hover:text-white"
+          className={`atelier-icon-btn h-9 ${isTablet ? 'w-8' : 'w-7'} shrink-0 rounded-xl text-neutral-400 hover:bg-white/10 hover:text-white`}
         >
           <ChevronDown className="h-4 w-4" />
         </button>

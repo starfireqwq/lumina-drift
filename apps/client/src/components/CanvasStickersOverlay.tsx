@@ -21,6 +21,7 @@ interface CanvasStickersOverlayProps {
   stickers: CanvasSticker[];
   currentUserId?: string;
   readOnly?: boolean;
+  avoidBottomDock?: boolean;
   zoom: number;
   pan: { x: number; y: number };
   onUpdateSticker: (stickerId: string, updates: Partial<CanvasSticker>) => void;
@@ -65,6 +66,7 @@ export const CanvasStickersOverlay: React.FC<CanvasStickersOverlayProps> = ({
   stickers,
   currentUserId,
   readOnly = false,
+  avoidBottomDock = false,
   zoom,
   pan,
   onUpdateSticker,
@@ -256,7 +258,13 @@ export const CanvasStickersOverlay: React.FC<CanvasStickersOverlayProps> = ({
       {/* 1. Floating Sticker Picker Trigger Button */}
       {/* stopPropagation: this sits inside the canvas, whose pointerdown would otherwise paint here too */}
       {!readOnly && (
-      <div className="absolute bottom-3 right-3 pointer-events-auto flex items-center gap-2" onPointerDown={(e) => e.stopPropagation()}>
+      <div
+        data-sticker-trigger=""
+        className={`absolute right-3 pointer-events-auto flex items-center gap-2 transition-[bottom] duration-150 ${
+          avoidBottomDock ? 'bottom-[68px]' : 'bottom-3'
+        }`}
+        onPointerDown={(e) => e.stopPropagation()}
+      >
         <button
           type="button"
           onClick={() => setIsPickerOpen(!isPickerOpen)}
