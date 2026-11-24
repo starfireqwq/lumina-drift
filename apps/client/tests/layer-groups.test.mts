@@ -1,8 +1,37 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { canUserPerformLayerAction, type LayerModel } from '@atelier/shared';
+import {
+  canUserPerformLayerAction,
+  computeTidiedAscendingNonMaskIds,
+  filterTopLevelSelectedLayers,
+  findTopAnchorForParent,
+  selectLayerRange,
+  tidyLayerModels,
+  type LayerModel,
+} from '@atelier/shared';
 import { LayerManager } from '../src/engine/LayerManager.ts';
 import type { Renderer } from 'pixi.js';
+
+function mkLayer(overrides: Partial<LayerModel> & { id: string; sortOrder: number }): LayerModel {
+  return {
+    canvasId: 'c1',
+    parentId: null,
+    ownerId: 'u1',
+    name: overrides.id,
+    layerType: 'raster',
+    blendMode: 'normal',
+    opacity: 1,
+    isVisible: true,
+    isLocked: false,
+    alphaLocked: false,
+    clipToBelow: false,
+    aclMode: 'owner_only',
+    isPublic: true,
+    createdAt: overrides.sortOrder,
+    updatedAt: overrides.sortOrder,
+    ...overrides,
+  };
+}
 
 test('folders retain management permissions and reject pixel operations even for admins', () => {
   const folder = { id: 'folder', layerType: 'group', ownerId: 'admin', isLocked: false } as LayerModel;
@@ -27,4 +56,64 @@ test('duplicate layer responses cannot create duplicate Pixi children or folder 
   } finally {
     manager.destroy();
   }
+});
+
+test('non-contiguous layers grouped together move directly underneath their new group in display order', () => {
+  // Bottom-to-top initial stack: L2(10), SF_bottom(20), SF_pick(30), 9-5(40), L5(50), L6(60), L7_pick(70)
+  const initial: LayerModel[] = [
+    mkLayer({ id: 'L2', sortOrder: 10 }),
+    mkLayer({ id: 'SF_bottom', sortOrder: 20 }),
+    mkLayer({ id: 'SF_pick', sortOrder: 30 }),
+    mkLayer({ id: '9-5', sortOrder: 40 }),
+    mkLayer({ id: 'L5', sortOrder: 50 }),
+    mkLayer({ id: 'L6', sortOrder: 60 }),
+    mkLayer({ id: 'L7_pick', sortOrder: 70 }),
+  ];
+
+  const selected = filterTopLevelSelectedLayers(initial, ['L7_pick', 'SF_pick']);
+  assert.deepEqual(selected.map((l) => l.id), ['SF_pick', 'L7_pick']);
+
+  const top = selected[selected.length - 1];
+  const anchor = findTopAnchorForParent(initial, top, null);
+  assert.equal(anchor.id, 'L7_pick');
+
+  // Create group directly above anchor, reparent selected roots into group
+  const group = mkLayer({ id: 'G1', layerType: 'group', sortOrder: 75 });
+  const patched = [...initial, group].map((l) =>
+    l.id === 'SF_pick' || l.id === 'L7_pick' ? { ...l, parentId: 'G1' } : l
+  );
+
+  const ascending = computeTidiedAscendingNonMaskIds(patched);
+  const descending = [...ascending].reverse();
+  // Display order (top-to-bottom): G1 -> L7_pick -> SF_pick -> L6 -> L5 -> 9-5 -> SF_bottom -> L2
+  assert.deepEqual(descending, ['G1', 'L7_pick', 'SF_pick', 'L6', 'L5', '9-5', 'SF_bottom', 'L2']);
+
+  // Verify masks stay attached to their moved owners
+  const mask = mkLayer({ id: 'M_SF', layerType: 'mask', parentId: 'SF_pick', sortOrder: 35 });
+  const withMask = tidyLayerModels([...patched, mask]).layers;
+  const sfIdx = withMask.findIndex((l) => l.id === 'SF_pick');
+  assert.equal(withMask[sfIdx + 1]?.id, 'M_SF');
+});
+
+test('grouping a nested folder along with its child keeps the child inside the inner folder', () => {
+  const layers: LayerModel[] = [
+    mkLayer({ id: 'inner_child', parentId: 'inner_group', sortOrder: 10 }),
+    mkLayer({ id: 'inner_group', layerType: 'group', sortOrder: 20 }),
+    mkLayer({ id: 'outer_layer', sortOrder: 30 }),
+  ];
+  const roots = filterTopLevelSelectedLayers(layers, ['inner_group', 'inner_child', 'outer_layer']);
+  assert.deepEqual(roots.map((l) => l.id), ['inner_group', 'outer_layer']);
+});
+
+test('selectLayerRange supports Shift+click and Shift+drag sweep (forward, backward, and additive)', () => {
+  const visible = ['L7', 'L6', 'L5', 'L4', 'L3', 'L2'];
+  // Sweep downward from L6 to L3
+  assert.deepEqual([...selectLayerRange(visible, 'L6', 'L3')], ['L6', 'L5', 'L4', 'L3']);
+  // Sweep upward from L3 to L6
+  assert.deepEqual([...selectLayerRange(visible, 'L3', 'L6')], ['L6', 'L5', 'L4', 'L3']);
+  // Shrink sweep back to L5
+  assert.deepEqual([...selectLayerRange(visible, 'L6', 'L5')], ['L6', 'L5']);
+  // Additive range (Ctrl+Shift) preserves previous selection
+  const existing = new Set(['L2']);
+  assert.deepEqual([...selectLayerRange(visible, 'L7', 'L6', true, existing)], ['L2', 'L7', 'L6']);
 });

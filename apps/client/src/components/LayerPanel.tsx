@@ -1,6 +1,14 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
-import { BlendMode, LayerModel, LayerType } from '@atelier/shared';
+import {
+  BlendMode,
+  LayerModel,
+  LayerType,
+  computeTidiedAscendingNonMaskIds,
+  filterTopLevelSelectedLayers,
+  selectLayerRange,
+  tidyLayerModels,
+} from '@atelier/shared';
 import { FolderAccessPanel } from './FolderAccessPanel';
 import type { FolderAccess } from './workspace/useFolderAccess';
 import { type DroppedImages, type ImageDropTarget, isImageDrag, readDroppedImages } from '../utils/imageImport';
@@ -562,6 +570,11 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   const activeDraggedIdRef = useRef<string | null>(null);
   const activeOverIdRef = useRef<string | null>(null);
   const activeDropPosRef = useRef<'above' | 'below' | 'inside' | null>(null);
+  // Shift + left-mouse drag multi-select state
+  const selectionAnchorIdRef = useRef<string | null>(null);
+  const isShiftDragSelectingRef = useRef<boolean>(false);
+  const suppressNextRowClickRef = useRef<boolean>(false);
+  const visibleDescendingIdsRef = useRef<string[]>([]);
   const listContainerRef = useRef<HTMLDivElement | null>(null);
   const [listScroll, setListScroll] = useState({ top: 0, height: 600 });
   React.useEffect(() => {
@@ -657,11 +670,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
     onCreateLayer(nextGroupName(allLayers), 'normal', 'group', activeLayerId);
   };
 
-  // Stable descending sort (display: top-to-bottom)
-  const getSortedDescending = () =>
-    [...layers].sort((a, b) =>
-      b.sortOrder !== a.sortOrder ? b.sortOrder - a.sortOrder : (b.createdAt || 0) - (a.createdAt || 0)
-    );
+  // Stable tree-coherent descending sort (display: top-to-bottom, each group sits directly above its children)
+  const getSortedDescending = () => [...tidyLayerModels(layers).layers].reverse();
 
   // Find clipping base layers (layers that have another layer immediately above them with clipToBelow=true)
   const baseClippingIds = new Set<string>();
@@ -721,6 +731,10 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
 
   // Desktop HTML5 Drag & Drop handlers
   const handleDragStart = (e: React.DragEvent, layerId: string) => {
+    if (e.shiftKey || isShiftDragSelectingRef.current) {
+      e.preventDefault();
+      return;
+    }
     setDraggedLayerId(layerId);
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', layerId);
@@ -904,14 +918,93 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
     setIsBatchMode(false);
   };
 
+  const moveLayersToGroup = async (ids: Iterable<string>, targetGroupId: string | null) => {
+    if (!onUpdateLayerProps) return;
+    const targetGroup = targetGroupId ? byId.get(targetGroupId) : undefined;
+    const roots = filterTopLevelSelectedLayers(layers, ids).filter(
+      (l) => !targetGroup || !isWithin(targetGroup, l.id)
+    );
+    if (!roots.length) return;
+    const movedIds = new Set(roots.map((l) => l.id));
+    for (const l of roots) {
+      await Promise.resolve(onUpdateLayerProps(l.id, { parentId: targetGroupId }));
+    }
+    const patched = allLayers.map((l) => (movedIds.has(l.id) ? { ...l, parentId: targetGroupId } : l));
+    const ascendingIds = computeTidiedAscendingNonMaskIds(patched);
+    onReorderLayer(roots[0].id, 0, ascendingIds);
+  };
+
   const handleBatchMoveToGroup = (targetGroupId: string | null) => {
     if (selectedLayerIds.size === 0 || !onUpdateLayerProps) return;
-    for (const id of selectedLayerIds) {
-      onUpdateLayerProps(id, { parentId: targetGroupId });
-    }
+    const ids = Array.from(selectedLayerIds);
+    void moveLayersToGroup(ids, targetGroupId);
     setSelectedLayerIds(new Set());
     setIsBatchMode(false);
     setBatchGroupMenuOpen(false);
+  };
+
+  /** Shift + left-mouse drag sweeps across rows to multi-select contiguous layers */
+  const startShiftDragSelect = (e: React.PointerEvent, startLayerId: string) => {
+    const additive = e.ctrlKey || e.metaKey || isBatchMode;
+    const baseSelection = additive ? new Set(selectedLayerIds) : new Set<string>();
+    const startY = e.clientY;
+    let didDrag = false;
+    let lastHoverId = startLayerId;
+    isShiftDragSelectingRef.current = true;
+
+    const findRowLayerId = (clientX: number, clientY: number): string | null => {
+      const direct = document.elementFromPoint(clientX, clientY)?.closest('[data-layer-id]') as HTMLElement | null;
+      if (direct) return direct.getAttribute('data-layer-id');
+      const container = listContainerRef.current;
+      if (!container) return null;
+      const rect = container.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+      const clampedX = Math.max(rect.left + 8, Math.min(rect.right - 8, clientX));
+      const clampedY = Math.max(rect.top + 4, Math.min(rect.bottom - 4, clientY));
+      const fallback = document.elementFromPoint(clampedX, clampedY)?.closest('[data-layer-id]') as HTMLElement | null;
+      return fallback?.getAttribute('data-layer-id') ?? null;
+    };
+
+    const onPointerMove = (ev: PointerEvent) => {
+      if (!isShiftDragSelectingRef.current) return;
+      const container = listContainerRef.current;
+      if (container) {
+        const rect = container.getBoundingClientRect();
+        const topDist = ev.clientY - rect.top;
+        const bottomDist = rect.bottom - ev.clientY;
+        if (topDist < 36 && topDist > -40) container.scrollTop -= 10;
+        else if (bottomDist < 36 && bottomDist > -40) container.scrollTop += 10;
+      }
+
+      const hoverId = findRowLayerId(ev.clientX, ev.clientY);
+      if (!hoverId) return;
+      if (!didDrag && hoverId === startLayerId && Math.abs(ev.clientY - startY) <= 4) return;
+      if (!didDrag || hoverId !== lastHoverId) {
+        didDrag = true;
+        lastHoverId = hoverId;
+        setSelectedLayerIds(
+          selectLayerRange(visibleDescendingIdsRef.current, startLayerId, hoverId, additive, baseSelection)
+        );
+      }
+    };
+
+    const finish = () => {
+      isShiftDragSelectingRef.current = false;
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      if (didDrag) {
+        selectionAnchorIdRef.current = startLayerId;
+        suppressNextRowClickRef.current = true;
+        window.setTimeout(() => {
+          suppressNextRowClickRef.current = false;
+        }, 0);
+      }
+    };
+
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
   };
 
   // ---- Shared properties bar (CSP style): every setting acts on the selected layer ----
@@ -1036,11 +1129,11 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
               {groupSelectLayerId === active.id && (
                 <div className="absolute left-0 top-7 z-50 w-44 atelier-popover atelier-menu-in p-1.5">
                   {active.parentId && (
-                    <button type="button" onClick={() => { onUpdateLayerProps?.(active.id, { parentId: null }); setGroupSelectLayerId(null); }}
+                    <button type="button" onClick={() => { void moveLayersToGroup([active.id], null); setGroupSelectLayerId(null); }}
                       className="w-full rounded px-2 py-1 text-left text-[11px] text-rose-300 hover:bg-neutral-800">{t.layers.removeFromGroup}</button>
                   )}
                   {allGroups.map((g) => (
-                    <button key={g.id} type="button" onClick={() => { onUpdateLayerProps?.(active.id, { parentId: g.id }); setGroupSelectLayerId(null); }}
+                    <button key={g.id} type="button" onClick={() => { void moveLayersToGroup([active.id], g.id); setGroupSelectLayerId(null); }}
                       className={`flex w-full items-center justify-between rounded px-2 py-1 text-left text-[11px] ${active.parentId === g.id ? 'bg-indigo-600 text-white' : 'text-neutral-200 hover:bg-neutral-800'}`}>
                       <span className="truncate">{g.name}</span>{active.parentId === g.id && <Check className="h-3 w-3" />}
                     </button>
@@ -1339,6 +1432,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
           </div>
         ) : (() => {
           const visibleDescending = descending.filter((layer) => !ancestorsOf(layer).some((a) => collapsedGroups.has(a.id)));
+          const visibleDescendingIds = visibleDescending.map((l) => l.id);
+          visibleDescendingIdsRef.current = visibleDescendingIds;
           const ROW_H = 36;
           const virtualize = visibleDescending.length > 48;
           const startIdx = virtualize ? Math.max(0, Math.floor(listScroll.top / ROW_H) - 8) : 0;
@@ -1405,9 +1500,36 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                   onDragLeave={handleDragLeave}
                   onDrop={(e) => handleDrop(e, layer.id)}
                   onDragEnd={handleDragEnd}
+                  onMouseDown={(e) => {
+                    // Prevent native HTML5 drag-and-drop & text selection when Shift+dragging to multi-select
+                    if (e.button === 0 && e.shiftKey && editingLayerId !== layer.id) {
+                      const targetEl = e.target as HTMLElement | null;
+                      if (!targetEl?.closest('button, input, textarea, select')) {
+                        e.preventDefault();
+                      }
+                    }
+                  }}
                   onClick={(e) => {
-                    // Ctrl / Shift + click picks several layers (for 群組); a plain click selects one
-                    if (isBatchMode || e.ctrlKey || e.metaKey || e.shiftKey) {
+                    if (suppressNextRowClickRef.current) {
+                      suppressNextRowClickRef.current = false;
+                      return;
+                    }
+                    // Shift + click selects contiguous range from anchor to clicked layer
+                    if (e.shiftKey) {
+                      const storedAnchor = selectionAnchorIdRef.current;
+                      const anchorId =
+                        storedAnchor && visibleDescendingIds.includes(storedAnchor)
+                          ? storedAnchor
+                          : activeLayerId && visibleDescendingIds.includes(activeLayerId)
+                            ? activeLayerId
+                            : layer.id;
+                      const additive = e.ctrlKey || e.metaKey || isBatchMode;
+                      setSelectedLayerIds(selectLayerRange(visibleDescendingIds, anchorId, layer.id, additive, selectedLayerIds));
+                      return;
+                    }
+                    // Ctrl / batch mode toggles individual layers (for 群組); a plain click selects one
+                    if (isBatchMode || e.ctrlKey || e.metaKey) {
+                      selectionAnchorIdRef.current = layer.id;
                       if (!isBatchMode && selectedLayerIds.size === 0 && activeLayerId && activeLayerId !== layer.id) {
                         setSelectedLayerIds(new Set([activeLayerId, layer.id]));
                       } else {
@@ -1415,6 +1537,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                       }
                       return;
                     }
+                    selectionAnchorIdRef.current = layer.id;
                     if (selectedLayerIds.size) setSelectedLayerIds(new Set());
                     onSelectLayer(layer.id);
                   }}
@@ -1427,6 +1550,13 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                     setMenu({ x: e.clientX, y: e.clientY, layerId: layer.id });
                   }}
                   onPointerDown={(e) => {
+                    if (e.pointerType !== 'touch' && e.button === 0 && e.shiftKey && editingLayerId !== layer.id) {
+                      const targetEl = e.target as HTMLElement | null;
+                      if (!targetEl?.closest('button, input, textarea, select')) {
+                        startShiftDragSelect(e, layer.id);
+                        return;
+                      }
+                    }
                     // Touch: a long press opens the same menu (phones have no right click)
                     if (e.pointerType !== 'touch') return;
                     const { clientX, clientY } = e;
@@ -1604,7 +1734,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             {onToggleKeepLayerClipboard && <MenuItem label={`${keepLayerClipboard ? '✓ ' : ''}${t.layers.keepClipboard}`} hint="~5MB" onClick={close(onToggleKeepLayerClipboard)} />}
             <div className="my-1 h-px bg-neutral-700/70" />
             <MenuItem label={t.layers.mergeDown} hint="Ctrl+E" disabledReason={ids.length > 1 ? t.layers.mergeOneAtATime : mergeBlocker(layer)} onClick={close(() => onMergeDown?.(layer.id))} />
-            {parent && <MenuItem label={t.layers.removeFromGroup} disabledReason={canManage(layer) ? null : t.layers.cannotMoveOthers} onClick={close(() => onUpdateLayerProps?.(layer.id, { parentId: parent.parentId ?? null }))} />}
+            {parent && <MenuItem label={t.layers.removeFromGroup} disabledReason={canManage(layer) ? null : t.layers.cannotMoveOthers} onClick={close(() => void moveLayersToGroup([layer.id], parent.parentId ?? null))} />}
             {layer.layerType !== 'text' && layer.meta?.cel?.ref === undefined && !maskOf.get(layer.id) && onAddMask && (
               <MenuItem label={layer.layerType === 'group' ? t.layers.maskAddGroup : t.layers.addMask} disabledReason={canManage(layer) ? null : t.layers.cannotMaskOthers} onClick={close(() => onAddMask(layer.id))} />
             )}

@@ -49,3 +49,4 @@ export * from './animation/keyframes';
 export * from './animation/camera';
 export * from './animation/audio';
 export * from './canvas/canvas-units';
+export * from './canvas/layer-tree';

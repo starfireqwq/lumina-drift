@@ -17,6 +17,7 @@ import {
   decompressTileBuffer,
   getTileBounds,
   parseTileKey,
+  tidyLayerModels,
   tileKey,
 } from '@atelier/shared';
 import { compositeLayers, type LayerCanvasItem } from '../engine/layerComposite';
@@ -1081,10 +1082,11 @@ class OfflineSessionStoreImpl {
     };
 
     rec.layers.push(newLayer);
-    rec.layers.sort((a, b) => a.sortOrder - b.sortOrder);
+    rec.layers = tidyLayerModels(rec.layers).layers;
     rec.updatedAt = now;
     this.schedulePersist(canvasId);
-    return { ...newLayer };
+    const saved = rec.layers.find((l) => l.id === newLayer.id) ?? newLayer;
+    return { ...saved };
   }
 
   public async updateLayer(canvasId: string, layerId: string, dto: UpdateLayerDto): Promise<LayerModel> {
@@ -1112,9 +1114,13 @@ class OfflineSessionStoreImpl {
       ...(dto.layerType !== undefined ? { layerType: dto.layerType } : {}),
       updatedAt: Date.now(),
     });
+    if (dto.parentId !== undefined || dto.sortOrder !== undefined) {
+      rec.layers = tidyLayerModels(rec.layers).layers;
+    }
     rec.updatedAt = Date.now();
     this.schedulePersist(canvasId);
-    return { ...target };
+    const saved = rec.layers.find((l) => l.id === layerId) ?? target;
+    return { ...saved };
   }
 
   public async deleteLayer(
@@ -1159,7 +1165,7 @@ class OfflineSessionStoreImpl {
     }
 
     const gone = new Set(deletedIds);
-    rec.layers = rec.layers.filter((l) => !gone.has(l.id));
+    rec.layers = tidyLayerModels(rec.layers.filter((l) => !gone.has(l.id))).layers;
     let delSet = this.deletedLayersByCanvas.get(canvasId);
     if (!delSet) {
       delSet = new Set();
@@ -1194,7 +1200,7 @@ class OfflineSessionStoreImpl {
         if (pOrder !== undefined) l.sortOrder = pOrder + 5;
       }
     }
-    rec.layers.sort((a, b) => a.sortOrder - b.sortOrder);
+    rec.layers = tidyLayerModels(rec.layers).layers;
     rec.updatedAt = Date.now();
     this.schedulePersist(canvasId);
     return [...rec.layers];
