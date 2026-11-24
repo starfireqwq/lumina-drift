@@ -732,8 +732,34 @@ export const MobilePanelSheet: React.FC<{
   onClose: () => void;
 }> = ({ def, placement = 'bottom', quickTabs, onSelectTab, onClose }) => {
   const { t } = useI18n();
+  const [dragOffset, setDragOffset] = useState(0);
+  const dragRef = useRef<{ pointerId: number; start: number } | null>(null);
+
   if (!def) return null;
   const isRight = placement === 'right';
+
+  const onGripDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if ((e.target as HTMLElement | null)?.closest?.('button')) return;
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* synthetic */ }
+    dragRef.current = { pointerId: e.pointerId, start: isRight ? e.clientX : e.clientY };
+    setDragOffset(0);
+  };
+  const onGripMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    const delta = (isRight ? e.clientX : e.clientY) - drag.start;
+    setDragOffset(Math.max(0, delta));
+  };
+  const onGripUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    dragRef.current = null;
+    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+    const delta = (isRight ? e.clientX : e.clientY) - drag.start;
+    setDragOffset(0);
+    if (delta > 68) onClose();
+  };
+
   return (
     <div
       data-mobile-panel={def.id}
@@ -746,33 +772,44 @@ export const MobilePanelSheet: React.FC<{
       <div
         className={
           isRight
-            ? 'atelier-popover relative flex h-full w-[min(360px,88vw)] min-h-0 flex-col border-l border-neutral-700/80 bg-neutral-900/92 backdrop-blur-xl shadow-2xl'
-            : 'atelier-popover relative flex max-h-[min(78dvh,100%)] min-h-0 flex-col rounded-t-2xl border-t border-neutral-700/80 bg-neutral-900/92 backdrop-blur-xl shadow-2xl'
+            ? 'atelier-popover relative flex h-full w-[min(360px,88vw)] min-h-0 flex-col rounded-none border-l shadow-2xl'
+            : 'atelier-popover relative flex max-h-[min(78dvh,100%)] min-h-0 flex-col rounded-b-none rounded-t-2xl border-t shadow-2xl'
         }
-        style={
-          isRight
+        style={{
+          ...(isRight
             ? {
                 paddingTop: 'env(safe-area-inset-top, 0px)',
                 paddingBottom: 'env(safe-area-inset-bottom, 0px)',
                 paddingRight: 'env(safe-area-inset-right, 0px)',
+                transform: dragOffset > 0 ? `translate3d(${dragOffset}px, 0, 0)` : undefined,
               }
             : {
                 paddingBottom: 'env(safe-area-inset-bottom, 0px)',
                 paddingLeft: 'env(safe-area-inset-left, 0px)',
                 paddingRight: 'env(safe-area-inset-right, 0px)',
-              }
-        }
+                transform: dragOffset > 0 ? `translate3d(0, ${dragOffset}px, 0)` : undefined,
+              }),
+          transition: dragOffset > 0 ? 'none' : 'transform 180ms cubic-bezier(.2, .8, .2, 1)',
+        }}
       >
-        {!isRight && <div className="mx-auto mt-2 h-1 w-10 rounded-full bg-neutral-600" />}
-        <div className="flex h-11 shrink-0 items-center gap-2 border-b border-neutral-700/70 px-3 text-sm font-semibold text-neutral-100">
-          <span className="shrink-0 text-indigo-400 [&>svg]:h-4 [&>svg]:w-4">{def.icon}</span>
-          <span className="min-w-0 truncate">{def.title}</span>
-          <button type="button" onClick={onClose} aria-label={t.common.close} className="atelier-icon-btn ml-auto h-8 w-8 shrink-0">
-            <X className="h-4 w-4" />
-          </button>
+        <div
+          style={{ touchAction: 'none' }}
+          onPointerDown={onGripDown}
+          onPointerMove={onGripMove}
+          onPointerUp={onGripUp}
+          onPointerCancel={() => { dragRef.current = null; setDragOffset(0); }}
+        >
+          {!isRight && <div className="mx-auto mt-2 h-1 w-10 rounded-full bg-white/30" />}
+          <div className="flex h-11 shrink-0 items-center gap-2 border-b border-white/10 px-3 text-sm font-semibold text-neutral-100">
+            <span className="shrink-0 text-indigo-400 [&>svg]:h-4 [&>svg]:w-4">{def.icon}</span>
+            <span className="min-w-0 truncate">{def.title}</span>
+            <button type="button" onClick={onClose} aria-label={t.common.close} className="atelier-icon-btn ml-auto h-8 w-8 shrink-0">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
         {quickTabs && quickTabs.length > 0 && onSelectTab && (
-          <div className="no-scrollbar flex shrink-0 items-center gap-1 overflow-x-auto border-b border-neutral-800/80 px-2 py-1.5">
+          <div className="no-scrollbar flex shrink-0 items-center gap-1 overflow-x-auto border-b border-white/10 px-2 py-1.5">
             {quickTabs.map((tab) => {
               const active = tab.id === def.id;
               return (

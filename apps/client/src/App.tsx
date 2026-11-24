@@ -13,6 +13,7 @@ import { CreateCanvasModal } from './components/CreateCanvasModal';
 import { AtelierModal } from './components/AtelierModal';
 import type { CanvasPluginAccess, CanvasProjectAccess } from './components/CanvasWorkspace';
 import { getPlugins, subscribePlugins } from './plugins/pluginStore';
+import { getCanvasFullscreen, setCanvasFullscreen, subscribeCanvasFullscreen } from './engine/touchGestures';
 import { getPluginLabels } from './plugins/pluginLabels';
 import { isModernPluginManifest, resolvePluginName, type PluginManifestModern } from './plugins/pluginApi';
 import {
@@ -84,6 +85,15 @@ const loadThumbs = (): Record<string, string> => {
 export const App: React.FC = () => {
   const { t, language } = useI18n();
   const plugins = useSyncExternalStore(subscribePlugins, getPlugins);
+  const canvasFullscreen = useSyncExternalStore(subscribeCanvasFullscreen, getCanvasFullscreen, getCanvasFullscreen);
+  useEffect(() => {
+    if (!canvasFullscreen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCanvasFullscreen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [canvasFullscreen]);
   const [isPluginManagerOpen, setIsPluginManagerOpen] = useState(false);
   const [isPluginV3ConsoleOpen, setIsPluginV3ConsoleOpen] = useState(false);
   const [v3ConsentQueue, setV3ConsentQueue] = useState<
@@ -1531,37 +1541,39 @@ export const App: React.FC = () => {
           </button>
         </div>
       )}
-      <TopNavbar
-        currentCanvas={currentCanvas}
-        plugins={plugins}
-        openPluginPanels={openPluginPanels}
-        activePluginToolKey={activePluginToolKey}
-        onManagePlugins={() => setIsPluginManagerOpen(true)}
-        onRunPlugin={(pluginId, commandId) => void handleRunPlugin(pluginId, commandId)}
-        onTogglePluginPanel={handleTogglePluginPanel}
-        onSelectPluginTool={handleSelectPluginTool}
-        onOpenCreateCanvas={() => setIsCreateModalOpen(true)}
-        onOpenProject={handleOpenLuminaProject}
-        onSaveProject={() => void handleSaveLuminaProject(false)}
-        onSaveProjectAs={() => void handleSaveLuminaProject(true)}
-        onShowStorage={() => void readStorageInfo()}
-        onOpenAuth={() => setIsAuthModalOpen(true)}
-        onOpenProfile={() => setIsProfileModalOpen(true)}
-        onOpenReplay={() => setIsReplayModalOpen(true)}
-        onOpenExport={() => setIsExportModalOpen(true)}
-        onOpenCapsule={() => setIsCapsuleModalOpen(true)}
-        onOpenServer={() => setIsServerModalOpen(true)}
-        onOpenGateway={openGateway}
-        onOpenSettings={(tab?: string) => { setSettingsTab(tab); setIsSettingsModalOpen(true); }}
-        onOpenHelp={(query) => { setHelpQuery(query ?? ''); setIsHelpOpen(true); }}
-        onOpenAdmin={() => setIsAdminDashboardOpen(true)}
-        onOpenChat={() => setIsChatOpen(true)}
-        hasUnreadChat={!isChatOpen && latestIncomingChatId !== null && latestIncomingChatId !== lastReadChatId}
-        onOpenResize={() => setResizeRequest((n) => n + 1)}
-        onImportImages={(files) => setImportImagesRequest((prev) => ({ files, id: (prev?.id ?? 0) + 1 }))}
-      />
+      {!canvasFullscreen && (
+        <TopNavbar
+          currentCanvas={currentCanvas}
+          plugins={plugins}
+          openPluginPanels={openPluginPanels}
+          activePluginToolKey={activePluginToolKey}
+          onManagePlugins={() => setIsPluginManagerOpen(true)}
+          onRunPlugin={(pluginId, commandId) => void handleRunPlugin(pluginId, commandId)}
+          onTogglePluginPanel={handleTogglePluginPanel}
+          onSelectPluginTool={handleSelectPluginTool}
+          onOpenCreateCanvas={() => setIsCreateModalOpen(true)}
+          onOpenProject={handleOpenLuminaProject}
+          onSaveProject={() => void handleSaveLuminaProject(false)}
+          onSaveProjectAs={() => void handleSaveLuminaProject(true)}
+          onShowStorage={() => void readStorageInfo()}
+          onOpenAuth={() => setIsAuthModalOpen(true)}
+          onOpenProfile={() => setIsProfileModalOpen(true)}
+          onOpenReplay={() => setIsReplayModalOpen(true)}
+          onOpenExport={() => setIsExportModalOpen(true)}
+          onOpenCapsule={() => setIsCapsuleModalOpen(true)}
+          onOpenServer={() => setIsServerModalOpen(true)}
+          onOpenGateway={openGateway}
+          onOpenSettings={(tab?: string) => { setSettingsTab(tab); setIsSettingsModalOpen(true); }}
+          onOpenHelp={(query) => { setHelpQuery(query ?? ''); setIsHelpOpen(true); }}
+          onOpenAdmin={() => setIsAdminDashboardOpen(true)}
+          onOpenChat={() => setIsChatOpen(true)}
+          hasUnreadChat={!isChatOpen && latestIncomingChatId !== null && latestIncomingChatId !== lastReadChatId}
+          onOpenResize={() => setResizeRequest((n) => n + 1)}
+          onImportImages={(files) => setImportImagesRequest((prev) => ({ files, id: (prev?.id ?? 0) + 1 }))}
+        />
+      )}
 
-      {tabsPlacement === 'top' && canvasTabs}
+      {!canvasFullscreen && tabsPlacement === 'top' && canvasTabs}
       <div key="canvas-workspace" data-canvas-workspace="" className="relative flex min-h-0 flex-1 overflow-hidden">
         {roomLocked ? (
           <div className="atelier-workspace flex flex-1 items-center justify-center">
@@ -1641,7 +1653,7 @@ export const App: React.FC = () => {
         )}
       </div>
 
-      {tabsPlacement === 'bottom' && canvasTabs}
+      {!canvasFullscreen && tabsPlacement === 'bottom' && canvasTabs}
 
       {currentCanvas && roomLocked && !checkingMembership && promptHiddenFor !== currentCanvas.id && (
         <RoomPasswordModal

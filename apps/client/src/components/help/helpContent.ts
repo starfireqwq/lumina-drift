@@ -553,28 +553,34 @@ export const HELP_TOPICS: HelpTopic[] = [
 
   // ---- 觸控
   {
-    id: 'gesture-undo', category: 'touch', title: '雙指點：復原',
-    summary: '兩根手指同時輕點畫布一下。',
+    id: 'gesture-undo', category: 'touch', title: '雙指點／長按：復原',
+    summary: '兩根手指同時輕點畫布復原一步；按住兩指不動可連續快速復原。',
     art: 'two-finger-tap',
-    keywords: ['雙指', '兩指', '復原', '手勢', 'gesture', 'undo', 'ipad', '平板', '手機'],
+    keywords: ['雙指', '兩指', '復原', '連續復原', '手勢', 'gesture', 'undo', 'ipad', '平板', '手機'],
   },
   {
-    id: 'gesture-redo', category: 'touch', title: '三指點：重做',
-    summary: '三根手指同時輕點畫布一下。',
+    id: 'gesture-redo', category: 'touch', title: '三指點／長按：重做',
+    summary: '三根手指同時輕點畫布重做一步；按住三指不動可連續快速重做。',
     art: 'three-finger-tap',
-    keywords: ['三指', '重做', '手勢', 'redo'],
+    keywords: ['三指', '重做', '連續重做', '手勢', 'redo'],
   },
   {
-    id: 'gesture-pinch', category: 'touch', title: '雙指捏合：縮放與旋轉',
-    summary: '兩指張開／合起縮放，轉動兩指旋轉畫面（接近水平或垂直時會吸附），拖曳平移。',
+    id: 'gesture-pinch', category: 'touch', title: '雙指捏合與快捏符合畫面',
+    summary: '兩指張開／合起縮放，轉動兩指旋轉畫面（接近直角會吸附），拖曳平移；快速向內一捏即重置縮放與旋轉符合畫面。',
     art: 'pinch',
-    keywords: ['捏合', '縮放', '旋轉', '雙指', 'pinch', 'zoom'],
+    keywords: ['捏合', '快捏', '符合畫面', '縮放', '旋轉', '雙指', 'pinch', 'zoom', 'fit'],
   },
   {
-    id: 'gesture-long', category: 'touch', title: '長按：輪盤與多選',
-    summary: '長按畫布叫出快捷輪盤；長按圖層進入多選或打開圖層選單。',
+    id: 'gesture-long', category: 'touch', title: '長按：輪盤或吸色環',
+    summary: '預設長按畫布叫出快捷輪盤；可在「設定 → 觸控與筆壓」改為長按吸色（附雙色對比色環），也可切換僅觸控筆作畫模式（單指平移或防誤觸）。',
     art: 'long-press',
-    keywords: ['長按', '輪盤', '快捷', '多選', 'long press', 'radial'],
+    keywords: ['長按', '輪盤', '吸色', '滴管', '僅觸控筆', '防誤觸', '單指平移', 'long press', 'radial', 'eyedropper', 'stylus'],
+  },
+  {
+    id: 'gesture-procraft-more', category: 'touch', title: '三指下滑剪貼／四指全螢幕',
+    summary: '三指同時下滑喚出剪貼選單（剪下、複製、複製全部、再製、貼上、清除圖層）；四指輕點切換純畫布全螢幕（再四指輕點或點右上按鈕恢復）。',
+    art: 'three-finger-tap',
+    keywords: ['三指下滑', '剪貼', '複製全部', '清除圖層', '四指', '全螢幕', '隱藏介面', 'fullscreen', 'clipboard', 'procraft'],
   },
 
   // ---- 介面

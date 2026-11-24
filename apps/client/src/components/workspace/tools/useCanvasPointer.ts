@@ -5,6 +5,15 @@ import { RulerManager } from '../../../engine/RulerManager';
 import type { BrushProperties } from '../../../engine/BrushRenderer';
 import { eraserStrokeProperties, loadBrushTool } from '../../../engine/brushToolSettings';
 import { hasDrawingContact, isTabletEraser } from '../../../engine/tabletInput';
+import {
+  classifyMultiFingerTap,
+  detectThreeFingerSwipeDown,
+  getTouchGestureSettings,
+  QuickPinchTracker,
+  RAPID_UNDO_HOLD_DELAY_MS,
+  RAPID_UNDO_REPEAT_MS,
+} from '../../../engine/touchGestures';
+import type { TouchEyedropperState } from '../../TouchEyedropperLoupe';
 import type { Point, ToolContext } from './toolContext';
 import { LIQUIFY_TOOLS, useLiquifyTool } from './useLiquifyTool';
 import { SHAPE_TOOLS, useShapeTools } from './useShapeTools';
@@ -58,12 +67,18 @@ interface PointerDeps {
   /** While a filter dialog or the radial menu is open the canvas ignores the pointer */
   filterModalOpenRef: React.MutableRefObject<boolean>;
   radialMenuOpenRef: React.MutableRefObject<boolean>;
+  clipboardMenuOpenRef?: React.MutableRefObject<boolean>;
   /** While the canvas resize frame is open, prevent accidental strokes while still allowing pan/zoom */
   resizeModalOpenRef?: React.MutableRefObject<boolean>;
   updateBrushCursor: (clientX: number, clientY: number) => void;
   hideBrushCursor: () => void;
   setEraserHover: (active: boolean) => void;
   openRadialMenu: (pos: Point) => void;
+  onOpenClipboardMenu?: (pos: Point) => void;
+  onQuickFitCanvas?: () => void;
+  onToggleFullscreen?: () => void;
+  onTouchEyedropperChange?: (state: TouchEyedropperState | null) => void;
+  onTouchEyedropperCommit?: (hex: string) => void;
   emitCursor: (x: number, y: number, isDrawing: boolean, brushSize?: number) => void;
   undo: () => void;
   redo: () => void;
@@ -94,14 +109,15 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     viewportRef, layerManagerRef, strokePipelineRef, selectionEngineRef, shapeGraphicRef, activeLayerRef, warn, requestRender,
   } = ctx;
   const {
-    containerRef, filterModalOpenRef, radialMenuOpenRef, resizeModalOpenRef, updateBrushCursor, hideBrushCursor, openRadialMenu, emitCursor,
-    setEraserHover, undo, redo, setCurrentTool, onSelectLayer, onRequestCreateMyLayer, onTextTool, pluginTool,
+    containerRef, filterModalOpenRef, radialMenuOpenRef, clipboardMenuOpenRef, resizeModalOpenRef, updateBrushCursor, hideBrushCursor,
+    openRadialMenu, onOpenClipboardMenu, onQuickFitCanvas, onToggleFullscreen, onTouchEyedropperChange, onTouchEyedropperCommit,
+    emitCursor, setEraserHover, undo, redo, setCurrentTool, onSelectLayer, onRequestCreateMyLayer, onTextTool, pluginTool,
   } = deps;
   const isLassoErase = () => currentTool === 'eraser' && selection.lassoErase;
   const isTransformActive = transform.isTransformActive;
 
   const lastCursorEmitTimeRef = useRef<number>(0);
-  // Mobile touch gestures: Procreate-like 2-finger undo / 3-finger redo, deferred one-finger bucket
+  // Mobile touch gestures: Procreate/Procraft multi-touch gestures, deferred one-finger bucket & long press
   const isMultiTouchGestureRef = useRef<boolean>(false);
   const touchSessionRef = useRef<{
     startTime: number;
@@ -112,11 +128,115 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     hasMoved: boolean;
     toolStarted: boolean;
     pendingBucketTarget: LayerModel | null;
+    rapidTriggered: boolean;
+    swipeTriggered: boolean;
+    quickPinchTriggered: boolean;
   } | null>(null);
-  // Long press opens the radial menu; the press is held back until it moves or lifts
+  // Long press opens the radial menu or live eyedropper loupe; the press is held back until it moves or lifts
   const radialLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const pendingTouchDownRef = useRef<PointerEvent | null>(null);
+  const pendingSingleFingerPanRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const radialTouchRef = useRef<number | null>(null);
+  const eyedropperTouchRef = useRef<{
+    pointerId: number;
+    previousColor: string;
+    pickedColor: string;
+    hasSampled: boolean;
+    sampling: boolean;
+    queued: Point | null;
+  } | null>(null);
+  // 2/3-finger hold rapid undo/redo timers
+  const rapidHoldTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const rapidRepeatIntervalRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+  // Quick inward pinch-to-fit tracker
+  const quickPinchRef = useRef<QuickPinchTracker | null>(null);
+  // Latest undo/redo refs so rapid interval always invokes fresh callbacks
+  const undoRef = useRef(undo);
+  const redoRef = useRef(redo);
+  undoRef.current = undo;
+  redoRef.current = redo;
+
+  const clearRapidTimers = () => {
+    if (rapidHoldTimerRef.current !== undefined) {
+      clearTimeout(rapidHoldTimerRef.current);
+      rapidHoldTimerRef.current = undefined;
+    }
+    if (rapidRepeatIntervalRef.current !== undefined) {
+      clearInterval(rapidRepeatIntervalRef.current);
+      rapidRepeatIntervalRef.current = undefined;
+    }
+  };
+
+  const armRapidUndoRedo = (fingerCount: 2 | 3) => {
+    clearRapidTimers();
+    if (!getTouchGestureSettings().rapidUndoRedoHold || isTransformActive) return;
+    const session = touchSessionRef.current;
+    if (!session || session.hasMoved || session.swipeTriggered) return;
+    rapidHoldTimerRef.current = setTimeout(() => {
+      rapidHoldTimerRef.current = undefined;
+      const cur = touchSessionRef.current;
+      if (!cur || cur.hasMoved || cur.swipeTriggered || activePointersRef.current.size !== fingerCount) return;
+      cur.rapidTriggered = true;
+      quickPinchRef.current = null;
+      const run = () => {
+        if (fingerCount === 2) undoRef.current();
+        else redoRef.current();
+      };
+      run();
+      try { navigator.vibrate?.(18); } catch {}
+      warn(fingerCount === 2 ? '↩️ 雙指長按：連續復原中' : '↪️ 三指長按：連續重做中', 1200);
+      rapidRepeatIntervalRef.current = setInterval(() => {
+        const s = touchSessionRef.current;
+        if (!s || s.hasMoved || activePointersRef.current.size !== fingerCount) {
+          clearRapidTimers();
+          return;
+        }
+        run();
+      }, RAPID_UNDO_REPEAT_MS);
+    }, RAPID_UNDO_HOLD_DELAY_MS);
+  };
+
+  const sampleTouchEyedropper = (clientX: number, clientY: number) => {
+    const ed = eyedropperTouchRef.current;
+    if (!ed) return;
+    onTouchEyedropperChange?.({
+      active: true,
+      clientX,
+      clientY,
+      pickedColor: ed.pickedColor,
+      previousColor: ed.previousColor,
+    });
+    if (ed.sampling) {
+      ed.queued = { x: clientX, y: clientY };
+      return;
+    }
+    const local = viewportRef.current?.screenToCanvas(clientX, clientY);
+    if (!local) return;
+    ed.sampling = true;
+    void brush.sampleColorAt(local).then((hex) => {
+      const cur = eyedropperTouchRef.current;
+      if (!cur || cur !== ed) return;
+      cur.sampling = false;
+      if (hex) {
+        cur.pickedColor = hex;
+        cur.hasSampled = true;
+        onTouchEyedropperChange?.({
+          active: true,
+          clientX: cur.queued?.x ?? clientX,
+          clientY: cur.queued?.y ?? clientY,
+          pickedColor: cur.pickedColor,
+          previousColor: cur.previousColor,
+        });
+      }
+      if (cur.queued) {
+        const next = cur.queued;
+        cur.queued = null;
+        sampleTouchEyedropper(next.x, next.y);
+      }
+    }).catch(() => {
+      if (eyedropperTouchRef.current === ed) ed.sampling = false;
+    });
+  };
   // Panning (space / middle button / hand tool) and pinch zoom
   const isPanningRef = useRef<boolean>(false);
   const lastPanPosRef = useRef<Point>({ x: 0, y: 0 });
@@ -141,6 +261,14 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
   const blurRef = useRef(() => {});
   blurRef.current = () => {
     if (tailRef.current) finishTail(tailRef.current.id);
+    clearTimeout(radialLongPressTimerRef.current);
+    clearRapidTimers();
+    if (eyedropperTouchRef.current) {
+      eyedropperTouchRef.current = null;
+      onTouchEyedropperChange?.(null);
+    }
+    pendingSingleFingerPanRef.current = null;
+    quickPinchRef.current = null;
     pluginTool?.onCancel();
     for (const id of activePointersRef.current.keys()) brush.interrupt(id);
     setEraserHover(false);
@@ -153,7 +281,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
   }, []);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (filterModalOpenRef.current || radialMenuOpenRef.current) return;
+    if (filterModalOpenRef.current || radialMenuOpenRef.current || clipboardMenuOpenRef?.current) return;
     if ((e.target as HTMLElement | null)?.closest?.('[data-transform-overlay], [data-canvas-resize-overlay], button, select, input, textarea, [role="dialog"], [role="menu"]')) return;
     if ((isTransformActive || resizeModalOpenRef?.current) && e.button !== 1 && !isSpacePressedRef.current && currentTool !== 'hand') return;
     if (e.pointerType === 'mouse' && e.button === 2) return;
@@ -179,6 +307,10 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       for (const id of [...activePointersRef.current.keys()]) if (id !== e.pointerId) activePointersRef.current.delete(id);
       touchSessionRef.current = null;
       isMultiTouchGestureRef.current = false;
+      pendingSingleFingerPanRef.current = null;
+      eyedropperTouchRef.current = null;
+      quickPinchRef.current = null;
+      clearRapidTimers();
     }
 
     // Stylus / Samsung S-Pen is a dedicated drawing instrument
@@ -199,6 +331,9 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
           hasMoved: false,
           toolStarted: false,
           pendingBucketTarget: null,
+          rapidTriggered: false,
+          swipeTriggered: false,
+          quickPinchTriggered: false,
         };
       } else {
         touchSessionRef.current.starts.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -210,11 +345,17 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       }
     }
 
-    // Multi-touch gestures (Pinch-zoom / 2-finger Undo / 3-finger Redo)
+    // Multi-touch gestures (Pinch-zoom / Quick-pinch fit / 2-finger Undo / 3-finger Redo / 3-finger Swipe / 4-finger Fullscreen)
     if (e.pointerType === 'touch' && activePointersRef.current.size >= 2) {
       isMultiTouchGestureRef.current = true;
       clearTimeout(radialLongPressTimerRef.current);
       pendingTouchDownRef.current = null;
+      pendingSingleFingerPanRef.current = null;
+      isPanningRef.current = false;
+      if (eyedropperTouchRef.current) {
+        eyedropperTouchRef.current = null;
+        onTouchEyedropperChange?.(null);
+      }
       const pipeline = strokePipelineRef.current;
       const layer = activeLayerRef.current;
       if (pipeline?.getIsDrawing() || brush.isHolding() || liquify.isActive()) {
@@ -235,12 +376,21 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
 
       if (activePointersRef.current.size === 2) {
         const pts = Array.from(activePointersRef.current.values());
-        touchInitialDistRef.current = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        const initDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+        touchInitialDistRef.current = initDist;
         touchLastMidRef.current = {
           x: (pts[0].x + pts[1].x) / 2,
           y: (pts[0].y + pts[1].y) / 2,
         };
         touchTwistRef.current = null; // restarts on the first move of this pair
+        quickPinchRef.current = new QuickPinchTracker(initDist, Date.now());
+        armRapidUndoRedo(2);
+      } else if (activePointersRef.current.size === 3) {
+        quickPinchRef.current = null;
+        armRapidUndoRedo(3);
+      } else {
+        quickPinchRef.current = null;
+        clearRapidTimers();
       }
       return;
     }
@@ -259,16 +409,43 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     if (isTransformActive) return;
 
     if (e.pointerType === 'touch') {
+      const gestures = getTouchGestureSettings();
+      // Stylus-only mode: ignore single-finger touch completely (multi-finger gestures still work above)
+      if (gestures.singleFingerMode === 'ignore') {
+        return;
+      }
       const down = e.nativeEvent;
-      pendingTouchDownRef.current = down;
+      if (gestures.singleFingerMode === 'pan') {
+        pendingSingleFingerPanRef.current = { pointerId: down.pointerId, x: down.clientX, y: down.clientY };
+      } else {
+        pendingTouchDownRef.current = down;
+      }
       clearTimeout(radialLongPressTimerRef.current);
       radialLongPressTimerRef.current = setTimeout(() => {
-        if (pendingTouchDownRef.current !== down) return;
-        pendingTouchDownRef.current = null;
-        radialTouchRef.current = down.pointerId;
+        if (gestures.singleFingerMode === 'pan') {
+          if (pendingSingleFingerPanRef.current?.pointerId !== down.pointerId) return;
+          pendingSingleFingerPanRef.current = null;
+        } else {
+          if (pendingTouchDownRef.current !== down) return;
+          pendingTouchDownRef.current = null;
+        }
         hideBrushCursor();
-        openRadialMenu({ x: down.clientX, y: down.clientY });
-      }, 550);
+        if (gestures.longPressAction === 'eyedropper') {
+          eyedropperTouchRef.current = {
+            pointerId: down.pointerId,
+            previousColor: brushProps.color,
+            pickedColor: brushProps.color,
+            hasSampled: false,
+            sampling: false,
+            queued: null,
+          };
+          try { navigator.vibrate?.(22); } catch {}
+          sampleTouchEyedropper(down.clientX, down.clientY);
+        } else {
+          radialTouchRef.current = down.pointerId;
+          openRadialMenu({ x: down.clientX, y: down.clientY });
+        }
+      }, gestures.longPressDelayMs);
       return;
     }
 
@@ -456,6 +633,12 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     if (activePointersRef.current.has(e.pointerId)) activePointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
     if (e.pointerType === 'touch') {
+      // Live touch long-press eyedropper dragging
+      if (eyedropperTouchRef.current?.pointerId === e.pointerId) {
+        sampleTouchEyedropper(e.clientX, e.clientY);
+        return;
+      }
+
       if (touchSessionRef.current) {
         // Each finger against its own touch-down point (the second finger is never near the
         // first one's, so comparing with that made every two-finger tap look like a drag)
@@ -465,11 +648,31 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
         if (dist > (activePointersRef.current.size >= 2 ? 18 : 10)) {
           touchSessionRef.current.hasMoved = true;
           touchSessionRef.current.pendingBucketTarget = null;
+          clearRapidTimers();
         }
       }
 
-      // If in multi-touch gesture mode (pinch-to-zoom / 2-finger pan / multi-finger undo-redo)
+      // If in multi-touch gesture mode (pinch-to-zoom / quick-pinch / 2-finger pan / 3-finger swipe / multi-finger undo-redo)
       if (isMultiTouchGestureRef.current || activePointersRef.current.size >= 2) {
+        // 3-finger swipe down: open Copy & Paste menu
+        if (
+          activePointersRef.current.size === 3 &&
+          touchSessionRef.current &&
+          !touchSessionRef.current.swipeTriggered &&
+          !touchSessionRef.current.rapidTriggered &&
+          getTouchGestureSettings().threeFingerSwipeCopyPaste
+        ) {
+          const swipe = detectThreeFingerSwipeDown(touchSessionRef.current.starts, activePointersRef.current);
+          if (swipe.triggered) {
+            clearRapidTimers();
+            touchSessionRef.current.swipeTriggered = true;
+            touchSessionRef.current.hasMoved = true;
+            try { navigator.vibrate?.(25); } catch {}
+            onOpenClipboardMenu?.(swipe.centroid);
+            return;
+          }
+        }
+
         if (activePointersRef.current.size === 2 && viewportRef.current) {
           const pts = Array.from(activePointersRef.current.values());
           const currentDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
@@ -477,6 +680,8 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
             x: (pts[0].x + pts[1].x) / 2,
             y: (pts[0].y + pts[1].y) / 2,
           };
+
+          quickPinchRef.current?.record(currentDist, Date.now());
 
           if (touchInitialDistRef.current && touchInitialDistRef.current > 10) {
             const zoomDelta = currentDist / touchInitialDistRef.current;
@@ -503,6 +708,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
               if (Math.abs(twist.twist) > TOUCH_ROTATE_ENGAGE) {
                 twist.engaged = true;
                 if (touchSessionRef.current) touchSessionRef.current.hasMoved = true; // not a two-finger tap
+                clearRapidTimers();
               }
             } else {
               twist.raw += d;
@@ -519,6 +725,21 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
           }
           touchLastMidRef.current = currentMid;
         }
+        return;
+      }
+
+      // Stylus-only single-finger pan mode: promote to pan once moved past slop
+      const pendingPan = pendingSingleFingerPanRef.current;
+      if (pendingPan?.pointerId === e.pointerId) {
+        if (!touchSessionRef.current?.hasMoved) return;
+        clearTimeout(radialLongPressTimerRef.current);
+        pendingSingleFingerPanRef.current = null;
+        isPanningRef.current = true;
+        lastPanPosRef.current = { x: pendingPan.x, y: pendingPan.y };
+      }
+
+      // Stylus-only ignore mode: do not route single-finger touch to drawing tools
+      if (!isPanningRef.current && getTouchGestureSettings().singleFingerMode === 'ignore') {
         return;
       }
     }
@@ -598,13 +819,32 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     } catch {}
 
     clearTimeout(radialLongPressTimerRef.current);
+    clearRapidTimers();
     if (e.pointerType === "touch") hideBrushCursor();
+
+    // Finish touch long-press eyedropper
+    const activeEyedropper = eyedropperTouchRef.current;
+    if (activeEyedropper?.pointerId === e.pointerId) {
+      eyedropperTouchRef.current = null;
+      activePointersRef.current.delete(e.pointerId);
+      touchSessionRef.current = null;
+      onTouchEyedropperChange?.(null);
+      if (!cancelled && activeEyedropper.hasSampled) {
+        onTouchEyedropperCommit?.(activeEyedropper.pickedColor);
+      }
+      return;
+    }
+
+    if (pendingSingleFingerPanRef.current?.pointerId === e.pointerId) {
+      pendingSingleFingerPanRef.current = null;
+    }
 
     const touchDown = pendingTouchDownRef.current;
     if (touchDown?.pointerId === e.pointerId) {
       pendingTouchDownRef.current = null;
       if (!cancelled) startCanvasTool(touchDown);
     }
+    const prevCount = activePointersRef.current.size;
     activePointersRef.current.delete(e.pointerId);
     if (radialTouchRef.current === e.pointerId) {
       radialTouchRef.current = null;
@@ -612,28 +852,59 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       return;
     }
 
-    // Process touch gestures: Procreate 2-finger Undo, 3-finger Redo, and single-finger Paint Bucket
+    // Check quick inward pinch-to-fit as the 2-finger pair parts
+    if (e.pointerType === 'touch' && prevCount === 2 && activePointersRef.current.size < 2 && quickPinchRef.current) {
+      const tracker = quickPinchRef.current;
+      quickPinchRef.current = null;
+      if (
+        !cancelled &&
+        !isTransformActive &&
+        getTouchGestureSettings().quickPinchToFit &&
+        tracker.shouldFitOnRelease(Date.now())
+      ) {
+        if (touchSessionRef.current) touchSessionRef.current.quickPinchTriggered = true;
+        onQuickFitCanvas?.();
+        try { navigator.vibrate?.(25); } catch {}
+        warn('🔍 雙指快捏：已符合畫面', 1400);
+      }
+    }
+
+    // Process touch gestures: 2-finger Undo, 3-finger Redo, 4-finger Fullscreen, and single-finger Paint Bucket
     if (e.pointerType === 'touch') {
       if (isMultiTouchGestureRef.current) {
         if (activePointersRef.current.size === 0) {
           const session = touchSessionRef.current;
           const duration = session ? Date.now() - session.startTime : 0;
-          if (!cancelled && !isTransformActive && session && !session.hasMoved && duration < 500) {
-            if (session.maxPointers === 2) {
-              undo();
-              try { navigator.vibrate?.(35); } catch {}
-              warn('↩️ 雙指輕點：已撤銷 (Undo)', 1500);
-            } else if (session.maxPointers >= 3) {
-              redo();
-              try { navigator.vibrate?.(35); } catch {}
-              warn('↪️ 三指輕點：已重做 (Redo)', 1500);
-            }
+          const action = session && !isTransformActive
+            ? classifyMultiFingerTap({
+                maxPointers: session.maxPointers,
+                hasMoved: session.hasMoved,
+                durationMs: duration,
+                cancelled,
+                rapidTriggered: session.rapidTriggered,
+                swipeTriggered: session.swipeTriggered,
+                quickPinchTriggered: session.quickPinchTriggered,
+                fourFingerFullscreenEnabled: getTouchGestureSettings().fourFingerTapFullscreen,
+              })
+            : null;
+          if (action === 'undo') {
+            undo();
+            try { navigator.vibrate?.(35); } catch {}
+            warn('↩️ 雙指輕點：已撤銷 (Undo)', 1500);
+          } else if (action === 'redo') {
+            redo();
+            try { navigator.vibrate?.(35); } catch {}
+            warn('↪️ 三指輕點：已重做 (Redo)', 1500);
+          } else if (action === 'fullscreen') {
+            onToggleFullscreen?.();
+            try { navigator.vibrate?.(30); } catch {}
           }
           isMultiTouchGestureRef.current = false;
           touchSessionRef.current = null;
           touchInitialDistRef.current = null;
           touchLastMidRef.current = null;
           touchTwistRef.current = null;
+          quickPinchRef.current = null;
         }
         return;
       }
@@ -715,17 +986,24 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
   /** Canvas switch / engine rebuild: forget every pointer, gesture and pan in progress */
   const reset = () => {
     if (radialLongPressTimerRef.current) clearTimeout(radialLongPressTimerRef.current);
+    clearRapidTimers();
     pluginTool?.onCancel();
     activePointersRef.current.clear();
     tailRef.current = null;
     setEraserHover(false);
     radialTouchRef.current = null;
+    if (eyedropperTouchRef.current) {
+      eyedropperTouchRef.current = null;
+      onTouchEyedropperChange?.(null);
+    }
     pendingTouchDownRef.current = null;
+    pendingSingleFingerPanRef.current = null;
     touchSessionRef.current = null;
     isMultiTouchGestureRef.current = false;
     touchInitialDistRef.current = null;
     touchLastMidRef.current = null;
     touchTwistRef.current = null;
+    quickPinchRef.current = null;
     isSpacePressedRef.current = false;
     isPanningRef.current = false;
   };

@@ -36,6 +36,16 @@ import {
   subscribeTouchSimulatedPressure,
 } from '../engine/inputPreferences';
 import {
+  getTouchGestureSettings,
+  MAX_LONG_PRESS_DELAY_MS,
+  MIN_LONG_PRESS_DELAY_MS,
+  resetTouchGestureSettings,
+  subscribeTouchGestureSettings,
+  updateTouchGestureSettings,
+  type TouchLongPressAction,
+  type TouchSingleFingerMode,
+} from '../engine/touchGestures';
+import {
   getTabletSnapshot, hasNativeTabletModes, setTabletPreference, startTabletStroke, subscribeTablet, type TabletMotion, type TabletPoint, type TabletStroke,
 } from '../engine/tabletInput';
 import type { TabletPreference } from '../../electron/tabletProtocol';
@@ -185,6 +195,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const tablet = useSyncExternalStore(subscribeTablet, getTabletSnapshot);
   const showBrushCrosshair = useSyncExternalStore(subscribeShowBrushCrosshair, getShowBrushCrosshair, getShowBrushCrosshair);
   const touchSimulatedPressure = useSyncExternalStore(subscribeTouchSimulatedPressure, getTouchSimulatedPressure, getTouchSimulatedPressure);
+  const touchGestures = useSyncExternalStore(subscribeTouchGestureSettings, getTouchGestureSettings, getTouchGestureSettings);
   const settings = t.settings;
   const modeLabel = { browser: settings.tabletBrowser, ink: settings.tabletInk, wintab: 'WinTab' };
   const driverMessage = {
@@ -1019,6 +1030,134 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     className="mt-0.5 shrink-0"
                   />
                 </label>
+              </section>
+
+              <section className="rounded-xl border border-neutral-800 p-3 text-xs flex flex-col gap-2.5" aria-label={t.touchGestures.sectionTitle}>
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <h4 className="font-bold text-white flex items-center gap-1.5">
+                      <Hand className="w-3.5 h-3.5 text-indigo-400" />
+                      {t.touchGestures.sectionTitle}
+                    </h4>
+                    <p className="text-[11px] text-neutral-400 mt-0.5">{t.touchGestures.sectionDesc}</p>
+                  </div>
+                  <button
+                    type="button"
+                    data-setting="touch-gestures-reset"
+                    onClick={() => resetTouchGestureSettings()}
+                    className="text-[11px] text-neutral-400 hover:text-white flex items-center gap-1 px-2 py-1 bg-neutral-800 rounded-lg shrink-0"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>{t.touchGestures.resetDefaults}</span>
+                  </button>
+                </div>
+
+                <label className="flex items-start justify-between gap-3 cursor-pointer">
+                  <span className="flex flex-col gap-0.5">
+                    <span className="font-medium text-neutral-100">{t.touchGestures.quickPinchToFit}</span>
+                    <span className="text-[11px] text-neutral-400">{t.touchGestures.quickPinchToFitDesc}</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    data-setting="touch-quick-pinch-fit"
+                    checked={touchGestures.quickPinchToFit}
+                    onChange={(e) => updateTouchGestureSettings({ quickPinchToFit: e.target.checked })}
+                    className="mt-0.5 shrink-0"
+                  />
+                </label>
+
+                <label className="flex items-start justify-between gap-3 cursor-pointer">
+                  <span className="flex flex-col gap-0.5">
+                    <span className="font-medium text-neutral-100">{t.touchGestures.fourFingerFullscreen}</span>
+                    <span className="text-[11px] text-neutral-400">{t.touchGestures.fourFingerFullscreenDesc}</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    data-setting="touch-four-finger-fullscreen"
+                    checked={touchGestures.fourFingerTapFullscreen}
+                    onChange={(e) => updateTouchGestureSettings({ fourFingerTapFullscreen: e.target.checked })}
+                    className="mt-0.5 shrink-0"
+                  />
+                </label>
+
+                <label className="flex items-start justify-between gap-3 cursor-pointer">
+                  <span className="flex flex-col gap-0.5">
+                    <span className="font-medium text-neutral-100">{t.touchGestures.rapidUndoRedoHold}</span>
+                    <span className="text-[11px] text-neutral-400">{t.touchGestures.rapidUndoRedoHoldDesc}</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    data-setting="touch-rapid-undo-redo"
+                    checked={touchGestures.rapidUndoRedoHold}
+                    onChange={(e) => updateTouchGestureSettings({ rapidUndoRedoHold: e.target.checked })}
+                    className="mt-0.5 shrink-0"
+                  />
+                </label>
+
+                <label className="flex items-start justify-between gap-3 cursor-pointer">
+                  <span className="flex flex-col gap-0.5">
+                    <span className="font-medium text-neutral-100">{t.touchGestures.threeFingerCopyPaste}</span>
+                    <span className="text-[11px] text-neutral-400">{t.touchGestures.threeFingerCopyPasteDesc}</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    data-setting="touch-three-finger-clipboard"
+                    checked={touchGestures.threeFingerSwipeCopyPaste}
+                    onChange={(e) => updateTouchGestureSettings({ threeFingerSwipeCopyPaste: e.target.checked })}
+                    className="mt-0.5 shrink-0"
+                  />
+                </label>
+
+                <div className="border-t border-neutral-800 pt-2.5 flex flex-col gap-2">
+                  <label className="flex items-center justify-between gap-3">
+                    <span className="font-medium text-neutral-100">{t.touchGestures.longPressAction}</span>
+                    <select
+                      data-setting="touch-long-press-action"
+                      value={touchGestures.longPressAction}
+                      onChange={(e) => updateTouchGestureSettings({ longPressAction: e.target.value as TouchLongPressAction })}
+                      className="rounded-lg border border-neutral-700 bg-neutral-900 px-2 py-1 text-white"
+                    >
+                      <option value="radial">{t.touchGestures.longPressRadial}</option>
+                      <option value="eyedropper">{t.touchGestures.longPressEyedropper}</option>
+                    </select>
+                  </label>
+
+                  <label className="flex items-center justify-between gap-3">
+                    <span className="font-medium text-neutral-100">{t.touchGestures.longPressDelay}</span>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="range"
+                        data-setting="touch-long-press-delay"
+                        min={MIN_LONG_PRESS_DELAY_MS}
+                        max={MAX_LONG_PRESS_DELAY_MS}
+                        step={50}
+                        value={touchGestures.longPressDelayMs}
+                        onChange={(e) => updateTouchGestureSettings({ longPressDelayMs: Number(e.target.value) })}
+                        className="w-28 accent-indigo-500"
+                      />
+                      <span className="w-12 text-right font-mono tabular-nums text-neutral-300">
+                        {touchGestures.longPressDelayMs}ms
+                      </span>
+                    </div>
+                  </label>
+
+                  <label className="flex flex-col gap-1">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-medium text-neutral-100">{t.touchGestures.singleFingerMode}</span>
+                      <select
+                        data-setting="touch-single-finger-mode"
+                        value={touchGestures.singleFingerMode}
+                        onChange={(e) => updateTouchGestureSettings({ singleFingerMode: e.target.value as TouchSingleFingerMode })}
+                        className="rounded-lg border border-neutral-700 bg-neutral-900 px-2 py-1 text-white"
+                      >
+                        <option value="draw">{t.touchGestures.singleFingerDraw}</option>
+                        <option value="pan">{t.touchGestures.singleFingerPan}</option>
+                        <option value="ignore">{t.touchGestures.singleFingerIgnore}</option>
+                      </select>
+                    </div>
+                    <span className="text-[11px] text-neutral-400">{t.touchGestures.singleFingerModeDesc}</span>
+                  </label>
+                </div>
               </section>
               <PressureCurveEditor curve={pressureCurve} onChange={updatePressureCurve} />
               <div className="flex items-center justify-between">

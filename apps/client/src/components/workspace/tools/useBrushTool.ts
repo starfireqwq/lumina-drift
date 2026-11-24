@@ -468,6 +468,24 @@ export function useBrushTool(ctx: ToolContext) {
     select('eyedropper');
   };
 
+  /** Sample the visible composite canvas at a point without changing tool state; returns #RRGGBB or null if transparent. */
+  const sampleColorAt = async (local: Point): Promise<string | null> => {
+    const { canvas, layerManagerRef, tileEngineRef } = ctx;
+    const lm = layerManagerRef.current;
+    const te = tileEngineRef.current;
+    if (!canvas || !lm || !te) return null;
+    const ix = Math.max(0, Math.min(canvas.width - 1, Math.round(local.x)));
+    const iy = Math.max(0, Math.min(canvas.height - 1, Math.round(local.y)));
+    try {
+      const [px] = await te.readRegionsAsync(lm.getCompositeTexture(true), [{ x: ix, y: iy, w: 1, h: 1 }]);
+      const [pr, pg, pb, a] = px;
+      if (!a) return null;
+      return '#' + [pr, pg, pb].map((c) => Math.min(255, Math.round((c * 255) / a)).toString(16).padStart(2, '0')).join('').toUpperCase();
+    } catch {
+      return null;
+    }
+  };
+
   /** Sample the visible canvas, including layers underneath an empty active layer. */
   const pickColor = (local: Point, layer: LayerModel) => {
     const { canvas, layerManagerRef, tileEngineRef } = ctx;
@@ -511,6 +529,7 @@ export function useBrushTool(ctx: ToolContext) {
     /** A stroke is waiting for the previous stroke's outline */
     isHolding: () => heldRef.current !== null || historyHoldRef.current !== null,
     pickColor,
+    sampleColorAt,
     /** Canvas switch / engine rebuild */
     reset: () => {
       strokeTouchedTileCoordsRef.current.clear();

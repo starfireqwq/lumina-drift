@@ -152,6 +152,57 @@ export function useSelectionTools(ctx: ToolContext) {
     return true;
   };
 
+  /** 複製全部 (Copy Merged): copies the flattened visible canvas (clipped to selection if active) */
+  const copyMerged = async (): Promise<boolean> => {
+    const lm = layerManagerRef.current;
+    const te = tileEngineRef.current;
+    if (!canvas || !lm || !te) return false;
+    const sel = selectedRegion();
+    const x = sel ? sel.x : 0;
+    const y = sel ? sel.y : 0;
+    const w = sel ? sel.w : canvas.width;
+    const h = sel ? sel.h : canvas.height;
+    if (w <= 0 || h <= 0) return false;
+    const [pm] = await te.readRegionsAsync(lm.getCompositeTexture(true), [{ x, y, w, h }]);
+    const source = document.createElement('canvas');
+    source.width = w;
+    source.height = h;
+    const c2d = source.getContext('2d');
+    if (!c2d) return false;
+    const img = c2d.createImageData(w, h);
+    for (let i = 0; i < pm.length; i += 4) {
+      const a = pm[i + 3];
+      if (!a) continue;
+      const k = 255 / a;
+      img.data[i] = pm[i] * k;
+      img.data[i + 1] = pm[i + 1] * k;
+      img.data[i + 2] = pm[i + 2] * k;
+      img.data[i + 3] = a;
+    }
+    if (sel) {
+      for (let row = 0; row < h; row++) {
+        for (let col = 0; col < w; col++) {
+          const i = (row * w + col) * 4 + 3;
+          img.data[i] = Math.round(img.data[i] * (sel.mask[(y + row) * canvas.width + (x + col)] / 255));
+        }
+      }
+    }
+    c2d.putImageData(img, 0, 0);
+    clipboardRef.current = { source, x, y };
+    setHasClipboard(true);
+    try {
+      source.toBlob((blob) => {
+        if (blob && typeof ClipboardItem !== 'undefined') {
+          void navigator.clipboard?.write([new ClipboardItem({ 'image/png': blob })]).catch(() => {});
+        }
+      }, 'image/png');
+    } catch {
+      // internal clipboard still works
+    }
+    ctx.warn('📋 已複製合併畫面', 1800);
+    return true;
+  };
+
   /** 刪除: clears the selected pixels of the active layer (feathered edges partly) as one op and undo step */
   const deleteSelection = (desc = '刪除選取內容', override?: ReturnType<typeof selectedRegion>) => {
     const r = override ?? selectedRegion();
@@ -373,6 +424,7 @@ export function useSelectionTools(ctx: ToolContext) {
     handleClearSelection,
     invertSelection,
     copySelection,
+    copyMerged,
     cutSelection,
     deleteSelection,
     clipboardRef,

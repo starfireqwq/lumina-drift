@@ -155,6 +155,16 @@ import { RulerManager } from '../engine/RulerManager';
 import { RulerOverlay } from './RulerOverlay';
 import { FilterPointOverlay } from './FilterPointOverlay';
 import { TouchRadialMenu } from './TouchRadialMenu';
+import { TouchClipboardMenu } from './TouchClipboardMenu';
+import { TouchEyedropperLoupe, type TouchEyedropperState } from './TouchEyedropperLoupe';
+import {
+  getCanvasFullscreen,
+  getTouchGestureSettings,
+  setCanvasFullscreen,
+  subscribeCanvasFullscreen,
+  subscribeTouchGestureSettings,
+  toggleCanvasFullscreen,
+} from '../engine/touchGestures';
 import type { DistortMode } from '../utils/distortModes';
 import { LiquifyEngine } from '../engine/LiquifyEngine';
 import { BlurSmudgeEngine } from '../engine/BlurSmudgeEngine';
@@ -228,7 +238,7 @@ import { PluginFilterWorkerClient } from '../plugins/pluginFilterClient';
 import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../utils/filterMemoryGuard';
 import type { FilterTargetOptions } from './FilterTargetBar';
 import { AtelierModal, modalButton } from './AtelierModal';
-import { AlertCircle, AlignCenter, Eye, Grid2x2, ImagePlus, Keyboard, Layers, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
+import { AlertCircle, AlignCenter, Eye, Grid2x2, ImagePlus, Keyboard, Layers, Minimize2, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
 import { type DroppedImages, type ImageDropTarget, ImageImportError, imageEntries, isImageDrag, loadImageEntry, readDroppedImages } from '../utils/imageImport';
 
 /** Where a key types text (a text field), unlike a focused button, slider, checkbox or the page */
@@ -1246,6 +1256,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   radialMenuOpenRef.current = isRadialMenuOpen;
   const [radialMenuPos, setRadialMenuPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const contextPointerRef = useRef({ type: '', rightButton: false });
+
+  // Procraft-inspired Touch Clipboard Menu, Live Eyedropper Loupe & 4-Finger Fullscreen
+  const [isClipboardMenuOpen, setIsClipboardMenuOpen] = useState<boolean>(false);
+  const clipboardMenuOpenRef = useRef(isClipboardMenuOpen);
+  clipboardMenuOpenRef.current = isClipboardMenuOpen;
+  const [touchEyedropper, setTouchEyedropper] = useState<TouchEyedropperState | null>(null);
+  const canvasFullscreen = useSyncExternalStore(subscribeCanvasFullscreen, getCanvasFullscreen, getCanvasFullscreen);
+  const touchGestureSettings = useSyncExternalStore(subscribeTouchGestureSettings, getTouchGestureSettings, getTouchGestureSettings);
 
   // Undo / Redo availability
   const [canUndoState, setCanUndoState] = useState<boolean>(false);
@@ -6453,18 +6471,121 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     metaKey: e.metaKey,
   });
 
+  const clearActiveLayerWithUndo = () => {
+    if (selectionEngineRef.current?.hasSelection()) {
+      selection.deleteSelection('清除選取內容');
+      return;
+    }
+    const layer = activeLayerRef.current;
+    const lm = layerManagerRef.current;
+    const te = tileEngineRef.current;
+    if (!layer || !lm || !te || !canvas) return;
+    if (layer.layerType === 'group' || !canEditPixels(layer)) {
+      warn('請先選取自己可編輯、未鎖定的圖層。', 2500);
+      return;
+    }
+    const coords = te.getDirtyTilesForBounds(0, 0, canvas.width, canvas.height);
+    const layerId = layer.id;
+    commitInOrder(() => {
+      const diff = diffTilesAsync(lm, layerId, coords, () => {
+        lm.clearLayer(layerId);
+      }, 'before');
+      lm.syncPingPong(layerId);
+      return diff;
+    }, (res) => {
+      if (!res || (!res.beforeTiles.length && !res.afterTiles.length)) return;
+      scopedUndoRef.current.push({
+        opId: `op_clear_layer_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        userId: userRef.current?.id || user?.id || 'guest',
+        layerId,
+        opType: 'STROKE',
+        beforeTiles: res.beforeTiles,
+        afterTiles: res.afterTiles,
+        timestamp: Date.now(),
+        desc: `清除圖層「${layer.name}」`,
+      });
+      updateUndoRedoState();
+      commitTilePatch(layerId, res.afterTiles, false, '清除圖層');
+      warn('🧹 已清除圖層內容', 1600);
+    });
+  };
+
+  const handleTouchCut = () => {
+    if (selectionEngineRef.current?.hasSelection()) {
+      selection.cutSelection();
+      return;
+    }
+    const layer = activeLayerRef.current;
+    if (!layer) return;
+    copyLayers([layer.id]);
+    const wait = pendingCopyRef.current ?? Promise.resolve();
+    void wait.then(() => clearActiveLayerWithUndo());
+  };
+
+  const handleTouchCopy = () => {
+    if (selectionEngineRef.current?.hasSelection()) {
+      void selection.copySelection().then((ok) => {
+        if (ok) warn('📋 已複製選取內容', 1600);
+      });
+      return;
+    }
+    if (activeLayerRef.current) copyLayers([activeLayerRef.current.id]);
+  };
+
+  const handleTouchCopyAll = () => {
+    void selection.copyMerged();
+  };
+
+  const handleTouchDuplicate = () => {
+    if (selectionEngineRef.current?.hasSelection()) {
+      void selection.copySelection().then((ok) => {
+        if (ok) pasteClipboard();
+      });
+      return;
+    }
+    if (!activeLayerRef.current) return;
+    copyLayers([activeLayerRef.current.id]);
+    void pasteLayers();
+  };
+
+  const handleTouchPaste = () => {
+    if (selection.clipboardRef.current) {
+      pasteClipboard();
+      return;
+    }
+    void pasteLayers();
+  };
+
   // Pointer & touch input: layer checks, tool routing and navigation gestures (workspace/tools/useCanvasPointer)
   const pointer = useCanvasPointer(toolCtx, { brush, liquify, shapes, selection, fill, vector, transform }, {
     setEraserHover,
     containerRef,
     filterModalOpenRef,
     radialMenuOpenRef,
+    clipboardMenuOpenRef,
     resizeModalOpenRef,
     updateBrushCursor,
     hideBrushCursor,
     openRadialMenu: (pos) => {
       setRadialMenuPos(pos);
       setIsRadialMenuOpen(true);
+    },
+    onOpenClipboardMenu: () => {
+      setIsClipboardMenuOpen(true);
+    },
+    onQuickFitCanvas: () => {
+      fitViewport(true);
+    },
+    onToggleFullscreen: () => {
+      const next = toggleCanvasFullscreen();
+      warn(next ? t.touchGestures.fullscreenEntered : t.touchGestures.fullscreenExited, 1800);
+    },
+    onTouchEyedropperChange: (state) => {
+      setTouchEyedropper(state);
+    },
+    onTouchEyedropperCommit: (hex) => {
+      setBrushProps((prev) => ({ ...prev, color: hex, isEraser: false }));
+      warn(`💧 已吸取顏色 ${hex}`, 1400);
     },
     emitCursor,
     undo: () => handleScopedUndo(),
@@ -6929,10 +7050,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           <span className="font-medium">{permissionWarning}</span>
         </div>
       )}
-      {renderToolOptions()}
+      {!canvasFullscreen && renderToolOptions()}
       <div className="flex min-h-0 min-w-0 flex-1" data-dock-root="">
         {/* The size / opacity strip and the tool rail sit on the left, or on the right for left-handed painters */}
-        {!isTouchCanvasMode && (
+        {!canvasFullscreen && !isTouchCanvasMode && (
         <div data-workspace-entry={railRight ? 'right-tools' : 'left-tools'}
           className={`flex min-h-0 shrink-0 ${railRight ? 'order-last flex-row-reverse [&>[role=group]]:border-l [&>[role=group]]:border-r-0' : ''}`}>
           <BrushSideSliders size={sizeValue} onSize={setSizeValue} opacity={brushProps.opacity} onOpacity={(opacity) => handleBrushPropsChange({ opacity })}
@@ -6950,7 +7071,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             />
         </div>
         )}
-        {!isTouchCanvasMode && <DockColumn side="left" panels={panelDefs} />}
+        {!canvasFullscreen && !isTouchCanvasMode && <DockColumn side="left" panels={panelDefs} />}
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-dock-center="">
           {/* isolate: overlays inside the canvas (transform preview, rulers, mesh) can never stack above the docks */}
@@ -7231,21 +7352,23 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 )}
               </ConditionalViewportConsumer>
 
-              <ConditionalViewportConsumer active={stickers.length > 0} subscribe={subscribeViewport} getSnapshot={getViewportSnapshot}>
-                {(viewportState) => (
-                  <CanvasStickersOverlay
-                    stickers={stickers}
-                    currentUserId={user?.id}
-                    readOnly={isGuest || isCanvasViewer}
-                    avoidBottomDock={isTouchCanvasMode && !isTouchTablet}
-                    zoom={viewportState.zoom}
-                    pan={{ x: viewportState.panX, y: viewportState.panY }}
-                    onAddSticker={addSticker}
-                    onUpdateSticker={updateSticker}
-                    onRemoveSticker={removeSticker}
-                  />
-                )}
-              </ConditionalViewportConsumer>
+              {!canvasFullscreen && (
+                <ConditionalViewportConsumer active={stickers.length > 0} subscribe={subscribeViewport} getSnapshot={getViewportSnapshot}>
+                  {(viewportState) => (
+                    <CanvasStickersOverlay
+                      stickers={stickers}
+                      currentUserId={user?.id}
+                      readOnly={isGuest || isCanvasViewer}
+                      avoidBottomDock={isTouchCanvasMode && !isTouchTablet}
+                      zoom={viewportState.zoom}
+                      pan={{ x: viewportState.panX, y: viewportState.panY }}
+                      onAddSticker={addSticker}
+                      onUpdateSticker={updateSticker}
+                      onRemoveSticker={removeSticker}
+                    />
+                  )}
+                </ConditionalViewportConsumer>
+              )}
 
               <RulerOverlay
                 canvasWidth={canvas.width}
@@ -7337,7 +7460,21 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 </button>
               </div>
             )}
-            {isTouchCanvasMode && (
+            {canvasFullscreen && (
+              <button
+                type="button"
+                data-canvas-fullscreen-exit=""
+                onClick={() => setCanvasFullscreen(false)}
+                aria-label={t.touchGestures.exitFullscreen}
+                title={t.touchGestures.exitFullscreen}
+                onPointerDown={(e) => e.stopPropagation()}
+                className="atelier-popover pointer-events-auto absolute right-3 top-3 z-40 flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium text-neutral-100 opacity-80 transition hover:opacity-100"
+              >
+                <Minimize2 className="h-3.5 w-3.5" />
+                <span>{t.touchGestures.exitFullscreen}</span>
+              </button>
+            )}
+            {!canvasFullscreen && isTouchCanvasMode && (
               <>
                 <TouchSideIsland
                   side={dockLayout.railSide === 'right' ? 'right' : 'left'}
@@ -7347,6 +7484,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                   currentTool={currentTool}
                   canUndo={canUndoState}
                   canRedo={canRedoState}
+                  stylusOnlyActive={touchGestureSettings.singleFingerMode !== 'draw'}
                   onSize={setSizeValue}
                   onOpacity={(opacity) => handleBrushPropsChange({ opacity })}
                   onSizeDrag={setSizeDragging}
@@ -7370,7 +7508,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           </div>
 
           {/* Timeline sits in the layout (not over the canvas or the canvas switcher) */}
-          {animationEngine && (
+          {!canvasFullscreen && animationEngine && (
             <Suspense fallback={null}>
               <AnimationTimelineBar
                 key={canvas.id}
@@ -7536,46 +7674,48 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             </Suspense>
           )}
 
-          <ViewportConsumer subscribe={subscribeViewportZoom} getSnapshot={getViewportZoomSnapshot}>
-            {(viewportState) => (
-              <ViewportToolbar
-                viewportState={viewportState}
-                displayScale={viewportRef.current?.getDisplayScale() ?? getTargetDisplayResolution()}
-                width={canvas.width}
-                height={canvas.height}
-                onZoomIn={() => zoomAtViewCenter(1.25)}
-                onZoomOut={() => zoomAtViewCenter(1 / 1.25)}
-                onResetZoom={() => {
-                  const vp = viewportRef.current;
-                  if (vp) zoomAtViewCenter(vp.getActualSizeZoom() / vp.getState().zoom);
-                }}
-                onFitView={() => fitViewport()}
-                onRotate={(rad) => viewportRef.current?.rotateBy(rad)}
-                onResetRotation={() => viewportRef.current?.resetRotation()}
-                onToggleMirror={() => viewportRef.current?.toggleMirrorX()}
-                onOpenRuler={() => setIsRulerModalOpen(true)}
-                onOpenReference={() => setIsReferenceHUDOpen(true)}
-                onOpenFilters={() => openFilterRef.current()}
-                onOpenAlign={() => openAlign()}
-                onOpenResize={() => setIsResizeModalOpen(true)}
-                onOpenRadial={() => {
-                  if (transformLayerIdRef.current || filterModalOpenRef.current) return;
-                  setRadialMenuPos(getViewCenter() ?? { x: window.innerWidth / 2, y: window.innerHeight / 2 });
-                  setIsRadialMenuOpen(true);
-                }}
-              />
-            )}
-          </ViewportConsumer>
-          {!isTouchCanvasMode && <DockRow panels={panelDefs} />}
+          {!canvasFullscreen && (
+            <ViewportConsumer subscribe={subscribeViewportZoom} getSnapshot={getViewportZoomSnapshot}>
+              {(viewportState) => (
+                <ViewportToolbar
+                  viewportState={viewportState}
+                  displayScale={viewportRef.current?.getDisplayScale() ?? getTargetDisplayResolution()}
+                  width={canvas.width}
+                  height={canvas.height}
+                  onZoomIn={() => zoomAtViewCenter(1.25)}
+                  onZoomOut={() => zoomAtViewCenter(1 / 1.25)}
+                  onResetZoom={() => {
+                    const vp = viewportRef.current;
+                    if (vp) zoomAtViewCenter(vp.getActualSizeZoom() / vp.getState().zoom);
+                  }}
+                  onFitView={() => fitViewport()}
+                  onRotate={(rad) => viewportRef.current?.rotateBy(rad)}
+                  onResetRotation={() => viewportRef.current?.resetRotation()}
+                  onToggleMirror={() => viewportRef.current?.toggleMirrorX()}
+                  onOpenRuler={() => setIsRulerModalOpen(true)}
+                  onOpenReference={() => setIsReferenceHUDOpen(true)}
+                  onOpenFilters={() => openFilterRef.current()}
+                  onOpenAlign={() => openAlign()}
+                  onOpenResize={() => setIsResizeModalOpen(true)}
+                  onOpenRadial={() => {
+                    if (transformLayerIdRef.current || filterModalOpenRef.current) return;
+                    setRadialMenuPos(getViewCenter() ?? { x: window.innerWidth / 2, y: window.innerHeight / 2 });
+                    setIsRadialMenuOpen(true);
+                  }}
+                />
+              )}
+            </ViewportConsumer>
+          )}
+          {!canvasFullscreen && !isTouchCanvasMode && <DockRow panels={panelDefs} />}
         </div>
 
-        {!isTouchCanvasMode && <DockColumn side="right" panels={panelDefs} />}
+        {!canvasFullscreen && !isTouchCanvasMode && <DockColumn side="right" panels={panelDefs} />}
       </div>
 
       {/* Floating windows: phones & non-desktop touch tablets use frosted slide-out drawers; desktops float */}
-      <FloatingPanels panels={isTouchCanvasMode ? [] : panelDefs} />
+      <FloatingPanels panels={canvasFullscreen || isTouchCanvasMode ? [] : panelDefs} />
       <MobilePanelSheet
-        def={isTouchCanvasMode ? mobilePanel : null}
+        def={!canvasFullscreen && isTouchCanvasMode ? mobilePanel : null}
         placement={isTouchTablet ? 'right' : 'bottom'}
         quickTabs={[
           { id: 'toolPicker', label: t.navbar.tools, icon: <Grid2x2 /> },
@@ -7646,6 +7786,24 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             }}
           />
         </Suspense>
+      )}
+
+      {touchEyedropper && <TouchEyedropperLoupe state={touchEyedropper} />}
+
+      {isClipboardMenuOpen && (
+        <TouchClipboardMenu
+          isOpen
+          canEdit={Boolean(activeLayer && canEditPixels(activeLayer) && !isCanvasViewer)}
+          canPaste={Boolean(selection.hasClipboard || layerClipboard || loadLayerClipboard())}
+          hasSelection={hasSelectionState}
+          onClose={() => setIsClipboardMenuOpen(false)}
+          onCut={handleTouchCut}
+          onCopy={handleTouchCopy}
+          onCopyAll={handleTouchCopyAll}
+          onDuplicate={handleTouchDuplicate}
+          onPaste={handleTouchPaste}
+          onClearLayer={clearActiveLayerWithUndo}
+        />
       )}
 
       {isRadialMenuOpen && (

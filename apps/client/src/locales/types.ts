@@ -1545,6 +1545,7 @@ export interface Translations {
     surfaceStyleDesc: string;
     surfaceSolid: string;
     surfaceLiquidGlass: string;
+    surfaceChromaticGlass: string;
     surfaceFrostedMatte: string;
     surfaceLuminaGlow: string;
     surfaceSoftPaper: string;
@@ -1578,6 +1579,43 @@ export interface Translations {
     expandSideControls: string;
     collapseToolIsland: string;
     expandToolIsland: string;
+    moveSideIsland: string;
+  };
+
+  touchGestures: {
+    sectionTitle: string;
+    sectionDesc: string;
+    quickPinchToFit: string;
+    quickPinchToFitDesc: string;
+    fourFingerFullscreen: string;
+    fourFingerFullscreenDesc: string;
+    rapidUndoRedoHold: string;
+    rapidUndoRedoHoldDesc: string;
+    threeFingerCopyPaste: string;
+    threeFingerCopyPasteDesc: string;
+    longPressAction: string;
+    longPressRadial: string;
+    longPressEyedropper: string;
+    longPressDelay: string;
+    singleFingerMode: string;
+    singleFingerDraw: string;
+    singleFingerPan: string;
+    singleFingerIgnore: string;
+    singleFingerModeDesc: string;
+    stylusOnlyActiveHint: string;
+    resetDefaults: string;
+    fullscreenEntered: string;
+    fullscreenExited: string;
+    exitFullscreen: string;
+    clipTitle: string;
+    clipSelectionBadge: string;
+    clipCut: string;
+    clipCopy: string;
+    clipCopyAll: string;
+    clipDuplicate: string;
+    clipPaste: string;
+    clipClearLayer: string;
+    clipClearSelection: string;
   };
 
   gateway: {

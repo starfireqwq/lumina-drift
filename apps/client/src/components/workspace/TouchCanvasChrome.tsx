@@ -7,9 +7,11 @@ import {
   ChevronUp,
   Eraser,
   Grid2x2,
+  GripHorizontal,
   Keyboard,
   Layers,
   Paintbrush,
+  PenTool,
   Pencil,
   Pipette,
   Redo2,
@@ -24,6 +26,7 @@ import { useI18n } from '../../context/I18nContext';
 
 const SIDE_COLLAPSED_KEY = 'atelier_touch_side_collapsed';
 const DOCK_COLLAPSED_KEY = 'atelier_touch_dock_collapsed';
+const SIDE_POS_Y_KEY = 'atelier_touch_side_y_pct';
 
 const LOG_MAX = Math.log(MAX_BRUSH_SIZE);
 const sizeToPos = (size: number) => Math.max(0, Math.min(1, Math.log(Math.max(1, size)) / LOG_MAX));
@@ -45,20 +48,44 @@ function writeBool(key: string, value: boolean) {
   }
 }
 
+function readSidePosY(): number {
+  try {
+    const raw = Number(localStorage.getItem(SIDE_POS_Y_KEY));
+    if (Number.isFinite(raw) && raw >= 22 && raw <= 74) return raw;
+  } catch {
+    // ignore
+  }
+  return 48;
+}
+
+function writeSidePosY(pct: number) {
+  try {
+    localStorage.setItem(SIDE_POS_Y_KEY, String(Math.round(pct)));
+  } catch {
+    // ignore
+  }
+}
+
 interface FloatingTrackProps {
   label: string;
+  side: 'left' | 'right';
   position: number;
   valueText: string;
   fill: string;
+  previewDiameter?: number;
+  previewColor?: string;
   onChange: (pos: number) => void;
   onDragChange?: (dragging: boolean) => void;
 }
 
 const FloatingVerticalTrack: React.FC<FloatingTrackProps> = ({
   label,
+  side,
   position,
   valueText,
   fill,
+  previewDiameter,
+  previewColor,
   onChange,
   onDragChange,
 }) => {
@@ -71,14 +98,29 @@ const FloatingVerticalTrack: React.FC<FloatingTrackProps> = ({
     onChange(Math.max(0, Math.min(1, 1 - (e.clientY - rect.top) / rect.height)));
   };
 
+  const bubbleSideClass = side === 'right' ? 'right-full mr-2.5' : 'left-full ml-2.5';
+  const clampedDot = previewDiameter !== undefined ? Math.max(4, Math.min(44, Math.round(previewDiameter * 0.45))) : 0;
+
   return (
     <div className="relative flex flex-col items-center">
       {dragging && (
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute left-full top-1/2 ml-2 -translate-y-1/2 whitespace-nowrap rounded-lg border border-neutral-600/80 bg-neutral-950/95 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-white shadow-xl"
+          className={`atelier-popover pointer-events-none absolute top-1/2 -translate-y-1/2 flex flex-col items-center gap-1.5 whitespace-nowrap rounded-2xl px-2.5 py-2 text-[11px] font-semibold tabular-nums text-white shadow-2xl ${bubbleSideClass}`}
         >
-          {valueText}
+          {previewDiameter !== undefined && (
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-black/25">
+              <span
+                className="rounded-full border border-white/75 shadow"
+                style={{
+                  width: `${clampedDot}px`,
+                  height: `${clampedDot}px`,
+                  backgroundColor: previewColor ?? '#ffffff',
+                }}
+              />
+            </div>
+          )}
+          <span>{valueText}</span>
         </div>
       )}
       <div
@@ -93,7 +135,7 @@ const FloatingVerticalTrack: React.FC<FloatingTrackProps> = ({
         aria-valuetext={valueText}
         title={`${label}: ${valueText}`}
         style={{ touchAction: 'none' }}
-        className="relative h-24 w-6 cursor-ns-resize overflow-hidden rounded-full border border-white/15 bg-neutral-950/75 shadow-inner outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
+        className="relative h-24 w-6 cursor-ns-resize overflow-hidden rounded-full border border-white/20 bg-neutral-950/60 shadow-inner outline-none focus-visible:ring-2 focus-visible:ring-indigo-400"
         onPointerDown={(e) => {
           e.stopPropagation();
           try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* synthetic */ }
@@ -137,6 +179,7 @@ export interface TouchSideIslandProps {
   currentTool: ToolType;
   canUndo: boolean;
   canRedo: boolean;
+  stylusOnlyActive?: boolean;
   onSize: (size: number) => void;
   onOpacity: (opacity: number) => void;
   onSizeDrag: (dragging: boolean) => void;
@@ -147,7 +190,8 @@ export interface TouchSideIslandProps {
 
 /**
  * Procraft-inspired floating side brush island for mobile/tablet non-desktop mode:
- * vertical brush size, quick eyedropper, vertical opacity, undo/redo, and edge collapse toggle.
+ * vertical brush size (with live preview dot), quick eyedropper, vertical opacity,
+ * undo/redo, vertical thumb-height repositioning grip, and edge collapse toggle.
  */
 export const TouchSideIsland: React.FC<TouchSideIslandProps> = ({
   side = 'left',
@@ -157,6 +201,7 @@ export const TouchSideIsland: React.FC<TouchSideIslandProps> = ({
   currentTool,
   canUndo,
   canRedo,
+  stylusOnlyActive = false,
   onSize,
   onOpacity,
   onSizeDrag,
@@ -166,6 +211,9 @@ export const TouchSideIsland: React.FC<TouchSideIslandProps> = ({
 }) => {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(() => readBool(SIDE_COLLAPSED_KEY));
+  const [posY, setPosY] = useState(() => readSidePosY());
+  const dragGripRef = useRef<{ pointerId: number; startY: number; startPct: number } | null>(null);
+
   const toggleCollapsed = () => {
     setCollapsed((prev) => {
       const next = !prev;
@@ -184,14 +232,15 @@ export const TouchSideIsland: React.FC<TouchSideIslandProps> = ({
     return (
       <div
         data-touch-island="side-collapsed"
-        className={`pointer-events-auto absolute top-1/2 z-30 -translate-y-1/2 ${isRight ? 'right-0' : 'left-0'}`}
+        className={`pointer-events-auto absolute z-30 -translate-y-1/2 ${isRight ? 'right-0' : 'left-0'}`}
+        style={{ top: `${posY}%` }}
       >
         <button
           type="button"
           onClick={toggleCollapsed}
           aria-label={t.touchUi.expandSideControls}
           title={t.touchUi.expandSideControls}
-          className={`atelier-popover flex h-14 w-6 items-center justify-center border border-neutral-700/80 bg-neutral-900/80 text-neutral-300 backdrop-blur-md shadow-xl transition hover:text-white ${
+          className={`atelier-popover flex h-14 w-6 items-center justify-center text-neutral-200 shadow-xl transition hover:text-white ${
             isRight ? 'rounded-l-xl border-r-0' : 'rounded-r-xl border-l-0'
           }`}
         >
@@ -204,10 +253,42 @@ export const TouchSideIsland: React.FC<TouchSideIslandProps> = ({
   return (
     <div
       data-touch-island="side"
-      className={`atelier-popover pointer-events-auto absolute top-1/2 z-30 flex -translate-y-1/2 flex-col items-center gap-2 rounded-2xl border border-neutral-700/75 bg-neutral-900/82 px-1.5 py-2 backdrop-blur-md shadow-2xl ${edgePos}`}
-      style={{ touchAction: 'none' }}
+      className={`atelier-popover pointer-events-auto absolute z-30 flex -translate-y-1/2 flex-col items-center gap-1.5 rounded-2xl px-1.5 py-2 shadow-2xl ${edgePos}`}
+      style={{ top: `${posY}%`, touchAction: 'none' }}
       onPointerDown={(e) => e.stopPropagation()}
     >
+      {/* Procraft-style thumb-height vertical reposition grip */}
+      <div
+        role="separator"
+        aria-label={t.touchUi.moveSideIsland}
+        title={t.touchUi.moveSideIsland}
+        className="flex h-4 w-8 cursor-ns-resize items-center justify-center rounded-md text-neutral-400 transition hover:bg-white/10 hover:text-white"
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* synthetic */ }
+          dragGripRef.current = { pointerId: e.pointerId, startY: e.clientY, startPct: posY };
+        }}
+        onPointerMove={(e) => {
+          const drag = dragGripRef.current;
+          if (!drag || drag.pointerId !== e.pointerId) return;
+          const parentH = Math.max(240, e.currentTarget.parentElement?.parentElement?.clientHeight ?? window.innerHeight);
+          const nextPct = Math.max(22, Math.min(74, drag.startPct + ((e.clientY - drag.startY) / parentH) * 100));
+          setPosY(nextPct);
+        }}
+        onPointerUp={(e) => {
+          const drag = dragGripRef.current;
+          if (!drag || drag.pointerId !== e.pointerId) return;
+          dragGripRef.current = null;
+          try { e.currentTarget.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+          writeSidePosY(posY);
+        }}
+        onPointerCancel={() => {
+          dragGripRef.current = null;
+        }}
+      >
+        <GripHorizontal className="h-3.5 w-3.5" />
+      </div>
+
       <button
         type="button"
         onClick={toggleCollapsed}
@@ -218,12 +299,25 @@ export const TouchSideIsland: React.FC<TouchSideIslandProps> = ({
         <CollapseIcon className="h-3.5 w-3.5" />
       </button>
 
+      {stylusOnlyActive && (
+        <span
+          data-stylus-only-indicator="1"
+          title={t.touchGestures.stylusOnlyActiveHint}
+          className="flex h-5 w-7 items-center justify-center rounded-md bg-indigo-500/25 text-indigo-300 ring-1 ring-indigo-400/50"
+        >
+          <PenTool className="h-3 w-3" />
+        </span>
+      )}
+
       <span className="text-[10px] font-mono tabular-nums text-neutral-300">{size}</span>
       <FloatingVerticalTrack
         label={t.studio.brushSize}
+        side={side}
         position={sizeToPos(size)}
         valueText={`${size} px`}
         fill="linear-gradient(to top, rgba(99,102,241,0.5), rgba(129,140,248,0.95))"
+        previewDiameter={size}
+        previewColor={color}
         onChange={(pos) => onSize(posToSize(pos))}
         onDragChange={onSizeDrag}
       />
@@ -237,7 +331,7 @@ export const TouchSideIsland: React.FC<TouchSideIslandProps> = ({
         className={`flex h-8 w-8 items-center justify-center rounded-xl border transition ${
           currentTool === 'eyedropper'
             ? 'border-indigo-400 bg-indigo-500/30 text-white shadow-inner'
-            : 'border-white/15 bg-neutral-800/80 text-neutral-200 hover:bg-neutral-700/80'
+            : 'border-white/15 bg-white/10 text-neutral-200 hover:bg-white/15'
         }`}
       >
         <Pipette className="h-4 w-4" />
@@ -245,6 +339,7 @@ export const TouchSideIsland: React.FC<TouchSideIslandProps> = ({
 
       <FloatingVerticalTrack
         label={t.studio.opacity}
+        side={side}
         position={opacity}
         valueText={`${Math.round(opacity * 100)}%`}
         fill={`linear-gradient(to top, transparent, ${color})`}
@@ -252,7 +347,7 @@ export const TouchSideIsland: React.FC<TouchSideIslandProps> = ({
       />
       <span className="text-[10px] font-mono tabular-nums text-neutral-400">{Math.round(opacity * 100)}%</span>
 
-      <div className="my-0.5 h-px w-6 bg-white/10" />
+      <div className="my-0.5 h-px w-6 bg-white/15" />
 
       <button
         type="button"
@@ -292,7 +387,8 @@ export interface TouchToolIslandProps {
 
 /**
  * Procraft-inspired floating bottom tool island for phones & non-desktop touch tablets.
- * Keeps the canvas full-bleed while offering 1-tap primary tools, slide-out drawers, and collapse-to-pill.
+ * Keeps the canvas full-bleed while offering 1-tap primary tools, slide-out drawers,
+ * swipe-down/up collapse-to-pill, safe-area inset support, and Lumina Drift glass styling.
  */
 export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
   isTablet,
@@ -307,13 +403,13 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
 }) => {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(() => readBool(DOCK_COLLAPSED_KEY));
-  const toggleCollapsed = () => {
-    setCollapsed((prev) => {
-      const next = !prev;
-      writeBool(DOCK_COLLAPSED_KEY, next);
-      return next;
-    });
+  const swipeStartYRef = useRef<number | null>(null);
+
+  const setCollapsedState = (next: boolean) => {
+    setCollapsed(next);
+    writeBool(DOCK_COLLAPSED_KEY, next);
   };
+  const toggleCollapsed = () => setCollapsedState(!collapsed);
 
   const toolBtnClass = (active: boolean) =>
     `atelier-icon-btn ${isTablet ? 'h-10 w-10' : 'h-9 w-8'} shrink-0 rounded-xl transition ${
@@ -322,16 +418,31 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
         : 'text-neutral-200 hover:bg-white/10'
     }`;
 
+  const dockBottomStyle: React.CSSProperties = {
+    bottom: 'max(0.5rem, env(safe-area-inset-bottom, 0px))',
+  };
+
   if (collapsed) {
     return (
       <div
         data-workspace-entry="mobile-tools"
         data-touch-island="dock-collapsed"
-        className="pointer-events-none absolute inset-x-0 bottom-2 z-30 flex justify-center px-3"
+        className="pointer-events-none absolute inset-x-0 z-30 flex justify-center px-3"
+        style={dockBottomStyle}
       >
         <div
-          className="atelier-popover pointer-events-auto flex items-center gap-1.5 rounded-full border border-neutral-700/80 bg-neutral-900/88 px-2.5 py-1 backdrop-blur-md shadow-2xl"
-          onPointerDown={(e) => e.stopPropagation()}
+          className="atelier-popover pointer-events-auto flex items-center gap-1.5 rounded-full px-2.5 py-1 shadow-2xl"
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            swipeStartYRef.current = e.clientY;
+          }}
+          onPointerUp={(e) => {
+            if (swipeStartYRef.current !== null && swipeStartYRef.current - e.clientY > 28) {
+              setCollapsedState(false);
+            }
+            swipeStartYRef.current = null;
+          }}
+          onPointerCancel={() => { swipeStartYRef.current = null; }}
         >
           <button
             type="button"
@@ -368,13 +479,24 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
     <div
       data-workspace-entry="mobile-tools"
       data-touch-island="dock"
-      className="pointer-events-none absolute inset-x-0 bottom-2 z-30 flex justify-center px-2"
+      className="pointer-events-none absolute inset-x-0 z-30 flex justify-center px-2"
+      style={dockBottomStyle}
     >
       <div
-        className={`atelier-popover no-scrollbar pointer-events-auto flex max-w-full items-center overflow-x-auto rounded-2xl border border-neutral-700/80 bg-neutral-900/86 backdrop-blur-md shadow-2xl ${
+        className={`atelier-popover no-scrollbar pointer-events-auto flex max-w-full items-center overflow-x-auto rounded-2xl shadow-2xl ${
           isTablet ? 'gap-1 px-2 py-1.5' : 'gap-0.5 px-1.5 py-1.5'
         }`}
-        onPointerDown={(e) => e.stopPropagation()}
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          swipeStartYRef.current = e.clientY;
+        }}
+        onPointerUp={(e) => {
+          if (swipeStartYRef.current !== null && e.clientY - swipeStartYRef.current > 36) {
+            setCollapsedState(true);
+          }
+          swipeStartYRef.current = null;
+        }}
+        onPointerCancel={() => { swipeStartYRef.current = null; }}
       >
         {/* All Tools Drawer */}
         <button
@@ -428,7 +550,7 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
           <Pipette className="h-4 w-4" />
         </button>
 
-        <div className="mx-0.5 h-6 w-px shrink-0 bg-white/12" />
+        <div className="mx-0.5 h-6 w-px shrink-0 bg-white/15" />
 
         {/* Slide-out Drawer Panel Triggers */}
         <button
@@ -482,7 +604,7 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
           <Keyboard className={isTablet ? 'h-5 w-5' : 'h-4 w-4'} />
         </button>
 
-        <div className="mx-0.5 h-6 w-px shrink-0 bg-white/12" />
+        <div className="mx-0.5 h-6 w-px shrink-0 bg-white/15" />
 
         <button
           type="button"
