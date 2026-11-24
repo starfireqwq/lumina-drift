@@ -24,8 +24,12 @@ test('zoom keeps the pointer over the same canvas point inside an offset workspa
         for (let step = 0; step < count; step++) {
           viewport.zoomAt(pointer.x, pointer.y, factor);
           const projected = viewport.canvasToScreen(anchor.x, anchor.y);
-          assert.ok(Math.abs(projected.x - (pointer.x - left)) < 1e-7);
-          assert.ok(Math.abs(projected.y - (pointer.y - top)) < 1e-7);
+          const st = viewport.getState();
+          // At unrotated 1:1 physical scale, updateTransform intentionally snaps display position to the physical pixel grid (<= 0.5 / displayScale CSS px)
+          const isOneToOneSnap = Math.abs(st.rotation) < 1e-4 && Math.abs(st.zoom * viewport.getDisplayScale() - 1) < 1e-3;
+          const tol = isOneToOneSnap ? 0.5 / viewport.getDisplayScale() + 1e-7 : 1e-7;
+          assert.ok(Math.abs(projected.x - (pointer.x - left)) < tol);
+          assert.ok(Math.abs(projected.y - (pointer.y - top)) < tol);
         }
         assert.equal(viewport.getState().zoom, limit);
       }
@@ -72,5 +76,48 @@ test('free-transform handles project the same corners as the applied pixels in r
         }
       }
     }
+  }
+});
+
+test('dynamic displayScale updates actual-size zoom, fit cap, magnetic snap, and odd-canvas 1:1 pixel alignment', () => {
+  for (const scale of [1.5, 2]) {
+    const viewport = new CanvasViewport(501, 501);
+    let changeEvents = 0;
+    viewport.setOnChange(() => { changeEvents++; });
+
+    viewport.setDisplayScale(scale);
+    assert.equal(viewport.getDisplayScale(), scale);
+    assert.ok(Math.abs(viewport.getActualSizeZoom() - 1 / scale) < 1e-12);
+
+    const afterFirstSet = changeEvents;
+    viewport.setDisplayScale(scale);
+    assert.equal(changeEvents, afterFirstSet, 'setDisplayScale with identical value should be a no-op');
+
+    // Fit cap: small canvas in large viewport is capped at 1.5 / displayScale
+    viewport.centerInView(2400, 1800, true);
+    assert.ok(Math.abs(viewport.getState().zoom - 1.5 / scale) < 1e-9);
+    assert.equal(viewport.isFitTo(2400, 1800), true);
+
+    // Odd-dimension canvas at 1:1 physical scale aligns canvas origin to exact integer physical pixels
+    viewport.centerInView(800, 600, false);
+    assert.ok(Math.abs(viewport.getState().zoom - 1 / scale) < 1e-12);
+    viewport.panBy(0.3, 0.7);
+    const origin = viewport.canvasToScreen(0, 0);
+    assert.ok(
+      Math.abs(origin.x * scale - Math.round(origin.x * scale)) < 1e-6,
+      `expected integer physical x at displayScale=${scale}, got ${origin.x * scale}`
+    );
+    assert.ok(
+      Math.abs(origin.y * scale - Math.round(origin.y * scale)) < 1e-6,
+      `expected integer physical y at displayScale=${scale}, got ${origin.y * scale}`
+    );
+
+    // Magnetic snap to 1 / displayScale when zooming into ±3.5% neighborhood
+    viewport.setZoom((1 / scale) * 1.05);
+    viewport.zoomAt(400, 300, 1 / 1.03);
+    assert.ok(
+      Math.abs(viewport.getState().zoom - 1 / scale) < 1e-12,
+      `expected zoomAt to snap to ${1 / scale} at displayScale=${scale}, got ${viewport.getState().zoom}`
+    );
   }
 });

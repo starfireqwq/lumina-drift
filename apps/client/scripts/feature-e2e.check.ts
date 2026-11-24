@@ -354,6 +354,57 @@ function contrastRgb(fg: [number, number, number], bg: [number, number, number])
   return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
 }
 
+async function checkGatewayDragAndSurface(page: import('playwright-core').Page) {
+  const dragBar = page.locator('.atelier-gateway .atelier-drag-region').first();
+  await dragBar.waitFor({ state: 'visible', timeout: 5000 });
+  const dragBox = await dragBar.boundingBox();
+  assert.ok(dragBox, 'ConnectionGateway .atelier-drag-region bounding box missing');
+  assert.ok(dragBox.y >= 0 && dragBox.y <= 1, `Expected gateway drag bar at top edge, got y=${dragBox.y}`);
+  assert.ok(dragBox.height >= 28 && dragBox.height <= 30, `Expected 28px gateway drag bar, got ${dragBox.height}`);
+  assert.ok(dragBox.width >= 900, `Expected full-width gateway drag bar, got ${dragBox.width}`);
+
+  const dragPadding = await dragBar.evaluate((el) => {
+    const cs = getComputedStyle(el);
+    return {
+      paddingLeft: parseFloat(cs.paddingLeft),
+      paddingRight: parseFloat(cs.paddingRight),
+      appRegion: cs.getPropertyValue('-webkit-app-region'),
+    };
+  });
+  assert.equal(dragPadding.appRegion, 'drag', 'Gateway top bar must have -webkit-app-region: drag');
+  if (process.platform === 'darwin') {
+    assert.ok(dragPadding.paddingLeft >= 76, `Expected macOS traffic light inset >= 76px, got ${dragPadding.paddingLeft}`);
+  } else {
+    assert.ok(dragPadding.paddingRight >= 142, `Expected Windows titleBarOverlay clearance >= 142px, got ${dragPadding.paddingRight}`);
+  }
+
+  const scrollBox = await page.locator('.atelier-gateway form').evaluate((formEl) => {
+    const scroller = formEl.parentElement;
+    if (!scroller) return null;
+    const rect = scroller.getBoundingClientRect();
+    return { y: rect.y, overflowY: getComputedStyle(scroller).overflowY };
+  });
+  assert.ok(scrollBox, 'Gateway scroll container missing');
+  assert.ok(scrollBox.y >= dragBox.y + dragBox.height - 0.5,
+    `Gateway form scroll area (y=${scrollBox.y}) must start below 28px drag bar (${dragBox.y + dragBox.height})`);
+
+  const splash = page.locator('.atelier-startup-splash').first();
+  if (await splash.isVisible().catch(() => false)) {
+    const splashBox = await splash.boundingBox();
+    const pointerEvents = await splash.evaluate((el) => getComputedStyle(el).pointerEvents);
+    assert.equal(pointerEvents, 'none', 'Startup splash must keep pointer-events: none');
+    if (splashBox) {
+      assert.ok(splashBox.y >= dragBox.y + dragBox.height,
+        `Startup splash (y=${splashBox.y}) must sit below gateway drag bar`);
+    }
+  }
+
+  const startBtnRegion = await page.locator('button:has-text("開始單機作畫")').first().evaluate(
+    (el) => getComputedStyle(el).getPropertyValue('-webkit-app-region'),
+  );
+  assert.notEqual(startBtnRegion, 'drag', 'Gateway buttons must remain clickable (not drag region)');
+}
+
 async function main() {
   console.log(`=== Running Feature E2E Suite (${usePackaged ? 'PACKAGED .EXE' : 'DEV ELECTRON'}) ===`);
   const { app, page, pageErrors, cleanup } = await launchIsolatedApp(usePackaged);
@@ -361,6 +412,7 @@ async function main() {
   try {
     assert.equal(await page.evaluate(() => (window as any).atelierDesktop.server.stopTunnel()), true,
       'The local desktop renderer may control its own tunnel');
+    await checkGatewayDragAndSurface(page);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     const normalEntrance = await observeWorkspaceEntrance(page);
     await enterOfflineWorkspace(page);
@@ -431,13 +483,42 @@ async function main() {
     await checkCollaborativeWorkspace(page, app);
     await page.locator('.atelier-drag-region').getByRole('button', { name: /Lumina Drift/ }).click();
     await page.getByRole('button', { name: /單人離線作畫/ }).click();
+
+    // C1: Default motion mode ('on') keeps animations alive even when OS reducedMotion is 'reduce'.
     await page.emulateMedia({ reducedMotion: 'reduce' });
+    assert.equal(await page.locator('html').getAttribute('data-motion'), 'on');
+    assert.equal(await page.locator('html').getAttribute('data-motion-mode'), 'on');
+    const forcedEntrance = await observeWorkspaceEntrance(page);
+    await enterOfflineWorkspace(page);
+    const forcedEntryParts = JSON.parse(await forcedEntrance.getAttribute('data-test-entrance') ?? '[]') as unknown[];
+    assert.ok(forcedEntryParts.length > 0, 'Default motionMode="on" must still run entrance animation under OS reduced-motion');
+    assert.equal(await page.locator('.atelier-canvas-surface').evaluate((element) => getComputedStyle(element).animationName), 'atelierCanvasReveal');
+
+    // Switch motion mode to 'auto' in Settings -> now OS reducedMotion='reduce' turns animations off.
+    await page.getByTitle('偏好設定', { exact: true }).click();
+    const settingsDialog = page.locator('[data-overlay-motion="dialog"]');
+    await settingsDialog.waitFor({ state: 'visible' });
+    await settingsDialog.locator('[data-setting="motion-mode"][data-motion-mode="auto"]').click();
+    assert.equal(await page.locator('html').getAttribute('data-motion'), 'off');
+    assert.equal(await page.locator('html').getAttribute('data-motion-mode'), 'auto');
+    await settingsDialog.getByRole('button', { name: '關閉', exact: true }).first().click();
+    await settingsDialog.waitFor({ state: 'detached' });
+
+    await page.locator('.atelier-drag-region').getByRole('button', { name: /Lumina Drift/ }).click();
+    await page.getByRole('button', { name: /單人離線作畫/ }).click();
     const reducedEntrance = await observeWorkspaceEntrance(page);
     await enterOfflineWorkspace(page);
     assert.equal(await reducedEntrance.getAttribute('data-test-entrance'), '[]');
     assert.equal(await page.locator('.atelier-canvas-surface').evaluate((element) => getComputedStyle(element).animationName), 'none');
+
+    // Restore OS media & set app motion mode back to 'on' for remaining checks.
     await page.emulateMedia({ reducedMotion: 'no-preference' });
-    console.log('✓ [1/7] Canvas fade and reduced motion, docking, theme input guard, chat read receipts, gateway and tunnel verified');
+    await page.getByTitle('偏好設定', { exact: true }).click();
+    await settingsDialog.waitFor({ state: 'visible' });
+    await settingsDialog.locator('[data-setting="motion-mode"][data-motion-mode="on"]').click();
+    await settingsDialog.getByRole('button', { name: '關閉', exact: true }).first().click();
+    await settingsDialog.waitFor({ state: 'detached' });
+    console.log('✓ [1/7] Canvas fade, motionMode(on/auto) vs OS reduced motion, docking, theme input guard, chat read receipts, gateway and tunnel verified');
 
     // 2. Electron custom titlebar, CSP info format, Physical Units (cm / in) + DPI
     const hasDragTitlebar = await page.locator('.atelier-drag-region').first().isVisible();
@@ -497,12 +578,13 @@ async function main() {
     assert.ok(titleAfterResize.includes('in') && titleAfterResize.includes('150dpi'), `Expected resized unit & dpi in title: ${titleAfterResize}`);
     console.log(`✓ [2/7] Electron titlebar & physical unit/DPI pipeline verified (${titleAfterResize})`);
 
-    // 3. Light/Sakura theme text contrast + Dock panel resize without canvas blink
+    // 3. Light/Sakura theme text contrast + 5 Surface Styles + Dock panel resize without canvas blink
     const darkDragBg = await page.locator('.atelier-drag-region').first().evaluate((el) => getComputedStyle(el).backgroundColor);
     await page.locator('button[title="主題配色選擇"]').click();
     const sakuraOption = page.locator('button:has-text("粉櫻"), button:has-text("櫻")').first();
     await sakuraOption.waitFor({ state: 'visible', timeout: 5000 });
     await sakuraOption.click();
+    await page.locator('html.atelier-theme-vt').waitFor({ state: 'detached', timeout: 5000 });
     await page.waitForTimeout(150);
 
     const lightDragBg = await page.locator('.atelier-drag-region').first().evaluate((el) => getComputedStyle(el).backgroundColor);
@@ -527,11 +609,39 @@ async function main() {
     const prefContrast = contrastRgb(effFg, effBg);
     assert.ok(prefContrast >= 4.5, `Expected readable Preferences text contrast >= 4.5 under Sakura theme (fg=${effFg.join(',')} bg=${effBg.join(',')}), got ${prefContrast.toFixed(2)}`);
 
+    // C2: Switch through all 5 surface styles and verify persistence + zero canvas backdropFilter/boxShadow
+    for (const surfaceId of ['liquid-glass', 'frosted-matte', 'lumina-glow', 'soft-paper', 'solid'] as const) {
+      const surfaceBtn = page.locator(`[data-surface-option="${surfaceId}"]`).first();
+      await surfaceBtn.waitFor({ state: 'visible', timeout: 5000 });
+      await surfaceBtn.click();
+      await page.locator('html.atelier-theme-vt').waitFor({ state: 'detached', timeout: 5000 });
+      await page.waitForTimeout(50);
+      assert.equal(await page.locator('html').getAttribute('data-surface'), surfaceId);
+      assert.equal(await page.evaluate(() => localStorage.getItem('atelier_surface_style')), surfaceId);
+      const canvasFx = await page.evaluate(() => {
+        const vp = document.querySelector('.atelier-canvas-viewport');
+        const surf = document.querySelector('.atelier-canvas-surface');
+        return {
+          vpBackdrop: vp ? getComputedStyle(vp).backdropFilter : 'none',
+          vpShadow: vp ? getComputedStyle(vp).boxShadow : 'none',
+          surfBackdrop: surf ? getComputedStyle(surf).backdropFilter : 'none',
+          surfShadow: surf ? getComputedStyle(surf).boxShadow : 'none',
+        };
+      });
+      assert.equal(canvasFx.vpBackdrop, 'none', `Canvas viewport must not have backdrop-filter under ${surfaceId}`);
+      assert.equal(canvasFx.vpShadow, 'none', `Canvas viewport must not have box-shadow under ${surfaceId}`);
+      assert.equal(canvasFx.surfBackdrop, 'none', `Canvas surface must not have backdrop-filter under ${surfaceId}`);
+      assert.equal(canvasFx.surfShadow, 'none', `Canvas surface must not have box-shadow under ${surfaceId}`);
+    }
+
     // Switch back to Midnight for remaining checks (ThemePicker leaves DropdownMenu open, so toggle cleanly)
     await page.keyboard.press('Escape');
     await page.locator('button[title="主題配色選擇"]').click();
-    const midnightOption = page.locator('button:has-text("極夜")').first();
-    if (await midnightOption.isVisible().catch(() => false)) await midnightOption.click();
+    const midnightOption = page.locator('button:has-text("午夜藍"), button:has-text("極夜")').first();
+    if (await midnightOption.isVisible().catch(() => false)) {
+      await midnightOption.click();
+      await page.locator('html.atelier-theme-vt').waitFor({ state: 'detached', timeout: 5000 });
+    }
     await page.keyboard.press('Escape');
 
     const resizeHandle = page.locator('[aria-label="調整面板寬度"]').first();

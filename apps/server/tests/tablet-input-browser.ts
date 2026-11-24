@@ -167,6 +167,7 @@ async function main() {
 
   try {
     const page = await open(false);
+    await page.getByRole('button', { name: /Online Collaborative Room/ }).click();
     await page.getByRole('radio', { name: /Tablet studio/ }).click();
     await page.getByRole('button', { name: 'Join "Tablet studio"' }).click();
     await page.getByRole('button', { name: 'Sign In / Register', exact: true }).click();

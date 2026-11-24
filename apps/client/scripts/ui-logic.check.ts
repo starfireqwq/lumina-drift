@@ -1257,7 +1257,7 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
     const worker = new StrokeWorkerEngine();
     const cfg: WorkerBrushConfig = {
       ...gpen.properties,
-      pressureCurve: 's-curve',
+      pressureCurve: gpen.properties.pressureCurve as WorkerBrushConfig['pressureCurve'],
     };
     const lightDab = worker.initStroke(cfg, { x: 10, y: 10, pressure: 0.15 });
     const heavyDab = worker.initStroke(cfg, { x: 10, y: 10, pressure: 0.95 });

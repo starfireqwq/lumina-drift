@@ -292,21 +292,25 @@ async function launchIsolatedElectron(packaged: boolean) {
   const packagedExe = path.resolve('apps/client/release/win-unpacked/Lumina-Drift-Paint.exe');
   const mainJs = path.resolve('apps/client/dist-electron/main.js');
 
+  const appData = path.join(userDataDir, 'roaming');
+  const localAppData = path.join(userDataDir, 'local');
+  const profile = path.join(userDataDir, 'profile');
+  for (const dir of [appData, localAppData, profile]) fs.mkdirSync(dir);
   const commonEnv = {
     ...process.env,
-    APPDATA: userDataDir,
-    LOCALAPPDATA: userDataDir,
+    APPDATA: appData,
+    LOCALAPPDATA: localAppData,
   };
 
   const app = packaged
     ? await electron.launch({
         executablePath: packagedExe,
-        args: [`--user-data-dir=${userDataDir}`],
+        args: [`--user-data-dir=${profile}`],
         env: commonEnv,
       })
     : await electron.launch({
         executablePath: electronExe,
-        args: [mainJs, `--user-data-dir=${userDataDir}`],
+        args: [mainJs, `--user-data-dir=${profile}`],
         env: commonEnv,
       });
 

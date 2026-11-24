@@ -21,6 +21,7 @@
  *
  * Usage:
  *   pnpm --filter @atelier/server exec tsx tests/align-l3-e2e.ts
+ *   Add --workspace-only for the offline workspace checks against a built client.
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -216,7 +217,193 @@ async function openRoomPage(
   return { ctx, page, pageErrors };
 }
 
+async function checkSoloWorkspace(browser: Browser) {
+  const dist = path.resolve(REPO_ROOT, 'apps/client/dist');
+  assert.ok(fs.existsSync(path.join(dist, 'index.html')), 'Build the web client before testing the workspace');
+  const workspaceSizes = [
+    { width: 1440, height: 900, phone: false },
+    { width: 1024, height: 700, phone: false },
+    { width: 768, height: 1024, phone: false },
+    { width: 390, height: 844, phone: true },
+    { width: 844, height: 390, phone: true },
+    { width: 568, height: 320, phone: true },
+  ];
+  for (const language of ['zh-TW', 'zh-CN', 'en-US', 'ja-JP']) {
+    for (const { width, height, phone } of workspaceSizes) {
+      const rotateWithSheetOpen = width === 568;
+      const viewport = rotateWithSheetOpen ? { width: height, height: width } : { width, height };
+      const context = await browser.newContext({ viewport, screen: viewport, hasTouch: phone, isMobile: phone, serviceWorkers: 'block' });
+      const page = await context.newPage();
+      page.setDefaultTimeout(9000);
+      try {
+        await context.addInitScript((locale) => {
+          localStorage.setItem('atelier_language', locale);
+          localStorage.setItem('atelier_gateway_resolved', '1');
+          localStorage.setItem('atelier_session_mode', 'offline');
+        }, language);
+        // This virtual secure origin serves the built files without an HTTP listener.
+        await context.route('http://localhost/**', async (route) => {
+          const pathname = new URL(route.request().url()).pathname;
+          const file = path.resolve(dist, pathname === '/' ? 'index.html' : '.' + pathname);
+          if (!file.startsWith(dist + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
+            await route.fulfill({ status: 404 });
+            return;
+          }
+          await route.fulfill({ path: file });
+        });
+        await page.goto('http://localhost');
+        await page.locator('[data-canvas-presented="true"]').waitFor({ timeout: 12000 });
+        const details = page.locator('[data-workspace-entry="options"] button[aria-haspopup="dialog"]').first();
+        assert.equal(await details.isVisible(), phone, `${language} ${width}×${height}: expandable phone options`);
+        if (phone) {
+          assert.equal(await page.locator('[data-workspace-entry="left-tools"], [data-workspace-entry="right-tools"]').count(), 0);
+          await details.click();
+          const sheet = page.locator('[data-mobile-panel="toolProps"]');
+          await sheet.waitFor({ timeout: 5000 });
+          if (rotateWithSheetOpen) {
+            await page.setViewportSize({ width, height });
+            await sheet.waitFor();
+            assert.equal(await details.isVisible(), true, 'Rotation keeps the phone workspace active');
+          }
+          const sliders = sheet.locator('[data-mobile-brush-sliders] input[type="range"]');
+          assert.equal(await sliders.count(), 2);
+          const [size, opacity] = await Promise.all([sliders.nth(0).boundingBox(), sliders.nth(1).boundingBox()]);
+          assert.ok(size && opacity, 'Both slider inputs must be visible');
+          for (const slider of [size, opacity]) {
+            assert.ok(slider.width > 80 && slider.x >= 0 && slider.x + slider.width <= width + 1);
+            assert.ok(slider.y >= 0 && slider.y + slider.height <= height + 1);
+          }
+          if (width > height) assert.ok(Math.abs(size.y - opacity.y) < 24 && size.x + size.width <= opacity.x);
+          else assert.ok(size.y + size.height <= opacity.y);
+          for (const [i, box] of [size, opacity].entries()) {
+            const slider = sliders.nth(i);
+            const before = await slider.inputValue();
+            const atMax = before === await slider.getAttribute('max');
+            await slider.press(atMax ? 'ArrowLeft' : 'ArrowRight');
+            const keyboardValue = await slider.inputValue();
+            assert.notEqual(keyboardValue, before, 'The brush slider accepts keyboard input');
+            await slider.tap({ position: { x: box.width / 4, y: box.height / 2 } });
+            assert.notEqual(await slider.inputValue(), keyboardValue, 'The brush slider accepts touch input');
+          }
+          await sheet.locator('button').first().click();
+          await sheet.waitFor({ state: 'hidden', timeout: 5000 });
+          const openPicker = page.locator('[data-workspace-entry="mobile-tools"] button[aria-haspopup="dialog"]');
+          await openPicker.click();
+          const picker = page.locator('[data-mobile-panel="toolPicker"]');
+          await picker.locator('[data-tool-id="eraser"]').click();
+          await picker.waitFor({ state: 'hidden', timeout: 5000 });
+          await openPicker.click();
+          assert.equal(await picker.locator('[data-tool-id="eraser"]').getAttribute('aria-pressed'), 'true');
+          await picker.locator('[data-tool-id="brush"]').click();
+          await picker.waitFor({ state: 'hidden', timeout: 5000 });
+          const canvasRect = await page.locator('.atelier-canvas-viewport canvas').first().boundingBox();
+          assert.ok(canvasRect);
+          await page.touchscreen.tap(canvasRect.x + canvasRect.width / 2, canvasRect.y + canvasRect.height / 2);
+          await page.waitForFunction(() => {
+            const dbg = (window as any).__debugPixi;
+            return dbg.layerManager.getLayers().some((layer: { model: { id: string } }) =>
+              dbg.undo.peekLatestForLayer(layer.model.id)?.afterTiles?.length > 0);
+          }, undefined, { timeout: 5000 });
+          await page.keyboard.press('Control+KeyZ');
+        }
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1), false);
+        if (language === 'zh-TW' && width === 1440) {
+          await openAlignWindow(page);
+          const align = page.locator('[data-tool-window="layer-align"]');
+          await align.locator('[data-testid="align-basis-select"]').selectOption('canvas');
+          await align.getByRole('button', { name: '停靠左側' }).click();
+          const leftAlign = page.locator('[data-dock-side="left"] [data-panel="align"]');
+          await leftAlign.waitFor();
+          assert.equal(await leftAlign.locator('[data-testid="align-basis-select"]').inputValue(), 'canvas');
+          await leftAlign.getByRole('button', { name: '面板位置' }).click();
+          await page.getByRole('menuitemradio', { name: '浮動視窗' }).click();
+          await align.getByRole('button', { name: '停靠右側' }).waitFor();
+          await align.getByRole('button', { name: '關閉', exact: true }).click();
+          await align.waitFor({ state: 'hidden' });
+          await page.locator('button[title="新建畫布"]').first().click();
+          await page.locator('#new-canvas-w').fill('4000');
+          await page.locator('#new-canvas-h').fill('4000');
+          await page.getByRole('button', { name: '建立畫布', exact: true }).click();
+          await page.waitForFunction(() => (window as any).__debugPixi?.viewport.canvasWidth === 4000 &&
+            document.querySelector('[data-canvas-presented="true"]'), undefined, { timeout: 8000 }).catch(async (error) => {
+            const width = await page.evaluate(() => (window as any).__debugPixi?.viewport.canvasWidth);
+            const dialogs = await page.locator('[role="dialog"],[role="status"]').allTextContents();
+            throw new Error(`Creation landed at width ${width}. Dialogs: ${dialogs.join(' | ')}`, { cause: error });
+          });
+          await page.locator('button[aria-label="新增點陣圖層"]').first().click();
+          await page.getByRole('button', { name: '圖層濾鏡', exact: true }).first().click();
+          const filter = page.locator('[data-tool-window="layer-filter"]');
+          await filter.getByRole('button', { name: '停靠右側' }).click({ timeout: 6000 }).catch(async (error) => {
+            throw new Error(`Filter failed to open: ${(await page.locator('[role="dialog"],[role="status"]').allTextContents()).join(' | ')}`, { cause: error });
+          });
+          const rightFilter = page.locator('[data-dock-side="right"] [data-panel="filters"]');
+          await rightFilter.locator('[data-tool-window="layer-filter"]').waitFor();
+          await rightFilter.locator('button').filter({ has: page.locator('svg.lucide-x') }).first().click();
+          console.log('✓ Align and filter dock, and align options survive a round trip into the dock');
+
+          await page.evaluate(() => (window as any).__debugPixi.viewport.setZoom(1.25));
+          await page.waitForFunction(() => (window as any).__debugPixi?.layerManager.pixelated);
+          await page.locator('[data-tool-id="bucket"]').first().click();
+          await page.getByRole('radio', { name: '套索填色', exact: true }).first().click();
+          for (const [offset, aa, partialExpected] of [[-76, '中', true], [76, '無', false]] as const) {
+            await page.getByRole('radio', { name: `消除鋸齒: ${aa}`, exact: true }).first().click();
+            const box = await page.locator('.atelier-canvas-viewport canvas').first().boundingBox();
+            assert.ok(box);
+            const x = box.x + box.width / 2 + offset;
+            const y = box.y + box.height / 2;
+            await page.mouse.move(x - 50, y - 35);
+            await page.mouse.down();
+            await page.mouse.move(x + 43, y - 17, { steps: 6 });
+            await page.mouse.move(x + 12, y + 43, { steps: 6 });
+            await page.mouse.move(x - 50, y - 35, { steps: 6 });
+            await page.mouse.up();
+            const region = { x: x - 55, y: y - 40, width: 105, height: 88 };
+            await page.waitForFunction(async (area) => {
+              const { viewport, layerManager } = (window as any).__debugPixi;
+              const start = viewport.screenToCanvas(area.x, area.y);
+              const end = viewport.screenToCanvas(area.x + area.width, area.y + area.height);
+              const layer = layerManager.getLayers().filter((l: { model: { layerType: string } }) => l.model.layerType === 'raster').at(-1)?.model;
+              if (!layer) return false;
+              const [pixels] = await layerManager.readAsync(layer.id, [{
+                x: Math.floor(start.x), y: Math.floor(start.y),
+                w: Math.ceil(end.x - start.x), h: Math.ceil(end.y - start.y),
+              }]);
+              return pixels.some((v: number, i: number) => i % 4 === 3 && v === 255);
+            }, region, { timeout: 6000 });
+            const partial = await page.evaluate(async (area) => {
+              const { viewport, layerManager } = (window as any).__debugPixi;
+              const start = viewport.screenToCanvas(area.x, area.y);
+              const end = viewport.screenToCanvas(area.x + area.width, area.y + area.height);
+              const layer = layerManager.getLayers().filter((l: { model: { layerType: string } }) => l.model.layerType === 'raster').at(-1).model;
+              const [pixels] = await layerManager.readAsync(layer.id, [{
+                x: Math.floor(start.x), y: Math.floor(start.y),
+                w: Math.ceil(end.x - start.x), h: Math.ceil(end.y - start.y),
+              }]);
+              return pixels.some((v: number, i: number) => i % 4 === 3 && v > 0 && v < 255);
+            }, region);
+            assert.equal(partial, partialExpected, `Lasso fill edge coverage with AA ${aa}`);
+          }
+          console.log('✓ 4000×4000: physical-pixel magnification and antialiased vs hard-edged lasso fill verified');
+        }
+      } finally {
+        await context.close();
+      }
+    }
+  }
+  console.log('✓ Workspace: 24 localized viewport combinations and touch drawing in each phone locale');
+}
+
 async function main() {
+  if (process.argv.includes('--workspace-only')) {
+    const browser = await chromium.launch({ executablePath: detectChromeExecutable(), headless: true });
+    try {
+      await checkSoloWorkspace(browser);
+    } finally {
+      await browser.close();
+    }
+    return;
+  }
+
   const lanIp = detectLanIpv4();
   const chromeExe = detectChromeExecutable();
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'atelier-align-l3-e2e-'));
@@ -409,6 +596,8 @@ async function main() {
       }
     }
     console.log('✓ Part 1: Web 5 viewports x 4 locales (20 combinations) passed with zero clipping/overflow');
+
+    await checkSoloWorkspace(browser);
 
     // =========================================================================
     // PART 2: Phone standalone offline mode (390x844) full Align L3 functional tests
@@ -771,6 +960,40 @@ async function main() {
       const editorBoundsUnmoved = await readLayerContentBounds(editorSession.page, editorOwnLayerId, 512, 512);
       assert.equal(editorBoundsUnmoved?.x, 180, 'Editor own layer must not partially move when batch is rejected');
       assert.equal(editorBoundsUnmoved?.y, 180, 'Editor own layer Y unchanged on batch rejection');
+
+      const fillLayer = (await api(proxyBaseUrl, ownerAuth.token, 'POST', `/api/canvases/${canvasId}/layers`, {
+        name: 'Bucket LAN Regression', layerType: 'raster', aclMode: 'shared_all',
+      })).layer;
+      const ownerPage = ownerSession.page;
+      const editorPage = editorSession.page;
+      const waitAlpha = (page: Page, alpha: number) => page.waitForFunction(async ({ layerId, alpha }) => {
+        const lm = (window as any).__debugPixi?.layerManager;
+        if (!lm?.getLayerItem(layerId)) return false;
+        const [pixel] = await lm.readAsync(layerId, [{ x: 30, y: 30, w: 1, h: 1 }]);
+        return pixel[3] === alpha;
+      }, { layerId: fillLayer.id, alpha }, { timeout: 12000 });
+      // Reload both sessions to verify the exact same blank layer supplied by the isolated server.
+      await Promise.all([ownerPage.reload(), editorPage.reload()]);
+      await ownerPage.getByText(fillLayer.name, { exact: true }).first().click();
+      await ownerPage.locator('[data-tool-id="bucket"]').first().click();
+      await ownerPage.getByRole('radio', { name: '目前圖層', exact: true }).first().click();
+      const center = await ownerPage.evaluate(() => {
+        const rect = document.querySelector('.atelier-canvas-viewport')!.getBoundingClientRect();
+        return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+      });
+      const confirm = ownerPage.getByRole('dialog', { name: '填滿整張畫布？' });
+      await ownerPage.mouse.click(center.x, center.y);
+      await confirm.waitFor();
+      await confirm.getByRole('button', { name: '取消', exact: true }).click();
+      await confirm.waitFor({ state: 'hidden' });
+      await waitAlpha(editorPage, 0);
+      await ownerPage.mouse.click(center.x, center.y);
+      await confirm.getByRole('button', { name: '填色', exact: true }).click();
+      await Promise.all([waitAlpha(ownerPage, 255), waitAlpha(editorPage, 255)]);
+      await confirm.waitFor({ state: 'hidden' });
+      await ownerPage.keyboard.press('Control+KeyZ');
+      await Promise.all([waitAlpha(ownerPage, 0), waitAlpha(editorPage, 0)]);
+      console.log('✓ LAN bucket: cancel preserves pixels; confirmed fill and one undo reach both clients');
 
       assert.deepEqual(ownerSession.pageErrors, [], `Owner page errors: ${ownerSession.pageErrors.join('; ')}`);
       assert.deepEqual(editorSession.pageErrors, [], `Editor page errors: ${editorSession.pageErrors.join('; ')}`);
