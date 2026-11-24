@@ -64,6 +64,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
   const { user, isGuest, setGuestDisplayName } = useAuth();
   const desktop = typeof window !== 'undefined' ? (window as any).atelierDesktop : null;
   const isDesktop = Boolean(desktop?.isElectron);
+  const isMac = desktop?.platform === 'darwin';
   const isAndroid = Boolean((window as any).atelierMobile?.isAndroid);
   // Local app or a page opened on this machine; a shared link opened elsewhere stays collaborative.
   const supportsOfflineMode = OfflineSessionStore.canUseOfflineMode();
@@ -510,7 +511,6 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
   const startSoloOffline = (canvasId?: string) => {
     if (!canvasId && !validSize) return;
     persistRemember();
-    OfflineSessionStore.setSessionMode('offline');
     // With a primary account the solo artist is that account; the nickname field is hidden then.
     if (!primary && nickname.trim() && nickname.trim() !== user?.displayName) setGuestDisplayName(nickname.trim());
     onResolve('offline', nickname.trim() || undefined, canvasId ? { canvasId, offline: true } : {
@@ -666,7 +666,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
 
   return (
     <div
-      className={`fixed inset-0 z-50 overflow-y-auto bg-neutral-950 text-neutral-200${focusOnOpen ? ' atelier-gateway-enter' : ''}`}
+      className={`atelier-gateway fixed inset-0 z-50 flex flex-col overflow-hidden bg-neutral-950 text-neutral-200${focusOnOpen ? ' atelier-gateway-enter' : ''}`}
       style={{
         paddingTop: 'env(safe-area-inset-top, 0px)',
         paddingBottom: 'env(safe-area-inset-bottom, 0px)',
@@ -674,10 +674,25 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
         paddingRight: 'env(safe-area-inset-right, 0px)',
       }}
     >
+      {isDesktop && (
+        <div
+          className="atelier-drag-region flex h-7 min-h-[28px] shrink-0 items-center justify-between border-b border-neutral-800/90 bg-neutral-950 px-2.5 text-[11px] text-neutral-300 select-none"
+          style={isMac ? { paddingLeft: '76px', minHeight: '28px' } : { paddingRight: '142px', minHeight: '28px' }}
+        >
+          <div className="flex min-w-0 items-center gap-1.5">
+            <img src={`${(import.meta as any).env?.BASE_URL || './'}logo.svg`} alt="" aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate font-semibold text-neutral-100">Lumina Drift</span>
+            {t.brand && t.brand !== 'Lumina Drift' && (
+              <span className="truncate text-neutral-400">{t.brand}</span>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Non-blocking startup intro animation banner showing creator 星火セイカ */}
-      <div aria-hidden="true" className="atelier-startup-splash pointer-events-none fixed inset-x-0 top-4 z-[60] flex justify-center px-4">
+      <div aria-hidden="true" className={`atelier-startup-splash pointer-events-none fixed inset-x-0 ${isDesktop ? 'top-10' : 'top-4'} z-[60] flex justify-center px-4`}>
         <div className="flex items-center gap-2.5 rounded-full border border-cyan-400/50 bg-neutral-900/95 px-4 py-2 text-xs font-bold text-white shadow-xl shadow-cyan-500/20 backdrop-blur-md">
-          <span className="inline-block h-2 w-2 animate-ping rounded-full bg-cyan-400 motion-reduce:animate-none" />
+          <span className="atelier-motion-animate inline-block h-2 w-2 animate-ping rounded-full bg-cyan-400" />
           <span className="bg-gradient-to-r from-cyan-300 via-indigo-200 to-fuchsia-300 bg-clip-text text-transparent">
             Lumina Drift
           </span>
@@ -686,6 +701,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
         </div>
       </div>
 
+      <div className="min-h-0 flex-1 overflow-y-auto">
       <form onSubmit={submit} className="mx-auto flex min-h-full w-full max-w-2xl flex-col gap-4 px-4 py-6 sm:py-10">
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
@@ -711,7 +727,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
             data-resume-card={lastVisit.canvasId}
             data-state={resume.status}
             aria-label={t.gateway.resumeHeading}
-            className={`atelier-resume-card flex items-center gap-1 rounded-2xl border p-1.5 transition-colors${resumeLeaving ? ' is-leaving' : ''} ${
+            className={`atelier-resume-card atelier-gateway-card flex items-center gap-1 rounded-2xl border p-1.5 transition-colors${resumeLeaving ? ' is-leaving' : ''} ${
               resume.status === 'ready'
                 ? 'border-cyan-400/50 bg-gradient-to-r from-cyan-500/10 via-indigo-500/10 to-fuchsia-500/10'
                 : 'border-neutral-800 bg-neutral-900/60'
@@ -758,7 +774,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                 </span>
               )}
               {resume.status === 'checking' && (
-                <RefreshCw aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin text-neutral-500 motion-reduce:animate-none" />
+                <RefreshCw aria-hidden="true" className="atelier-motion-animate h-4 w-4 shrink-0 animate-spin text-neutral-500" />
               )}
             </button>
             {resumeDimmed && (
@@ -785,7 +801,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
             type="button"
             onClick={() => setGatewayMode('offline')}
             aria-pressed={gatewayMode === 'offline'}
-            className={`flex items-start gap-3 rounded-2xl border p-3 text-left transition ${
+            className={`atelier-gateway-card flex items-start gap-3 rounded-2xl border p-3 text-left transition ${
               gatewayMode === 'offline'
                 ? 'border-cyan-400 bg-cyan-500/15 text-white shadow-lg shadow-cyan-500/10'
                 : 'border-neutral-800 bg-neutral-900/60 text-neutral-300 hover:border-neutral-600'
@@ -804,7 +820,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
             type="button"
             onClick={switchToOnlineMode}
             aria-pressed={gatewayMode === 'online'}
-            className={`flex items-start gap-3 rounded-2xl border p-3 text-left transition ${
+            className={`atelier-gateway-card flex items-start gap-3 rounded-2xl border p-3 text-left transition ${
               gatewayMode === 'online'
                 ? 'border-indigo-400 bg-indigo-600/20 text-white shadow-lg shadow-indigo-500/10'
                 : 'border-neutral-800 bg-neutral-900/60 text-neutral-300 hover:border-neutral-600'
@@ -835,7 +851,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
         </button>
 
         {/* Who you are */}
-        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3">
+        <section className="atelier-gateway-card rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3">
           {gatewayMode === 'offline' && primary ? (
             <div className="flex items-center justify-between gap-2">
               <span className="flex min-w-0 items-center gap-2 text-xs text-neutral-300" title={t.auth.primaryTooltip}>
@@ -898,7 +914,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
         </section>
 
         {gatewayMode === 'offline' ? (
-          <section className="space-y-3 rounded-2xl border border-cyan-500/30 bg-neutral-900/70 p-4">
+          <section className="atelier-gateway-card space-y-3 rounded-2xl border border-cyan-500/30 bg-neutral-900/70 p-4">
             {/* The gallery first: earlier canvases are one tap away, a new one is set up below */}
             {recentCanvases.length > 0 && (
               <div className="space-y-2 border-b border-neutral-700 pb-3">
@@ -948,7 +964,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
         ) : (
           <>
             {/* Quick Remote Link / Server Connection Bar */}
-            <section className="space-y-2 rounded-2xl border border-indigo-500/30 bg-neutral-900/70 p-3">
+            <section className="atelier-gateway-card space-y-2 rounded-2xl border border-indigo-500/30 bg-neutral-900/70 p-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="flex items-center gap-1.5 text-xs font-bold text-indigo-200">
                   <Globe className="h-3.5 w-3.5 text-indigo-400" />
@@ -1057,7 +1073,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                       aria-checked={Boolean(tunnelUrl)} disabled={!tunnelReady || tunnelBusy} onClick={toggleTunnel}
                       className="atelier-btn atelier-btn--ghost shrink-0 gap-2 disabled:opacity-50">
                       <span aria-hidden="true" className={`relative h-4 w-7 rounded-full transition-colors ${tunnelUrl ? 'bg-indigo-600' : 'bg-neutral-600'}`}>
-                        <span className={`absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-white transition-transform motion-reduce:transition-none ${tunnelUrl ? 'translate-x-3' : ''}`} />
+                        <span className={`atelier-motion-transition absolute left-0.5 top-0.5 h-3 w-3 rounded-full bg-white transition-transform ${tunnelUrl ? 'translate-x-3' : ''}`} />
                       </span>
                       {tunnelBusy ? (tunnelUrl ? t.gateway.tunnelClosing : t.gateway.tunnelOpening) : tunnelUrl ? t.gateway.tunnelOn : t.gateway.tunnelOff}
                     </button>
@@ -1107,7 +1123,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
             </div>
 
             {tab === 'join' ? (
-              <section id="gateway-join" role="tabpanel" aria-labelledby="gateway-tab-join" className="space-y-2 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3">
+              <section id="gateway-join" role="tabpanel" aria-labelledby="gateway-tab-join" className="atelier-gateway-card space-y-2 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3">
                 <div className="flex items-center gap-2">
                   <label className="relative flex-1">
                     <span className="sr-only">{t.gateway.searchRooms}</span>
@@ -1216,7 +1232,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                 )}
               </section>
             ) : tab === 'create-group' ? (
-              <section id="gateway-create-group" role="tabpanel" aria-labelledby="gateway-tab-create-group" className="space-y-3 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3">
+              <section id="gateway-create-group" role="tabpanel" aria-labelledby="gateway-tab-create-group" className="atelier-gateway-card space-y-3 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3">
                 <label className="block space-y-1">
                   <span className="text-xs font-semibold text-neutral-200">{t.canvas.canvasGroupName}</span>
                   <input
@@ -1261,7 +1277,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
                 </div>
               </section>
             ) : (
-              <section id="gateway-create" role="tabpanel" aria-labelledby="gateway-tab-create" className="space-y-3 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3">
+              <section id="gateway-create" role="tabpanel" aria-labelledby="gateway-tab-create" className="atelier-gateway-card space-y-3 rounded-2xl border border-neutral-800 bg-neutral-900/60 p-3">
                 {!canCreate && (
                   <div className="flex items-center gap-2 rounded-lg border border-amber-700/60 bg-amber-950/30 p-2 text-xs text-amber-100">
                     <LogIn className="h-4 w-4 shrink-0" />
@@ -1325,6 +1341,7 @@ export const ConnectionGateway: React.FC<ConnectionGatewayProps> = ({ onResolve,
           )}
         </footer>
       </form>
+      </div>
       {/* Outside the gateway form: the dialog is a form of its own */}
       {primaryDialogOpen && <PrimaryAccountDialog onClose={() => setPrimaryDialogOpen(false)} />}
       <OverlayPresence open={connectGuideOpen}>

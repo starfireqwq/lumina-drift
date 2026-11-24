@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useState } from 'react';
 import { UserPayload, ServerRole } from '@atelier/shared';
 import { ApiService } from '../services/api';
 import { LOCAL_ARTIST_ID, OfflineSessionStore } from '../services/offlineStore';
+import { sanitizeOnlineGuestName } from '../utils/roomJoinGuard';
 import { getPrimaryAccount, notePrimaryEdit, PRIMARY_ACCOUNT_EVENT, restoreSession, syncAfterSession } from '../services/accountBridge';
 
 interface AuthContextType {
@@ -24,7 +25,7 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const localGuest = (): UserPayload => ({
   id: `guest_${Math.random().toString(36).substring(2, 9)}`,
   username: 'guest',
-  displayName: localStorage.getItem('atelier_guest_name') || '訪客畫師',
+  displayName: sanitizeOnlineGuestName(localStorage.getItem('atelier_guest_name'), '訪客畫師'),
   serverRole: 'guest' as ServerRole,
 });
 
@@ -239,7 +240,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const setGuestDisplayName = (displayName: string) => {
     const offline = OfflineSessionStore.isOfflineMode();
-    const trimmed = displayName.trim() || (offline ? '本機畫師' : '訪客畫師');
+    const trimmed = offline
+      ? (displayName.trim() || '本機畫師')
+      : sanitizeOnlineGuestName(displayName, '訪客畫師');
     if (typeof window !== 'undefined') {
       localStorage.setItem('atelier_guest_name', trimmed);
     }

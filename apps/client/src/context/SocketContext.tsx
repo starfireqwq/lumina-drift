@@ -28,6 +28,7 @@ import { VoiceChatManager, VoiceChatState } from '../engine/VoiceChatManager';
 import { P2PTileManager, P2PStats } from '../engine/P2PTileManager';
 import { getUserColor } from '../utils/userColors';
 import { sharedRoomFromLocation } from '../utils/serverLinks';
+import { resolveInitialActiveCanvasId, sanitizeOnlineGuestName } from '../utils/roomJoinGuard';
 
 export interface EventLogItem {
   id: string;
@@ -101,6 +102,8 @@ interface SocketContextType {
   voiceState: VoiceChatState;
   p2pTileManager: P2PTileManager;
   joinCanvas: (canvasId: string) => void;
+  getActiveCanvasId: () => string | null;
+  clearActiveCanvas: () => void;
   emitCursor: (x: number, y: number, isDrawing?: boolean, brushSize?: number) => void;
   emitPreviewDab: (
     layerId: string,
@@ -166,7 +169,11 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [activeCanvasId, setActiveCanvasId] = useState<string | null>(() => {
     if (typeof window !== 'undefined') {
-      return sharedRoomFromLocation() ?? localStorage.getItem('atelier_active_canvas_id');
+      return resolveInitialActiveCanvasId({
+        isOfflineMode: OfflineSessionStore.isOfflineMode(),
+        sharedRoomId: sharedRoomFromLocation(),
+        savedCanvasId: localStorage.getItem('atelier_active_canvas_id'),
+      });
     }
     return null;
   });
@@ -335,7 +342,9 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [voiceState, setVoiceState] = useState<VoiceChatState>(voiceManagerRef.current.getState());
 
   // Dynamic server endpoint connection
-  const [currentServerUrl, setCurrentServerUrl] = useState<string>(() => ApiService.getServerUrl());
+  const [currentServerUrl, setCurrentServerUrl] = useState<string>(() =>
+    OfflineSessionStore.isOfflineMode() ? 'offline' : ApiService.getServerUrl()
+  );
   // Realtime Text Chat Room State
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
 
@@ -371,8 +380,11 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setCurrentServerUrl('offline');
       return;
     }
+    if (OfflineSessionStore.isOfflineMode()) {
+      OfflineSessionStore.setSessionMode('collaborative');
+      setMembers((prev) => (prev.some((m) => m.userId === LOCAL_ARTIST_ID) ? [] : prev));
+    }
     if (newServerUrl !== undefined) ApiService.setServerUrl(newServerUrl);
-    if (OfflineSessionStore.isOfflineMode()) OfflineSessionStore.setSessionMode('collaborative');
     setCurrentServerUrl(ApiService.getServerUrl());
   };
 
@@ -418,12 +430,19 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   useEffect(() => {
     // Wait for AuthContext to settle: connecting before /auth/me returned and again after it
     // (the user object changed) opened two sockets on every page load
-    if (authLoading) return;
+    if (authLoading) {
+      if (!OfflineSessionStore.isOfflineMode() && currentServerUrl !== 'offline') {
+        setMembers((prev) => (prev.some((m) => m.userId === LOCAL_ARTIST_ID) ? [] : prev));
+      }
+      return;
+    }
     if (OfflineSessionStore.isOfflineMode() || currentServerUrl === 'offline') {
       if (socketRef.current) {
         socketRef.current.disconnect();
         socketRef.current = null;
       }
+      joinedCanvasIdRef.current = null;
+      setRoomAccessError(null);
       setIsConnected(false);
       setMembers([
         {
@@ -439,6 +458,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       ]);
       return;
     }
+    setMembers((prev) => (prev.some((m) => m.userId === LOCAL_ARTIST_ID) ? [] : prev));
     // Connect to Socket.io with specified server endpoint or relative origin
     const target = currentServerUrl || '/';
 
@@ -446,12 +466,15 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       // A function, so every (re)connection sends the canvas that is active right now: the server
       // joins it during the handshake, before the ops buffered while offline are flushed.
       // (socket.io flushes that buffer before 'connect' fires, i.e. before join_canvas below.)
-      auth: (cb) =>
+      auth: (cb) => {
+        const liveId = activeCanvasIdRef.current;
+        const onlineCanvasId = liveId && !OfflineSessionStore.isOfflineCanvas(liveId) ? liveId : null;
         cb({
           token: token || undefined,
-          displayName: userRef.current?.displayName || '訪客',
-          ...(activeCanvasIdRef.current && joinPayload(activeCanvasIdRef.current)),
-        }),
+          displayName: sanitizeOnlineGuestName(userRef.current?.displayName, '訪客'),
+          ...(onlineCanvasId && joinPayload(onlineCanvasId)),
+        });
+      },
       transports: ['websocket', 'polling'],
       autoConnect: true,
       parser: tileSocketParser(socketParser), // more than 10 tiles per op, see tileSocketParser
@@ -475,8 +498,10 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
         }, i * 200);
       }
       addLog('MEMBER', `已建立即時連線 (Socket ID: ${socket.id})`, '#10B981');
-      if (activeCanvasIdRef.current) {
-        socket.emit('join_canvas', joinPayload(activeCanvasIdRef.current));
+      const liveId = activeCanvasIdRef.current;
+      if (liveId && !OfflineSessionStore.isOfflineCanvas(liveId)) {
+        joinedCanvasIdRef.current = liveId;
+        socket.emit('join_canvas', joinPayload(liveId));
       }
       voiceManagerRef.current.init(socket);
       p2pManagerRef.current.init(socket, (p2pPacket) => {
@@ -757,6 +782,10 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
     return () => {
       socket.disconnect();
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+      }
+      joinedCanvasIdRef.current = null;
     };
   }, [token, user?.id, user?.displayName, currentServerUrl, authLoading]);
 
@@ -795,8 +824,24 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
 
   // When activeCanvasId changes, rejoin (or hydrate persisted offline canvas telemetry)
   useEffect(() => {
-    if (!activeCanvasId) return;
+    if (!activeCanvasId) {
+      const previous = joinedCanvasIdRef.current;
+      if (previous && socketRef.current) {
+        socketRef.current.emit('leave_canvas', { canvasId: previous });
+      }
+      joinedCanvasIdRef.current = null;
+      setRoomAccessError(null);
+      return;
+    }
     if (OfflineSessionStore.isOfflineCanvas(activeCanvasId)) {
+      if (!OfflineSessionStore.isOfflineMode()) {
+        const previous = joinedCanvasIdRef.current;
+        if (previous && socketRef.current) {
+          socketRef.current.emit('leave_canvas', { canvasId: previous });
+        }
+        joinedCanvasIdRef.current = null;
+        return;
+      }
       void OfflineSessionStore.ensureInitialized().then(() => {
         if (activeCanvasIdRef.current !== activeCanvasId) return;
         const tel = OfflineSessionStore.getCanvasTelemetry(activeCanvasId);
@@ -830,6 +875,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     // Leave the previous room first: otherwise this socket stays listed there as a ghost member
     // and keeps downloading every tile painted on a canvas it no longer shows
     const previous = joinedCanvasIdRef.current;
+    if (previous === activeCanvasId) return;
     if (previous && previous !== activeCanvasId) {
       socketRef.current.emit('leave_canvas', { canvasId: previous });
     }
@@ -849,6 +895,13 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     if (typeof window !== 'undefined') {
       localStorage.setItem('atelier_active_canvas_id', canvasId);
     }
+  };
+
+  const getActiveCanvasId = () => activeCanvasIdRef.current;
+
+  const clearActiveCanvas = () => {
+    setActiveCanvasId(null);
+    activeCanvasIdRef.current = null;
   };
 
   const emitCursor = (x: number, y: number, isDrawing: boolean = false, brushSize: number = 8) => {
@@ -1193,6 +1246,8 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           voiceState,
           p2pTileManager: p2pManagerRef.current,
           joinCanvas,
+          getActiveCanvasId,
+          clearActiveCanvas,
           emitCursor,
           emitPreviewDab,
           commitOp,

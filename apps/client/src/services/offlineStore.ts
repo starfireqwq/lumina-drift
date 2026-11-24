@@ -23,6 +23,13 @@ import { compositeLayers, type LayerCanvasItem } from '../engine/layerComposite'
 import { isLoopbackServer } from '../utils/serverLinks';
 
 export const LOCAL_ARTIST_ID = 'local-artist';
+export const LOCAL_OFFLINE_CANVAS_PREFIX = 'local_';
+
+/** 嚴格判定是否為本機單機離線畫布 ID（僅允許 local_*，避免線上房間 UUID 混入離線快取） */
+export function isLocalOfflineCanvasId(canvasId: string | null | undefined): boolean {
+  return Boolean(canvasId && canvasId.startsWith(LOCAL_OFFLINE_CANVAS_PREFIX));
+}
+
 const SESSION_MODE_KEY = 'atelier_session_mode';
 const FILE_PATHS_KEY = 'lumina_canvas_file_paths';
 const IDB_NAME = 'LuminaDrift_OfflineStorage';
@@ -337,6 +344,7 @@ class OfflineSessionStoreImpl {
   }
 
   public setCanvasFilePath(canvasId: string, filePath: string | null) {
+    if (!isLocalOfflineCanvasId(canvasId)) return;
     if (filePath) this.filePaths.set(canvasId, filePath);
     else this.filePaths.delete(canvasId);
     const rec = this.records.get(canvasId);
@@ -376,7 +384,7 @@ class OfflineSessionStoreImpl {
 
   public isOfflineCanvas(canvasId: string | null | undefined): boolean {
     if (!canvasId) return this.isOfflineMode();
-    return canvasId.startsWith('local_') || this.records.has(canvasId) || this.isOfflineMode();
+    return isLocalOfflineCanvasId(canvasId);
   }
 
   public setSessionMode(mode: 'offline' | 'collaborative') {
@@ -446,18 +454,27 @@ class OfflineSessionStoreImpl {
               };
             }
             tx.oncomplete = () => {
+              const poisonedIds: string[] = [];
               for (const item of metaList) {
-                if (item?.canvas?.id && !this.records.has(item.canvas.id)) {
+                const cid = item?.canvas?.id;
+                if (!cid) continue;
+                if (!isLocalOfflineCanvasId(cid)) {
+                  // 清除過去因模式切換競態被誤寫入 IndexedDB 的線上房間幽靈紀錄
+                  poisonedIds.push(cid);
+                  this.filePaths.delete(cid);
+                  continue;
+                }
+                if (!this.records.has(cid)) {
                   const hasLegacyInlineTiles = item.tilesByLayer && Object.keys(item.tilesByLayer).length > 0;
-                  this.records.set(item.canvas.id, {
+                  this.records.set(cid, {
                     ...item,
                     tilesByLayer: item.tilesByLayer || {},
                     vectorsByLayer: item.vectorsByLayer || {},
                   });
-                  if (item.filePath) this.filePaths.set(item.canvas.id, item.filePath);
+                  if (item.filePath) this.filePaths.set(cid, item.filePath);
                   if (hasLegacyInlineTiles && item.storageV !== 2) {
-                    this.dirtyFullRewrite.add(item.canvas.id);
-                    this.schedulePersist(item.canvas.id);
+                    this.dirtyFullRewrite.add(cid);
+                    this.schedulePersist(cid);
                   }
                 }
               }
@@ -467,6 +484,11 @@ class OfflineSessionStoreImpl {
                 const layerMap = rec.tilesByLayer[row.layerId] || (rec.tilesByLayer[row.layerId] = {});
                 if (!layerMap[row.tileKey]) {
                   layerMap[row.tileKey] = row.tile;
+                }
+              }
+              if (poisonedIds.length > 0) {
+                for (const pid of poisonedIds) {
+                  void this.deleteRecordFromDB(pid).catch(() => {});
                 }
               }
               resolve();
@@ -579,57 +601,47 @@ class OfflineSessionStoreImpl {
 
       if (hasTileStore) {
         const tileStore = tx.objectStore(IDB_TILE_STORE);
-        const putAllCurrentTiles = () => {
-          for (const [layerId, tileMap] of Object.entries(rec.tilesByLayer)) {
-            if (!tileMap) continue;
-            for (const [tk, tile] of Object.entries(tileMap)) {
-              tileStore.put({
-                id: `${canvasId}\0${layerId}\0${tk}`,
-                canvasId,
-                layerId,
-                tileKey: tk,
-                tile,
-              } satisfies OfflineTileRow);
-            }
-          }
+        const removePrefix = (prefix: string) => {
+          tileStore.delete(IDBKeyRange.bound(`${prefix}\0`, `${prefix}\u0001`, false, true));
         };
-
         if (fullRewrite) {
-          const idx = tileStore.index('by_canvas');
-          const cursorReq = idx.openKeyCursor(IDBKeyRange.only(canvasId));
-          cursorReq.onsuccess = () => {
-            const cur = cursorReq.result;
-            if (cur) {
-              tileStore.delete(cur.primaryKey);
-              cur.continue();
-            } else {
-              putAllCurrentTiles();
+          removePrefix(canvasId);
+        } else if (deletedLayers) {
+          for (const id of deletedLayers) removePrefix(`${canvasId}\0${id}`);
+        }
+        const fullTileSnapshot = fullRewrite
+          ? Object.entries(rec.tilesByLayer).map(([layerId, tiles]) => [layerId, Object.entries(tiles)] as const)
+          : null;
+        function* tileRows(): Generator<OfflineTileRow> {
+          if (fullTileSnapshot) {
+            for (const [layerId, tiles] of fullTileSnapshot) {
+              for (const [tileKey, tile] of tiles) {
+                yield { id: `${canvasId}\0${layerId}\0${tileKey}`, canvasId, layerId, tileKey, tile };
+              }
             }
-          };
-        } else {
-          if (deletedLayers && deletedLayers.size > 0) {
-            const idx = tileStore.index('by_canvas');
-            const cursorReq = idx.openCursor(IDBKeyRange.only(canvasId));
-            cursorReq.onsuccess = () => {
-              const cur = cursorReq.result;
-              if (!cur) return;
-              const val = cur.value as OfflineTileRow;
-              if (deletedLayers.has(val.layerId)) cur.delete();
-              cur.continue();
-            };
-          }
-          if (dirtyMap && dirtyMap.size > 0) {
-            for (const [compositeId, entry] of dirtyMap.entries()) {
-              tileStore.put({
-                id: `${canvasId}\0${compositeId}`,
-                canvasId,
-                layerId: entry.layerId,
-                tileKey: entry.key,
-                tile: entry.tile,
-              } satisfies OfflineTileRow);
+          } else {
+            for (const [compositeId, { layerId, key, tile }] of dirtyMap ?? []) {
+              yield { id: `${canvasId}\0${compositeId}`, canvasId, layerId, tileKey: key, tile };
             }
           }
         }
+        const rows = tileRows();
+        // Queue small groups of structured clones while keeping one atomic transaction.
+        const writeBatch = () => {
+          try {
+            let tail: IDBRequest | undefined;
+            for (let i = 0; i < 24; i++) {
+              const entry = rows.next();
+              if (entry.done) return;
+              tail = tileStore.put(entry.value);
+            }
+            if (tail) tail.onsuccess = writeBatch;
+          } catch (error) {
+            reject(error);
+            tx.abort();
+          }
+        };
+        writeBatch();
       }
 
       tx.oncomplete = () => resolve();
@@ -688,10 +700,14 @@ class OfflineSessionStoreImpl {
 
   public async listRecentCanvases(): Promise<CanvasModel[]> {
     await this.ensureInitialized();
-    return [...this.records.values()].sort((a, b) => b.updatedAt - a.updatedAt).map((record) => record.canvas);
+    return [...this.records.values()]
+      .filter((record) => isLocalOfflineCanvasId(record.canvas.id))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .map((record) => record.canvas);
   }
 
   public saveThumbnail(canvasId: string, thumbnail: string): void {
+    if (!isLocalOfflineCanvasId(canvasId)) return;
     const record = this.records.get(canvasId);
     if (!record || record.thumbnail === thumbnail) return;
     record.thumbnail = thumbnail;
@@ -758,7 +774,9 @@ class OfflineSessionStoreImpl {
 
   public async listCanvases(): Promise<CanvasModel[]> {
     await this.ensureInitialized();
-    const list = Array.from(this.records.values()).map((r) => r.canvas);
+    const list = Array.from(this.records.values())
+      .filter((r) => isLocalOfflineCanvasId(r.canvas.id))
+      .map((r) => r.canvas);
     list.sort((a, b) => a.createdAt - b.createdAt);
     if (list.length === 0) {
       const created = await this.createCanvas({
@@ -836,6 +854,9 @@ class OfflineSessionStoreImpl {
   }
 
   private ensureRecord(canvasId: string): OfflineCanvasRecord {
+    if (!isLocalOfflineCanvasId(canvasId)) {
+      throw new Error(`Refusing to create offline canvas record for non-local id: ${canvasId}`);
+    }
     let rec = this.records.get(canvasId);
     if (!rec) {
       const now = Date.now();
@@ -1304,6 +1325,7 @@ class OfflineSessionStoreImpl {
   }
 
   public commitLocalOp(canvasId: string, layerId: string, opType: string, payload: any): number {
+    if (!isLocalOfflineCanvasId(canvasId)) return 0;
     const rec = this.ensureRecord(canvasId);
     if (payload && typeof payload === 'object') {
       if (Array.isArray(payload.tiles)) {
@@ -1358,6 +1380,7 @@ class OfflineSessionStoreImpl {
     isUndo?: boolean,
     layerType?: string
   ): number {
+    if (!isLocalOfflineCanvasId(canvasId)) return 0;
     const rec = this.ensureRecord(canvasId);
     const map = rec.tilesByLayer[layerId] || (rec.tilesByLayer[layerId] = {});
     for (const t of tiles) {

@@ -43,6 +43,14 @@ import {
 import { useAuth } from '../context/AuthContext';
 import { useI18n } from '../context/I18nContext';
 import type { Translations } from '../locales';
+import {
+  LOCAL_ARTIST_USER_ID,
+  getLayerDrawGuidanceState,
+  hasAnyDrawableLayerForUser,
+  isBlockedOnlineGuestName,
+  isLayerDrawableForUser,
+  resolveLayerOwnerDisplay,
+} from '../utils/roomJoinGuard';
 import { AdminConfirmModal } from './AdminConfirmModal';
 import { getUserColor } from '../utils/userColors';
 import { nextGroupName } from '../utils/canvasName';
@@ -196,6 +204,10 @@ interface LayerPanelProps {
   isRoomAdmin?: boolean;
   /** True when the current user has a read-only room role (e.g. viewer) */
   isReadOnly?: boolean;
+  /** True when viewing a local offline solo canvas */
+  isOfflineCanvas?: boolean;
+  /** Opens sign-in modal when guest clicks login CTA in layer guidance */
+  onOpenAuth?: () => void;
 }
 
 export interface BlendModeGroup {
@@ -430,6 +442,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   folderAccess,
   isRoomAdmin,
   isReadOnly,
+  isOfflineCanvas = false,
+  onOpenAuth,
 }) => {
   const { t } = useI18n();
   const { isGuest, user } = useAuth();
@@ -477,7 +491,6 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   }, [menu]);
   const longPressRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isAdmin = Boolean(isRoomAdmin || user?.serverRole === 'admin');
-  const myLayers = layers.filter((l) => l.ownerId === user?.id);
 
   // Group folding state
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
@@ -862,7 +875,9 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
 
   // Filter out child layers of collapsed groups for display list
   const allGroups = layers.filter((l) => l.layerType === 'group' && (folderAccess?.canAdd(l) ?? canManage(l)));
-  const availableTransferMembers = roomMembers.filter((m) => m.userId !== user?.id);
+  const availableTransferMembers = roomMembers.filter(
+    (m) => m.userId !== user?.id && (isOfflineCanvas || m.userId !== LOCAL_ARTIST_USER_ID)
+  );
 
   // Batch Selection helpers
   const handleToggleBatchSelect = (layerId: string) => {
@@ -925,7 +940,35 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
     `atelier-icon-btn h-6 w-6 shrink-0 border ${
       on ? 'border-transparent' : 'border-neutral-700/70'
     } ${extra}`;
-  const hasDrawableLayer = myLayers.length > 0 || layers.some((l) => l.isPublic || !l.ownerId);
+  const drawCtx = { user, isGuest, isCanvasViewer: Boolean(isReadOnly) };
+  const hasDrawableLayer = hasAnyDrawableLayerForUser(allLayers, drawCtx);
+  const guidance = getLayerDrawGuidanceState({
+    layers: allLayers,
+    activeLayerId,
+    user,
+    isGuest,
+    isCanvasViewer: Boolean(isReadOnly),
+    canCreateLayer: Boolean(!readOnly && (onRequestCreateMyLayer || onCreateRaster || onCreateLayer)),
+  });
+  const guidanceMessage = (() => {
+    switch (guidance.kind) {
+      case 'guest_login_required':
+        return t.layers.guidanceGuest;
+      case 'viewer_readonly':
+        return t.layers.guidanceViewer;
+      case 'claim_public_layer':
+        return t.layers.guidanceClaimPublic;
+      case 'switch_to_drawable':
+        if (guidance.reason === 'locked') return t.layers.guidanceLocked;
+        if (guidance.reason === 'group') return t.layers.guidanceGroup;
+        if (guidance.reason === 'other_owner') return t.layers.guidanceOtherOwner;
+        return t.layers.guidanceNotDrawable;
+      case 'create_my_layer':
+        return t.layers.guidanceNoDrawable;
+      default:
+        return '';
+    }
+  })();
 
   return (
     <div className="relative flex h-full w-full min-w-0 select-none flex-col bg-atelier-panel text-xs">
@@ -1155,6 +1198,60 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
         )}
       </div>
 
+      {/* Drawability guidance banner: one-click switch / safe claim / create layer / sign-in */}
+      {guidance.kind !== 'none' && guidance.kind !== 'drawable' && (
+        <div
+          role="status"
+          data-layer-draw-guidance={guidance.kind}
+          data-layer-guidance-reason={guidance.reason ?? ''}
+          className="flex shrink-0 flex-col gap-1.5 border-b border-atelier-border bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-100"
+        >
+          <span className="leading-snug text-amber-100/95">{guidanceMessage}</span>
+          <div className="flex flex-wrap items-center gap-1">
+            {guidance.kind === 'guest_login_required' && onOpenAuth && (
+              <button
+                type="button"
+                data-layer-guidance-action="login"
+                onClick={onOpenAuth}
+                className="rounded border border-indigo-400/50 bg-indigo-500/20 px-2 py-0.5 text-[11px] font-medium text-indigo-100 hover:bg-indigo-500/35"
+              >
+                {t.layers.guidanceLoginBtn}
+              </button>
+            )}
+            {guidance.kind === 'claim_public_layer' && guidance.claimTargetLayerId && (
+              <button
+                type="button"
+                data-layer-guidance-action="claim"
+                onClick={() => onClaimLayer(guidance.claimTargetLayerId!, false)}
+                className="rounded border border-emerald-400/50 bg-emerald-500/20 px-2 py-0.5 text-[11px] font-medium text-emerald-100 hover:bg-emerald-500/35"
+              >
+                {t.layers.guidanceClaimBtn}
+              </button>
+            )}
+            {guidance.switchTargetLayerId && (
+              <button
+                type="button"
+                data-layer-guidance-action="switch"
+                onClick={() => onSelectLayer(guidance.switchTargetLayerId!)}
+                className="rounded border border-cyan-400/50 bg-cyan-500/20 px-2 py-0.5 text-[11px] font-medium text-cyan-100 hover:bg-cyan-500/35"
+              >
+                {t.layers.guidanceSwitchBtn.replace('{name}', guidance.switchTargetLayerName || '')}
+              </button>
+            )}
+            {guidance.kind === 'create_my_layer' && guidance.canCreateLayer && (
+              <button
+                type="button"
+                data-layer-guidance-action="create"
+                onClick={() => (onRequestCreateMyLayer ? onRequestCreateMyLayer() : handleDirectAddRaster())}
+                className="rounded border border-indigo-400/50 bg-indigo-500/20 px-2 py-0.5 text-[11px] font-medium text-indigo-100 hover:bg-indigo-500/35"
+              >
+                {t.layers.guidanceCreateMyLayerBtn}
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Batch mode bar */}
       {(isBatchMode || selectedLayerIds.size > 0) && (
         <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-atelier-border bg-amber-950/30 px-2 py-1">
@@ -1262,9 +1359,23 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             const isClippingBase = baseClippingIds.has(layer.id);
             const isBatchSelected = selectedLayerIds.has(layer.id);
             const ownerTheme = getUserColor(layer.ownerId);
-            const ownerHex = layer.isPublic || !layer.ownerId ? PUBLIC_COLOR : ownerTheme.hex;
-            const ownerMember = roomMembers?.find((m) => m.userId === layer.ownerId);
-            const ownerDisplayName = isOwner ? t.layers.myLayer : ownerMember?.displayName || layer.ownerDisplayName || (layer.ownerId ? `#${layer.ownerId.slice(-4)}` : t.layers.public);
+            const ownerDisplay = resolveLayerOwnerDisplay(layer, {
+              currentUserId: user?.id ?? null,
+              roomMembers,
+              isOfflineCanvas,
+              labels: {
+                myLayer: t.layers.myLayer,
+                publicLayer: t.layers.public,
+                painterPrefix: t.layers.painterPrefix,
+              },
+            });
+            const ownerHex = ownerDisplay.isPublicUnclaimed ? PUBLIC_COLOR : ownerTheme.hex;
+            const ownerDisplayName = ownerDisplay.label;
+            const safeOriginalAuthor =
+              layer.meta?.originalAuthor && (isOfflineCanvas || !isBlockedOnlineGuestName(layer.meta.originalAuthor))
+                ? layer.meta.originalAuthor
+                : null;
+            const canDrawRow = isLayerDrawableForUser(layer, drawCtx, allLayers);
             const canToggleVis = isOwner;
             const isOver = dragOverLayerId === layer.id;
             const localOverride = localVisibility[layer.id];
@@ -1411,8 +1522,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                       <span className="shrink-0 tabular-nums">{pctText}</span>
                       <span className="shrink-0">{blendLabel(layer.blendMode)}</span>
                       <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: ownerHex }} />
-                      <span className="truncate" title={layer.meta?.originalAuthor ? t.layers.originalAuthor.replace('{author}', layer.meta.originalAuthor) : ownerDisplayName}>
-                        {layer.isPublic || !layer.ownerId ? t.layers.public : ownerDisplayName}
+                      <span className="truncate" title={safeOriginalAuthor ? t.layers.originalAuthor.replace('{author}', safeOriginalAuthor) : ownerDisplayName}>
+                        {ownerDisplayName}
                       </span>
                       {extraEffects.length > 0 && <span className="truncate text-indigo-400">· {extraEffects.join(' · ')}</span>}
                     </span>
@@ -1439,7 +1550,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                     {isClippingBase && <span className="h-2 w-0.5 rounded bg-pink-400/70" title={t.layers.clippingBaseTooltip} />}
                     {layer.alphaLocked && <span title={t.layers.lockedAlphaTooltip} className="text-amber-400"><AlphaLockIcon /></span>}
                     {layer.isLocked && <span title={t.layers.layerLocked}><Lock className="h-3 w-3 text-amber-400" /></span>}
-                    {!isOwner && !isAdmin && !(layer.isPublic || !layer.ownerId) && (
+                    {!isGroup && !layer.isLocked && !ownerDisplay.isPublicUnclaimed && !canDrawRow && (
                       <span title={t.layers.readOnlyTooltip} className="text-[10px] text-neutral-500"><Lock className="h-2.5 w-2.5 opacity-60" /></span>
                     )}
                     {canMove && !isBatchMode && (

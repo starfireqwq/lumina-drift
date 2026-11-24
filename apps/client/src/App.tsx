@@ -34,6 +34,23 @@ import { RoomPasswordModal } from './components/RoomPasswordModal';
 import { getNextCanvasTitle } from './utils/canvasName';
 import { sharedRoomFromLocation } from './utils/serverLinks';
 import { recordRecentVisit } from './utils/recentVisits';
+import {
+  type CanvasTargetContext,
+  filterVisibleOfflineCanvases,
+  isCanvasViewerForUser,
+  isLayerDrawableForUser,
+  isLocalArtistUser,
+  loadClosedOfflineCanvasIds,
+  pickBestInitialLayer,
+  resolveAutoSelectCanvasId,
+  resolveNextCanvasAfterClose,
+  resolveTargetCanvasId,
+  sanitizeOnlineGuestName,
+  saveClosedOfflineCanvasIds,
+  shouldCommitCanvasFetch,
+  shouldCommitGatewayResolve,
+  shouldSkipAutoAssign,
+} from './utils/roomJoinGuard';
 import type { LayerCanvasItem } from './engine/layerComposite';
 import { useFolderAccess } from './components/workspace/useFolderAccess';
 // Loaded when first needed: the workspace (Pixi), exports (ag-psd / jszip), time-lapse, settings…
@@ -53,9 +70,6 @@ const PluginV3ConsentModal = lazy(() => import('./components/PluginV3ConsentModa
 
 const EMPTY_LAYERS: LayerModel[] = [];
 
-/** A painter has a layer of their own here (a new canvas's locked, shared background does not count) */
-const ownsDrawableLayer = (list: LayerModel[], userId: string) =>
-  list.some((l) => l.ownerId === userId && l.layerType !== 'group' && l.layerType !== 'mask' && !(l.isLocked && l.aclMode === 'shared_all'));
 const THUMBS_KEY = 'atelier_canvas_thumbs';
 const MAX_THUMBS = 40;
 
@@ -125,6 +139,8 @@ export const App: React.FC = () => {
   const {
     activeCanvasId,
     joinCanvas,
+    getActiveCanvasId,
+    clearActiveCanvas,
     members,
     offlineMembers,
     releaseLayer,
@@ -152,10 +168,34 @@ export const App: React.FC = () => {
   });
   const returningToGateway = useRef(false);
   const importingLumina = useRef(false);
+  // The canvas picked on the gateway. The list fetched as the gateway closes opens it directly,
+  // instead of joining the list's first (or the last opened) canvas on the way there.
+  const gatewayCanvasRef = useRef<string | null>(null);
+  // True while ANY gateway transition (pick room / resume / create / offline) is settling, so
+  // background fetchCanvases and auto-select effects cannot clobber the chosen room.
+  const gatewayResolvingRef = useRef(false);
+  const gatewayResolveSeqRef = useRef(0);
+  const gatewayTimerRef = useRef<number | null>(null);
+  const fetchCanvasesSeqRef = useRef(0);
+
+  useEffect(() => () => {
+    if (gatewayTimerRef.current !== null) {
+      window.clearTimeout(gatewayTimerRef.current);
+      gatewayTimerRef.current = null;
+    }
+  }, []);
+
   // The mode picker is only reachable where solo mode is allowed (local app or a localhost page).
   // Without it, the logo, the 切換模式 menu item and the ServerModal button are not rendered.
   const openGateway = OfflineSessionStore.canUseOfflineMode() ? () => {
     if (importingLumina.current) return;
+    if (gatewayTimerRef.current !== null) {
+      window.clearTimeout(gatewayTimerRef.current);
+      gatewayTimerRef.current = null;
+    }
+    gatewayResolveSeqRef.current += 1;
+    gatewayResolvingRef.current = false;
+    gatewayCanvasRef.current = null;
     returningToGateway.current = true;
     setShowGateway(true);
   } : undefined;
@@ -171,6 +211,19 @@ export const App: React.FC = () => {
     items: EMPTY_LAYERS,
   });
   const layers = layerState.canvasId === activeCanvasId ? layerState.items : EMPTY_LAYERS;
+  const layersRef = useRef<LayerModel[]>(layers);
+  layersRef.current = layers;
+  const closedOfflineTabsRef = useRef<Set<string>>(loadClosedOfflineCanvasIds());
+  const uncloseOfflineCanvas = useCallback((canvasId: string | null | undefined) => {
+    if (!canvasId || !canvasId.startsWith('local_')) return;
+    if (closedOfflineTabsRef.current.delete(canvasId)) {
+      saveClosedOfflineCanvasIds(closedOfflineTabsRef.current);
+    }
+  }, []);
+  const recordLayerCreationRef = useRef<((created: LayerModel) => void) | null>(null);
+  const registerRecordLayerCreation = useCallback((fn: ((created: LayerModel) => void) | null) => {
+    recordLayerCreationRef.current = fn;
+  }, []);
   const [settledLayerListId, setSettledLayerListId] = useState<string | null>(null);
   useLayoutEffect(() => {
     setLayerState({ canvasId: activeCanvasId, items: EMPTY_LAYERS });
@@ -282,42 +335,60 @@ export const App: React.FC = () => {
     | null
   >(null);
 
-  // The canvas picked on the gateway. The list fetched as the gateway closes opens it directly,
-  // instead of joining the list's first (or the last opened) canvas on the way there.
-  const gatewayCanvasRef = useRef<string | null>(null);
-  // True while the gateway's "create new room" flow is still running, so the effect on
-  // showGateway=false does not briefly join an existing room before createCanvas resolves.
-  const gatewayCreatingRoomRef = useRef(false);
+  const getCanvasTargetContext = (): CanvasTargetContext => ({
+    serverOrigin: ApiService.getServerOrigin(),
+    isOfflineMode: OfflineSessionStore.isOfflineMode(),
+  });
 
   // Load all available canvases on boot or user change
   const fetchCanvases = async () => {
-    if (gatewayCreatingRoomRef.current) return;
-    const origin = ApiService.getServerOrigin();
-    const offline = OfflineSessionStore.isOfflineMode();
-    const sameTarget = () => origin === ApiService.getServerOrigin() && offline === OfflineSessionStore.isOfflineMode();
+    if (gatewayResolvingRef.current) return;
+    const requestSeq = ++fetchCanvasesSeqRef.current;
+    const requestTarget = getCanvasTargetContext();
+    const canCommit = () =>
+      shouldCommitCanvasFetch({
+        requestSeq,
+        latestSeq: fetchCanvasesSeqRef.current,
+        requestTarget,
+        currentTarget: getCanvasTargetContext(),
+        gatewayResolving: gatewayResolvingRef.current,
+      });
     try {
-      const list = await ApiService.listCanvases();
-      if (!sameTarget() || gatewayCreatingRoomRef.current) return;
+      const rawList = await ApiService.listCanvases();
+      if (!canCommit()) return;
       const picked = gatewayCanvasRef.current;
       gatewayCanvasRef.current = null;
+      let list = rawList;
+      if (requestTarget.isOfflineMode) {
+        if (picked) uncloseOfflineCanvas(picked);
+        list = filterVisibleOfflineCanvases(rawList, closedOfflineTabsRef.current);
+        if (list.length === 0 && rawList.length > 0) {
+          const fallback = [...rawList].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0];
+          uncloseOfflineCanvas(fallback.id);
+          list = [fallback];
+        }
+      }
       setCanvases(list);
 
       // The socket starts in the linked room. Fall back to the last canvas if the room is gone.
       if (list.length > 0) {
         const savedCanvasId = typeof window !== 'undefined' ? localStorage.getItem('atelier_active_canvas_id') : null;
-        const targetId = list.find((c) => c.id === picked)?.id
-          ?? list.find((c) => c.id === activeCanvasId)?.id
-          ?? list.find((c) => c.id === savedCanvasId)?.id
-          ?? list[0].id;
-        joinCanvas(targetId);
-      } else if (!isGuest) {
+        const targetId = resolveTargetCanvasId({
+          canvases: list,
+          pendingGatewayCanvasId: picked,
+          liveActiveCanvasId: getActiveCanvasId(),
+          sharedRoomId: requestTarget.isOfflineMode ? null : sharedRoomFromLocation(),
+          savedCanvasId,
+        });
+        if (targetId) joinCanvas(targetId);
+      } else if (!isGuest && !(!requestTarget.isOfflineMode && isLocalArtistUser(user))) {
         try {
           const res = await ApiService.createCanvas({
             title: '🎨 流光畫室 1',
             width: 2048,
             height: 2048,
           });
-          if (!sameTarget()) return;
+          if (!canCommit()) return;
           setCanvases([res.canvas]);
           joinCanvas(res.canvas.id);
         } catch (e) {
@@ -334,12 +405,36 @@ export const App: React.FC = () => {
     _nickname?: string,
     canvasOptions?: InitialCanvasOptions
   ) => {
+    if (gatewayTimerRef.current !== null) {
+      window.clearTimeout(gatewayTimerRef.current);
+      gatewayTimerRef.current = null;
+    }
+    const resolveSeq = ++gatewayResolveSeqRef.current;
+    fetchCanvasesSeqRef.current += 1;
     gatewayCanvasRef.current = canvasOptions?.canvasId ?? null;
-    const creatingNewRoom = Boolean(!canvasOptions?.canvasId && canvasOptions?.title);
-    gatewayCreatingRoomRef.current = creatingNewRoom;
+    gatewayResolvingRef.current = true;
+    const finishResolve = () => {
+      if (resolveSeq === gatewayResolveSeqRef.current) {
+        gatewayResolvingRef.current = false;
+      }
+    };
+
     if ((targetServerUrl === 'offline' || canvasOptions?.offline) && OfflineSessionStore.canUseOfflineMode()) {
+      const wasOnline = !OfflineSessionStore.isOfflineMode();
+      const liveId = getActiveCanvasId();
+      if (wasOnline || !liveId || !OfflineSessionStore.isOfflineCanvas(liveId) || Boolean(!canvasOptions?.canvasId && canvasOptions?.title)) {
+        clearActiveCanvas();
+      }
       OfflineSessionStore.setSessionMode('offline');
       reconnectServer('offline');
+      const requestTarget = getCanvasTargetContext();
+      const stillCurrent = () =>
+        shouldCommitGatewayResolve({
+          resolveSeq,
+          latestResolveSeq: gatewayResolveSeqRef.current,
+          requestTarget,
+          currentTarget: getCanvasTargetContext(),
+        });
       setShowGateway(false);
       try {
         if (canvasOptions?.title) {
@@ -348,51 +443,100 @@ export const App: React.FC = () => {
             width: canvasOptions.width || 2048,
             height: canvasOptions.height || 2048,
           });
-          setCanvases(await OfflineSessionStore.listCanvases());
+          uncloseOfflineCanvas(res.canvas.id);
+          const allOffline = await OfflineSessionStore.listCanvases();
+          const list = filterVisibleOfflineCanvases(allOffline, closedOfflineTabsRef.current);
+          if (!stillCurrent()) return;
+          gatewayCanvasRef.current = null;
+          setCanvases(list);
           joinCanvas(res.canvas.id);
           return;
         }
-        const list = await OfflineSessionStore.listCanvases();
+        if (canvasOptions?.canvasId) {
+          uncloseOfflineCanvas(canvasOptions.canvasId);
+        }
+        const allOffline = await OfflineSessionStore.listCanvases();
+        if (!stillCurrent()) return;
+        let list = filterVisibleOfflineCanvases(allOffline, closedOfflineTabsRef.current);
+        if (list.length === 0 && allOffline.length > 0) {
+          const fallback = [...allOffline].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0];
+          uncloseOfflineCanvas(fallback.id);
+          list = [fallback];
+        }
         setCanvases(list);
-        const chosen = list.find((entry) => entry.id === canvasOptions?.canvasId) ?? list[0];
-        if (chosen) joinCanvas(chosen.id);
+        const savedCanvasId = typeof window !== 'undefined' ? localStorage.getItem('atelier_active_canvas_id') : null;
+        const targetId = resolveTargetCanvasId({
+          canvases: list,
+          pendingGatewayCanvasId: canvasOptions?.canvasId ?? null,
+          liveActiveCanvasId: getActiveCanvasId(),
+          sharedRoomId: null,
+          savedCanvasId,
+        });
+        gatewayCanvasRef.current = null;
+        if (targetId) joinCanvas(targetId);
       } catch (err) {
         console.error('Failed to initialize offline canvas:', err);
       } finally {
-        gatewayCreatingRoomRef.current = false;
+        finishResolve();
       }
       return;
     }
 
     const previous = ApiService.getServerOrigin();
+    const wasOffline = OfflineSessionStore.isOfflineMode();
+    const nextOrigin = ApiService.getServerOrigin(targetServerUrl);
+    if (nextOrigin !== previous || wasOffline) {
+      setCanvases([]);
+      clearActiveCanvas();
+    } else if (!canvasOptions?.canvasId && canvasOptions?.title) {
+      clearActiveCanvas();
+    }
     reconnectServer(targetServerUrl);
     const origin = ApiService.getServerOrigin();
-    if (origin !== previous) {
-      setCanvases([]);
-      if (!canvasOptions?.title) pendingServerLogin.current = origin;
+    const requestTarget = getCanvasTargetContext();
+    const stillCurrent = () =>
+      shouldCommitGatewayResolve({
+        resolveSeq,
+        latestResolveSeq: gatewayResolveSeqRef.current,
+        requestTarget,
+        currentTarget: getCanvasTargetContext(),
+      });
+    if (origin !== previous && !canvasOptions?.title) {
+      pendingServerLogin.current = origin;
     }
     setShowGateway(false);
-    // Transition and fetch canvases from target server
-    setTimeout(async () => {
+    // Transition and fetch canvases from target server while gatewayResolvingRef guards against races
+    gatewayTimerRef.current = window.setTimeout(async () => {
+      gatewayTimerRef.current = null;
       const opts = canvasOptions;
-      if (origin !== ApiService.getServerOrigin() || OfflineSessionStore.isOfflineMode()) {
-        if (creatingNewRoom) gatewayCreatingRoomRef.current = false;
+      if (!stillCurrent()) {
+        finishResolve();
         return;
       }
+      let resolvedRoom = false;
       try {
         if (opts?.openLogin) setIsAuthModalOpen(true);
         if (opts?.canvasId) {
           const list = await ApiService.listCanvases();
-          if (origin !== ApiService.getServerOrigin()) return;
+          if (!stillCurrent()) return;
           setCanvases(list);
-          if (list.some((c) => c.id === opts.canvasId)) {
-            joinCanvas(opts.canvasId);
-            return;
+          const savedCanvasId = typeof window !== 'undefined' ? localStorage.getItem('atelier_active_canvas_id') : null;
+          const targetId = resolveTargetCanvasId({
+            canvases: list,
+            pendingGatewayCanvasId: opts.canvasId,
+            liveActiveCanvasId: getActiveCanvasId(),
+            sharedRoomId: sharedRoomFromLocation(),
+            savedCanvasId,
+          });
+          gatewayCanvasRef.current = null;
+          if (targetId) {
+            joinCanvas(targetId);
+            resolvedRoom = true;
           }
         } else if (opts?.title) {
           // 建立新房間 / 建立畫布組房間 is explicit now (the name starts empty), so it always makes a new room and promotes the creator to room owner/admin
           const list = await ApiService.listCanvases();
-          if (origin !== ApiService.getServerOrigin()) return;
+          if (!stillCurrent()) return;
           const res = await ApiService.createCanvas({
             title: opts.title,
             width: opts.width || 2048,
@@ -403,34 +547,45 @@ export const App: React.FC = () => {
           if (opts.password && res.canvas?.id) {
             ApiService.setRoomPassword(res.canvas.id, opts.password);
           }
-          if (origin !== ApiService.getServerOrigin()) return;
-          setCanvases([...list, res.canvas]);
+          if (!stillCurrent()) return;
+          gatewayCanvasRef.current = null;
+          setCanvases(list.some((c) => c.id === res.canvas.id) ? list : [...list, res.canvas]);
           joinCanvas(res.canvas.id);
-          return;
+          resolvedRoom = true;
         }
       } catch (err: any) {
         if (opts?.title) alert(err?.message || '建立房間失敗');
       } finally {
-        if (creatingNewRoom) gatewayCreatingRoomRef.current = false;
+        finishResolve();
       }
-      if (origin === ApiService.getServerOrigin() && !authLoading) fetchCanvases();
+      if (!resolvedRoom && stillCurrent() && !authLoading) {
+        void fetchCanvases();
+      }
     }, 150);
   };
 
   useEffect(() => {
-    if (!showGateway && !authLoading && !gatewayCreatingRoomRef.current) {
+    if (!showGateway && !authLoading && !gatewayResolvingRef.current) {
       fetchCanvases();
     }
   }, [user?.id, showGateway, authLoading]);
 
   // Ensure valid canvas is auto-selected when canvases load
   useEffect(() => {
-    if (gatewayCreatingRoomRef.current) return;
-    if (canvases.length > 0 && !canvases.some((c) => c.id === activeCanvasId)) {
-      const savedCanvasId = typeof window !== 'undefined' ? localStorage.getItem('atelier_active_canvas_id') : null;
-      joinCanvas(canvases.find((c) => c.id === savedCanvasId)?.id ?? canvases[0].id);
+    const savedCanvasId = typeof window !== 'undefined' ? localStorage.getItem('atelier_active_canvas_id') : null;
+    const fallbackId = resolveAutoSelectCanvasId({
+      showGateway,
+      gatewayResolving: gatewayResolvingRef.current,
+      canvases,
+      activeCanvasId,
+      pendingGatewayCanvasId: gatewayCanvasRef.current,
+      sharedRoomId: OfflineSessionStore.isOfflineMode() ? null : sharedRoomFromLocation(),
+      savedCanvasId,
+    });
+    if (fallbackId) {
+      joinCanvas(fallbackId);
     }
-  }, [canvases, activeCanvasId]);
+  }, [canvases, activeCanvasId, showGateway]);
 
   const currentCanvas = canvases.find((c) => c.id === activeCanvasId) || null;
 
@@ -510,17 +665,40 @@ export const App: React.FC = () => {
       if (!isCurrent()) return;
       setLayers(res);
 
+      const isOfflineCanvas = OfflineSessionStore.isOfflineCanvas(canvasId);
+      const isCanvasViewer = isCanvasViewerForUser({
+        user,
+        isGuest,
+        members,
+        canvasOwnerId: canvases.find((c) => c.id === canvasId)?.ownerId ?? null,
+      });
+      const drawCtx = { user, isGuest, isCanvasViewer };
+
       const localLastLayerId = !isGuest && user?.id ? ApiService.getLastDrawnLayerId(canvasId, user.id) : null;
-      const hintLayerId = [localLastLayerId, serverLastLayerId].find((id) =>
-        Boolean(id && res.some((l) => l.id === id && l.layerType !== 'group' && !l.isLocked))
-      ) ?? null;
+      const hintLayerId = [localLastLayerId, serverLastLayerId].find((id) => {
+        if (!id) return false;
+        const candidate = res.find((l) => l.id === id);
+        return Boolean(candidate && isLayerDrawableForUser(candidate, drawCtx, res));
+      }) ?? null;
 
       const tryKey = `${canvasId}:${user?.id}`;
-      if (autoAssign && res.length > 0 && !isGuest && user && !hintLayerId && !autoLayerTriedRef.current.has(tryKey) && !ownsDrawableLayer(res, user.id)) {
+      const skipAutoAssign = shouldSkipAutoAssign({
+        autoAssign,
+        isOfflineCanvas,
+        authLoading,
+        layers: res,
+        hintLayerId,
+        alreadyTried: autoLayerTriedRef.current.has(tryKey),
+        ctx: drawCtx,
+      });
+      if (!skipAutoAssign && user) {
         autoLayerTriedRef.current.add(tryKey);
         try {
+          const ownerLabel = isOfflineCanvas
+            ? (user.displayName || user.username || '本機畫師')
+            : sanitizeOnlineGuestName(user.displayName || user.username, user.username || '畫師');
           const mine = await ApiService.createLayer(canvasId, {
-            name: `${user.displayName || user.username} 的圖層`,
+            name: `${ownerLabel} 的圖層`,
             blendMode: 'normal',
             layerType: 'raster',
             isPublic: false,
@@ -546,15 +724,10 @@ export const App: React.FC = () => {
           return;
         }
 
-        // Priority 3: Jump to the user's last-drawn layer, or own UNLOCKED layer, or public unlocked layer
-        const topFirst = [...res].reverse().filter((layer) => layer.layerType !== 'group' && layer.layerType !== 'mask');
-        const lastDrawnLayer = hintLayerId ? res.find((l) => l.id === hintLayerId) : undefined;
-        const myUnlockedLayer = topFirst.find((l) => l.ownerId === user?.id && !l.isLocked);
-        const publicUnlockedLayer = topFirst.find((l) => (l.isPublic || l.aclMode === 'shared_all' || !l.ownerId) && !l.isLocked);
-        const topUnlocked = topFirst.find((l) => !l.isLocked);
-        const targetLayer = lastDrawnLayer || myUnlockedLayer || publicUnlockedLayer || topUnlocked || topFirst[0];
+        // Priority 3: Jump to the best drawable/claimable layer for this user
+        const targetLayer = pickBestInitialLayer(res, drawCtx, hintLayerId);
         setActiveLayerId(targetLayer?.id ?? null);
-      } else if (!isGuest) {
+      } else if (!isGuest && !isCanvasViewer && !(!isOfflineCanvas && isLocalArtistUser(user))) {
         // If canvas has zero layers, automatically create an initial collaborative layer
         try {
           const initialLayer = await ApiService.createLayer(canvasId, {
@@ -579,14 +752,18 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     let cancelled = false;
-    const userChanged = lastLayerUserIdRef.current !== user?.id;
-    lastLayerUserIdRef.current = user?.id;
-    // A locked room's layers are refused until it is unlocked; this runs again then
-    if (activeCanvasId && !roomLocked) {
+    // A locked room's layers are refused until it is unlocked; do not fetch/autoAssign while the gateway is open
+    if (activeCanvasId && !roomLocked && !showGateway) {
+      const isOfflineCanvas = OfflineSessionStore.isOfflineCanvas(activeCanvasId);
+      if (!isOfflineCanvas && (authLoading || isLocalArtistUser(user))) {
+        return () => { cancelled = true; };
+      }
+      const userChanged = lastLayerUserIdRef.current !== user?.id;
+      lastLayerUserIdRef.current = user?.id;
       fetchLayers(activeCanvasId, null, () => cancelled, true, userChanged);
     }
     return () => { cancelled = true; };
-  }, [activeCanvasId, user?.id, roomLocked]);
+  }, [activeCanvasId, user?.id, roomLocked, authLoading, showGateway]);
 
   // Another painter (or this user's other tab) resized a canvas: the workspace rebuilds at the new size
   useEffect(() => {
@@ -625,6 +802,7 @@ export const App: React.FC = () => {
       return;
     }
     const res = await ApiService.createCanvas(dto);
+    uncloseOfflineCanvas(res.canvas.id);
     setCanvases((prev) => [...prev, res.canvas]);
     joinCanvas(res.canvas.id);
   };
@@ -640,14 +818,43 @@ export const App: React.FC = () => {
 
   const handleDeleteCanvas = async (canvasId: string) => {
     try {
+      const nextId = activeCanvasId === canvasId ? resolveNextCanvasAfterClose(canvases, canvasId) : null;
       await ApiService.deleteCanvas(canvasId);
+      uncloseOfflineCanvas(canvasId);
       const remaining = canvases.filter((c) => c.id !== canvasId);
       setCanvases(remaining);
-      if (activeCanvasId === canvasId && remaining.length > 0) {
-        joinCanvas(remaining[0].id);
+      if (activeCanvasId === canvasId) {
+        if (nextId) {
+          joinCanvas(nextId);
+        } else if (remaining.length > 0) {
+          joinCanvas(remaining[0].id);
+        } else if (OfflineSessionStore.isOfflineMode()) {
+          clearActiveCanvas();
+          returningToGateway.current = true;
+          setShowGateway(true);
+        }
       }
     } catch (err: any) {
       alert(err.message || '無法刪除畫布');
+    }
+  };
+
+  const handleCloseOfflineCanvas = async (canvas: CanvasModel) => {
+    if (!OfflineSessionStore.isOfflineMode() || !OfflineSessionStore.isOfflineCanvas(canvas.id)) return;
+    await OfflineSessionStore.flushPendingWrites().catch(console.error);
+    const nextId = activeCanvasId === canvas.id ? resolveNextCanvasAfterClose(canvases, canvas.id) : null;
+    closedOfflineTabsRef.current.add(canvas.id);
+    saveClosedOfflineCanvasIds(closedOfflineTabsRef.current);
+    const remaining = canvases.filter((c) => c.id !== canvas.id);
+    setCanvases(remaining);
+    if (activeCanvasId === canvas.id) {
+      if (nextId) {
+        joinCanvas(nextId);
+      } else {
+        clearActiveCanvas();
+        returningToGateway.current = true;
+        setShowGateway(true);
+      }
     }
   };
 
@@ -843,7 +1050,8 @@ export const App: React.FC = () => {
   /** Deletes a layer; a group goes with everything inside it (other painters' layers in it move up out of it) */
   const handleDeleteLayer = async (layerId: string, opts?: { keepContents?: boolean }): Promise<{ deleted: string[]; lifted: string[] } | false> => {
     if (!activeCanvasId) return false;
-    const target = layers.find((l) => l.id === layerId);
+    const liveLayers = layersRef.current;
+    const target = liveLayers.find((l) => l.id === layerId);
     const isOwner = target && user?.id === target.ownerId;
     const isAdmin = user?.serverRole === 'admin';
     if (!isOwner && !isAdmin) {
@@ -859,10 +1067,11 @@ export const App: React.FC = () => {
       const gone = new Set(deleted);
       const isGone = (l: LayerModel) => gone.has(l.id) || (l.layerType === 'mask' && Boolean(l.parentId) && gone.has(l.parentId!));
       setLayers((prev) => prev.filter((l) => !isGone(l)).map((l) => (lifted.includes(l.id) ? { ...l, parentId: target?.parentId ?? null } : l)));
-      const active = layers.find((l) => l.id === activeLayerId);
+      const latestLayers = layersRef.current;
+      const active = latestLayers.find((l) => l.id === activeLayerIdRef.current);
       if (!active || isGone(active)) {
         // The layer right below what went, else the top one
-        const left = layers.filter((l) => !isGone(l) && l.layerType !== 'mask').sort((a, b) => b.sortOrder - a.sortOrder);
+        const left = latestLayers.filter((l) => !isGone(l) && l.layerType !== 'mask').sort((a, b) => b.sortOrder - a.sortOrder);
         const next = left.find((l) => target && l.sortOrder < target.sortOrder && !lifted.includes(l.id)) ?? left[0];
         if (next) setActiveLayerId(next.id);
       }
@@ -1085,6 +1294,7 @@ export const App: React.FC = () => {
         const collaborative = !OfflineSessionStore.canUseOfflineMode() || (!locally && !showGateway && !OfflineSessionStore.isOfflineMode());
         const unpacked = await LuminaProjectEngine.unpackProject(data, filePath);
         if (!collaborative && !OfflineSessionStore.isOfflineMode()) {
+          clearActiveCanvas();
           OfflineSessionStore.setSessionMode('offline');
           reconnectServer('offline');
         }
@@ -1093,6 +1303,7 @@ export const App: React.FC = () => {
           shareEditableLayers: collaborative,
           groupId: collaborative && group?.ownerId === user?.id ? group?.id : undefined,
         });
+        uncloseOfflineCanvas(restored.id);
         if (unpacked.previewDataUrl) {
           handleCanvasThumbnail(restored.id, unpacked.previewDataUrl);
         }
@@ -1246,6 +1457,8 @@ export const App: React.FC = () => {
       onOpenCreateModal={() => setIsCreateModalOpen(true)}
       onRenameCanvas={handleRenameCanvas}
       onRequestDeleteCanvas={(canvas) => setCanvasToDelete(canvas)}
+      isOfflineMode={OfflineSessionStore.isOfflineMode()}
+      onCloseCanvas={(canvas) => void handleCloseOfflineCanvas(canvas)}
     />
   );
 
@@ -1388,6 +1601,7 @@ export const App: React.FC = () => {
               onTransferLayer={handleTransferLayer}
               roomMembers={members}
               onOpenChat={() => setIsChatOpen(true)}
+              onOpenAuth={() => setIsAuthModalOpen(true)}
               onQuickEnterCanvas={async () => {
                 if (canvases.length > 0) {
                   joinCanvas(canvases[0].id);
@@ -1421,6 +1635,7 @@ export const App: React.FC = () => {
               onRegisterBakeScreentone={(fn) => {
                 bakeScreentoneRef.current = fn;
               }}
+              onRegisterRecordLayerCreation={registerRecordLayerCreation}
             />
             </Suspense>
         )}
@@ -1644,7 +1859,11 @@ export const App: React.FC = () => {
       <CreateMyLayerModal
         isOpen={isCreateMyLayerModalOpen}
         onClose={() => setIsCreateMyLayerModalOpen(false)}
-        onCreateLayer={handleCreateLayer}
+        onCreateLayer={async (name, blendMode, layerType) => {
+          const created = await handleCreateLayer(name, blendMode, layerType);
+          if (created) recordLayerCreationRef.current?.(created);
+          return created;
+        }}
       />
 
       <OverlayPresence open={isCapsuleModalOpen}>

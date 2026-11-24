@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ChevronDown, ChevronRight, ChevronUp, Folder, FolderOpen, GripHorizontal, ImageOff, Lock, Pencil, Plus, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, ChevronUp, Folder, FolderOpen, GripHorizontal, ImageOff, Lock, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { CanvasModel } from '@atelier/shared';
 import { useAuth } from '../context/AuthContext';
 import { getUserColor } from '../utils/userColors';
@@ -27,6 +27,8 @@ interface CanvasTabsBarProps {
   onOpenCreateModal: () => void;
   onRenameCanvas: (canvasId: string, newTitle: string) => void;
   onRequestDeleteCanvas: (canvas: CanvasModel) => void;
+  isOfflineMode?: boolean;
+  onCloseCanvas?: (canvas: CanvasModel) => void;
 }
 
 /**
@@ -44,6 +46,8 @@ export const CanvasTabsBar: React.FC<CanvasTabsBarProps> = ({
   onOpenCreateModal,
   onRenameCanvas,
   onRequestDeleteCanvas,
+  isOfflineMode = false,
+  onCloseCanvas,
 }) => {
   const { user } = useAuth();
   const { t } = useI18n();
@@ -103,16 +107,16 @@ export const CanvasTabsBar: React.FC<CanvasTabsBarProps> = ({
     activeRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }, [activeCanvasId, canvases.length, expanded]);
 
-  const canManage = (canvas: CanvasModel) => user?.serverRole === 'admin' || user?.id === canvas.ownerId;
+  const canManage = (canvas: CanvasModel) => isOfflineMode || user?.serverRole === 'admin' || user?.id === canvas.ownerId;
   /** Same colour language as the layer list: owner-colour edge; someone else's canvas also gets a wash of their colour */
   const ownerStyle = (canvas: CanvasModel): React.CSSProperties => {
     const hex = getUserColor(canvas.ownerId).hex;
     // A border, not box-shadow: the active tab's ring is a box-shadow
-    return user?.id === canvas.ownerId
+    return isOfflineMode || user?.id === canvas.ownerId
       ? { borderLeft: `3px solid ${hex}` }
       : { borderLeft: `3px solid ${hex}`, backgroundImage: `linear-gradient(90deg, ${hex}33, transparent 70%)` };
   };
-  const ownerTitle = (canvas: CanvasModel) => (user?.id === canvas.ownerId ? t.canvas.myCanvas : t.canvas.otherCanvas);
+  const ownerTitle = (canvas: CanvasModel) => (isOfflineMode || user?.id === canvas.ownerId ? t.canvas.myCanvas : t.canvas.otherCanvas);
 
   const startRename = (canvas: CanvasModel, e: React.SyntheticEvent) => {
     e.stopPropagation();
@@ -148,16 +152,40 @@ export const CanvasTabsBar: React.FC<CanvasTabsBarProps> = ({
     />
   );
 
-  const actions = (canvas: CanvasModel) => canManage(canvas) && (
-    <span className="flex shrink-0 items-center opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
-      <button type="button" onClick={(e) => startRename(canvas, e)} title={t.canvas.renameCanvas} aria-label={`${t.canvas.renameCanvas} ${canvas.title}`}
-        className="atelier-icon-btn h-6 w-6"><Pencil className="h-3 w-3" /></button>
-      {canvases.length > 1 && (
-        <button type="button" onClick={(e) => { e.stopPropagation(); onRequestDeleteCanvas(canvas); }} title={t.canvas.deleteCanvas} aria-label={`${t.canvas.deleteCanvas} ${canvas.title}`}
-          className="atelier-icon-btn h-6 w-6 hover:!text-rose-400"><X className="h-3.5 w-3.5" /></button>
-      )}
-    </span>
-  );
+  const actions = (canvas: CanvasModel, active: boolean) => {
+    if (isOfflineMode && onCloseCanvas) {
+      return (
+        <span className="flex shrink-0 items-center">
+          <span className="flex shrink-0 items-center opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
+            <button type="button" onClick={(e) => startRename(canvas, e)} title={t.canvas.renameCanvas} aria-label={`${t.canvas.renameCanvas} ${canvas.title}`}
+              className="atelier-icon-btn h-6 w-6"><Pencil className="h-3 w-3" /></button>
+            <button type="button" onClick={(e) => { e.stopPropagation(); onRequestDeleteCanvas(canvas); }} title={t.canvas.deleteCanvas} aria-label={`${t.canvas.deleteCanvas} ${canvas.title}`}
+              className="atelier-icon-btn h-6 w-6 hover:!text-rose-400"><Trash2 className="h-3 w-3" /></button>
+          </span>
+          <button
+            type="button"
+            data-close-offline-canvas={canvas.id}
+            onClick={(e) => { e.stopPropagation(); onCloseCanvas(canvas); }}
+            title={t.canvas.closeCanvasHint}
+            aria-label={`${t.canvas.closeCanvas} ${canvas.title}`}
+            className={`atelier-icon-btn h-6 w-6 hover:!text-amber-300 ${active ? 'opacity-90' : 'opacity-65 group-hover:opacity-100 group-focus-within:opacity-100'}`}
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </span>
+      );
+    }
+    return canManage(canvas) && (
+      <span className="flex shrink-0 items-center opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
+        <button type="button" onClick={(e) => startRename(canvas, e)} title={t.canvas.renameCanvas} aria-label={`${t.canvas.renameCanvas} ${canvas.title}`}
+          className="atelier-icon-btn h-6 w-6"><Pencil className="h-3 w-3" /></button>
+        {canvases.length > 1 && (
+          <button type="button" onClick={(e) => { e.stopPropagation(); onRequestDeleteCanvas(canvas); }} title={t.canvas.deleteCanvas} aria-label={`${t.canvas.deleteCanvas} ${canvas.title}`}
+            className="atelier-icon-btn h-6 w-6 hover:!text-rose-400"><X className="h-3.5 w-3.5" /></button>
+        )}
+      </span>
+    );
+  };
 
   const renderTab = (canvas: CanvasModel, inGroup = false) => {
     const active = canvas.id === activeCanvasId;
@@ -175,7 +203,7 @@ export const CanvasTabsBar: React.FC<CanvasTabsBarProps> = ({
         {canvas.hasPassword && <Lock className="h-3 w-3 shrink-0 text-amber-400" aria-label="密碼房" />}
         {!inGroup && canvas.group && <span className="max-w-16 shrink-0 truncate text-[10px] text-indigo-300" title={canvas.group.title}>{canvas.group.title}</span>}
         {editingId === canvas.id ? renameInput(canvas, 'w-32') : <span className="truncate">{canvas.title}</span>}
-        {editingId !== canvas.id && actions(canvas)}
+        {editingId !== canvas.id && actions(canvas, active)}
       </div>
     );
   };
@@ -209,7 +237,7 @@ export const CanvasTabsBar: React.FC<CanvasTabsBarProps> = ({
                   {!inGroup && canvas.group && <span className="block truncate text-[10px] text-indigo-300">{canvas.group.title}</span>}
                   <span className="block text-[10px] tabular-nums text-neutral-500">{canvas.width} × {canvas.height}</span>
                 </span>
-                {actions(canvas)}
+                {actions(canvas, active)}
               </>
             )}
         </div>

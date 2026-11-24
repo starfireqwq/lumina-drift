@@ -1,5 +1,16 @@
 import React, { createContext, useContext, useLayoutEffect, useState } from 'react';
-import { applyTheme, CustomThemeSettings, loadThemeSettings, resolveTheme, saveThemeSettings, ThemeId } from '../theme/themes';
+import {
+  applySurfaceStyle,
+  applyTheme,
+  CustomThemeSettings,
+  loadSurfaceStyle,
+  loadThemeSettings,
+  resolveTheme,
+  saveSurfaceStyle,
+  saveThemeSettings,
+  SurfaceStyle,
+  ThemeId,
+} from '../theme/themes';
 import { detectLanguage, LANGUAGE_STORAGE_KEY, translations, type Language, type Translations } from '../locales';
 
 export type { Language, Translations };
@@ -17,6 +28,8 @@ interface I18nContextType {
   setThemeId: (id: ThemeId) => void;
   customTheme: CustomThemeSettings;
   setCustomTheme: (custom: CustomThemeSettings) => void;
+  surfaceStyle: SurfaceStyle;
+  setSurfaceStyle: (surface: SurfaceStyle) => void;
 }
 
 const I18nContext = createContext<I18nContextType | undefined>(undefined);
@@ -27,6 +40,7 @@ export const I18nProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [themeState, setThemeState] = useState(loadThemeSettings);
   const { id: themeId, custom: customTheme } = themeState;
   const theme: 'dark' | 'light' = resolveTheme(themeId, customTheme).base === 'light' ? 'light' : 'dark';
+  const [surfaceStyle, setSurfaceStyleState] = useState<SurfaceStyle>(loadSurfaceStyle);
 
   const setLanguage = (lang: Language) => {
     setLanguageState(lang);
@@ -37,12 +51,18 @@ export const I18nProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const setCustomTheme = (custom: CustomThemeSettings) => setThemeState({ id: 'custom', custom });
   const setTheme = (newTheme: 'dark' | 'light') => setThemeId(newTheme);
   const toggleTheme = () => setThemeId(theme === 'dark' ? 'light' : 'dark');
+  const setSurfaceStyle = (surface: SurfaceStyle) => setSurfaceStyleState(surface);
 
   // Layout effect: the theme is on the page in the same commit (the animated switch snapshots right after it)
   useLayoutEffect(() => {
     applyTheme(themeId, customTheme);
     saveThemeSettings(themeId, customTheme);
   }, [themeId, customTheme]);
+
+  useLayoutEffect(() => {
+    applySurfaceStyle(surfaceStyle);
+    saveSurfaceStyle(surfaceStyle);
+  }, [surfaceStyle]);
 
   const value: I18nContextType = {
     language,
@@ -55,6 +75,8 @@ export const I18nProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setThemeId,
     customTheme,
     setCustomTheme,
+    surfaceStyle,
+    setSurfaceStyle,
   };
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;

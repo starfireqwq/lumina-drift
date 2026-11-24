@@ -1,4 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { createPortal } from 'react-dom';
 import type { PluginAction, PluginManifestModern } from '../plugins/pluginApi';
 import type { PluginV2Result } from '../plugins/pluginRpc';
 import {
@@ -28,6 +29,12 @@ import {
 import { startPluginToolSessionInWorker } from '../plugins/runPlugin';
 import { Application, Container, type Filter, Graphics, MaskFilter, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
 
+function getTargetDisplayResolution(): number {
+  if (typeof window === 'undefined') return 1;
+  const dpr = window.devicePixelRatio;
+  return Number.isFinite(dpr) && dpr > 0 ? Math.min(dpr, 2) : 1;
+}
+
 function parseWorkspaceBgColor(cssColor: string, fallback = 0x0d0e12): number {
   const s = cssColor.trim();
   if (!s) return fallback;
@@ -44,6 +51,7 @@ function parseWorkspaceBgColor(cssColor: string, fallback = 0x0d0e12): number {
   }
   return fallback;
 }
+import { getShowBrushCrosshair, subscribeShowBrushCrosshair } from '../engine/inputPreferences';
 import {
   AtelierBrushPreset,
   MIN_BRUSH_SPACING,
@@ -105,10 +113,11 @@ import { CanvasStickersOverlay } from './CanvasStickersOverlay';
 import { ColorWheelStudio } from './ColorWheelStudio';
 import { UserListPanel } from './UserListPanel';
 import { ToolRail } from './workspace/ToolRail';
-import { BrushSideSliders } from './workspace/BrushSideSliders';
+import { BrushSideSliders, MobileBrushSliders } from './workspace/BrushSideSliders';
 import { BezierMode, SelectionMode, ToolOptionsBar } from './workspace/ToolOptionsBar';
-import { DockColumn, DockRow, FloatingPanels, MobilePanelSheet, PanelDef } from './workspace/DockSystem';
-import { dockActions, PanelId, PANEL_TITLES, useDockLayout, usePhoneLayout } from './workspace/dockStore';
+import { DockColumn, DockRow, FloatingPanels, MobilePanelSheet, type MobilePanelDef, PanelDef, ToolDockSlot } from './workspace/DockSystem';
+import { dockActions, PanelId, PANEL_TITLES, useDockLayout, useFloatsAllowed, usePhoneLayout, useTouchTabletLayout } from './workspace/dockStore';
+import { TouchSideIsland, TouchToolIsland } from './workspace/TouchCanvasChrome';
 import { ALL_TOOLS, MAX_BRUSH_SIZE, nextSizeStep } from './workspace/toolCatalog';
 import { RemoteCursorsLayer } from './workspace/RemoteCursorsLayer';
 import { OpLogPanel } from './workspace/OpLogPanel';
@@ -219,7 +228,7 @@ import { PluginFilterWorkerClient } from '../plugins/pluginFilterClient';
 import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../utils/filterMemoryGuard';
 import type { FilterTargetOptions } from './FilterTargetBar';
 import { AtelierModal, modalButton } from './AtelierModal';
-import { AlertCircle, Eye, ImagePlus, Keyboard, Layers, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
+import { AlertCircle, AlignCenter, Eye, Grid2x2, ImagePlus, Keyboard, Layers, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
 import { type DroppedImages, type ImageDropTarget, ImageImportError, imageEntries, isImageDrag, loadImageEntry, readDroppedImages } from '../utils/imageImport';
 
 /** Where a key types text (a text field), unlike a focused button, slider, checkbox or the page */
@@ -414,9 +423,11 @@ interface CanvasWorkspaceProps {
   onRegisterPluginAccess?: (access: CanvasPluginAccess | null) => void;
   onActivePluginToolChange?: (toolKey: string | null) => void;
   onRegisterBakeScreentone?: (fn: (layerId: string, params: { density: number; angleRad: number; dotScale: number }) => void) => void;
+  onRegisterRecordLayerCreation?: (fn: ((created: LayerModel) => void) | null) => void;
   onQuickEnterCanvas?: () => void;
   onQuickCreateCanvas?: () => void;
   onOpenChat?: () => void;
+  onOpenAuth?: () => void;
   onThumbnailsChange?: (thumbnails: Record<string, string>) => void;
 }
 
@@ -446,9 +457,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   onUpdateLayerProps,
   onRegisterGetLayerCanvases,
   onRegisterBakeScreentone,
+  onRegisterRecordLayerCreation,
   onQuickEnterCanvas,
   onQuickCreateCanvas,
   onOpenChat,
+  onOpenAuth,
   onThumbnailsChange,
 }) => {
   const { isGuest, user } = useAuth();
@@ -496,31 +509,41 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     Boolean(canvas && user?.id && canvas.ownerId === user.id);
   // A phone keeps this layout when turned sideways; 桌面模式 switches it to the desktop layout.
   const isPhone = usePhoneLayout();
+  const isTouchTablet = useTouchTabletLayout();
+  const isTouchCanvasMode = isPhone || isTouchTablet;
   const { t, language } = useI18n();
   const dockLayout = useDockLayout();
-  const railRight = !isPhone && dockLayout.railSide === 'right';
-  const [mobileSheet, setMobileSheet] = useState<PanelId | null>(null);
-  const openMobileSheet = (id: PanelId) => {
+  const floatsAllowed = useFloatsAllowed();
+  const [toolDockHosts] = useState(() => {
+    const align = document.createElement('div');
+    const filters = document.createElement('div');
+    align.className = 'contents';
+    filters.className = 'contents';
+    return { align, filters };
+  });
+  const railRight = !isTouchCanvasMode && dockLayout.railSide === 'right';
+  const [mobileSheet, setMobileSheet] = useState<MobilePanelDef['id'] | null>(null);
+  const openMobileSheet = (id: MobilePanelDef['id']) => {
     if (dockLayout.panels.members.visible) dockActions.hide('members');
     if (dockLayout.panels.oplog.visible) dockActions.hide('oplog');
     setMobileSheet(id);
   };
   const openBrushToolset = () => {
-    if (isPhone) openMobileSheet('brushToolset');
+    if (isTouchCanvasMode) openMobileSheet('brushToolset');
     else dockActions.activate('brushToolset');
   };
   const membersPanelVisible = dockLayout.panels.members.visible;
   const oplogPanelVisible = dockLayout.panels.oplog.visible;
   useEffect(() => {
-    if (!isPhone) return;
+    if (!isTouchCanvasMode) return;
     if (membersPanelVisible) setMobileSheet('members');
     else setMobileSheet((curr) => (curr === 'members' ? null : curr));
-  }, [isPhone, membersPanelVisible]);
+  }, [isTouchCanvasMode, membersPanelVisible]);
   useEffect(() => {
-    if (!isPhone) return;
+    if (!isTouchCanvasMode) return;
     if (oplogPanelVisible) setMobileSheet('oplog');
     else setMobileSheet((curr) => (curr === 'oplog' ? null : curr));
-  }, [isPhone, oplogPanelVisible]);
+  }, [isTouchCanvasMode, oplogPanelVisible]);
 
   const workspaceRef = useRef<HTMLDivElement>(null);
   const hasCanvas = Boolean(canvas);
@@ -544,6 +567,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const [isEngineReady, setIsEngineReady] = useState<boolean>(false);
   const [isCanvasPresented, setIsCanvasPresented] = useState(false);
   const requestRenderRef = useRef<() => void>(() => pixiAppRef.current?.render());
+  const setPlaybackResolutionRef = useRef<(reduced: boolean) => void>(() => {});
   const presentCanvas = useCallback(() => {
     pixiAppRef.current?.render();
     setIsCanvasPresented(true);
@@ -681,13 +705,20 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const vp = viewportRef.current;
     const c = canvasMetaRef.current;
     if (!cameraPreviewActiveRef.current || !cam || !cam.isVisible || !cam.meta?.camera || !vp || !c) return;
-    const rect = containerRef.current?.getBoundingClientRect();
-    const viewW = rect?.width || pixiAppRef.current?.screen.width || window.innerWidth;
-    const viewH = rect?.height || pixiAppRef.current?.screen.height || window.innerHeight;
+    const screen = pixiAppRef.current?.screen;
+    const viewW = screen?.width || window.innerWidth;
+    const viewH = screen?.height || window.innerHeight;
     const ev = evaluateCameraFrame(cam.meta.camera, cam.meta.keyframes, frame, c.width, c.height);
     const pv = computeCameraPreviewViewport(ev, c.width, c.height, viewW, viewH);
-    vp.setState({ zoom: pv.zoom, panX: pv.panX, panY: pv.panY, rotation: pv.rotation, mirrorX: false });
-    setCameraPreviewRect(pv.frameRect);
+    const current = vp.getState();
+    if (current.zoom !== pv.zoom || current.panX !== pv.panX || current.panY !== pv.panY ||
+        current.rotation !== pv.rotation || current.mirrorX) {
+      vp.setState({ zoom: pv.zoom, panX: pv.panX, panY: pv.panY, rotation: pv.rotation, mirrorX: false });
+    }
+    setCameraPreviewRect((rect) => {
+      const next = pv.frameRect;
+      return rect && rect.x === next.x && rect.y === next.y && rect.width === next.width && rect.height === next.height ? rect : next;
+    });
   }, []);
   const syncCameraPreviewViewportRef = useRef(syncCameraPreviewViewport);
   syncCameraPreviewViewportRef.current = syncCameraPreviewViewport;
@@ -1234,6 +1265,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     rotation: 0,
     mirrorX: false,
   });
+  const lastZoomDisplayScaleRef = useRef<number>(1);
   const viewportSubsRef = useRef(new Set<() => void>());
   const viewportZoomSubsRef = useRef(new Set<() => void>());
   const subscribeViewport = useCallback((cb: () => void) => {
@@ -1250,12 +1282,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     viewportStateRef.current = next;
     viewportSubsRef.current.forEach((cb) => cb());
     const prevZ = viewportZoomStateRef.current;
+    const curDisplayScale = viewportRef.current?.getDisplayScale() ?? getTargetDisplayResolution();
     if (
       Math.abs(prevZ.zoom - next.zoom) > 1e-6 ||
       Math.abs(prevZ.rotation - next.rotation) > 1e-6 ||
-      prevZ.mirrorX !== next.mirrorX
+      prevZ.mirrorX !== next.mirrorX ||
+      Math.abs(lastZoomDisplayScaleRef.current - curDisplayScale) > 1e-6
     ) {
-      viewportZoomStateRef.current = next;
+      lastZoomDisplayScaleRef.current = curDisplayScale;
+      viewportZoomStateRef.current = { ...next };
       viewportZoomSubsRef.current.forEach((cb) => cb());
     }
   }, []);
@@ -1283,6 +1318,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const [showBrushSize, setShowBrushSize] = useState(false);
   // The side size slider is being dragged: the canvas centre shows the brush at its real on-screen size
   const [sizeDragging, setSizeDragging] = useState(false);
+  useEffect(() => setSizeDragging(false), [isPhone, mobileSheet]);
   const brushSizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Each brush tool (筆刷／鉛筆／橡皮擦) remembers its own settings on this device
@@ -1420,7 +1456,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     : currentTool === 'liquify' ? liquifyRadius * 2
     : currentTool === 'blur' || currentTool === 'smudge' || vectorCursorClass ? brushProps.size * 2
     : brushProps.size;
+  const showBrushCrosshair = useSyncExternalStore(subscribeShowBrushCrosshair, getShowBrushCrosshair, getShowBrushCrosshair);
   const showBrushCursor = !activePluginTool && (eraserHover || Boolean(vectorCursorClass) || ['brush', 'pencil', 'eraser', 'liquify', 'blur', 'smudge', 'select_brush', 'select_eraser'].includes(currentTool));
+  const defaultCanvasCursorClass = !activePluginTool && currentTool === 'hand'
+    ? 'cursor-grab'
+    : showBrushCursor && !showBrushCrosshair
+      ? 'cursor-none'
+      : 'cursor-crosshair';
 
   // The number the options bar / [ ] keys edit: liquify keeps its own radius, the rest the brush size
   const sizeValue = currentTool === 'liquify' ? liquifyRadius : brushProps.size;
@@ -1626,6 +1668,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
     let destroyed = false;
     let resizeObserver: ResizeObserver | null = null;
+    let syncDisplayResolution: ((nextWidth?: number, nextHeight?: number) => void) | null = null;
+    let unbindDprWatcher: (() => void) | null = null;
     let themeObserver: MutationObserver | null = null;
     let renderRaf = 0;
     let handleKeyDown: ((ev: KeyboardEvent) => void) | null = null;
@@ -1634,7 +1678,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     let activeFlipKeyCode: string | null = null;
     let vpSyncRaf = 0;
     const invalidateContainerRect = () => { containerRectRef.current = null; };
-    window.addEventListener('resize', invalidateContainerRect, { passive: true });
+    const handleWindowResize = () => {
+      invalidateContainerRect();
+      syncDisplayResolution?.();
+    };
+    window.addEventListener('resize', handleWindowResize, { passive: true });
     window.addEventListener('scroll', invalidateContainerRect, { capture: true, passive: true });
     let app = new Application();
 
@@ -1663,7 +1711,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           // the back buffer (Pixi turns screen MSAA off with it; layers are render textures anyway)
           useBackBuffer: true,
           antialias: false,
-          resolution: Math.min(window.devicePixelRatio || 1, 2),
+          resolution: getTargetDisplayResolution(),
           autoDensity: true,
           eventMode: 'none',
           eventFeatures: { move: false, globalMove: false, click: false, wheel: false },
@@ -1679,7 +1727,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           backgroundColor: initialBgColor,
           backgroundAlpha: 1,
           useBackBuffer: true,
-          resolution: 1,
+          resolution: getTargetDisplayResolution(),
           autoDensity: true,
           eventMode: 'none',
           eventFeatures: { move: false, globalMove: false, click: false, wheel: false },
@@ -1715,7 +1763,16 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       const currentRect = container.getBoundingClientRect();
       viewWidth = Math.max(1, currentRect.width);
       viewHeight = Math.max(1, currentRect.height);
-      app.renderer.resize(viewWidth, viewHeight);
+      app.renderer.resize(viewWidth, viewHeight, getTargetDisplayResolution());
+      let editingResolution = app.renderer.resolution;
+      let playbackReduced = false;
+      setPlaybackResolutionRef.current = (reduced) => {
+        playbackReduced = reduced;
+        const resolution = reduced ? Math.max(0.75, editingResolution * 0.75) : editingResolution;
+        if (destroyed || Math.abs(resolution - app.renderer.resolution) <= 1e-4) return;
+        app.renderer.resize(viewWidth, viewHeight, resolution);
+        scheduleRender();
+      };
       mount.replaceChildren(app.canvas);
       app.canvas.style.touchAction = 'none';
       app.canvas.style.width = '100%';
@@ -1740,6 +1797,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
       // 1. Viewport
       const viewport = new CanvasViewport(canvas.width, canvas.height);
+      viewport.setDisplayScale(editingResolution);
       viewport.setDomElement(app.canvas);
       viewportRef.current = viewport;
       app.stage.eventMode = 'none';
@@ -1753,11 +1811,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         app.renderer,
         canvas.width,
         canvas.height,
-        canvas.bgColor
+        canvas.bgColor,
+        OfflineSessionStore.isOfflineCanvas(canvas.id)
       );
       layerManagerRef.current = layerManager;
-      // Zoomed out, the layers are sampled from mip levels (smooth like CSP instead of jagged)
-      prepareLayerView = () => layerManager.prepareView(viewport.getState().zoom * app.renderer.resolution);
+      prepareLayerView = () => {
+        const deviceScale = viewport.getState().zoom * app.renderer.resolution;
+        layerManager.setPixelated(deviceScale >= 1 - 1e-6);
+        layerManager.prepareView(deviceScale);
+      };
       const syncViewportBounds = () => {
         if (destroyed) return;
         const w = app.screen.width || viewWidth;
@@ -1766,20 +1828,23 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       };
       let pendingVpState: ViewportState | null = null;
       let vpBoundsDirty = false;
-      let lastDispatchedZoom = viewport.getState().zoom;
+      let lastDispatchedZoom = -1;
+      let lastDispatchedDisplayScale = -1;
       const flushViewportBoundsAndZoom = () => {
         if (destroyed || !vpBoundsDirty) return;
         vpBoundsDirty = false;
         syncViewportBounds();
         const st = pendingVpState ?? viewport.getState();
-        if (Math.abs(st.zoom - lastDispatchedZoom) > 1e-6) {
+        const curDisplayScale = viewport.getDisplayScale();
+        if (
+          Math.abs(st.zoom - lastDispatchedZoom) > 1e-6 ||
+          Math.abs(curDisplayScale - lastDispatchedDisplayScale) > 1e-6
+        ) {
           lastDispatchedZoom = st.zoom;
-          layerManager.setPixelated(
-            st.zoom >= 2 || (st.zoom > 1 && brushPropsRef.current?.antiAlias === 'none')
-          );
+          lastDispatchedDisplayScale = curDisplayScale;
           selectionEngineRef.current?.setViewScale(st.zoom);
           if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('atelier:zoom', { detail: st.zoom }));
+            window.dispatchEvent(new CustomEvent('atelier:zoom', { detail: st.zoom * curDisplayScale }));
           }
         }
       };
@@ -1799,8 +1864,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         scheduleRender();
         if (!vpSyncRaf) vpSyncRaf = requestAnimationFrame(flushViewportSync);
       });
-      notifyViewportSubs(viewport.getState());
-      syncViewportBounds();
+      const initialVp = viewport.getState();
+      notifyViewportSubs(initialVp);
+      vpBoundsDirty = true;
+      flushViewportBoundsAndZoom();
       layerManager.onStageChange = scheduleRender;
       layerManager.setActiveLayer(activeLayerRef.current?.id ?? null);
       // Thumbnails of parked layers are decoded when the page is idle
@@ -1870,7 +1937,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
       // 6. Stroke Pipeline with Tile Dirty Detection & Zero-Latency Ping-Pong
       const pipeline = new StrokePipeline(brushRenderer, layerManager, viewport, {
-        onEmitPreviewDabs: (dabs, isEraser) => {
+        coalesceTouch: OfflineSessionStore.isOfflineCanvas(canvas.id),
+        onEmitPreviewDabs: OfflineSessionStore.isOfflineCanvas(canvas.id) ? undefined : (dabs, isEraser) => {
           const currentLayer = activeLayerRef.current;
           const currentProps = brushPropsRef.current || brushProps;
           if (currentLayer && canvas) {
@@ -1892,27 +1960,76 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       pipeline.setActiveLayer(activeLayerRef.current?.id || null);
       scheduleRender();
 
-      // Keep the point at the center in place when a dock changes the workspace size.
+      syncDisplayResolution = (nextWidth = viewWidth, nextHeight = viewHeight) => {
+        if (destroyed) return;
+        const w = Math.max(1, nextWidth);
+        const h = Math.max(1, nextHeight);
+        const nextEditingRes = getTargetDisplayResolution();
+        const resChanged = Math.abs(nextEditingRes - editingResolution) > 1e-4;
+        const sizeChanged = Math.abs(w - viewWidth) > 1e-4 || Math.abs(h - viewHeight) > 1e-4;
+        if (!resChanged && !sizeChanged) return;
+
+        // Evaluate fit state before mutating displayScale or view dimensions
+        const wasFit = viewWidth <= 1 || viewHeight <= 1 || viewport.isFitTo(viewWidth, viewHeight);
+        const prevWidth = viewWidth;
+        const prevHeight = viewHeight;
+        editingResolution = nextEditingRes;
+        viewWidth = w;
+        viewHeight = h;
+
+        const targetRendererRes = playbackReduced ? Math.max(0.75, editingResolution * 0.75) : editingResolution;
+        app.renderer.resize(viewWidth, viewHeight, targetRendererRes);
+        if (resChanged) {
+          viewport.setDisplayScale(editingResolution);
+        }
+        if (wasFit) {
+          viewport.centerInView(viewWidth, viewHeight, true);
+        } else if (sizeChanged) {
+          viewport.panBy((viewWidth - prevWidth) / 2, (viewHeight - prevHeight) / 2);
+        }
+        vpBoundsDirty = true;
+        flushViewportBoundsAndZoom();
+        notifyViewportSubs(viewport.getState());
+        // Resizing the WebGL backbuffer clears it immediately; re-render synchronously before paint to eliminate flicker
+        prepareLayerView?.();
+        app.render();
+      };
+
+      const bindDprWatcher = () => {
+        unbindDprWatcher?.();
+        unbindDprWatcher = null;
+        if (destroyed || typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+        const dpr = window.devicePixelRatio || 1;
+        const mq = window.matchMedia(`(resolution: ${dpr}dppx)`);
+        const onDprChange = () => {
+          bindDprWatcher();
+          invalidateContainerRect();
+          viewport.invalidateRect();
+          const r = container.getBoundingClientRect();
+          syncDisplayResolution?.(r.width > 0 ? r.width : viewWidth, r.height > 0 ? r.height : viewHeight);
+        };
+        if (typeof mq.addEventListener === 'function') {
+          mq.addEventListener('change', onDprChange, { once: true });
+          unbindDprWatcher = () => mq.removeEventListener('change', onDprChange);
+        } else {
+          const legacyMq = mq as MediaQueryList & {
+            addListener?: (cb: () => void) => void;
+            removeListener?: (cb: () => void) => void;
+          };
+          legacyMq.addListener?.(onDprChange);
+          unbindDprWatcher = () => legacyMq.removeListener?.(onDprChange);
+        }
+      };
+      bindDprWatcher();
+
+      // Keep the point at the center in place when a dock changes the workspace size, or when DPR changes across monitors.
       resizeObserver = new ResizeObserver(([entry]) => {
         if (destroyed || !entry) return;
         containerRectRef.current = null;
         viewport.invalidateRect();
         const { width, height } = entry.contentRect;
-        if (width <= 0 || height <= 0 || (width === viewWidth && height === viewHeight)) return;
-        app.renderer.resize(width, height);
-        // A view still "fit to window" re-fits (and re-centres) when a dock opens or closes;
-        // one the user zoomed or panned keeps its centre point instead
-        if (viewWidth <= 1 || viewHeight <= 1 || viewport.isFitTo(viewWidth, viewHeight)) {
-          viewport.centerInView(width, height, true);
-        } else {
-          viewport.panBy((width - viewWidth) / 2, (height - viewHeight) / 2);
-        }
-        viewWidth = width;
-        viewHeight = height;
-        syncViewportBounds();
-        // Resizing the WebGL backbuffer clears it immediately; re-render synchronously before paint to eliminate flicker
-        prepareLayerView?.();
-        app.render();
+        if (width <= 0 || height <= 0) return;
+        syncDisplayResolution?.(width, height);
       });
       resizeObserver.observe(container);
 
@@ -2258,7 +2375,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           // Some browsers press a focused button on the key's release
           if (pointer.isSpacePressedRef.current) ev.preventDefault();
           pointer.isSpacePressedRef.current = false;
-          if (containerRef.current) containerRef.current.style.cursor = 'crosshair';
+          if (containerRef.current) containerRef.current.style.cursor = activePluginToolRef.current?.tool.cursor ?? '';
         }
         if (activeFlipKeyCode && ev.code === activeFlipKeyCode) {
           activeFlipKeyCode = null;
@@ -2316,8 +2433,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       renderRaf = 0;
       if (themeObserver) themeObserver.disconnect();
       requestRenderRef.current = () => pixiAppRef.current?.render();
+      setPlaybackResolutionRef.current = () => {};
+      syncDisplayResolution = null;
+      unbindDprWatcher?.();
+      unbindDprWatcher = null;
       if (resizeObserver) resizeObserver.disconnect();
-      window.removeEventListener('resize', invalidateContainerRect);
+      window.removeEventListener('resize', handleWindowResize);
       window.removeEventListener('scroll', invalidateContainerRect, true);
       container.removeEventListener('wheel', handleWheel);
       if (handleKeyDown) window.removeEventListener('keydown', handleKeyDown);
@@ -2460,15 +2581,6 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       onRegisterBakeScreentone(handleBakeScreentone);
     }
   }, [onRegisterBakeScreentone]);
-
-  // From 200 % up (or above 100 % when anti-aliasing is disabled) canvas pixels show as sharp squares
-  useEffect(() => {
-    const zoom = viewportStateRef.current.zoom;
-    layerManagerRef.current?.setPixelated(
-      zoom >= 2 || (zoom > 1 && brushProps.antiAlias === 'none')
-    );
-    selectionEngineRef.current?.setViewScale(zoom);
-  }, [brushProps.antiAlias, isEngineReady]);
 
   // Sync Active Layer in pipeline; its before-state buffer must exist before any tool edits it
   useEffect(() => {
@@ -3268,13 +3380,27 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         return own?.width === t.width && own.height === t.height;
       });
       const version = item.version;
-      const current = await lm.readTilesAsync(layerId, valid);
       await Promise.all(foreignReadsRef.current);
+      if (item.version !== version) continue;
+      const untouched: TileData[] = [];
+      const untouchedBefore: TileData[] = [];
+      const needRead = valid.filter((tile) => {
+        if (op.opType !== 'FILL') return true;
+        const key = `${tile.col}_${tile.row}`;
+        const own = mineByTile.get(key)!;
+        if (op.foreign?.has(key) || scopedUndoRef.current.hasForeignTile(op, key) || !lm.matchesCachedTile(layerId, own)) return true;
+        untouched.push(tile);
+        untouchedBefore.push(own);
+        return false;
+      });
+      const current = needRead.length ? await lm.readTilesAsync(layerId, needRead) : [];
+      await Promise.all(foreignReadsRef.current);
+      if (layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== item) return;
       if (item.version !== version) continue;
       let conflicts = 0;
       const raw: TileData[] = [];
       const historyTiles: NonNullable<TilePatchPacket['historyTiles']> = [];
-      valid.forEach((t, index) => {
+      needRead.forEach((t, index) => {
         const key = `${t.col}_${t.row}`;
         const own = mineByTile.get(key)!;
         const history = scopedUndoRef.current;
@@ -3283,10 +3409,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         if (merged.conflicts > 0 || history.hasForeignTile(op, key)) historyTiles.push({ from: own, to: t });
         raw.push({ ...t, compression: 'raw', data: merged.pixels, byteLength: merged.pixels.byteLength });
       });
-      const tiles = await compressTiles(raw);
+      const tiles = raw.length ? await compressTiles(raw) : [];
       if (layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== item) return;
       if (item.version !== version) continue;
-      apply(tiles, conflicts, current, historyTiles);
+      apply(untouched.concat(tiles), conflicts, untouchedBefore.concat(current), historyTiles);
       return;
     }
   };
@@ -3525,8 +3651,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       ) {
         return true;
       }
-      const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model;
-      return Boolean(target && (target.ownerId === effectiveUserId || canEditPixels(target)));
+      const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model ?? candidate?.layerCreated?.model;
+      return Boolean(target && (target.ownerId === effectiveUserId || (candidate?.layerCreated && isAdmin) || canEditPixels(target)));
     });
 
     let totalConflicts = 0;
@@ -3640,8 +3766,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       ) {
         return true;
       }
-      const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model;
-      return Boolean(target && (target.ownerId === effectiveUserId || canEditPixels(target)));
+      const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model ?? candidate?.layerCreated?.model;
+      return Boolean(target && (target.ownerId === effectiveUserId || (candidate?.layerCreated && isAdmin) || canEditPixels(target)));
     });
 
     let totalConflicts = 0;
@@ -3798,6 +3924,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     recordLayerCreation(created);
     return created;
   };
+
+  const recordLayerCreationRef = useRef(recordLayerCreation);
+  recordLayerCreationRef.current = recordLayerCreation;
+  useEffect(() => {
+    if (!onRegisterRecordLayerCreation) return;
+    onRegisterRecordLayerCreation((created) => recordLayerCreationRef.current(created));
+    return () => onRegisterRecordLayerCreation(null);
+  }, [onRegisterRecordLayerCreation]);
 
   shortcutActionsRef.current = {
     ...shortcutActionsRef.current,
@@ -4212,16 +4346,38 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   useEffect(() => {
     const engine = animationEngine;
     if (!engine || !isEngineReady) return;
+    const solo = OfflineSessionStore.isOfflineCanvas(canvas?.id);
+    const adaptiveResolution = solo && Boolean(canvas && canvas.width * canvas.height >= 2048 * 2048);
+    const playbackFrames = new Map<number, ReturnType<typeof displayLayersFor>>();
+    let frameLayers = layersRef.current;
+    let frameVisibility = localVisibilityRef.current;
+    let frameFolder = animFolderIdRef.current;
+    const playbackDisplay = (time: number) => {
+      if (!solo) return displayLayersFor(layersRef.current, { time });
+      if (frameLayers !== layersRef.current || frameVisibility !== localVisibilityRef.current || frameFolder !== animFolderIdRef.current) {
+        playbackFrames.clear();
+        frameLayers = layersRef.current;
+        frameVisibility = localVisibilityRef.current;
+        frameFolder = animFolderIdRef.current;
+      }
+      const cached = playbackFrames.get(time);
+      if (cached) return cached;
+      const displayed = displayLayersFor(frameLayers, { time });
+      if (playbackFrames.size >= 16) playbackFrames.delete(playbackFrames.keys().next().value!);
+      playbackFrames.set(time, displayed);
+      return displayed;
+    };
     let lastSyncSig = '';
     let lastPrefetchSig = '';
     const buildDisplaySig = (list: ReturnType<typeof displayLayersFor>) => {
       let s = '';
       for (let i = 0; i < list.length; i++) {
-        const l = list[i] as LayerModel & { onionTint?: number; renderTransform?: { isIdentity: boolean; a: number; b: number; tx: number; ty: number } };
+        const l = list[i] as LayerModel & { onionTint?: number; renderTransform?: { isIdentity: boolean; a: number; b: number; c: number; d: number; tx: number; ty: number } };
         if (!l.isVisible) continue;
         s += `${l.id}:${l.opacity.toFixed(3)}:${l.onionTint ?? ''}`;
         if (l.renderTransform && !l.renderTransform.isIdentity) {
-          s += `@${l.renderTransform.a.toFixed(3)},${l.renderTransform.b.toFixed(3)},${l.renderTransform.tx.toFixed(1)},${l.renderTransform.ty.toFixed(1)}`;
+          const { a, b, c, d, tx, ty } = l.renderTransform;
+          s += `@${a.toFixed(3)},${b.toFixed(3)},${c.toFixed(3)},${d.toFixed(3)},${tx.toFixed(1)},${ty.toFixed(1)}`;
         }
         s += '|';
       }
@@ -4230,8 +4386,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const show = () => {
       const lm = layerManagerRef.current;
       if (!lm) return;
-      const displayed = displayLayersFor(layersRef.current);
       const playing = engine.getIsPlaying();
+      const displayed = solo && playing && !liveKeyframePreviewRef.current
+        ? playbackDisplay(engine.getTime()) : displayLayersFor(layersRef.current);
       const sig = buildDisplaySig(displayed);
       if (!playing || sig !== lastSyncSig) {
         lastSyncSig = sig;
@@ -4239,15 +4396,20 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       }
       if (!playing) {
         lastPrefetchSig = '';
+        playbackFrames.clear();
         return;
       }
       // The next frames' cels: their compressed tiles are decoded in the workers now, so they are
       // on the GPU when their turn comes (decoding on the spot made a phone drop frames)
       const t = engine.getTime();
-      const len = Math.max(1, engine.getLength());
+      const range = engine.getRange();
+      const start = range?.start ?? 0;
+      const end = range?.end ?? engine.getLength() - 1;
       const ids = new Set<string>();
       for (let k = 1; k <= ANIM_PREFETCH_FRAMES; k++) {
-        for (const l of displayLayersFor(layersRef.current, { time: (t + k) % len })) if (l.isVisible) ids.add(l.id);
+        if (!engine.getLoop() && t + k > end) break;
+        const next = start + (t + k - start) % Math.max(1, end - start + 1);
+        for (const l of playbackDisplay(next)) if (l.isVisible) ids.add(l.id);
       }
       const pfSig = [...ids].sort().join(',');
       if (pfSig !== lastPrefetchSig) {
@@ -4266,6 +4428,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       onSelectLayer?.(shown);
     };
     let prevPlayFrame = engine.getTime();
+    let lastPlaybackAt = 0;
+    let slowFrames = 0;
+    let reducedPreview = false;
     const playableAudioItems = () =>
       audioLayersRef.current
         .filter((l) => l.isVisible && l.meta?.audio)
@@ -4274,6 +4439,16 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       show();
       if (cameraPreviewActiveRef.current) syncCameraPreviewViewportRef.current(t);
       if (engine.getIsPlaying()) {
+        if (adaptiveResolution && !reducedPreview) {
+          const now = performance.now();
+          const slow = lastPlaybackAt && !byUser && now - lastPlaybackAt > 1600 / engine.getFps();
+          slowFrames = slow ? slowFrames + 1 : Math.max(0, slowFrames - 1);
+          lastPlaybackAt = now;
+          if (slowFrames >= 3) {
+            reducedPreview = true;
+            setPlaybackResolutionRef.current(true);
+          }
+        }
         // Re-sync local audio on loop wrap or user seek during playback
         if (t < prevPlayFrame || byUser) {
           void audioPlayerRef.current?.startPlayback(playableAudioItems(), t, engine.getFps(), engine.getRange()?.end);
@@ -4301,6 +4476,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         );
       } else {
         audioPlayerRef.current?.stopPlayback();
+        if (reducedPreview) setPlaybackResolutionRef.current(false);
+        lastPlaybackAt = 0;
+        slowFrames = 0;
+        reducedPreview = false;
         lastSyncSig = '';
         setAnimFrame(engine.getTime());
       }
@@ -4311,6 +4490,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     return () => {
       unsubFrame();
       unsubPlay();
+      if (reducedPreview) setPlaybackResolutionRef.current(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [animationEngine, isEngineReady]);
@@ -6434,6 +6614,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     }
   };
 
+  const alignDocked = !isTouchCanvasMode && (!floatsAllowed || dockLayout.panels.align.place !== 'float');
+  const filterDocked = !isTouchCanvasMode && (!floatsAllowed || dockLayout.panels.filters.place !== 'float');
+  const closeAlign = () => setAlignOpen(false);
   const panelDefs: PanelDef[] = [
     {
       id: 'color',
@@ -6474,13 +6657,20 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     },
     {
       id: 'toolProps',
-      title: PANEL_TITLES.toolProps,
+      title: isTouchCanvasMode ? t.toolOptions.title : PANEL_TITLES.toolProps,
       icon: <Sliders />,
       render: () => (
-        <div className="p-2">
+        <div className="min-w-0 p-2">
+          {isTouchCanvasMode && (
+            <>
+              <MobileBrushSliders size={sizeValue} onSize={setSizeValue} opacity={brushProps.opacity}
+                onOpacity={(opacity) => handleBrushPropsChange({ opacity })} onSizeDrag={setSizeDragging} />
+              {renderToolOptions(true)}
+            </>
+          )}
           <FloatingStudioPanel
             currentTool={currentTool}
-            compact={isPhone}
+            compact={isTouchCanvasMode}
             brushProps={brushProps}
             onChangeBrushProps={handleBrushPropsChange}
             wandTolerance={wandTolerance}
@@ -6540,7 +6730,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             vectorWidthMode={vectorWidthMode}
             onChangeVectorWidthMode={setVectorWidthMode}
           />
-          {isBrushTool(currentTool) && (
+          {!isPhone && isBrushTool(currentTool) && (
             <button type="button" onClick={() => setIsBrushSettingsOpen(true)}
               className="mt-2 w-full rounded-lg border border-indigo-500/50 bg-indigo-600/20 px-2 py-1.5 text-xs font-semibold text-indigo-100 hover:bg-indigo-600/30">
               筆刷詳細設定
@@ -6562,7 +6752,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           getThumbnailsSnapshot={getThumbnailsSnapshot}
           onRequestThumbnail={refreshLayerThumbnail}
           onSelectLayer={onSelectLayer || (() => {})}
-          onCreateLayer={onCreateLayer || (() => {})}
+          onCreateLayer={onCreateLayer ? createLayerWithUndo : (() => {})}
           onCreateRaster={() => createLayerFromDock('raster')}
           onCreateVector={() => createLayerFromDock('vector')}
           onCreateGroup={() => createLayerFromDock('group')}
@@ -6594,6 +6784,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           folderAccess={folderAccess}
           isRoomAdmin={isAdmin}
           isReadOnly={isCanvasViewer}
+          isOfflineCanvas={OfflineSessionStore.isOfflineCanvas(canvas?.id)}
+          onOpenAuth={onOpenAuth}
           onLoadLayerSelection={(id) => {
             const layer = layersRef.current.find((l) => l.id === id);
             if (layer) selection.loadLayerSelection(layer);
@@ -6611,19 +6803,30 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     { id: 'oplog', title: PANEL_TITLES.oplog, icon: <Terminal />, render: () => <OpLogPanel /> },
     { id: 'quickKeys', title: PANEL_TITLES.quickKeys, icon: <Keyboard />, render: () => <QuickKeysPanel /> },
   ];
+  if (alignDocked && alignOpen) panelDefs.push({
+    id: 'align', title: t.align.title, icon: <AlignCenter />, onClose: closeAlign,
+    render: () => <ToolDockSlot host={toolDockHosts.align} />,
+  });
+  if (filterDocked && filterMenuOpen) panelDefs.push({
+    id: 'filters', title: t.filters.title, icon: <Sliders />, onClose: closeFilters,
+    render: () => <ToolDockSlot host={toolDockHosts.filters} />,
+  });
+  const mobilePanel: MobilePanelDef | null = mobileSheet === 'toolPicker' ? {
+    id: mobileSheet,
+    title: t.navbar.tools,
+    icon: <Grid2x2 />,
+    render: () => <ToolRail orientation="grid" currentTool={currentTool}
+      onSelectTool={(tool) => { handleSelectTool(tool); setMobileSheet(null); }}
+      pluginTools={pluginTools} activePluginToolKey={activePluginTool?.key ?? null}
+      onSelectPluginTool={(tool, key) => { setMobileSheet(null); selectPluginTool(tool, key); }} />,
+  } : panelDefs.find((p) => p.id === mobileSheet) ?? null;
 
-  return (
-    <div ref={workspaceRef} className="atelier-workspace relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden select-none">
-      {permissionWarning && (
-        <div role="status" className="pointer-events-none fixed left-1/2 top-24 z-[80] flex -translate-x-1/2 items-center gap-2 rounded-xl border border-amber-500/70 bg-amber-950/95 px-4 py-2 text-xs text-amber-100 shadow-2xl">
-          <AlertCircle className="h-4 w-4 shrink-0 text-amber-400" />
-          <span className="font-medium">{permissionWarning}</span>
-        </div>
-      )}
-
+  const renderToolOptions = (inPanel = false) => (
       <ToolOptionsBar
         currentTool={currentTool}
-        compact={isPhone}
+        compact={isTouchCanvasMode}
+        inPanel={inPanel}
+        onOpenOptions={isTouchCanvasMode && !inPanel ? () => openMobileSheet('toolProps') : undefined}
         brushProps={brushProps}
         onBrushProps={handleBrushPropsChange}
         canUndo={canUndoState}
@@ -6661,6 +6864,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         onBucketReference={setBucketReference}
         bucketMode={bucketMode}
         onBucketMode={setBucketMode}
+        confirmSoloFullFill={fill.confirmSoloFullFill}
+        onConfirmSoloFullFill={OfflineSessionStore.isOfflineCanvas(canvas?.id) ? fill.updateConfirmSoloFullFill : undefined}
         outline={outlineBrush}
         onOutline={updateOutlineBrush}
         onPickOutlineColor={() => brush.armOutlinePick(currentTool, handleSelectTool)}
@@ -6714,14 +6919,24 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         }}
         onExitPluginTool={clearPluginTool}
       />
+  );
 
+  return (
+    <div ref={workspaceRef} className="atelier-workspace relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden select-none">
+      {permissionWarning && (
+        <div role="status" className="pointer-events-none fixed left-1/2 top-24 z-[80] flex -translate-x-1/2 items-center gap-2 rounded-xl border border-amber-500/70 bg-amber-950/95 px-4 py-2 text-xs text-amber-100 shadow-2xl">
+          <AlertCircle className="h-4 w-4 shrink-0 text-amber-400" />
+          <span className="font-medium">{permissionWarning}</span>
+        </div>
+      )}
+      {renderToolOptions()}
       <div className="flex min-h-0 min-w-0 flex-1" data-dock-root="">
         {/* The size / opacity strip and the tool rail sit on the left, or on the right for left-handed painters */}
+        {!isTouchCanvasMode && (
         <div data-workspace-entry={railRight ? 'right-tools' : 'left-tools'}
           className={`flex min-h-0 shrink-0 ${railRight ? 'order-last flex-row-reverse [&>[role=group]]:border-l [&>[role=group]]:border-r-0' : ''}`}>
           <BrushSideSliders size={sizeValue} onSize={setSizeValue} opacity={brushProps.opacity} onOpacity={(opacity) => handleBrushPropsChange({ opacity })}
             color={brushProps.color} onSizeDrag={setSizeDragging} width={dockLayout.slidersWidth} side={railRight ? 'right' : 'left'} onResizeWidth={dockActions.setSlidersWidth} />
-          {!isPhone && (
             <ToolRail
               orientation="vertical"
               side={railRight ? 'right' : 'left'}
@@ -6733,9 +6948,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               activePluginToolKey={activePluginTool?.key ?? null}
               onSelectPluginTool={selectPluginTool}
             />
-          )}
         </div>
-        {!isPhone && <DockColumn side="left" panels={panelDefs} />}
+        )}
+        {!isTouchCanvasMode && <DockColumn side="left" panels={panelDefs} />}
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-dock-center="">
           {/* isolate: overlays inside the canvas (transform preview, rulers, mesh) can never stack above the docks */}
@@ -6801,11 +7016,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 setRadialMenuPos({ x: event.clientX, y: event.clientY });
                 setIsRadialMenuOpen(true);
               }}
+              data-brush-crosshair={showBrushCrosshair ? 'true' : 'false'}
               style={{
                 touchAction: 'none',
                 ...(activePluginTool?.tool.cursor ? { cursor: activePluginTool.tool.cursor } : {}),
               }}
-              className={`atelier-canvas-viewport relative min-h-0 min-w-0 flex-1 overflow-hidden ${!activePluginTool && currentTool === 'hand' ? 'cursor-grab' : 'cursor-crosshair'}`}
+              className={`atelier-canvas-viewport relative min-h-0 min-w-0 flex-1 overflow-hidden ${defaultCanvasCursorClass}`}
             >
               {/* Dedicated Pixi Canvas Host Layer (isolated from React DOM reconciler) */}
               <div ref={canvasMountRef} data-canvas-presented={isCanvasPresented}
@@ -7293,11 +7509,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             {(viewportState) => (
               <ViewportToolbar
                 viewportState={viewportState}
+                displayScale={viewportRef.current?.getDisplayScale() ?? getTargetDisplayResolution()}
                 width={canvas.width}
                 height={canvas.height}
                 onZoomIn={() => zoomAtViewCenter(1.25)}
                 onZoomOut={() => zoomAtViewCenter(1 / 1.25)}
-                onResetZoom={() => zoomAtViewCenter(1 / (viewportRef.current?.getState().zoom ?? 1))}
+                onResetZoom={() => {
+                  const vp = viewportRef.current;
+                  if (vp) zoomAtViewCenter(vp.getActualSizeZoom() / vp.getState().zoom);
+                }}
                 onFitView={() => fitViewport()}
                 onRotate={(rad) => viewportRef.current?.rotateBy(rad)}
                 onResetRotation={() => viewportRef.current?.resetRotation()}
@@ -7315,41 +7535,56 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               />
             )}
           </ViewportConsumer>
-          {!isPhone && <DockRow panels={panelDefs} />}
+          {!isTouchCanvasMode && <DockRow panels={panelDefs} />}
         </div>
 
-        {!isPhone && <DockColumn side="right" panels={panelDefs} />}
+        {!isTouchCanvasMode && <DockColumn side="right" panels={panelDefs} />}
       </div>
 
-      {isPhone && (
-        <div data-workspace-entry="mobile-tools" className="flex shrink-0 items-stretch">
-          <div className="min-w-0 flex-1">
-            <ToolRail
-              orientation="horizontal"
-              currentTool={currentTool}
-              onSelectTool={handleSelectTool}
-              pluginTools={pluginTools}
-              activePluginToolKey={activePluginTool?.key ?? null}
-              onSelectPluginTool={selectPluginTool}
-            />
-          </div>
-          <div className="atelier-chrome flex shrink-0 items-center gap-1 overflow-x-auto border-l border-t px-1.5 no-scrollbar">
-            <button type="button" onClick={() => openMobileSheet('color')} aria-label="色彩" className="atelier-icon-btn h-10 w-10 shrink-0">
-              <span className="h-6 w-6 rounded-full border-2 border-white/80 shadow" style={{ backgroundColor: brushProps.color }} />
-            </button>
-            <button type="button" onClick={() => openMobileSheet('toolProps')} aria-label="工具屬性" className="atelier-icon-btn h-10 w-10 shrink-0"><Sliders className="h-5 w-5" /></button>
-            <button type="button" onClick={openBrushToolset} aria-label={t.brushPreset.toolset} className="atelier-icon-btn h-10 w-10 shrink-0"><Paintbrush className="h-5 w-5" /></button>
-            <button type="button" onClick={() => openMobileSheet('layers')} aria-label="圖層" className="atelier-icon-btn h-10 w-10 shrink-0"><Layers className="h-5 w-5" /></button>
-            <button type="button" onClick={() => dockActions.toggle('members')} aria-label="成員" className="atelier-icon-btn h-10 w-10 shrink-0"><Users className="h-5 w-5" /></button>
-            <button type="button" onClick={() => openMobileSheet('quickKeys')} aria-label="快捷鍵面板" className="atelier-icon-btn h-10 w-10 shrink-0"><Keyboard className="h-5 w-5" /></button>
-          </div>
-        </div>
+      {isTouchCanvasMode && (
+        <>
+          <TouchSideIsland
+            side={dockLayout.railSide === 'right' ? 'right' : 'left'}
+            size={sizeValue}
+            opacity={brushProps.opacity}
+            color={brushProps.color}
+            currentTool={currentTool}
+            canUndo={canUndoState}
+            canRedo={canRedoState}
+            onSize={setSizeValue}
+            onOpacity={(opacity) => handleBrushPropsChange({ opacity })}
+            onSizeDrag={setSizeDragging}
+            onToggleEyedropper={() => handleSelectTool(currentTool === 'eyedropper' ? 'brush' : 'eyedropper')}
+            onUndo={handleScopedUndo}
+            onRedo={handleScopedRedo}
+          />
+          <TouchToolIsland
+            isTablet={isTouchTablet}
+            currentTool={currentTool}
+            color={brushProps.color}
+            activeSheet={mobileSheet}
+            showMembers={!OfflineSessionStore.isOfflineCanvas(canvas.id)}
+            onSelectTool={handleSelectTool}
+            onOpenSheet={openMobileSheet}
+            onOpenBrushToolset={openBrushToolset}
+            onToggleMembers={() => dockActions.toggle('members')}
+          />
+        </>
       )}
 
-      {/* Floating windows: phones use MobilePanelSheet for members/oplog; tablets/desktops float */}
-      <FloatingPanels panels={isPhone ? [] : panelDefs} />
+      {/* Floating windows: phones & non-desktop touch tablets use frosted slide-out drawers; desktops float */}
+      <FloatingPanels panels={isTouchCanvasMode ? [] : panelDefs} />
       <MobilePanelSheet
-        def={isPhone ? panelDefs.find((p) => p.id === mobileSheet) ?? null : null}
+        def={isTouchCanvasMode ? mobilePanel : null}
+        placement={isTouchTablet ? 'right' : 'bottom'}
+        quickTabs={[
+          { id: 'toolPicker', label: t.navbar.tools, icon: <Grid2x2 /> },
+          { id: 'color', label: PANEL_TITLES.color, icon: <Palette /> },
+          { id: 'brushToolset', label: t.brushPreset.toolset, icon: <Paintbrush /> },
+          { id: 'layers', label: PANEL_TITLES.layers, icon: <Layers /> },
+          { id: 'toolProps', label: t.toolOptions.title, icon: <Sliders /> },
+        ]}
+        onSelectTab={openMobileSheet}
         onClose={() => {
           if (mobileSheet === 'members' || mobileSheet === 'oplog') dockActions.hide(mobileSheet);
           setMobileSheet(null);
@@ -7433,8 +7668,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         />
       )}
 
-      <OverlayPresence open={alignOpen && Boolean(canvas)} kind="popover">
-        <Suspense fallback={null}><LayerAlignWindow targetLabel={alignTargetLabel} targetCount={alignTargetsList.length}
+      {!alignDocked && <ToolDockSlot host={toolDockHosts.align} />}
+      {!filterDocked && <ToolDockSlot host={toolDockHosts.filters} />}
+      {createPortal(<OverlayPresence open={alignOpen && Boolean(canvas)} kind="popover">
+        <Suspense fallback={null}><LayerAlignWindow embedded={alignDocked} targetLabel={alignTargetLabel} targetCount={alignTargetsList.length}
           blocker={alignBlockReason} hasSelection={hasSelectionState}
           guideSummary={alignGuideSummary}
           hasVectorTarget={alignHasVectorTarget}
@@ -7443,17 +7680,17 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           selectedVectorStrokeCount={alignSelectedVectorStrokeCount}
           hasTextTarget={alignHasTextTarget}
           onOpenGuides={() => setIsRulerModalOpen(true)}
-          onAlign={runAlign} onDistribute={runDistribute} onClose={() => setAlignOpen(false)} /></Suspense>
-      </OverlayPresence>
-      <OverlayPresence open={filterMenuOpen} kind="popover">
-        <Suspense fallback={null}><LayerFilterDialog key={layerFilterId ?? 'list'} filterId={layerFilterId} busy={filterBusy} refining={filterRefining}
+          onAlign={runAlign} onDistribute={runDistribute} onClose={closeAlign} /></Suspense>
+      </OverlayPresence>, toolDockHosts.align)}
+      {createPortal(<OverlayPresence open={filterMenuOpen} kind="popover">
+        <Suspense fallback={null}><LayerFilterDialog embedded={filterDocked} key={layerFilterId ?? 'list'} filterId={layerFilterId} busy={filterBusy} refining={filterRefining}
           layerName={activeLayer?.name ?? ''} layerType={activeLayer?.layerType} histogram={filterHistogram} target={filterTargetOptions}
           onReadThumbnail={filterCallbacks.readThumbnail} onStartPoint={filterCallbacks.startPoint}
           onChoose={chooseFilter} onBack={() => chooseFilter(null)} onClose={closeFilters}
           onPreview={filterCallbacks.parameters} onPreviewJob={filterCallbacks.libraryPreview}
           onApply={(values) => layerFilterId ? runLayerFilter({ id: layerFilterId, values }, false) : Promise.resolve(false)}
           onApplyJob={(job) => runLayerFilter(job, false)} /></Suspense>
-      </OverlayPresence>
+      </OverlayPresence>, toolDockHosts.filters)}
       {isColorCurvesOpen && <Suspense fallback={null}><ColorCurvesModal
         isOpen={isColorCurvesOpen}
         busy={filterBusy}
@@ -7472,6 +7709,16 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         onApply={(stops, opacity) => runLayerFilter({ id: 'gradient', values: { stops, opacity } }, false)}
       /></Suspense>}
 
+      <OverlayPresence open={fill.fullFillLayer !== null} kind="dialog">
+        <AtelierModal title={t.toolOptions.fullFillTitle} icon={<AlertCircle />} width="sm"
+          onClose={() => fill.finishFullFill(false)}
+          footer={<>
+            <button type="button" className={modalButton.secondary} onClick={() => fill.finishFullFill(false)}>{t.common.cancel}</button>
+            <button type="button" className={modalButton.primary} onClick={() => fill.finishFullFill(true)}>{t.toolOptions.applyFill}</button>
+          </>}>
+          <p className="break-words text-sm text-neutral-300">{t.toolOptions.fullFillMessage.replace('{layer}', () => fill.fullFillLayer ?? '')}</p>
+        </AtelierModal>
+      </OverlayPresence>
       <OverlayPresence open={Boolean(filterMemoryConfirm)} kind="dialog">
         <AtelierModal
           title={t.filters.newLayerConfirmTitle}
