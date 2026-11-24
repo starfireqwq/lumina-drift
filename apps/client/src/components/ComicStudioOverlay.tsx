@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import { ToolType } from '@atelier/shared';
 import {
   Check,
@@ -9,6 +9,7 @@ import {
   MessageSquare,
   Move,
   Plus,
+  RotateCcw,
   Scissors,
   Sparkles,
   Trash2,
@@ -17,31 +18,27 @@ import {
   Zap,
 } from 'lucide-react';
 import { useI18n } from '../context/I18nContext';
+import {
+  type BalloonGeometryResult,
+  type BalloonShape,
+  type ComicBalloonItem,
+  DEFAULT_LINE_HEIGHT,
+  DEFAULT_TAIL_CURVE,
+  DEFAULT_TAIL_WIDTH,
+  type TextOrientation,
+  buildBalloonGeometry,
+  buildBalloonRenderPlan,
+  clamp,
+  commandsToSvgPath,
+  layoutBalloonText,
+  normalizeAngleDeg,
+  parseColorAlpha,
+  renderBalloonTextToCanvas,
+  renderBalloonToCanvas,
+  resolveBalloonTailParams,
+} from '../utils/comicBubbleGeometry';
 
-export type BalloonShape = 'oval' | 'rect' | 'spiky' | 'thought';
-export type TextOrientation = 'horizontal' | 'vertical';
-
-export interface ComicBalloonItem {
-  id: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  shape: BalloonShape;
-  cornerRadius?: number;
-  tailPos: { x: number; y: number }; // Relative to balloon center
-  tailEnabled: boolean;
-  bgColor: string;
-  borderColor: string;
-  borderWidth: number;
-  text: string;
-  fontSize: number;
-  fontColor: string;
-  fontFamily: string;
-  orientation: TextOrientation;
-  strokeColor: string;
-  strokeWidth: number;
-}
+export type { BalloonShape, TextOrientation, ComicBalloonItem };
 
 export interface ComicPanelItem {
   id: string;
@@ -64,7 +61,82 @@ interface ComicStudioOverlayProps {
   onClose?: () => void;
 }
 
-type DragMode = 'move' | 'nw' | 'ne' | 'se' | 'sw' | 'n' | 's' | 'w' | 'e' | 'tail';
+type DragMode =
+  | 'move'
+  | 'nw'
+  | 'ne'
+  | 'se'
+  | 'sw'
+  | 'n'
+  | 's'
+  | 'w'
+  | 'e'
+  | 'tail'
+  | 'tailBase'
+  | 'tailCurve';
+
+function getCanvasBasis(toScreen: (cx: number, cy: number) => { x: number; y: number }) {
+  const o = toScreen(0, 0);
+  const ex = toScreen(1, 0);
+  const ey = toScreen(0, 1);
+  const ux = ex.x - o.x;
+  const uy = ex.y - o.y;
+  const vx = ey.x - o.x;
+  const vy = ey.y - o.y;
+  const det = ux * vy - vx * uy;
+  return { ux, uy, vx, vy, det };
+}
+
+function colorToHex6(color: string | undefined, fallback = '#ffffff'): string {
+  if (!color) return fallback;
+  const s = color.trim().toLowerCase();
+  if (s === 'transparent' || s === 'none') return fallback;
+  if (s.startsWith('#')) {
+    const hex = s.slice(1);
+    if (hex.length === 3 || hex.length === 4) {
+      return `#${hex[0]}${hex[0]}${hex[1]}${hex[1]}${hex[2]}${hex[2]}`;
+    }
+    if (hex.length >= 6) {
+      return `#${hex.slice(0, 6)}`;
+    }
+  }
+  const match = s.match(/^rgba?\(\s*([^)]+)\s*\)$/);
+  if (match) {
+    const inner = match[1].split('/')[0].trim();
+    const parts = inner.includes(',') ? inner.split(',').map((p) => p.trim()) : inner.split(/\s+/);
+    if (parts.length >= 3) {
+      const toHex = (v: string) =>
+        clamp(Math.round(parseFloat(v) || 0), 0, 255)
+          .toString(16)
+          .padStart(2, '0');
+      return `#${toHex(parts[0])}${toHex(parts[1])}${toHex(parts[2])}`;
+    }
+  }
+  return fallback;
+}
+
+function applyAlphaToColor(color: string, alpha01: number): string {
+  const a = clamp(Math.round(alpha01 * 100) / 100, 0, 1);
+  if (a <= 0.001) return 'transparent';
+  const hex6 = colorToHex6(color, '#ffffff');
+  if (a >= 0.999) return hex6.toUpperCase();
+  const r = parseInt(hex6.slice(1, 3), 16);
+  const g = parseInt(hex6.slice(3, 5), 16);
+  const b = parseInt(hex6.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${a})`;
+}
+
+let cachedMeasureCtx: CanvasRenderingContext2D | null = null;
+function measureBrowserTextWidth(text: string, font: string): number {
+  if (typeof document === 'undefined') return text.length * 10;
+  if (!cachedMeasureCtx) {
+    const c = document.createElement('canvas');
+    cachedMeasureCtx = c.getContext('2d');
+  }
+  if (!cachedMeasureCtx) return text.length * 10;
+  cachedMeasureCtx.font = font;
+  return cachedMeasureCtx.measureText(text).width;
+}
 
 export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
   currentTool,
@@ -77,6 +149,10 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
   onClose,
 }) => {
   const { t } = useI18n();
+  const maskIdPrefix = useId().replace(/[^a-zA-Z0-9_-]/g, '_');
+  const canvasToScreenRef = useRef(canvasToScreen);
+  canvasToScreenRef.current = canvasToScreen;
+
   const isPanelActive = currentTool === 'comic_panel';
   const isBalloonActive = currentTool === 'comic_balloon';
   // Text is a text layer of its own now (the text tool in CanvasWorkspace), not part of this overlay
@@ -93,7 +169,14 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
   const [balloons, setBalloons] = useState<ComicBalloonItem[]>([]);
 
   const [activeBalloonId, setActiveBalloonId] = useState<string | null>(null);
+  const [editingBalloonId, setEditingBalloonId] = useState<string | null>(null);
   const [activeLayout, setActiveLayout] = useState<string>('');
+
+  useEffect(() => {
+    if (!isBalloonActive) {
+      setEditingBalloonId(null);
+    }
+  }, [isBalloonActive]);
 
   // Dragging and Resizing Ref for balloons
   const dragRef = useRef<{
@@ -101,6 +184,8 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
     balloonId: string;
     startScreen: { x: number; y: number };
     origBalloon: ComicBalloonItem;
+    origGeom: BalloonGeometryResult;
+    moved: boolean;
   } | null>(null);
 
   // Dragging and Resizing Ref for panels
@@ -188,17 +273,24 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
   // Add new Balloon
   const handleAddBalloon = (shape: BalloonShape = 'oval') => {
     const center = getCanvasViewCenter();
-    const height = shape === 'rect' ? 200 : 110;
+    const width = shape === 'spiky' ? 220 : 200;
+    const height = shape === 'rect' ? 180 : shape === 'spiky' || shape === 'thought' ? 140 : 110;
+    const id = `balloon_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const newB: ComicBalloonItem = {
-      id: `balloon_${Date.now()}`,
-      x: Math.max(50, center.x - 100),
+      id,
+      x: Math.max(50, center.x - width / 2),
       y: Math.max(0, center.y - height / 2),
-      width: 200,
+      width,
       height,
       shape,
-      cornerRadius: 0,
-      tailPos: { x: -50, y: 90 },
+      cornerRadius: shape === 'rect' ? 12 : 0,
+      tailPos: { x: -50, y: Math.round(height / 2 + 45) },
       tailEnabled: true,
+      tailBaseAngle: undefined,
+      tailWidth: DEFAULT_TAIL_WIDTH,
+      tailCurve: DEFAULT_TAIL_CURVE,
+      lineHeight: DEFAULT_LINE_HEIGHT,
+      shapeSeed: id,
       bgColor: '#FFFFFF',
       borderColor: '#000000',
       borderWidth: 3,
@@ -212,6 +304,7 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
     };
     setBalloons((prev) => [...prev, newB]);
     setActiveBalloonId(newB.id);
+    setEditingBalloonId(null);
   };
 
   // Add pure text item
@@ -244,7 +337,12 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
   const handleDeleteActiveBalloon = () => {
     if (!activeBalloonId) return;
     setBalloons((prev) => prev.filter((b) => b.id !== activeBalloonId));
+    setEditingBalloonId((cur) => (cur === activeBalloonId ? null : cur));
     setActiveBalloonId(null);
+  };
+
+  const updateBalloon = (balloonId: string, patch: Partial<ComicBalloonItem>) => {
+    setBalloons((prev) => prev.map((b) => (b.id === balloonId ? { ...b, ...patch } : b)));
   };
 
   const handleAddPanel = () => {
@@ -350,11 +448,18 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
         return;
       }
 
-      // 2. Balloon dragging / resizing
+      // 2. Balloon dragging / resizing (using canvasToScreen inverse matrix for zoom/pan/rotation/mirror)
       if (!dragRef.current) return;
-      const { mode, balloonId, startScreen, origBalloon } = dragRef.current;
-      const dx = (e.clientX - startScreen.x) / viewportZoom;
-      const dy = (e.clientY - startScreen.y) / viewportZoom;
+      const { mode, balloonId, startScreen, origBalloon, origGeom } = dragRef.current;
+      const dsx = e.clientX - startScreen.x;
+      const dsy = e.clientY - startScreen.y;
+      if (Math.hypot(dsx, dsy) > 3) {
+        dragRef.current.moved = true;
+      }
+
+      const { ux, uy, vx, vy, det } = getCanvasBasis(canvasToScreenRef.current);
+      const dx = Math.abs(det) > 1e-8 ? (dsx * vy - dsy * vx) / det : dsx / viewportZoom;
+      const dy = Math.abs(det) > 1e-8 ? (ux * dsy - uy * dsx) / det : dsy / viewportZoom;
 
       setBalloons((prev) =>
         prev.map((b) => {
@@ -373,6 +478,47 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
                 x: Math.round(origBalloon.tailPos.x + dx),
                 y: Math.round(origBalloon.tailPos.y + dy),
               },
+            };
+          }
+          if (mode === 'tailBase') {
+            const targetX = origGeom.tailLocal.baseCenter.x + dx;
+            const targetY = origGeom.tailLocal.baseCenter.y + dy;
+            if (Math.hypot(targetX, targetY) <= 2) return b;
+            const rx = Math.max(10, origBalloon.width * 0.5);
+            const ry = Math.max(10, origBalloon.height * 0.5);
+            const angleDeg = Math.round(
+              normalizeAngleDeg((Math.atan2(targetY / ry, targetX / rx) * 180) / Math.PI)
+            ) % 360;
+            return {
+              ...b,
+              tailBaseAngle: angleDeg,
+            };
+          }
+          if (mode === 'tailCurve') {
+            const baseMid = {
+              x: (origGeom.tailLocal.baseLeft.x + origGeom.tailLocal.baseRight.x) * 0.5,
+              y: (origGeom.tailLocal.baseLeft.y + origGeom.tailLocal.baseRight.y) * 0.5,
+            };
+            const tip = origBalloon.tailPos;
+            const chordDx = tip.x - baseMid.x;
+            const chordDy = tip.y - baseMid.y;
+            const L = Math.hypot(chordDx, chordDy);
+            if (L < 1e-3) return b;
+            const uX = chordDx / L;
+            const uY = chordDy / L;
+            const nX = -uY;
+            const nY = uX;
+            const midX = (baseMid.x + tip.x) * 0.5;
+            const midY = (baseMid.y + tip.y) * 0.5;
+            const maxBend = Math.max(1e-3, origGeom.tailLocal.maxBend);
+            const px = origGeom.tailLocal.curveHandle.x + dx;
+            const py = origGeom.tailLocal.curveHandle.y + dy;
+            const signedDist = (px - midX) * nX + (py - midY) * nY;
+            const raw = clamp(signedDist / maxBend, -1, 1);
+            const tailCurve = Math.abs(raw) < 0.05 ? 0 : Math.round(raw * 100) / 100;
+            return {
+              ...b,
+              tailCurve,
             };
           }
           if (mode === 'se') {
@@ -417,6 +563,9 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
     };
 
     const handlePointerUp = () => {
+      if (dragRef.current?.moved) {
+        lastDragMovedAtRef.current = Date.now();
+      }
       dragRef.current = null;
       panelDragRef.current = null;
     };
@@ -428,6 +577,8 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
       window.removeEventListener('pointerup', handlePointerUp);
     };
   }, [viewportZoom]);
+
+  const lastDragMovedAtRef = useRef(0);
 
   const startPanelDrag = (
     mode: DragMode,
@@ -451,16 +602,22 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
   ) => {
     e.stopPropagation();
     setActiveBalloonId(balloon.id);
+    if (editingBalloonId && editingBalloonId !== balloon.id) {
+      setEditingBalloonId(null);
+    }
     dragRef.current = {
       mode,
       balloonId: balloon.id,
       startScreen: { x: e.clientX, y: e.clientY },
-      origBalloon: { ...balloon },
+      origBalloon: { ...balloon, tailPos: { ...balloon.tailPos } },
+      origGeom: buildBalloonGeometry(balloon),
+      moved: false,
     };
   };
 
   // Bake all comic layout & balloons onto current layer
   const handleBakeAll = () => {
+    setEditingBalloonId(null);
     const bakeCanvas = document.createElement('canvas');
     bakeCanvas.width = canvasWidth;
     bakeCanvas.height = canvasHeight;
@@ -477,67 +634,18 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
       }
     }
 
-    // 2. Draw balloons & texts
-    for (const b of isPanelActive ? [] : balloons) {
+    // 2. Draw balloons & texts via shared dual-layer / seamless transparency geometry engine
+    const measureText = (text: string, font: string) => {
       ctx.save();
-
-      // Draw bubble background & border
-      if (b.bgColor !== 'transparent') {
-        ctx.fillStyle = b.bgColor;
-        ctx.strokeStyle = b.borderColor;
-        ctx.lineWidth = b.borderWidth;
-
-        ctx.beginPath();
-        if (b.shape === 'oval') {
-          ctx.ellipse(
-            b.x + b.width / 2,
-            b.y + b.height / 2,
-            b.width / 2,
-            b.height / 2,
-            0,
-            0,
-            Math.PI * 2
-          );
-        } else {
-          ctx.roundRect(b.x, b.y, b.width, b.height, Math.min(b.cornerRadius ?? 0, b.width / 2, b.height / 2));
-        }
-        ctx.fill();
-        ctx.stroke();
-
-        // Draw speech tail
-        if (b.tailEnabled) {
-          const cx = b.x + b.width / 2;
-          const cy = b.y + b.height / 2;
-          const tx = cx + b.tailPos.x;
-          const ty = cy + b.tailPos.y;
-
-          ctx.beginPath();
-          ctx.moveTo(cx - 15, cy + b.height / 2 - 4);
-          ctx.lineTo(tx, ty);
-          ctx.lineTo(cx + 15, cy + b.height / 2 - 4);
-          ctx.closePath();
-          ctx.fill();
-          ctx.stroke();
-        }
-      }
-
-      // Draw Text inside
-      ctx.font = `bold ${b.fontSize}px ${b.fontFamily}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-
-      const textX = b.x + b.width / 2;
-      const textY = b.y + b.height / 2;
-
-      if (b.strokeWidth > 0) {
-        ctx.strokeStyle = b.strokeColor;
-        ctx.lineWidth = b.strokeWidth * 2;
-        ctx.strokeText(b.text, textX, textY);
-      }
-      ctx.fillStyle = b.fontColor;
-      ctx.fillText(b.text, textX, textY);
-
+      ctx.font = font;
+      const width = ctx.measureText(text).width;
       ctx.restore();
+      return width;
+    };
+
+    for (const b of isPanelActive ? [] : balloons) {
+      renderBalloonToCanvas(ctx, b);
+      renderBalloonTextToCanvas(ctx, b, measureText);
     }
 
     if (onBakeToLayer(bakeCanvas)) onClose?.();
@@ -633,91 +741,359 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
         );
       })}
 
-      {/* 2. Comic Balloons & Vector Text Overlay */}
-      {!isPanelActive && balloons.map((b) => {
-        const screenPos = canvasToScreen(b.x, b.y);
-        const screenW = b.width * viewportZoom;
-        const screenH = b.height * viewportZoom;
-        const isSelected = activeBalloonId === b.id;
+      {/* 2. Comic Balloons & Vector Text Overlay (WYSIWYG SVG matching bake pipeline) */}
+      {!isPanelActive &&
+        (() => {
+          const basis = getCanvasBasis(canvasToScreen);
+          const hasValidBasis = Math.abs(basis.det) > 1e-8;
+          const mA = hasValidBasis ? basis.ux : viewportZoom;
+          const mB = hasValidBasis ? basis.uy : 0;
+          const mC = hasValidBasis ? basis.vx : 0;
+          const mD = hasValidBasis ? basis.vy : viewportZoom;
 
-        return (
-          <div
-            key={b.id}
-            onPointerDown={(e) => startDrag('move', b, e)}
-            style={{
-              transform: `translate(${screenPos.x}px, ${screenPos.y}px)`,
-              width: `${screenW}px`,
-              height: `${screenH}px`,
-              backgroundColor: b.bgColor,
-              borderColor: isSelected ? '#6366F1' : b.borderColor,
-              borderWidth: `${Math.max(1, (b.borderWidth || 1) * viewportZoom)}px`,
-              borderRadius: b.shape === 'oval' ? '50%' : Math.min(b.cornerRadius ?? 0, b.width / 2, b.height / 2) * viewportZoom,
-            }}
-            className={`absolute pointer-events-auto flex items-center justify-center p-2 shadow-lg transition-shadow cursor-move ${
-              isSelected ? 'ring-2 ring-indigo-500 shadow-indigo-500/20' : ''
-            }`}
-          >
-            {/* Inline editable text */}
-            <input
-              type="text"
-              value={b.text}
-              onPointerDown={(e) => e.stopPropagation()}
-              onChange={(e) => {
-                const val = e.target.value;
-                setBalloons((prev) =>
-                  prev.map((item) => (item.id === b.id ? { ...item, text: val } : item))
-                );
-              }}
-              style={{
-                fontSize: `${Math.max(10, b.fontSize * viewportZoom)}px`,
-                color: b.fontColor,
-                fontFamily: b.fontFamily,
-                WebkitTextStroke:
-                  b.strokeWidth > 0
-                    ? `${b.strokeWidth * viewportZoom}px ${b.strokeColor}`
-                    : 'none',
-              }}
-              className="bg-transparent border-none outline-none text-center font-bold w-full truncate cursor-text"
-            />
+          return balloons.map((b) => {
+            const screenPos = canvasToScreen(b.x, b.y);
+            const isSelected = activeBalloonId === b.id;
+            const isEditing = editingBalloonId === b.id;
+            const plan = buildBalloonRenderPlan(b);
+            const geom = plan.geometry;
+            const textLayout = layoutBalloonText(b, measureBrowserTextWidth);
+            const safeBox = geom.safeTextBounds;
+            const maskId = `comic_balloon_mask_${maskIdPrefix}_${b.id.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+            const maskPad = 24;
+            const maskX = geom.bounds.x - maskPad;
+            const maskY = geom.bounds.y - maskPad;
+            const maskW = geom.bounds.width + maskPad * 2;
+            const maskH = geom.bounds.height + maskPad * 2;
 
-            {/* Speech Tail Handle (if selected & enabled) */}
-            {isSelected && b.tailEnabled && (
-              <div
-                onPointerDown={(e) => startDrag('tail', b, e)}
-                style={{
-                  transform: `translate(${b.tailPos.x * viewportZoom}px, ${
-                    b.tailPos.y * viewportZoom
-                  }px)`,
-                }}
-                className="absolute w-4 h-4 rounded-full bg-amber-400 border-2 border-white shadow-md cursor-grab active:cursor-grabbing hover:scale-125 transition-transform"
-                title="拖曳尾巴指向角色"
-              />
-            )}
+            const nwPt = canvasToScreen(b.x, b.y);
+            const nePt = canvasToScreen(b.x + b.width, b.y);
+            const sePt = canvasToScreen(b.x + b.width, b.y + b.height);
+            const swPt = canvasToScreen(b.x, b.y + b.height);
+            const tailTipPt = canvasToScreen(geom.tailTip.x, geom.tailTip.y);
+            const tailBasePt = canvasToScreen(geom.tailBaseCenter.x, geom.tailBaseCenter.y);
+            const tailCurvePt = canvasToScreen(geom.tailCurveHandle.x, geom.tailCurveHandle.y);
+            const showCurveHandle = b.tailEnabled && !geom.tailSuppressed && geom.tailLocal.chordLength >= 28;
 
-            {/* 4 Corner Resize Handles (when selected) */}
-            {isSelected && (
-              <>
+            return (
+              <React.Fragment key={b.id}>
+                {/* Pure WYSIWYG Balloon Body + Tail + Text (zero selection overrides) */}
                 <div
-                  onPointerDown={(e) => startDrag('nw', b, e)}
-                  className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border border-indigo-600 rounded-sm cursor-nwse-resize shadow"
-                />
-                <div
-                  onPointerDown={(e) => startDrag('ne', b, e)}
-                  className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border border-indigo-600 rounded-sm cursor-nesw-resize shadow"
-                />
-                <div
-                  onPointerDown={(e) => startDrag('se', b, e)}
-                  className="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border border-indigo-600 rounded-sm cursor-nwse-resize shadow"
-                />
-                <div
-                  onPointerDown={(e) => startDrag('sw', b, e)}
-                  className="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border border-indigo-600 rounded-sm cursor-nesw-resize shadow"
-                />
-              </>
-            )}
-          </div>
-        );
-      })}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    setActiveBalloonId(b.id);
+                    setEditingBalloonId(b.id);
+                  }}
+                  style={{
+                    transform: `translate(${screenPos.x}px, ${screenPos.y}px) matrix(${mA}, ${mB}, ${mC}, ${mD}, 0, 0)`,
+                    transformOrigin: '0 0',
+                    width: `${b.width}px`,
+                    height: `${b.height}px`,
+                  }}
+                  className="absolute top-0 left-0 pointer-events-none"
+                >
+                  <svg
+                    className="absolute inset-0 h-full w-full overflow-visible pointer-events-none"
+                    viewBox={`${b.x} ${b.y} ${b.width} ${b.height}`}
+                  >
+                    {plan.mode === 'isolated-alpha' && plan.hasBorder && (
+                      <defs>
+                        <mask
+                          id={maskId}
+                          maskUnits="userSpaceOnUse"
+                          x={maskX}
+                          y={maskY}
+                          width={maskW}
+                          height={maskH}
+                        >
+                          <rect x={maskX} y={maskY} width={maskW} height={maskH} fill="white" />
+                          {plan.punchOuts.map((cmds, idx) => (
+                            <path key={idx} d={commandsToSvgPath(cmds)} fill="black" />
+                          ))}
+                        </mask>
+                      </defs>
+                    )}
+
+                    {plan.mode === 'opaque-dual-layer' ? (
+                      <>
+                        {plan.hasBorder && (
+                          <g
+                            pointerEvents="visiblePainted"
+                            className="cursor-move"
+                            onPointerDown={(e) => startDrag('move', b, e)}
+                          >
+                            {plan.strokes.map((s, idx) => (
+                              <path
+                                key={idx}
+                                d={commandsToSvgPath(s.commands)}
+                                fill="none"
+                                stroke={s.strokeStyle}
+                                strokeWidth={s.lineWidth}
+                                strokeLinejoin="round"
+                                strokeLinecap="round"
+                                strokeMiterlimit={2.5}
+                              />
+                            ))}
+                          </g>
+                        )}
+                        {plan.hasFill && (
+                          <g
+                            pointerEvents="visiblePainted"
+                            className="cursor-move"
+                            onPointerDown={(e) => startDrag('move', b, e)}
+                          >
+                            {plan.fills.map((f, idx) => (
+                              <path
+                                key={idx}
+                                d={commandsToSvgPath(f.commands)}
+                                fill={f.fillStyle}
+                                stroke="none"
+                              />
+                            ))}
+                          </g>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        {!plan.hasFill && (
+                          <g
+                            pointerEvents="visibleFill"
+                            className="cursor-move"
+                            onPointerDown={(e) => startDrag('move', b, e)}
+                          >
+                            {plan.shapes.map((cmds, idx) => (
+                              <path
+                                key={idx}
+                                d={commandsToSvgPath(cmds)}
+                                fill="transparent"
+                                stroke="none"
+                              />
+                            ))}
+                          </g>
+                        )}
+                        {plan.hasFill && (
+                          <g
+                            opacity={plan.bgAlpha}
+                            pointerEvents="visiblePainted"
+                            className="cursor-move"
+                            onPointerDown={(e) => startDrag('move', b, e)}
+                          >
+                            {plan.fills.map((f, idx) => (
+                              <path
+                                key={idx}
+                                d={commandsToSvgPath(f.commands)}
+                                fill={f.fillStyle}
+                                stroke="none"
+                              />
+                            ))}
+                          </g>
+                        )}
+                        {plan.hasBorder && (
+                          <g
+                            opacity={plan.borderAlpha}
+                            mask={`url(#${maskId})`}
+                            pointerEvents="visiblePainted"
+                            className="cursor-move"
+                            onPointerDown={(e) => startDrag('move', b, e)}
+                          >
+                            {plan.strokes.map((s, idx) => (
+                              <path
+                                key={idx}
+                                d={commandsToSvgPath(s.commands)}
+                                fill="none"
+                                stroke={s.strokeStyle}
+                                strokeWidth={s.lineWidth}
+                                strokeLinejoin="round"
+                                strokeLinecap="round"
+                                strokeMiterlimit={2.5}
+                              />
+                            ))}
+                          </g>
+                        )}
+                      </>
+                    )}
+
+                    {/* WYSIWYG Text Layer (hidden only while inline textarea is active) */}
+                    {!isEditing && b.text && (
+                      <g
+                        pointerEvents="visiblePainted"
+                        className="cursor-move select-none"
+                        onPointerDown={(e) => startDrag('move', b, e)}
+                      >
+                        {textLayout.items.map((item, idx) =>
+                          item.text ? (
+                            <text
+                              key={idx}
+                              x={item.x}
+                              y={item.y}
+                              transform={
+                                item.rotationDeg !== 0
+                                  ? `rotate(${item.rotationDeg} ${item.x} ${item.y})`
+                                  : undefined
+                              }
+                              textAnchor="middle"
+                              dominantBaseline="central"
+                              fontFamily={b.fontFamily}
+                              fontSize={b.fontSize}
+                              fontWeight="bold"
+                              fill={b.fontColor}
+                              paintOrder="stroke"
+                              stroke={b.strokeWidth > 0 ? b.strokeColor : 'none'}
+                              strokeWidth={b.strokeWidth > 0 ? b.strokeWidth * 2 : 0}
+                              strokeLinejoin="round"
+                            >
+                              {item.text}
+                            </text>
+                          ) : null
+                        )}
+                      </g>
+                    )}
+                  </svg>
+
+                  {/* Click-to-edit safe text trigger when selected (strictly inside safeBox so perimeter tailBase stays unobstructed) */}
+                  {isSelected && !isEditing && (
+                    <div
+                      onPointerDown={(e) => startDrag('move', b, e)}
+                      onClick={(e) => {
+                        if (Date.now() - lastDragMovedAtRef.current > 200) {
+                          e.stopPropagation();
+                          setEditingBalloonId(b.id);
+                        }
+                      }}
+                      style={{
+                        left: `${safeBox.x - b.x}px`,
+                        top: `${safeBox.y - b.y}px`,
+                        width: `${safeBox.width}px`,
+                        height: `${safeBox.height}px`,
+                      }}
+                      className="absolute pointer-events-auto cursor-text"
+                    />
+                  )}
+
+                  {/* Inline Multiline Editor inside safeBox */}
+                  {isEditing && (
+                    <textarea
+                      autoFocus
+                      value={b.text}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onChange={(e) => updateBalloon(b.id, { text: e.target.value })}
+                      onBlur={() => setEditingBalloonId((cur) => (cur === b.id ? null : cur))}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') {
+                          e.stopPropagation();
+                          setEditingBalloonId(null);
+                        }
+                      }}
+                      style={{
+                        left: `${safeBox.x - b.x}px`,
+                        top: `${safeBox.y - b.y}px`,
+                        width: `${safeBox.width}px`,
+                        height: `${safeBox.height}px`,
+                        fontSize: `${b.fontSize}px`,
+                        lineHeight: b.lineHeight ?? DEFAULT_LINE_HEIGHT,
+                        color: b.fontColor,
+                        fontFamily: b.fontFamily,
+                        writingMode: b.orientation === 'vertical' ? 'vertical-rl' : 'horizontal-tb',
+                      }}
+                      className="absolute pointer-events-auto bg-transparent border border-indigo-400/50 rounded outline-none text-center font-bold resize-none overflow-hidden p-0.5 select-text"
+                    />
+                  )}
+                </div>
+
+                {/* Independent Selection Overlay & Screen-space Handles (only when selected) */}
+                {isSelected && (
+                  <>
+                    <svg className="absolute inset-0 h-full w-full overflow-visible pointer-events-none z-10">
+                      <polygon
+                        points={`${nwPt.x},${nwPt.y} ${nePt.x},${nePt.y} ${sePt.x},${sePt.y} ${swPt.x},${swPt.y}`}
+                        fill="none"
+                        stroke="#6366F1"
+                        strokeOpacity={0.85}
+                        strokeWidth={1.5}
+                        strokeDasharray="4 3"
+                      />
+                      {b.tailEnabled && (
+                        <polyline
+                          points={
+                            showCurveHandle
+                              ? `${tailBasePt.x},${tailBasePt.y} ${tailCurvePt.x},${tailCurvePt.y} ${tailTipPt.x},${tailTipPt.y}`
+                              : `${tailBasePt.x},${tailBasePt.y} ${tailTipPt.x},${tailTipPt.y}`
+                          }
+                          fill="none"
+                          stroke="#38BDF8"
+                          strokeOpacity={0.7}
+                          strokeWidth={1.25}
+                          strokeDasharray="3 3"
+                        />
+                      )}
+                    </svg>
+
+                    {/* 4 Corner Resize Handles (edges kept free for tailBase sliding) */}
+                    {[
+                      { mode: 'nw' as const, pt: nwPt, cursor: 'cursor-nwse-resize' },
+                      { mode: 'ne' as const, pt: nePt, cursor: 'cursor-nesw-resize' },
+                      { mode: 'se' as const, pt: sePt, cursor: 'cursor-nwse-resize' },
+                      { mode: 'sw' as const, pt: swPt, cursor: 'cursor-nesw-resize' },
+                    ].map((h) => (
+                      <div
+                        key={h.mode}
+                        onPointerDown={(e) => startDrag(h.mode, b, e)}
+                        style={{
+                          left: `${h.pt.x}px`,
+                          top: `${h.pt.y}px`,
+                          transform: 'translate(-50%, -50%)',
+                        }}
+                        className={`absolute z-20 w-3 h-3 bg-white border border-indigo-600 rounded-sm shadow pointer-events-auto ${h.cursor}`}
+                      />
+                    ))}
+
+                    {/* 3 Tail Handles: tip (amber), base (emerald diamond), curve midpoint (sky) */}
+                    {b.tailEnabled && (
+                      <>
+                        {showCurveHandle && (
+                          <div
+                            onPointerDown={(e) => startDrag('tailCurve', b, e)}
+                            onDoubleClick={(e) => {
+                              e.stopPropagation();
+                              updateBalloon(b.id, { tailCurve: 0 });
+                            }}
+                            style={{
+                              left: `${tailCurvePt.x}px`,
+                              top: `${tailCurvePt.y}px`,
+                              transform: 'translate(-50%, -50%)',
+                            }}
+                            className="absolute z-20 w-3 h-3 rounded-full bg-sky-400 border-2 border-white shadow-md cursor-grab active:cursor-grabbing hover:scale-125 transition-transform pointer-events-auto"
+                            title={t.comic.tailDirect}
+                          />
+                        )}
+                        <div
+                          onPointerDown={(e) => startDrag('tailBase', b, e)}
+                          style={{
+                            left: `${tailBasePt.x}px`,
+                            top: `${tailBasePt.y}px`,
+                            transform: 'translate(-50%, -50%) rotate(45deg)',
+                          }}
+                          className="absolute z-[25] w-3.5 h-3.5 rounded-[2px] bg-emerald-400 border-2 border-white shadow-md cursor-grab active:cursor-grabbing hover:scale-125 transition-transform pointer-events-auto"
+                          title={t.comic.balloonTail}
+                        />
+                        <div
+                          onPointerDown={(e) => startDrag('tail', b, e)}
+                          style={{
+                            left: `${tailTipPt.x}px`,
+                            top: `${tailTipPt.y}px`,
+                            transform: 'translate(-50%, -50%)',
+                          }}
+                          className="absolute z-30 w-3.5 h-3.5 rounded-full bg-amber-400 border-2 border-white shadow-md cursor-grab active:cursor-grabbing hover:scale-125 transition-transform pointer-events-auto"
+                          title={t.comic.tailDirect}
+                        />
+                      </>
+                    )}
+                  </>
+                )}
+              </React.Fragment>
+            );
+          });
+        })()}
 
       {/* Floating Comic / Balloon Tool Options Bar */}
       <div className="absolute top-14 left-1/2 -translate-x-1/2 pointer-events-auto atelier-popover atelier-menu-in p-1.5 flex flex-wrap items-center gap-1.5 text-xs text-neutral-200 animate-in slide-in-from-top-2 duration-150 max-w-[94vw] overflow-x-auto no-scrollbar">
@@ -805,22 +1181,44 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
               <span>{isBalloonActive ? t.comic.speechBalloon : t.tools.text}：</span>
             </span>
             {isBalloonActive && (
-              <>
+              <div className="flex items-center gap-1 shrink-0">
                 <button
                   type="button"
                   onClick={() => handleAddBalloon('oval')}
-                  className="px-2 py-1 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-white transition shrink-0"
+                  title={t.comic.balloonOval}
+                  className="px-2 py-1 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-white transition flex items-center gap-1 shrink-0"
                 >
-                  + {t.comic.balloonOval}
+                  <MessageCircle className="w-3.5 h-3.5" />
+                  <span>+ {t.comic.balloonOval.split(' (')[0]}</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => handleAddBalloon('rect')}
-                  className="px-2 py-1 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-white transition shrink-0"
+                  title={t.comic.balloonRounded}
+                  className="px-2 py-1 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-white transition flex items-center gap-1 shrink-0"
                 >
-                  + {t.comic.balloonRounded}
+                  <MessageSquare className="w-3.5 h-3.5" />
+                  <span>+ {t.comic.balloonRounded.split(' (')[0]}</span>
                 </button>
-              </>
+                <button
+                  type="button"
+                  onClick={() => handleAddBalloon('spiky')}
+                  title={t.comic.balloonSpiky}
+                  className="px-2 py-1 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-white transition flex items-center gap-1 shrink-0"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>+ {t.comic.balloonSpiky.split(' (')[0]}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleAddBalloon('thought')}
+                  title={t.comic.balloonThought}
+                  className="px-2 py-1 rounded-xl bg-neutral-800 hover:bg-neutral-700 text-white transition flex items-center gap-1 shrink-0"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>+ {t.comic.balloonThought.split(' (')[0]}</span>
+                </button>
+              </div>
             )}
             {isTextActive && (
               <button
@@ -833,60 +1231,312 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
               </button>
             )}
 
-            {isBalloonActive && currentBalloon?.shape === 'rect' && currentBalloon.bgColor !== 'transparent' && (
-              <label className="flex items-center gap-1.5 shrink-0">
-                {t.toolOptions.shapeCornerRadius}
-                <input type="range" min={0} max={Math.floor(Math.min(currentBalloon.width, currentBalloon.height) / 2)}
-                  value={Math.min(currentBalloon.cornerRadius ?? 0, Math.floor(Math.min(currentBalloon.width, currentBalloon.height) / 2))}
-                  onChange={(e) => {
-                    const cornerRadius = Number(e.target.value);
-                    setBalloons((prev) => prev.map((b) => b.id === currentBalloon.id ? { ...b, cornerRadius } : b));
-                  }} className="w-20" />
-              </label>
-            )}
-            {/* Current Balloon Text Styling Controls */}
-            {currentBalloon && (
-              <div className="flex items-center gap-1.5 ml-1 pl-1 border-l border-neutral-700 shrink-0">
-                <span className="text-[11px] text-neutral-400">{t.comic.fontSize}:</span>
-                <input
-                  type="number"
-                  min="12"
-                  max="96"
-                  value={currentBalloon.fontSize}
-                  onChange={(e) => {
-                    const sz = Math.max(10, Math.min(120, parseInt(e.target.value, 10) || 16));
-                    setBalloons((prev) =>
-                      prev.map((b) => (b.id === currentBalloon.id ? { ...b, fontSize: sz } : b))
-                    );
-                  }}
-                  className="w-12 bg-neutral-900 border border-neutral-700 rounded-lg px-1.5 py-0.5 text-center text-xs text-white"
-                />
-                <span className="text-[11px] text-neutral-400">{t.comic.fontFamily}:</span>
-                <select
-                  value={currentBalloon.fontFamily}
-                  onChange={(e) => {
-                    const fam = e.target.value;
-                    setBalloons((prev) =>
-                      prev.map((b) => (b.id === currentBalloon.id ? { ...b, fontFamily: fam } : b))
-                    );
-                  }}
-                  className="bg-neutral-900 border border-neutral-700 rounded-lg px-1.5 py-0.5 text-xs text-white"
-                >
-                  <option value="sans-serif">Sans-serif</option>
-                  <option value="serif">Serif</option>
-                  <option value="cursive">Cursive</option>
-                  <option value="monospace">Monospace</option>
-                </select>
-                <button
-                  type="button"
-                  onClick={handleDeleteActiveBalloon}
-                  className="p-1 rounded-lg text-rose-400 hover:bg-rose-950/40 transition"
-                  title={t.common.delete}
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            )}
+            {/* Selected Balloon Properties (Shape, Tail, Border/Fill, Text) */}
+            {currentBalloon && (() => {
+              const tailParams = resolveBalloonTailParams(currentBalloon);
+              const bgAlpha = parseColorAlpha(currentBalloon.bgColor);
+              const isTransparentBg = bgAlpha <= 0.001;
+              return (
+                <div className="flex flex-wrap items-center gap-1.5 ml-1 pl-1.5 border-l border-neutral-700">
+                  {/* Shape Switcher */}
+                  <label className="flex items-center gap-1 shrink-0" title={t.comic.balloonType}>
+                    <span className="text-[11px] text-neutral-400">{t.comic.balloonType}:</span>
+                    <select
+                      value={currentBalloon.shape}
+                      onChange={(e) =>
+                        updateBalloon(currentBalloon.id, { shape: e.target.value as BalloonShape })
+                      }
+                      className="bg-neutral-900 border border-neutral-700 rounded-lg px-1.5 py-0.5 text-xs text-white"
+                    >
+                      <option value="oval">{t.comic.balloonOval}</option>
+                      <option value="rect">{t.comic.balloonRounded}</option>
+                      <option value="spiky">{t.comic.balloonSpiky}</option>
+                      <option value="thought">{t.comic.balloonThought}</option>
+                    </select>
+                  </label>
+
+                  {currentBalloon.shape === 'rect' && (
+                    <label className="flex items-center gap-1 shrink-0">
+                      <span className="text-[11px] text-neutral-400">{t.toolOptions.shapeCornerRadius}:</span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={Math.floor(Math.min(currentBalloon.width, currentBalloon.height) / 2)}
+                        value={Math.min(
+                          currentBalloon.cornerRadius ?? 0,
+                          Math.floor(Math.min(currentBalloon.width, currentBalloon.height) / 2)
+                        )}
+                        onChange={(e) =>
+                          updateBalloon(currentBalloon.id, { cornerRadius: Number(e.target.value) })
+                        }
+                        className="w-16"
+                      />
+                    </label>
+                  )}
+
+                  {/* Tail Toggle + Free Base Angle / Width / Curve */}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      updateBalloon(currentBalloon.id, { tailEnabled: !currentBalloon.tailEnabled })
+                    }
+                    title={t.comic.balloonTail}
+                    className={`px-2 py-0.5 rounded-lg border text-[11px] transition shrink-0 ${
+                      currentBalloon.tailEnabled
+                        ? 'bg-amber-500/20 border-amber-400/60 text-amber-200'
+                        : 'bg-neutral-900 border-neutral-700 text-neutral-400'
+                    }`}
+                  >
+                    {currentBalloon.tailEnabled ? t.comic.balloonTail : t.comic.tailNone}
+                  </button>
+
+                  {currentBalloon.tailEnabled && (
+                    <div className="flex items-center gap-1.5 bg-neutral-900/70 px-1.5 py-0.5 rounded-lg border border-neutral-700/80 shrink-0">
+                      {/* Base Angle */}
+                      <label className="flex items-center gap-1" title={t.comic.tailDirect}>
+                        <span className="text-[11px] text-emerald-300">⌖</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={360}
+                          step={1}
+                          value={Math.round(tailParams.tailBaseAngle)}
+                          onChange={(e) =>
+                            updateBalloon(currentBalloon.id, {
+                              tailBaseAngle: Number(e.target.value) % 360,
+                            })
+                          }
+                          className="w-16"
+                        />
+                        <span className="text-[11px] font-mono w-9 text-right">
+                          {Math.round(tailParams.tailBaseAngle)}°
+                        </span>
+                      </label>
+                      {!tailParams.isAutoBaseAngle && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateBalloon(currentBalloon.id, { tailBaseAngle: undefined })
+                          }
+                          title={t.common.reset}
+                          className="p-0.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                        </button>
+                      )}
+
+                      {/* Tail Width */}
+                      <label className="flex items-center gap-1" title={t.comic.tailSize}>
+                        <span className="text-[11px] text-neutral-400">{t.comic.tailSize}:</span>
+                        <input
+                          type="range"
+                          min={8}
+                          max={80}
+                          step={1}
+                          value={Math.round(tailParams.tailWidth)}
+                          onChange={(e) =>
+                            updateBalloon(currentBalloon.id, { tailWidth: Number(e.target.value) })
+                          }
+                          className="w-14"
+                        />
+                        <span className="text-[11px] font-mono w-8 text-right">
+                          {Math.round(tailParams.tailWidth)}
+                        </span>
+                      </label>
+
+                      {/* Tail Curve */}
+                      <label className="flex items-center gap-1" title={t.comic.tailDirect}>
+                        <span className="text-[11px] text-sky-300">⌒</span>
+                        <input
+                          type="range"
+                          min={-100}
+                          max={100}
+                          step={1}
+                          value={Math.round(tailParams.tailCurve * 100)}
+                          onChange={(e) => {
+                            const raw = Number(e.target.value) / 100;
+                            updateBalloon(currentBalloon.id, {
+                              tailCurve: Math.abs(raw) < 0.05 ? 0 : raw,
+                            });
+                          }}
+                          className="w-14"
+                        />
+                        <span className="text-[11px] font-mono w-10 text-right">
+                          {Math.round(tailParams.tailCurve * 100)}%
+                        </span>
+                      </label>
+                      {tailParams.tailCurve !== 0 && (
+                        <button
+                          type="button"
+                          onClick={() => updateBalloon(currentBalloon.id, { tailCurve: 0 })}
+                          title={t.common.reset}
+                          className="p-0.5 rounded text-neutral-400 hover:text-white hover:bg-neutral-800"
+                        >
+                          <RotateCcw className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Border & Fill Colors */}
+                  <div className="flex items-center gap-1.5 bg-neutral-900/70 px-1.5 py-0.5 rounded-lg border border-neutral-700/80 shrink-0">
+                    <label className="flex items-center gap-1" title={t.comic.borderWidth}>
+                      <span className="text-[11px] text-neutral-400">{t.comic.borderWidth}:</span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={16}
+                        step={0.5}
+                        value={currentBalloon.borderWidth}
+                        onChange={(e) =>
+                          updateBalloon(currentBalloon.id, { borderWidth: Number(e.target.value) })
+                        }
+                        className="w-14"
+                      />
+                      <span className="text-[11px] font-mono w-7 text-right">
+                        {currentBalloon.borderWidth}
+                      </span>
+                    </label>
+                    <input
+                      type="color"
+                      value={colorToHex6(currentBalloon.borderColor, '#000000')}
+                      onChange={(e) =>
+                        updateBalloon(currentBalloon.id, { borderColor: e.target.value })
+                      }
+                      title={t.comic.borderColor}
+                      className="w-5 h-5 rounded border border-neutral-600 bg-transparent cursor-pointer p-0"
+                    />
+                    <span className="text-[11px] text-neutral-400">{t.comic.fillColor}:</span>
+                    <input
+                      type="color"
+                      value={colorToHex6(currentBalloon.bgColor, '#ffffff')}
+                      onChange={(e) => {
+                        const alpha = bgAlpha <= 0.001 ? 1 : bgAlpha;
+                        updateBalloon(currentBalloon.id, {
+                          bgColor: applyAlphaToColor(e.target.value, alpha),
+                        });
+                      }}
+                      title={t.comic.fillColor}
+                      className="w-5 h-5 rounded border border-neutral-600 bg-transparent cursor-pointer p-0"
+                    />
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      step={5}
+                      value={Math.round(bgAlpha * 100)}
+                      onChange={(e) =>
+                        updateBalloon(currentBalloon.id, {
+                          bgColor: applyAlphaToColor(
+                            currentBalloon.bgColor,
+                            Number(e.target.value) / 100
+                          ),
+                        })
+                      }
+                      title={`${t.comic.fillColor} ${Math.round(bgAlpha * 100)}%`}
+                      className="w-12"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateBalloon(currentBalloon.id, {
+                          bgColor: isTransparentBg ? '#FFFFFF' : 'transparent',
+                        })
+                      }
+                      title={t.comic.fillColor}
+                      className={`px-1.5 py-0.5 rounded text-[10px] border transition ${
+                        isTransparentBg
+                          ? 'bg-indigo-600/30 border-indigo-400 text-indigo-200'
+                          : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white'
+                      }`}
+                    >
+                      {Math.round(bgAlpha * 100)}%
+                    </button>
+                  </div>
+
+                  {/* Text Direction, Font Size, Line Height, Family & Color */}
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateBalloon(currentBalloon.id, {
+                          orientation:
+                            currentBalloon.orientation === 'vertical' ? 'horizontal' : 'vertical',
+                        })
+                      }
+                      title={
+                        currentBalloon.orientation === 'vertical'
+                          ? t.comic.verticalText
+                          : t.comic.horizontalText
+                      }
+                      className={`px-2 py-0.5 rounded-lg border text-[11px] transition shrink-0 ${
+                        currentBalloon.orientation === 'vertical'
+                          ? 'bg-indigo-600/30 border-indigo-400 text-indigo-200'
+                          : 'bg-neutral-900 border-neutral-700 text-neutral-300'
+                      }`}
+                    >
+                      {currentBalloon.orientation === 'vertical'
+                        ? t.comic.verticalText.split(' (')[0]
+                        : t.comic.horizontalText.split(' (')[0]}
+                    </button>
+                    <span className="text-[11px] text-neutral-400">{t.comic.fontSize}:</span>
+                    <input
+                      type="number"
+                      min="10"
+                      max="120"
+                      value={currentBalloon.fontSize}
+                      onChange={(e) => {
+                        const sz = Math.max(10, Math.min(120, parseInt(e.target.value, 10) || 16));
+                        updateBalloon(currentBalloon.id, { fontSize: sz });
+                      }}
+                      className="w-12 bg-neutral-900 border border-neutral-700 rounded-lg px-1 py-0.5 text-center text-xs text-white"
+                    />
+                    <span className="text-[11px] text-neutral-400">{t.comic.lineHeight}:</span>
+                    <input
+                      type="number"
+                      min="0.8"
+                      max="2.5"
+                      step="0.05"
+                      value={currentBalloon.lineHeight ?? DEFAULT_LINE_HEIGHT}
+                      onChange={(e) => {
+                        const lh = clamp(parseFloat(e.target.value) || DEFAULT_LINE_HEIGHT, 0.8, 2.5);
+                        updateBalloon(currentBalloon.id, { lineHeight: lh });
+                      }}
+                      className="w-14 bg-neutral-900 border border-neutral-700 rounded-lg px-1 py-0.5 text-center text-xs text-white"
+                    />
+                    <select
+                      value={currentBalloon.fontFamily}
+                      onChange={(e) =>
+                        updateBalloon(currentBalloon.id, { fontFamily: e.target.value })
+                      }
+                      title={t.comic.fontFamily}
+                      className="bg-neutral-900 border border-neutral-700 rounded-lg px-1.5 py-0.5 text-xs text-white"
+                    >
+                      <option value="sans-serif">Sans-serif</option>
+                      <option value="serif">Serif</option>
+                      <option value="cursive">Cursive</option>
+                      <option value="monospace">Monospace</option>
+                    </select>
+                    <input
+                      type="color"
+                      value={colorToHex6(currentBalloon.fontColor, '#000000')}
+                      onChange={(e) =>
+                        updateBalloon(currentBalloon.id, { fontColor: e.target.value })
+                      }
+                      className="w-5 h-5 rounded border border-neutral-600 bg-transparent cursor-pointer p-0"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleDeleteActiveBalloon}
+                      className="p-1 rounded-lg text-rose-400 hover:bg-rose-950/40 transition"
+                      title={t.common.delete}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
           </>
         )}
 
