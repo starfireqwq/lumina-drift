@@ -4,6 +4,7 @@ import { buildApp } from '../src/app';
 import {
   AbrParser,
   AtelierBrushPreset,
+  type AuthResponse,
   BrushPackageManager,
   CanvasSticker,
   SutParser,
@@ -155,36 +156,50 @@ async function runPhase6Tests() {
   const serverPort = (app.server.address() as any).port;
   const baseUrl = `http://127.0.0.1:${serverPort}`;
 
-  // Login Admin to create canvas
-  const loginRes = await fetch(`${baseUrl}/api/auth/login`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username: 'admin', password: 'admin123' }),
-  }).then((r) => r.json());
+  const aliceName = '愛麗絲畫師';
+  const bobName = '小鮑伯畫師';
+  const register = async (username: string, displayName: string): Promise<AuthResponse> => {
+    const response = await fetch(`${baseUrl}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, displayName, password: 'phase6-test' }),
+    });
+    assert.strictEqual(response.status, 201);
+    return response.json();
+  };
+  const alice = await register('phase6-alice', aliceName);
+  const bob = await register('phase6-bob', bobName);
 
-  const canvasRes = await fetch(`${baseUrl}/api/canvases`, {
+  const canvasResponse = await fetch(`${baseUrl}/api/canvases`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${loginRes.token}`,
+      Authorization: `Bearer ${alice.token}`,
     },
     body: JSON.stringify({
       title: 'Phase 6 語音繪茶與貼圖測試畫布',
       width: 1920,
       height: 1080,
     }),
-  }).then((r) => r.json());
-
+  });
+  assert.strictEqual(canvasResponse.status, 201);
+  const canvasRes = await canvasResponse.json();
   const canvasId = canvasRes.canvas.id;
+  const bobJoinResponse = await fetch(`${baseUrl}/api/canvases/join`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${bob.token}` },
+    body: JSON.stringify({ canvasId }),
+  });
+  assert.strictEqual(bobJoinResponse.status, 200);
 
   // Connect Alice & Bob sockets
   const socketAlice: Socket = socketIO(baseUrl, {
-    auth: { displayName: '愛麗絲畫師' },
+    auth: { token: alice.token, displayName: aliceName },
     transports: ['websocket'],
   });
 
   const socketBob: Socket = socketIO(baseUrl, {
-    auth: { displayName: '小鮑伯畫師' },
+    auth: { token: bob.token, displayName: bobName },
     transports: ['websocket'],
   });
 
@@ -210,7 +225,7 @@ async function runPhase6Tests() {
 
   socketAlice.emit('voice_join', { canvasId });
   const voiceJoinData = await bobHeardVoiceJoinPromise;
-  assert.strictEqual(voiceJoinData.displayName, '愛麗絲畫師');
+  assert.strictEqual(voiceJoinData.displayName, aliceName);
   console.log(`✓ WebRTC voice room join broadcast verified: ${voiceJoinData.displayName} entered voice`);
 
   // Test 4B: WebRTC SDP Signal forwarding
@@ -265,8 +280,8 @@ async function runPhase6Tests() {
   const testSticker: CanvasSticker = {
     id: 'stk_test_101',
     canvasId,
-    ownerId: 'alice_1',
-    ownerName: '愛麗絲畫師',
+    ownerId: alice.user.id,
+    ownerName: aliceName,
     title: '摸魚中貼圖',
     imageUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=',
     x: 150,
@@ -281,21 +296,48 @@ async function runPhase6Tests() {
     createdAt: Date.now(),
   };
 
-  // 5A: Add sticker
-  const bobHeardStickerAddPromise = new Promise<CanvasSticker>((resolve) => {
-    socketBob.on('sticker_added', (data: { canvasId: string; sticker: CanvasSticker }) => {
-      resolve(data.sticker);
-    });
+  // 5A: Guests can join and read, but their sticker writes are rejected.
+  const guestName = '貼圖訪客';
+  const socketGuest = socketIO(baseUrl, {
+    auth: { displayName: guestName },
+    transports: ['websocket'],
   });
+  const guestStickerId = 'stk_guest_denied';
+  let bobReceivedGuestSticker = false;
+  const bobHeardStickerAddPromise = new Promise<CanvasSticker>((resolve) => {
+    function onStickerAdded({ sticker }: { sticker: CanvasSticker }) {
+      if (sticker.id === guestStickerId) bobReceivedGuestSticker = true;
+      if (sticker.id !== testSticker.id) return;
+      socketBob.off('sticker_added', onStickerAdded);
+      resolve(sticker);
+    }
+    socketBob.on('sticker_added', onStickerAdded);
+  });
+  try {
+    const guestJoined = new Promise((resolve) => socketGuest.once('room_state', resolve));
+    socketGuest.emit('join_canvas', { canvasId });
+    await guestJoined;
+    const guestError = new Promise<{ code: string }>((resolve) => socketGuest.once('error', resolve));
+    socketGuest.emit('sticker_add', {
+      canvasId,
+      sticker: { ...testSticker, id: guestStickerId, ownerId: `guest_${socketGuest.id}`, ownerName: guestName },
+    });
+    assert.strictEqual((await guestError).code, 'PERMISSION_DENIED');
+  } finally {
+    socketGuest.disconnect();
+  }
 
+  // 5B: Alice's accepted write provides a later broadcast on Bob's socket.
   socketAlice.emit('sticker_add', { canvasId, sticker: testSticker });
   const addedSticker = await bobHeardStickerAddPromise;
+  assert.strictEqual(bobReceivedGuestSticker, false);
+  console.log('✓ Anonymous sticker write rejected without broadcasting to Bob');
   assert.strictEqual(addedSticker.id, testSticker.id);
   assert.strictEqual(addedSticker.x, 150);
   assert.strictEqual(addedSticker.y, 200);
   console.log(`✓ Floating sticker added & broadcast to canvas:「${addedSticker.title}」at (${addedSticker.x}, ${addedSticker.y})`);
 
-  // 5B: Update sticker
+  // 5C: Update sticker
   const bobHeardStickerUpdatePromise = new Promise<Partial<CanvasSticker>>((resolve) => {
     socketBob.on('sticker_updated', (data: { stickerId: string; updates: Partial<CanvasSticker> }) => {
       resolve(data.updates);
@@ -314,7 +356,7 @@ async function runPhase6Tests() {
   assert.strictEqual(updatedUpdates.opacity, 0.8);
   console.log(`✓ Floating sticker moved & resized smoothly: new coords (${updatedUpdates.x}, ${updatedUpdates.y})`);
 
-  // 5C: Remove sticker
+  // 5D: Remove sticker
   const bobHeardStickerRemovePromise = new Promise<string>((resolve) => {
     socketBob.on('sticker_removed', (data: { stickerId: string }) => {
       resolve(data.stickerId);
