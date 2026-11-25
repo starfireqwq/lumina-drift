@@ -68,13 +68,15 @@
 
 ---
 
-## 五、v1.3.2 預期全平台發佈產物
+## 五、v1.3.2 全平台發佈產物（GitHub Release）
 
-| 平台 | 預期檔名 | 狀態 |
+GitHub Release [`v1.3.2`](https://github.com/starfireqwq/lumina-drift/releases/tag/v1.3.2)（commit `9b8e713`）共包含 6 份全平台產物，均已完成上傳與驗證。
+
+| 平台 | 檔名 | 檔案大小 |
 | :--- | :--- | :--- |
-| Windows（安裝版） | `Lumina-Drift-Paint-Setup-1.3.2.exe` | 待發佈 |
-| Windows（免安裝版） | `Lumina-Drift-Paint-Portable-1.3.2.exe` | 待發佈 |
-| macOS（Apple Silicon） | `Lumina-Drift-Paint-Mac-1.3.2-arm64.pkg` | 待發佈 |
-| macOS（Intel） | `Lumina-Drift-Paint-Mac-1.3.2-x64.pkg` | 待發佈 |
-| Android | `Lumina-Drift-Paint-Android-1.3.2.apk` | 待發佈 |
-| Web 靜態包 | `Lumina-Drift-Paint-Web-1.3.2.zip` | 待發佈 |
+| Windows（安裝版） | `Lumina-Drift-Paint-Setup-1.3.2.exe` | `132.68 MB` |
+| Windows（免安裝版） | `Lumina-Drift-Paint-Portable-1.3.2.exe` | `121.36 MB` |
+| macOS（Apple Silicon） | `Lumina-Drift-Paint-Mac-1.3.2-arm64.pkg` | `140.2 MB` |
+| macOS（Intel） | `Lumina-Drift-Paint-Mac-1.3.2-x64.pkg` | `147.97 MB` |
+| Android | `Lumina-Drift-Paint-Android-1.3.2.apk` | `2.18 MB` |
+| Web 靜態包 | `Lumina-Drift-Paint-Web-1.3.2.zip` | `4.34 MB` |
