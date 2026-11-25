@@ -1,5 +1,5 @@
 import React from 'react';
-import { ToolType } from '@atelier/shared';
+import type { ToolType } from '@atelier/shared';
 import type { Translations } from '../../locales';
 import {
   Activity,
@@ -18,6 +18,7 @@ import {
   MousePointer2,
   Paintbrush,
   PaintBucket,
+  PaintRoller,
   PenTool,
   Pencil,
   Pipette,
@@ -46,6 +47,13 @@ export interface ToolGroup {
   tools: ToolDef[];
 }
 
+const PAINT_UNFILLED_TOOL: ToolDef = {
+  id: 'paint_unfilled',
+  label: '間隙填充筆',
+  icon: PaintRoller,
+  hint: '塗抹以填補參照圖層中的未上色間隙',
+};
+
 export const TOOL_GROUPS: ToolGroup[] = [
   {
     id: 'paint',
@@ -64,6 +72,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
     tools: [
       { id: 'bucket', label: '油漆桶', icon: PaintBucket, shortcutId: 'tool_bucket', hint: '點擊填滿封閉區域；上方選項可切換成「套索填色」' },
       { id: 'smart_fill', label: '智能填色', icon: Sparkles, shortcutId: 'tool_smart_fill', hint: '圈住線稿區域自動上色' },
+      PAINT_UNFILLED_TOOL,
       { id: 'gradient', label: '漸層', icon: Blend, shortcutId: 'tool_gradient', hint: '拖曳拉出漸層' },
       { id: 'eyedropper', label: '滴管', icon: Pipette, shortcutId: 'tool_eyedropper', hint: '點擊吸取顏色（任何工具按住 Alt 亦可）' },
     ],
@@ -119,6 +128,7 @@ export const getLocalizedTool = (id: ToolType, t: Translations): { label: string
     case 'smudge': return { label: t.tools.smudge, hint: t.tools.smudgeHint };
     case 'bucket': return { label: t.tools.bucket, hint: t.tools.bucketHint };
     case 'smart_fill': return { label: t.tools.smartFill, hint: t.tools.smartFillHint };
+    case 'paint_unfilled': return { label: t.tools.paintUnfilled, hint: t.tools.paintUnfilledHint };
     case 'gradient': return { label: t.tools.gradient, hint: t.tools.gradientHint };
     case 'eyedropper': return { label: t.tools.eyedropper, hint: t.tools.eyedropperHint };
     case 'lasso': return { label: t.tools.lasso, hint: t.tools.lassoHint };
@@ -174,7 +184,7 @@ export const getLocalizedToolGroups = (t: Translations): ToolGroup[] => {
 };
 
 /** Tools whose main control is a brush diameter */
-export const SIZE_TOOLS: ToolType[] = ['brush', 'pencil', 'eraser', 'select_brush', 'select_eraser', 'blur', 'smudge', 'liquify', 'vector_pen', 'vector_bezier', 'vector_reshape', 'vector_width', 'vector_eraser'];
+export const SIZE_TOOLS: ToolType[] = ['brush', 'pencil', 'eraser', 'select_brush', 'select_eraser', 'blur', 'smudge', 'liquify', 'paint_unfilled', 'vector_pen', 'vector_bezier', 'vector_reshape', 'vector_width', 'vector_eraser'];
 
 /** Size steps used by « » and the [ ] keys, roughly 15-25% apart like CSP's size presets */
 export const SIZE_STEPS = [1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 400, 500];
@@ -183,4 +193,184 @@ export const MAX_BRUSH_SIZE = 500;
 export const nextSizeStep = (size: number, direction: 1 | -1) => {
   if (direction > 0) return SIZE_STEPS.find((s) => s > size) ?? MAX_BRUSH_SIZE;
   return [...SIZE_STEPS].reverse().find((s) => s < size) ?? 1;
+};
+
+export type ToolCategoryId = 'paint' | 'eraser' | 'fill' | 'gradient' | 'eyedropper' | 'select' | 'transform' | 'vector' | 'shape' | 'comic' | 'hand';
+
+export type SubToolId = string;
+
+export interface SubToolParams {
+  bucketMode?: 'click' | 'lasso';
+  bucketReference?: 'current' | 'all' | 'specific' | 'none';
+  bucketRefLayerId?: string | null;
+  bucketTolerance?: number;
+  bucketExpand?: number;
+  referenceLayerId?: string | null;
+  gapClosingRadius?: number;
+  expandRadius?: number;
+  brushSize?: number;
+  antialias?: 'none' | 'weak' | 'medium' | 'strong';
+  outlineEnabled?: boolean;
+  lassoErase?: boolean;
+  [key: string]: unknown;
+}
+
+export interface SubToolDef {
+  id: SubToolId;
+  categoryId: ToolCategoryId;
+  tool: ToolType;
+  label: string;
+  hint: string;
+  icon: React.ComponentType<{ className?: string }>;
+  shortcutId?: string;
+  defaultParams?: SubToolParams;
+}
+
+export interface ToolCategoryDef {
+  id: ToolCategoryId;
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+  shortcutId?: string;
+  defaultSubToolId: SubToolId;
+  subTools: SubToolDef[];
+}
+
+const defineSubTool = (
+  categoryId: ToolCategoryId,
+  tool: ToolType,
+  overrides: Partial<Pick<SubToolDef, 'id' | 'label' | 'hint' | 'icon' | 'defaultParams'>> = {},
+): SubToolDef => {
+  const def = findTool(tool);
+  if (!def) throw new Error(`Tool ${tool} is missing from the catalog`);
+  return { ...def, categoryId, tool, ...overrides };
+};
+
+const defineCategory = (
+  id: ToolCategoryId,
+  label: string,
+  defaultTool: ToolType,
+  otherTools: ToolType[] = [],
+): ToolCategoryDef => {
+  const primary = defineSubTool(id, defaultTool);
+  return {
+    id,
+    label,
+    icon: primary.icon,
+    shortcutId: primary.shortcutId,
+    defaultSubToolId: primary.id,
+    subTools: [primary, ...otherTools.map((tool) => defineSubTool(id, tool))],
+  };
+};
+
+export const TOOL_CATEGORIES: ToolCategoryDef[] = [
+  defineCategory('paint', '繪畫', 'brush', ['pencil', 'blur', 'smudge']),
+  defineCategory('eraser', '橡皮擦', 'eraser'),
+  {
+    id: 'fill',
+    label: '填充',
+    icon: PaintBucket,
+    shortcutId: 'tool_bucket',
+    defaultSubToolId: 'fill_refer_other',
+    subTools: [
+      defineSubTool('fill', 'bucket', {
+        id: 'fill_refer_other',
+        label: '油漆桶 — 參照其他圖層',
+        hint: '參照所有圖層，點擊填滿封閉區域',
+        defaultParams: { bucketMode: 'click', bucketReference: 'all', bucketTolerance: 32, bucketExpand: 1 },
+      }),
+      defineSubTool('fill', 'bucket', {
+        id: 'fill_refer_edit',
+        label: '油漆桶 — 僅參照編輯圖層',
+        hint: '參照目前編輯的圖層，點擊填滿封閉區域',
+        defaultParams: { bucketMode: 'click', bucketReference: 'current', bucketTolerance: 32, bucketExpand: 1 },
+      }),
+      defineSubTool('fill', 'smart_fill', {
+        id: 'fill_enclose',
+        label: '圍住塗抹',
+        defaultParams: { gapClosingRadius: 4, expandRadius: 2 },
+      }),
+      defineSubTool('fill', 'bucket', {
+        id: 'fill_lasso',
+        label: '套索塗抹',
+        hint: '拖曳套索，填滿圈選範圍',
+        icon: Lasso,
+        defaultParams: { bucketMode: 'lasso', antialias: 'medium', outlineEnabled: false, lassoErase: false },
+      }),
+      defineSubTool('fill', 'paint_unfilled', {
+        id: 'fill_paint_unfilled',
+        defaultParams: {
+          brushSize: 24,
+          bucketReference: 'all',
+          bucketRefLayerId: null,
+          bucketTolerance: 32,
+          gapClosingRadius: 3,
+          expandRadius: 1,
+        },
+      }),
+    ],
+  },
+  defineCategory('gradient', '漸層', 'gradient'),
+  defineCategory('eyedropper', '滴管', 'eyedropper'),
+  defineCategory('select', '選取', 'lasso', ['magic_wand', 'select_brush', 'select_eraser']),
+  defineCategory('transform', '變形與液化', 'transform', ['liquify']),
+  defineCategory('vector', '向量', 'vector_pen', ['vector_bezier', 'vector_edit', 'vector_reshape', 'vector_width', 'vector_eraser']),
+  defineCategory('shape', '形狀與文字', 'shape', ['text']),
+  defineCategory('comic', '漫畫與動畫', 'comic_balloon', ['comic_panel', 'animation']),
+  defineCategory('hand', '移動畫面', 'hand'),
+];
+
+export const ALL_SUB_TOOLS: SubToolDef[] = TOOL_CATEGORIES.flatMap((category) => category.subTools);
+
+export const findCategory = (id: ToolCategoryId): ToolCategoryDef | undefined =>
+  TOOL_CATEGORIES.find((category) => category.id === id);
+
+export const findSubTool = (id: SubToolId): SubToolDef | undefined =>
+  ALL_SUB_TOOLS.find((subTool) => subTool.id === id);
+
+export const findCategoryForTool = (tool: ToolType): ToolCategoryDef | undefined =>
+  TOOL_CATEGORIES.find((category) => category.subTools.some((subTool) => subTool.tool === tool));
+
+export const findSubToolForTool = (
+  tool: ToolType,
+  hint?: { bucketMode?: 'click' | 'lasso'; bucketReference?: string },
+): SubToolDef | undefined => {
+  if (tool === 'bucket') {
+    if (hint?.bucketMode === 'lasso') return findSubTool('fill_lasso');
+    if (hint?.bucketReference === 'current') return findSubTool('fill_refer_edit');
+  }
+  return ALL_SUB_TOOLS.find((subTool) => subTool.tool === tool);
+};
+
+const categoryLocaleKeys = {
+  paint: 'categoryPaint',
+  eraser: 'categoryEraser',
+  fill: 'categoryFill',
+  gradient: 'categoryGradient',
+  eyedropper: 'categoryEyedropper',
+  select: 'categorySelect',
+  transform: 'categoryTransform',
+  vector: 'categoryVector',
+  shape: 'categoryShape',
+  comic: 'categoryComic',
+  hand: 'categoryHand',
+} as const satisfies Record<ToolCategoryId, keyof Translations['tools']>;
+
+export const getLocalizedCategoryLabel = (id: ToolCategoryId, t: Translations): string =>
+  t.tools[categoryLocaleKeys[id]];
+
+const fillLocaleKeys: Partial<Record<SubToolId, readonly [keyof Translations['tools'], keyof Translations['tools']]>> = {
+  fill_refer_other: ['fillReferOther', 'fillReferOtherHint'],
+  fill_refer_edit: ['fillReferEdit', 'fillReferEditHint'],
+  fill_enclose: ['fillEnclose', 'fillEncloseHint'],
+  fill_lasso: ['fillLasso', 'fillLassoHint'],
+  fill_paint_unfilled: ['fillPaintUnfilled', 'fillPaintUnfilledHint'],
+};
+
+export const getLocalizedSubTool = (id: SubToolId, t: Translations): { label: string; hint: string } => {
+  const sub = findSubTool(id);
+  if (!sub) return { label: id, hint: '' };
+  const keys = fillLocaleKeys[id];
+  if (!keys) return getLocalizedTool(sub.tool, t);
+  const [labelKey, hintKey] = keys;
+  return { label: t.tools[labelKey], hint: t.tools[hintKey] };
 };

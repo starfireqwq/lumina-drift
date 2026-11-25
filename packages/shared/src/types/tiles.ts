@@ -119,6 +119,7 @@ export type ToolType =
   | 'magic_wand'
   | 'lasso'
   | 'smart_fill'
+  | 'paint_unfilled'
   | 'shape'
   | 'text'
   | 'comic_balloon'
