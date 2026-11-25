@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { translations, SUPPORTED_LANGUAGES, type Language, type Translations } from '../src/locales';
-import { getLocalizedToolGroups, ALL_TOOLS } from '../src/components/workspace/toolCatalog';
+import { ALL_SUB_TOOLS, getLocalizedCategoryLabel, getLocalizedSubTool, getLocalizedToolGroups, TOOL_CATEGORIES } from '../src/components/workspace/toolCatalog';
 import { getLocalizedBlendModeGroups } from '../src/components/LayerPanel';
 import { BUILTIN_FILTERS, FILTER_GROUPS, filterGroupLabel, filterLabel, filterParamLabel } from '../src/utils/filterRegistry';
 import { PLUGIN_PERMISSIONS_V1, PLUGIN_PERMISSIONS_V2 } from '../src/plugins/pluginApi';
@@ -133,6 +133,20 @@ for (const lang of REQUIRED_LOCALES) {
     }
   }
 
+  const fill = TOOL_CATEGORIES.find(({ id }) => id === 'fill');
+  assert.ok(fill);
+  const fillLabels = fill.subTools.map(({ id }) => getLocalizedSubTool(id, t).label);
+  assert.equal(fillLabels.length, 5, `Should localize all five fill sub-tools in ${lang}`);
+  assert.equal(new Set(fillLabels).size, 5, `Fill sub-tools must have distinct labels in ${lang}`);
+  for (const { id } of TOOL_CATEGORIES) {
+    assert.ok(getLocalizedCategoryLabel(id, t).trim(), `Category ${id} must be translated in ${lang}`);
+  }
+  for (const { id } of ALL_SUB_TOOLS) {
+    const { label, hint } = getLocalizedSubTool(id, t);
+    assert.ok(label.trim(), `Sub-tool ${id} label must be translated in ${lang}`);
+    assert.ok(hint.trim(), `Sub-tool ${id} hint must be translated in ${lang}`);
+  }
+
   const blendGroups = getLocalizedBlendModeGroups(t);
   assert.equal(blendGroups.length, 6, `Should have 6 blend mode groups in ${lang}`);
   let totalModesInGroups = 0;
@@ -145,7 +159,7 @@ for (const lang of REQUIRED_LOCALES) {
   }
   assert.equal(totalModesInGroups, 27, `Should group all 27 blend modes in ${lang}`);
 }
-console.log('✓ Tool groups and blend mode groups localized helpers verified');
+console.log('✓ Tool groups, categories, sub-tools and blend mode groups localized helpers verified');
 
 // 5c. Specialized Modules Verification (Canvas resize, Comic, Animation, Rulers, Capsule, Admin, Auth)
 for (const lang of REQUIRED_LOCALES) {

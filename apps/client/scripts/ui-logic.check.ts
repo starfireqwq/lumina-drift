@@ -8,7 +8,8 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FLOATS_PER_DAB, StrokeWorkerEngine, type WorkerBrushConfig } from '../src/workers/stroke.worker';
 import { contrastRatio, resolveTheme, THEME_PRESETS, DEFAULT_CUSTOM_THEME } from '../src/theme/themes';
-import { nextSizeStep } from '../src/components/workspace/toolCatalog';
+import { ALL_SUB_TOOLS, nextSizeStep, TOOL_CATEGORIES } from '../src/components/workspace/toolCatalog';
+import { createSubToolStore, type StorageLike } from '../src/components/workspace/subToolStore';
 import { findContentBounds } from '../src/utils/pixelBounds';
 import {
   alignCrops, alignDestination, alignManyOffsets, alignOffset, alignTargetsBlocker,
@@ -32,6 +33,7 @@ import {
   computeCameraCanvasToOutputMatrix,
   computeCameraPreviewViewport,
   computeAudioPlaybackWindow,
+  computePaintUnfilledAreaMask,
   computeSmartEncloseFillMask,
   computeWaveformPeaks,
   DynamicStabilizer,
@@ -1318,6 +1320,155 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
     const closed = computeSmartEncloseFillMask(lasso, pixels, width, height, { gapClosingRadius: 2, expandRadius: 2 });
     assert.equal(closed.data[24 * width + 24], 255, 'Gap closing still seals a small break');
   }
+}
+
+// Phase 2: category definitions and fill sub-tool defaults
+{
+  assert.deepEqual(TOOL_CATEGORIES.map(({ id }) => id), [
+    'paint', 'eraser', 'fill', 'gradient', 'eyedropper', 'select',
+    'transform', 'vector', 'shape', 'comic', 'hand',
+  ]);
+  for (const category of TOOL_CATEGORIES) {
+    assert.ok(category.subTools.some(({ id }) => id === category.defaultSubToolId));
+    assert.ok(category.subTools.every(({ categoryId }) => categoryId === category.id));
+  }
+  assert.equal(new Set(ALL_SUB_TOOLS.map(({ id }) => id)).size, ALL_SUB_TOOLS.length);
+
+  const fill = TOOL_CATEGORIES.find(({ id }) => id === 'fill');
+  assert.ok(fill);
+  assert.equal(fill.shortcutId, 'tool_bucket');
+  assert.equal(fill.defaultSubToolId, 'fill_refer_other');
+  assert.deepEqual(fill.subTools.map(({ id, tool, defaultParams }) => ({ id, tool, defaultParams })), [
+    { id: 'fill_refer_other', tool: 'bucket', defaultParams: { bucketMode: 'click', bucketReference: 'all', bucketTolerance: 32, bucketExpand: 1 } },
+    { id: 'fill_refer_edit', tool: 'bucket', defaultParams: { bucketMode: 'click', bucketReference: 'current', bucketTolerance: 32, bucketExpand: 1 } },
+    { id: 'fill_enclose', tool: 'smart_fill', defaultParams: { gapClosingRadius: 4, expandRadius: 2 } },
+    { id: 'fill_lasso', tool: 'bucket', defaultParams: { bucketMode: 'lasso', antialias: 'medium', outlineEnabled: false, lassoErase: false } },
+    {
+      id: 'fill_paint_unfilled', tool: 'paint_unfilled',
+      defaultParams: { brushSize: 24, bucketReference: 'all', bucketRefLayerId: null, bucketTolerance: 32, gapClosingRadius: 3, expandRadius: 1 },
+    },
+  ]);
+}
+
+// Phase 2: independently saved parameters, last sub-tools and rail mode
+{
+  const saved = new Map<string, string>();
+  const storage: StorageLike = {
+    getItem: (key) => saved.get(key) ?? null,
+    setItem: (key, value) => { saved.set(key, value); },
+  };
+  const store = createSubToolStore(storage);
+  assert.equal(store.getState().railMode, 'compact');
+  const remembered = TOOL_CATEGORIES.map((category) => ({
+    categoryId: category.id,
+    subToolId: category.subTools[category.subTools.length - 1].id,
+  }));
+  for (const { subToolId } of remembered) store.selectSubTool(subToolId);
+  for (const { categoryId, subToolId } of remembered) assert.equal(store.selectCategory(categoryId).id, subToolId);
+
+  store.updateSubToolParams('fill_refer_other', { bucketTolerance: 44 });
+  store.updateSubToolParams('fill_refer_other', { bucketExpand: 4 });
+  store.updateSubToolParams('fill_refer_edit', { bucketTolerance: 18 });
+  store.updateSubToolParams('fill_paint_unfilled', { gapClosingRadius: 6, expandRadius: -2 });
+  store.selectCategory('fill');
+  store.setRailMode('classic');
+
+  const restored = createSubToolStore(storage);
+  assert.equal(restored.getState().activeCategoryId, 'fill');
+  assert.equal(restored.getState().activeSubToolId, 'fill_paint_unfilled');
+  assert.equal(restored.getState().railMode, 'classic');
+  for (const { categoryId, subToolId } of remembered) assert.equal(restored.selectCategory(categoryId).id, subToolId);
+  assert.deepEqual(restored.getSubToolParams('fill_refer_other'), {
+    bucketMode: 'click', bucketReference: 'all', bucketTolerance: 44, bucketExpand: 4,
+  });
+  assert.deepEqual(restored.getSubToolParams('fill_refer_edit'), {
+    bucketMode: 'click', bucketReference: 'current', bucketTolerance: 18, bucketExpand: 1,
+  });
+  assert.deepEqual(restored.getSubToolParams('fill_paint_unfilled'), {
+    brushSize: 24, bucketReference: 'all', bucketRefLayerId: null, bucketTolerance: 32, gapClosingRadius: 6, expandRadius: -2,
+  });
+
+  const defaultBucket = { bucketMode: 'click', bucketReference: 'all', bucketTolerance: 32, bucketExpand: 1 };
+  assert.deepEqual(restored.resetSubToolParams('fill_refer_other'), defaultBucket);
+  assert.deepEqual(restored.getSubToolParams('fill_refer_other'), defaultBucket);
+  restored.setRailMode('compact');
+  const afterReset = createSubToolStore(storage);
+  assert.deepEqual(afterReset.getSubToolParams('fill_refer_other'), defaultBucket);
+  assert.equal(afterReset.getSubToolParams('fill_refer_edit').bucketTolerance, 18);
+  assert.equal(afterReset.getState().railMode, 'compact');
+}
+
+// Phase 2: CSP shortcuts recall the last tool on entry and cycle on repeated presses.
+{
+  const store = createSubToolStore({ getItem: () => null, setItem: () => {} });
+  store.selectSubTool('pencil');
+  store.selectSubTool('fill_lasso');
+  assert.equal(store.activateCategoryShortcut('paint').id, 'pencil');
+  assert.equal(store.activateCategoryShortcut('fill').id, 'fill_lasso');
+  for (const id of ['fill_paint_unfilled', 'fill_refer_other', 'fill_refer_edit', 'fill_enclose', 'fill_lasso']) {
+    assert.equal(store.activateCategoryShortcut('fill').id, id);
+  }
+  assert.equal(store.getState().lastSubToolByCategory.fill, 'fill_lasso');
+}
+
+// Phase 2: exact gap-fill masks for thin line art, broken outlines and painted pixels
+{
+  const width = 42, height = 26;
+  const rgba = (x: number, y: number) => (y * width + x) * 4;
+  const lineart = new Uint8Array(width * height * 4);
+  for (const [left, right] of [[8, 20], [29, 35]]) {
+    for (let y = 8; y <= 18; y++) {
+      for (let x = left; x <= right; x++) {
+        if (x === left || x === right || y === 8 || y === 18) lineart[rgba(x, y) + 3] = 255;
+      }
+    }
+  }
+  const stroke = [{ x: 19, y: 13 }, { x: 2, y: 13 }];
+  const options = { brushRadius: 1 };
+  const inside = (x: number, y: number) => x > 8 && x < 20 && y > 8 && y < 18;
+  const assertMask = (
+    mask: ReturnType<typeof computePaintUnfilledAreaMask>,
+    expected: (x: number, y: number) => boolean,
+    message: string,
+  ) => {
+    let count = 0;
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const fill = expected(x, y);
+        assert.equal(mask.data[y * width + x], fill ? 255 : 0, `${message} at (${x}, ${y})`);
+        if (fill) count++;
+      }
+    }
+    assert.equal(mask.activePixelCount, count, message);
+  };
+
+  const closed = computePaintUnfilledAreaMask(stroke, lineart, width, height, options);
+  assertMask(closed, inside, 'Brush fills the touched pocket, leaving exterior and the untouched pocket empty');
+
+  const brokenLineart = lineart.slice();
+  brokenLineart[rgba(13, 8) + 3] = 0;
+  brokenLineart[rgba(14, 8) + 3] = 0;
+  assertMask(computePaintUnfilledAreaMask(stroke, brokenLineart, width, height, options), () => false, 'An open pocket is skipped');
+  assertMask(computePaintUnfilledAreaMask(stroke, brokenLineart, width, height, { ...options, gapClosingRadius: 3 }),
+    inside, 'Closing a 2px gap seals the same pocket without spilling');
+
+  const expanded = computePaintUnfilledAreaMask(stroke, lineart, width, height, { ...options, expandRadius: 1 });
+  assertMask(expanded, (x, y) => inside(x, y) || inside(x - 1, y) || inside(x + 1, y) || inside(x, y - 1) || inside(x, y + 1),
+    'One-pixel expansion covers adjacent line art and never reaches the exterior');
+  const contracted = computePaintUnfilledAreaMask(stroke, lineart, width, height, { ...options, expandRadius: -1 });
+  assertMask(contracted, (x, y) => x > 9 && x < 19 && y > 9 && y < 17, 'One-pixel contraction removes the inner rim');
+  assert.ok(contracted.activePixelCount < closed.activePixelCount);
+
+  const editPixels = new Uint8Array(lineart.length);
+  for (let y = 9; y < 18; y++) {
+    for (let x = 16; x < 18; x++) editPixels.set([40, 100, 200, 255], rgba(x, y));
+  }
+  assertMask(computePaintUnfilledAreaMask([{ x: 2, y: 13 }, { x: 16, y: 13 }], lineart, width, height, { ...options, editPixels }),
+    (x, y) => inside(x, y) && x < 16, 'Painted pixels block the fill, preserving their color and the separated pocket');
+  const expandedWithEdit = computePaintUnfilledAreaMask([{ x: 2, y: 13 }, { x: 16, y: 13 }], lineart, width, height, { ...options, editPixels, expandRadius: 1 });
+  assertMask(expandedWithEdit,
+    (x, y) => (inside(x, y) && x < 16) || ((x === 8 && y >= 9 && y <= 17) || ((y === 8 || y === 18) && x >= 9 && x <= 15)),
+    'Expansion tucks under line art without overwriting already-painted editPixels');
 }
 
 // Filter registry: every entry is computable, values are stored by key and survive bad storage
