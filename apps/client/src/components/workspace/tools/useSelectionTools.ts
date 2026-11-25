@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { hexToRgb, rasterizeLassoMask, type LayerModel, type SelectionSnapshot, type ToolType } from '@atelier/shared';
+import { useI18n } from '../../../context/I18nContext';
 import type { SelectionMode } from '../ToolOptionsBar';
 import type { Point, ToolContext } from './toolContext';
 import { commitInOrder, diffTilesAsync } from './asyncTiles';
@@ -25,6 +26,7 @@ function snapshotsEqual(a: SelectionSnapshot | null, b: SelectionSnapshot | null
 
 /** Selection gestures and commands (grow, clear, to layer mask). */
 export function useSelectionTools(ctx: ToolContext) {
+  const { t } = useI18n();
   const { canvas, layerManagerRef, tileEngineRef, selectionEngineRef, brushRendererRef } = ctx;
   const [wandTolerance, setWandTolerance] = useState<number>(32);
   const [wandContiguous, setWandContiguous] = useState<boolean>(true);
@@ -390,7 +392,7 @@ export function useSelectionTools(ctx: ToolContext) {
     const occupied = lm.occupiedTiles(layer.id);
     if (occupied !== null) {
       if (occupied.length === 0) {
-        if (mode === 'replace') withSelectionUndo('魔術棒選取', () => engine.clearSelection());
+        if (mode === 'replace') withSelectionUndo(t.tools.magicWand, () => engine.clearSelection());
         return;
       }
       if (wandContiguous && mode === 'replace') {
@@ -417,7 +419,7 @@ export function useSelectionTools(ctx: ToolContext) {
     }
     void lm.readAsync(layer.id, [{ x: 0, y: 0, w: canvas.width, h: canvas.height }]).then(([pixels]) => {
       if (selectionEngineRef.current !== engine) return;
-      withSelectionUndo('魔術棒選取', () => engine.selectWand(pixels, local.x, local.y, wandTolerance, wandContiguous, mode, createOptions));
+      withSelectionUndo(t.tools.magicWand, () => engine.selectWand(pixels, local.x, local.y, wandTolerance, wandContiguous, mode, createOptions));
     });
   };
 
@@ -431,7 +433,7 @@ export function useSelectionTools(ctx: ToolContext) {
 
   /** The lasso stays the active tool (no jump to the brush) so Shift / Ctrl can keep adding or cutting */
   const finishLasso = () => {
-    withSelectionUndo('套索選取', () => selectionEngineRef.current?.finishLasso(lassoModeRef.current, createOptions));
+    withSelectionUndo(t.tools.lasso, () => selectionEngineRef.current?.finishLasso(lassoModeRef.current, createOptions));
   };
 
   const updateMarquee = (e: { shiftKey: boolean; altKey: boolean }, local: Point) => {
@@ -447,14 +449,15 @@ export function useSelectionTools(ctx: ToolContext) {
   const finishMarquee = () => {
     const engine = selectionEngineRef.current;
     if (engine?.isMarqueeActive()) {
-      withSelectionUndo('幾何選框', () => engine.finishMarquee(marqueeModeRef.current, createOptions));
+      const label = ctx.currentToolRef.current === 'select_ellipse' ? t.tools.selectEllipse : t.tools.selectRect;
+      withSelectionUndo(label, () => engine.finishMarquee(marqueeModeRef.current, createOptions));
     }
   };
 
   const cancelMarquee = () => selectionEngineRef.current?.cancelMarquee();
 
   const finishPolygonLasso = () => {
-    withSelectionUndo('多邊形套索', () => selectionEngineRef.current?.finishPolygonLasso(polygonModeRef.current, createOptions));
+    withSelectionUndo(t.tools.selectPolygon, () => selectionEngineRef.current?.finishPolygonLasso(polygonModeRef.current, createOptions));
     polygonLastClickRef.current = null;
     setPolygonPointCount(0);
   };

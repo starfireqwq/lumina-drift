@@ -56,6 +56,7 @@ const PAINT_UNFILLED_TOOL: ToolDef = {
   id: 'paint_unfilled',
   label: '間隙填充筆',
   icon: PaintRoller,
+  shortcutId: 'tool_paint_unfilled',
   hint: '塗抹以填補參照圖層中的未上色間隙',
 };
 
@@ -91,10 +92,10 @@ export const TOOL_GROUPS: ToolGroup[] = [
       { id: 'lasso', label: '套索選取', icon: Lasso, shortcutId: 'tool_lasso', hint: '拖曳圈選；Shift 加選、Ctrl 減選' },
       { id: 'select_polygon', label: '多邊形套索', icon: Pentagon, shortcutId: 'tool_select_polygon', hint: '點擊新增頂點，按 Enter、雙擊或點擊起點閉合' },
       { id: 'magic_wand', label: '魔術棒', icon: Wand2, shortcutId: 'tool_magic_wand', hint: '點擊選取相近顏色；Shift 加選、Ctrl 減選' },
-      { id: 'select_brush', label: '選取筆', icon: Highlighter, hint: '用畫的加入選取範圍（筆刷大小＝筆尖大小）' },
-      { id: 'select_eraser', label: '選取橡皮擦', icon: CircleDashed, hint: '用畫的從選取範圍挖掉' },
-      { id: 'transform', label: '自由變形', icon: Move, shortcutId: 'action_filter_free_transform', hint: '有選區時變形選區，否則變形圖層上有內容的範圍' },
-      { id: 'liquify', label: '液化', icon: Waves, shortcutId: 'action_filter_liquify', hint: '推拉、膨脹、縮小或旋轉像素' },
+      { id: 'select_brush', label: '選取筆', icon: Highlighter, shortcutId: 'tool_select_brush', hint: '用畫的加入選取範圍（筆刷大小＝筆尖大小）' },
+      { id: 'select_eraser', label: '選取橡皮擦', icon: CircleDashed, shortcutId: 'tool_select_eraser', hint: '用畫的從選取範圍挖掉' },
+      { id: 'transform', label: '自由變形', icon: Move, shortcutId: 'tool_transform', hint: '有選區時變形選區，否則變形圖層上有內容的範圍' },
+      { id: 'liquify', label: '液化', icon: Waves, shortcutId: 'tool_liquify', hint: '推拉、膨脹、縮小或旋轉像素' },
       { id: 'hand', label: '抓手', icon: Hand, shortcutId: 'tool_hand', hint: '拖曳移動畫面（任何工具按住空白鍵亦可）' },
     ],
   },

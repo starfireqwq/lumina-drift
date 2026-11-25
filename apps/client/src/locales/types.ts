@@ -1548,6 +1548,10 @@ export interface Translations {
     scaleUp: string;
     scalePercent: string;
     shortcutCatTools: string;
+    shortcutCatToolCategories: string;
+    shortcutCatToolCategoriesDesc: string;
+    shortcutCatSubTools: string;
+    shortcutCatSubToolsDesc: string;
     shortcutCatLayers: string;
     shortcutCatFilterTransform: string;
     shortcutCatAssistStudio: string;

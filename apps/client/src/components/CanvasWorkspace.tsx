@@ -123,7 +123,7 @@ import { BezierMode, SelectionMode, ToolOptionsBar } from './workspace/ToolOptio
 import { DockColumn, DockRow, FloatingPanels, MobilePanelSheet, type MobilePanelDef, PanelDef, ToolDockSlot } from './workspace/DockSystem';
 import { dockActions, PanelId, PANEL_TITLES, useDockLayout, useFloatsAllowed, usePhoneLayout, useTouchTabletLayout } from './workspace/dockStore';
 import { TouchSideIsland, TouchToolIsland } from './workspace/TouchCanvasChrome';
-import { ALL_TOOLS, TOOL_CATEGORIES, findSubTool, getLocalizedCategoryLabel, MAX_BRUSH_SIZE, nextSizeStep } from './workspace/toolCatalog';
+import { ALL_SUB_TOOLS, ALL_TOOLS, TOOL_CATEGORIES, findSubTool, getLocalizedCategoryLabel, MAX_BRUSH_SIZE, nextSizeStep } from './workspace/toolCatalog';
 import type { SubToolDef, SubToolId, SubToolParams, ToolCategoryId } from './workspace/toolCatalog';
 import { subToolStore, useSubToolStore } from './workspace/subToolStore';
 import { SubToolPanel } from './workspace/SubToolPanel';
@@ -1327,6 +1327,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     createLayer: onCreateLayer,
     deleteLayer: async (_layerId: string) => {},
     selectTool: (_tool: ToolType) => {},
+    selectSubTool: (_subToolId: SubToolId) => {},
     activateCategoryShortcut: (_categoryId: ToolCategoryId) => {},
     undo: () => {},
     redo: () => {},
@@ -2109,14 +2110,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           return;
         }
         const shortcutMgr = ShortcutManager.getInstance();
+        const hit = (id: string) => shortcutMgr.matchesEvent(shortcutMgr.getComboForAction(id), ev);
         const categoryHit = TOOL_CATEGORIES.find((category) => category.shortcutId && shortcutMgr.matchesEvent(shortcutMgr.getComboForAction(category.shortcutId), ev));
         if (transformLayerIdRef.current) {
           if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z' && !ev.shiftKey) {
             ev.preventDefault();
             cancelTransform();
-          } else if (currentToolRef.current === 'transform' && categoryHit?.id === 'transform') {
+          } else if (currentToolRef.current === 'transform' && (categoryHit?.id === 'transform' || hit('action_filter_free_transform'))) {
             ev.preventDefault();
-            if (!ev.repeat) shortcutActionsRef.current.activateCategoryShortcut(categoryHit.id);
+            if (!ev.repeat) shortcutActionsRef.current.activateCategoryShortcut('transform');
           }
           return;
         }
@@ -2155,7 +2157,6 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
         // Selection commands; copy / cut / clear only with a selection (else the keys keep their usual meaning)
         const sel = shortcutActionsRef.current.selection;
-        const hit = (id: string) => shortcutMgr.matchesEvent(shortcutMgr.getComboForAction(id), ev);
         const selectionCommand =
           hit('action_selection_invert') ? sel.invert
           : sel.has() && hit('action_selection_copy') ? sel.copy
@@ -2328,10 +2329,22 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             if (!ev.repeat) shortcutActionsRef.current.activateCategoryShortcut(categoryHit.id);
             return;
           }
+          const subToolHit = ALL_SUB_TOOLS.find((sub) => sub.shortcutId && shortcutMgr.matchesEvent(shortcutMgr.getComboForAction(sub.shortcutId), ev));
+          if (subToolHit) {
+            ev.preventDefault();
+            shortcutActionsRef.current.selectSubTool(subToolHit.id);
+            return;
+          }
           const toolHit = ALL_TOOLS.find((tool) => tool.shortcutId && shortcutMgr.matchesEvent(shortcutMgr.getComboForAction(tool.shortcutId), ev));
           if (toolHit) {
             ev.preventDefault();
             shortcutActionsRef.current.selectTool(toolHit.id);
+          } else if (hit('action_filter_free_transform')) {
+            ev.preventDefault();
+            if (!ev.repeat) shortcutActionsRef.current.activateCategoryShortcut('transform');
+          } else if (hit('action_filter_liquify')) {
+            ev.preventDefault();
+            shortcutActionsRef.current.selectSubTool('liquify');
           } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('tool_resize'), ev)) {
             setIsResizeModalOpen(true);
           } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_brush_larger'), ev)) {
@@ -2655,10 +2668,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         return;
       }
     }
-    if (activePluginToolRef.current) {
-      pluginToolControllerRef.current.cancelStroke();
-      setActivePluginToolKey(null);
-    }
+    if (activePluginToolRef.current) clearPluginTool();
     const previousTool = currentToolRef.current;
     if (tool !== previousTool) {
       selection.cancelPolygonLasso();
@@ -4177,6 +4187,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     createLayer: createLayerWithUndo,
     deleteLayer: deleteLayerWithUndo,
     selectTool: handleSelectTool,
+    selectSubTool: handleSelectSubTool,
     activateCategoryShortcut: handleCategoryShortcut,
     undo: handleScopedUndo,
     redo: handleScopedRedo,

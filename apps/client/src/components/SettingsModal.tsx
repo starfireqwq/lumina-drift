@@ -53,6 +53,7 @@ import { PressureCurveEditor } from './PressureCurveEditor';
 import { ApiService } from '../services/api';
 import { AtelierModal, modalButton } from './AtelierModal';
 import { dockActions, PANEL_IDS, PANEL_TITLES, useDockLayout } from './workspace/dockStore';
+import { ALL_SUB_TOOLS, TOOL_CATEGORIES, getLocalizedCategoryLabel, getLocalizedSubTool } from './workspace/toolCatalog';
 
 type SettingsTab = 'shortcuts' | 'general' | 'pressure' | 'server';
 
@@ -450,14 +451,50 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     voice: t.settings.shortcutCatViewVoice,
     plugins: t.settings.shortcutCatPlugins,
   };
+  const toolboxShortcutText = (shortcut: ShortcutItem) => {
+    if (shortcut.id === 'tool_resize') return { label: t.tools.resizeCanvas, hint: '' };
+    if (shortcut.toolScope === 'category') {
+      const category = TOOL_CATEGORIES.find((item) => item.shortcutId === shortcut.id);
+      if (category) {
+        const subTools = category.subTools.map((sub) => getLocalizedSubTool(sub.id, t));
+        return {
+          label: getLocalizedCategoryLabel(category.id, t),
+          hint: subTools.length === 1 ? subTools[0].hint : subTools.map((sub) => sub.label).join(' / '),
+        };
+      }
+    } else {
+      const subTool = ALL_SUB_TOOLS.find((sub) => sub.shortcutId === shortcut.id);
+      if (subTool) return getLocalizedSubTool(subTool.id, t);
+    }
+    return { label: shortcut.name, hint: shortcut.description };
+  };
   const matchingShortcuts = query.length ? shortcuts.filter((shortcut) => {
+    const toolboxTerms = shortcut.category === 'toolbox' ? toolboxShortcutText(shortcut) : null;
+    const toolboxSectionTerms = shortcut.toolScope === 'category'
+      ? `${t.settings.shortcutCatToolCategories} 分類 分类 category categories`
+      : `${t.settings.shortcutCatSubTools} 子工具 sub-tool subtool`;
     const haystack = normalizeShortcut([
       shortcut.name, shortcut.description, shortcut.id.replace(/_/g, ' '), categoryLabels[shortcut.category],
+      toolboxTerms?.label, toolboxTerms?.hint, toolboxTerms && toolboxSectionTerms,
       shortcut.currentCombo, shortcutMgr.getDisplayLabel(shortcut.currentCombo),
     ].join(' '));
     return query.every((term) => haystack.includes(term));
   }) : shortcuts;
   const toolboxShortcuts = matchingShortcuts.filter((s) => s.category === 'toolbox');
+  const toolboxSections = [
+    {
+      id: 'tool-categories',
+      title: t.settings.shortcutCatToolCategories,
+      description: t.settings.shortcutCatToolCategoriesDesc,
+      shortcuts: toolboxShortcuts.filter((s) => s.toolScope === 'category'),
+    },
+    {
+      id: 'tool-subtools',
+      title: t.settings.shortcutCatSubTools,
+      description: t.settings.shortcutCatSubToolsDesc,
+      shortcuts: toolboxShortcuts.filter((s) => s.toolScope !== 'category'),
+    },
+  ];
   const layerShortcuts = matchingShortcuts.filter((s) => s.category === 'layers');
   const filterShortcuts = matchingShortcuts.filter((s) => s.category === 'filters');
   const studioShortcuts = matchingShortcuts.filter((s) => s.category === 'studio');
@@ -566,49 +603,53 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 );
               })()}
 
-              {/* Category 1: Toolbox Tools */}
-              <div className={toolboxShortcuts.length ? 'flex flex-col gap-2' : 'hidden'}>
-                <span className="text-[11px] font-bold text-indigo-400 uppercase tracking-wider">
-                  {t.settings.shortcutCatTools}
-                </span>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                  {toolboxShortcuts.map((s) => {
-                    const isRecording = recordingActionId === s.id;
-                    const hasConflict = (comboCounts.get(s.currentCombo) || 0) > 1 || ShortcutManager.isBrowserReserved(s.currentCombo);
+              {toolboxSections.map((section) => section.shortcuts.length > 0 && (
+                <section key={section.id} data-shortcut-section={section.id} className="flex flex-col gap-2">
+                  <div>
+                    <h4 className="text-[11px] font-bold text-indigo-400 uppercase tracking-wider">{section.title}</h4>
+                    <p className="text-[11px] text-neutral-400">{section.description}</p>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {section.shortcuts.map((s) => {
+                      const isRecording = recordingActionId === s.id;
+                      const hasConflict = (comboCounts.get(s.currentCombo) || 0) > 1 || ShortcutManager.isBrowserReserved(s.currentCombo);
+                      const { label, hint } = toolboxShortcutText(s);
 
-                    return (
-                      <div
-                        key={s.id}
-                        className="flex items-center justify-between p-2.5 rounded-xl bg-neutral-900/80 border border-neutral-800/80 hover:border-neutral-700 text-xs"
-                      >
-                        <div className="min-w-0 pr-2">
-                          <span className="font-semibold text-white block truncate">{s.name}</span>
-                          <span className="text-[10px] text-neutral-500 block truncate">{s.description}</span>
-                        </div>
+                      return (
+                        <div
+                          key={s.id}
+                          data-shortcut-id={s.id}
+                          className="flex items-center justify-between p-2.5 rounded-xl bg-neutral-900/80 border border-neutral-800/80 hover:border-neutral-700 text-xs"
+                        >
+                          <div className="min-w-0 pr-2">
+                            <span className="font-semibold text-white block truncate">{label}</span>
+                            {hint && <span className="text-[10px] text-neutral-500 block">{hint}</span>}
+                          </div>
 
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          {hasConflict && (
-                            <span title={ShortcutManager.isBrowserReserved(s.currentCombo) ? t.settings.shortcutBrowserReserved : t.settings.shortcutConflict} className="text-amber-400">
-                              <AlertCircle className="w-3.5 h-3.5" />
-                            </span>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => setRecordingActionId(isRecording ? null : s.id)}
-                            className={`px-3 py-1 rounded-lg font-mono text-xs font-bold transition shadow-sm ${
-                              isRecording
-                                ? 'bg-indigo-600 text-white animate-pulse ring-2 ring-indigo-400'
-                                : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700'
-                            }`}
-                          >
-                            {isRecording ? recordPreview : shortcutMgr.getDisplayLabel(s.currentCombo) || t.settings.shortcutNotSet}
-                          </button>
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {hasConflict && (
+                              <span title={ShortcutManager.isBrowserReserved(s.currentCombo) ? t.settings.shortcutBrowserReserved : t.settings.shortcutConflict} className="text-amber-400">
+                                <AlertCircle className="w-3.5 h-3.5" />
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => setRecordingActionId(isRecording ? null : s.id)}
+                              className={`px-3 py-1 rounded-lg font-mono text-xs font-bold transition shadow-sm ${
+                                isRecording
+                                  ? 'bg-indigo-600 text-white animate-pulse ring-2 ring-indigo-400'
+                                  : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700'
+                              }`}
+                            >
+                              {isRecording ? recordPreview : shortcutMgr.getDisplayLabel(s.currentCombo) || t.settings.shortcutNotSet}
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              ))}
 
               {/* Category 2: Layer & Group Management */}
               {layerShortcuts.length > 0 && (
