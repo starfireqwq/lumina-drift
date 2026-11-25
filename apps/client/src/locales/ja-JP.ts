@@ -343,6 +343,16 @@ export const jaJP: Translations = {
   },
 
   canvas: {
+    quickShapeHint: 'ドラッグで調整・Shift で角度を固定・離して確定',
+    quickShapeKinds: {
+      line: '直線',
+      arc: '円弧',
+      circle: '円',
+      ellipse: '楕円',
+      rectangle: '長方形',
+      quadrilateral: '四角形',
+      triangle: '三角形',
+    },
     resizeTitle: 'キャンバスサイズを変更',
     currentSize: '現在のサイズ',
     newSize: '変更後のサイズ',
@@ -1635,6 +1645,11 @@ export const jaJP: Translations = {
     popupPaletteTitle: 'ポップアップパレット',
     popupPaletteEnabled: 'デスクトップのポップアップパレットを有効にする',
     popupPaletteEnabledDesc: 'キャンバス上で色、ブラシ、ツールをすばやく選べます。',
+    quickShapeTitle: 'クイックシェイプ',
+    quickShapeEnabled: 'クイックシェイプを有効にする',
+    quickShapeEnabledDesc: '描き終わりにペンやマウスを押したままにすると、整った図形に補正します。',
+    quickShapeDelayLabel: '長押しの待ち時間',
+    quickShapeDelayDesc: '図形に補正されるまでの長押し時間です。',
     popupPaletteTriggerLabel: 'ポインターでの起動方法',
     popupPaletteTriggerRightClick: '右クリック',
     popupPaletteTriggerPenSide: 'ペンのサイドボタン',

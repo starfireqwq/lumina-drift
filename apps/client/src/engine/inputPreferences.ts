@@ -2,6 +2,11 @@ export const SHOW_BRUSH_CROSSHAIR_KEY = 'atelier_show_brush_crosshair';
 export const TOUCH_SIMULATED_PRESSURE_KEY = 'atelier_touch_simulated_pressure';
 export const DESKTOP_POPUP_PALETTE_ENABLED_KEY = 'atelier_desktop_popup_palette_enabled';
 export const DESKTOP_POPUP_PALETTE_TRIGGER_KEY = 'atelier_desktop_popup_palette_trigger';
+export const QUICK_SHAPE_ENABLED_KEY = 'atelier_quick_shape_enabled';
+export const QUICK_SHAPE_DELAY_MS_KEY = 'atelier_quick_shape_delay_ms';
+export const QUICK_SHAPE_MIN_DELAY_MS = 180;
+export const QUICK_SHAPE_MAX_DELAY_MS = 1500;
+export const QUICK_SHAPE_DEFAULT_DELAY_MS = 450;
 
 export type DesktopPopupPaletteTrigger = 'right-click' | 'pen-side-button' | 'shortcut-only';
 
@@ -45,6 +50,12 @@ function isDesktopPopupPaletteTrigger(value: unknown): value is DesktopPopupPale
   return value === 'right-click' || value === 'pen-side-button' || value === 'shortcut-only';
 }
 
+function normalizeQuickShapeDelay(value: number) {
+  return Number.isNaN(value)
+    ? QUICK_SHAPE_DEFAULT_DELAY_MS
+    : Math.round(clamp(value, QUICK_SHAPE_MIN_DELAY_MS, QUICK_SHAPE_MAX_DELAY_MS));
+}
+
 let showBrushCrosshair = readBooleanPreference(SHOW_BRUSH_CROSSHAIR_KEY, true);
 let touchSimulatedPressure = readBooleanPreference(TOUCH_SIMULATED_PRESSURE_KEY, false);
 let desktopPopupPaletteEnabled = readBooleanPreference(DESKTOP_POPUP_PALETTE_ENABLED_KEY, true);
@@ -57,6 +68,41 @@ const crosshairListeners = new Set<() => void>();
 const touchPressureListeners = new Set<() => void>();
 const desktopPopupPaletteEnabledListeners = new Set<() => void>();
 const desktopPopupPaletteTriggerListeners = new Set<() => void>();
+let quickShapeEnabled = readBooleanPreference(QUICK_SHAPE_ENABLED_KEY, true);
+const savedQuickShapeDelay = readPreference(QUICK_SHAPE_DELAY_MS_KEY);
+let quickShapeDelayMs = normalizeQuickShapeDelay(savedQuickShapeDelay?.trim() ? Number(savedQuickShapeDelay) : NaN);
+const quickShapeEnabledListeners = new Set<() => void>();
+const quickShapeDelayListeners = new Set<() => void>();
+
+export const getQuickShapeEnabled = () => quickShapeEnabled;
+
+export function setQuickShapeEnabled(next: boolean): void {
+  const normalized = Boolean(next);
+  if (normalized === quickShapeEnabled) return;
+  quickShapeEnabled = normalized;
+  writeBooleanPreference(QUICK_SHAPE_ENABLED_KEY, normalized);
+  quickShapeEnabledListeners.forEach(listener => listener());
+}
+
+export function subscribeQuickShapeEnabled(listener: () => void): () => void {
+  quickShapeEnabledListeners.add(listener);
+  return () => { quickShapeEnabledListeners.delete(listener); };
+}
+
+export const getQuickShapeDelayMs = () => quickShapeDelayMs;
+
+export function setQuickShapeDelayMs(next: number): void {
+  const normalized = normalizeQuickShapeDelay(next);
+  if (normalized === quickShapeDelayMs) return;
+  quickShapeDelayMs = normalized;
+  writePreference(QUICK_SHAPE_DELAY_MS_KEY, String(normalized));
+  quickShapeDelayListeners.forEach(listener => listener());
+}
+
+export function subscribeQuickShapeDelayMs(listener: () => void): () => void {
+  quickShapeDelayListeners.add(listener);
+  return () => { quickShapeDelayListeners.delete(listener); };
+}
 
 export const getShowBrushCrosshair = () => showBrushCrosshair;
 

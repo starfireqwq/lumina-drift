@@ -343,6 +343,16 @@ export const zhTW: Translations = {
   },
 
   canvas: {
+    quickShapeHint: '拖曳調整・Shift 對齊角度・放開確認',
+    quickShapeKinds: {
+      line: '直線',
+      arc: '圓弧',
+      circle: '圓形',
+      ellipse: '橢圓',
+      rectangle: '矩形',
+      quadrilateral: '四邊形',
+      triangle: '三角形',
+    },
     resizeTitle: '變更畫布尺寸',
     currentSize: '目前尺寸',
     newSize: '新尺寸',
@@ -1635,6 +1645,11 @@ export const zhTW: Translations = {
     popupPaletteTitle: '桌面快顯輪盤',
     popupPaletteEnabled: '啟用桌面快顯輪盤',
     popupPaletteEnabledDesc: '直接在畫布上快速選擇顏色、筆刷與工具。',
+    quickShapeTitle: '快速形狀',
+    quickShapeEnabled: '啟用快速形狀',
+    quickShapeEnabledDesc: '畫完後按住筆尖或滑鼠，即可吸附成規整形狀。',
+    quickShapeDelayLabel: '停頓延遲',
+    quickShapeDelayDesc: '筆尖或滑鼠需停留多久才會吸附。',
     popupPaletteTriggerLabel: '指標觸發方式',
     popupPaletteTriggerRightClick: '滑鼠右鍵',
     popupPaletteTriggerPenSide: '數位筆側鍵',

@@ -111,7 +111,8 @@ interface SocketContextType {
     color: string,
     brushSize: number,
     opacity?: number,
-    isEraser?: boolean
+    isEraser?: boolean,
+    quickShapePreviewId?: number
   ) => void;
   commitOp: (layerId: string, opType: string, payload: unknown) => void;
   flushCanvasWrites: () => Promise<void>;
@@ -923,7 +924,8 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     color: string,
     brushSize: number,
     opacity: number = 1.0,
-    isEraser: boolean = false
+    isEraser: boolean = false,
+    quickShapePreviewId?: number
   ) => {
     const canvasId = activeCanvasIdRef.current;
     if (!socketRef.current || !canvasId || isGuestRef.current) return;
@@ -935,6 +937,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       brushSize,
       opacity,
       isEraser,
+      quickShapePreviewId,
       sentAt: Date.now() + clockOffsetRef.current, // on the server clock
       // 0.1 px / 0.01 pressure is plenty for a preview and keeps packets small
       dabs: dabs.map((d) => ({ x: Math.round(d.x * 10) / 10, y: Math.round(d.y * 10) / 10, pressure: Math.round(d.pressure * 100) / 100 })),

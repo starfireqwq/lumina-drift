@@ -343,6 +343,16 @@ export const zhCN: Translations = {
   },
 
   canvas: {
+    quickShapeHint: '拖动调整・Shift 对齐角度・松开确认',
+    quickShapeKinds: {
+      line: '直线',
+      arc: '圆弧',
+      circle: '圆形',
+      ellipse: '椭圆',
+      rectangle: '矩形',
+      quadrilateral: '四边形',
+      triangle: '三角形',
+    },
     resizeTitle: '更改画布尺寸',
     currentSize: '当前尺寸',
     newSize: '新尺寸',
@@ -1635,6 +1645,11 @@ export const zhCN: Translations = {
     popupPaletteTitle: '桌面弹出转盘',
     popupPaletteEnabled: '启用桌面弹出转盘',
     popupPaletteEnabledDesc: '直接在画布上快速选择颜色、画笔和工具。',
+    quickShapeTitle: '快速形状',
+    quickShapeEnabled: '启用快速形状',
+    quickShapeEnabledDesc: '画完后按住笔尖或鼠标，即可吸附成规整形状。',
+    quickShapeDelayLabel: '停顿延迟',
+    quickShapeDelayDesc: '笔尖或鼠标需要停留多久才会吸附。',
     popupPaletteTriggerLabel: '指针触发方式',
     popupPaletteTriggerRightClick: '鼠标右键',
     popupPaletteTriggerPenSide: '数位笔侧键',

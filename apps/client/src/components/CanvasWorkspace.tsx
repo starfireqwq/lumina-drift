@@ -103,6 +103,7 @@ import { compressTiles, decodeTiles, warmUpCommitWorkers } from '../engine/commi
 import { commitInOrder, diffTilesAsync, tilesAsync, whenToolCommitsDone } from './workspace/tools/asyncTiles';
 import { BrushProperties, BrushRenderer } from '../engine/BrushRenderer';
 import { StrokePipeline } from '../engine/StrokePipeline';
+import type { QuickShapeCandidate } from '../engine/quickShape';
 import { normalizeTileBytes, TileEngine } from '../engine/TileEngine';
 import { OFFLINE_UNDO_LIMIT, ONLINE_UNDO_LIMIT, ScopedUndoManager } from '../engine/ScopedUndoManager';
 import { OfflineSessionStore } from '../services/offlineStore';
@@ -592,6 +593,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const layerManagerRef = useRef<LayerManager | null>(null);
   const brushRendererRef = useRef<BrushRenderer | null>(null);
   const strokePipelineRef = useRef<StrokePipeline | null>(null);
+  const [activeQuickShape, setActiveQuickShape] = useState<QuickShapeCandidate | null>(null);
+  const remoteQuickShapePreviews = useRef(new Map<string, { received?: number; shown?: number; committed?: number }>());
   const tileEngineRef = useRef<TileEngine | null>(null);
   const undoByCanvasRef = useRef(new Map<string, ScopedUndoManager>());
   const selectionEngineRef = useRef<SelectionEngine | null>(null);
@@ -2023,21 +2026,26 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       // 6. Stroke Pipeline with Tile Dirty Detection & Zero-Latency Ping-Pong
       const pipeline = new StrokePipeline(brushRenderer, layerManager, viewport, {
         coalesceTouch: OfflineSessionStore.isOfflineCanvas(canvas.id),
-        onEmitPreviewDabs: OfflineSessionStore.isOfflineCanvas(canvas.id) ? undefined : (dabs, isEraser) => {
-          const currentLayer = activeLayerRef.current;
+        onEmitPreviewDabs: OfflineSessionStore.isOfflineCanvas(canvas.id) ? undefined : (dabs, isEraser, quickShapePreviewId, strokeLayerId) => {
+          const layerId = strokeLayerId ?? activeLayerRef.current?.id;
           const currentProps = brushPropsRef.current || brushProps;
-          if (currentLayer && canvas) {
+          if (layerId && canvas) {
             emitPreviewDab(
-              currentLayer.id,
+              layerId,
               dabs,
               currentProps.color,
               currentProps.size,
               currentProps.opacity * currentProps.flow,
-              isEraser
+              isEraser,
+              quickShapePreviewId,
             );
           }
         },
         onCommitStroke: (strokeData, inkTiles) => brushCommitRef.current(strokeData, inkTiles),
+        onQuickShapeChange: (shape) => {
+          setActiveQuickShape(shape);
+          if (shape) brush.refreshOutlinePreview();
+        },
       });
       strokePipelineRef.current = pipeline;
       pipelineForRender = pipeline;
@@ -4315,8 +4323,24 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       let total = 0;
       const byPainter = new Map<string, Array<{ x: number; y: number; size: number; alpha: number; color: string }>>();
       for (const packet of packets) {
-        if (packet.isEraser || !packet.dabs?.length) continue;
         const key = packet.socketId || packet.userId;
+        const id = packet.quickShapePreviewId;
+        const state = remoteQuickShapePreviews.current.get(key);
+        if (id !== undefined) {
+          if (id < (state?.received ?? 0)) continue;
+          lm.dropPreviewPainter(key);
+          byPainter.delete(key);
+          const next = state ?? {};
+          next.received = id;
+          next.shown = id > (next.committed ?? 0) && packet.dabs?.length ? id : undefined;
+          remoteQuickShapePreviews.current.set(key, next);
+          if (next.shown === undefined) continue;
+        } else if (state?.shown !== undefined) {
+          lm.dropPreviewPainter(key);
+          byPainter.delete(key);
+          state.shown = undefined;
+        }
+        if (packet.isEraser || !packet.dabs?.length) continue;
         let list = byPainter.get(key);
         if (!list) byPainter.set(key, (list = []));
         const alpha = (packet.opacity || 0.8) * 0.7;
@@ -4347,6 +4371,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     return () => {
       unsubscribe();
       cancelAnimationFrame(raf);
+      remoteQuickShapePreviews.current.clear();
       layerManagerRef.current?.clearPreview();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -4358,7 +4383,19 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const applyRemoteOp = (latestBroadcastOp: OpBroadcastPacket, predecoded?: WeakMap<TileData, Uint8Array | null>) => {
     if (latestBroadcastOp.canvasId !== canvas?.id || !layerManagerRef.current || !brushRendererRef.current) return;
     // Their stroke is final now: the live preview of it goes
-    dropRemotePreview(latestBroadcastOp.socketId || latestBroadcastOp.userId);
+    const painter = latestBroadcastOp.socketId || latestBroadcastOp.userId;
+    const previewId = (latestBroadcastOp.payload as { quickShapePreviewId?: number } | null)?.quickShapePreviewId;
+    if (previewId !== undefined && Number.isFinite(previewId)) {
+      const state = remoteQuickShapePreviews.current.get(painter) ?? {};
+      if (state.shown === previewId || state.received === undefined) {
+        dropRemotePreview(painter);
+        state.shown = undefined;
+      }
+      state.committed = Math.max(state.committed ?? 0, previewId);
+      remoteQuickShapePreviews.current.set(painter, state);
+    } else {
+      dropRemotePreview(painter);
+    }
     if (latestBroadcastOp.seq > 0 && latestBroadcastOp.seq <= replayedSeqRef.current) return; // drawn by the initial replay
 
     if (latestBroadcastOp.layerId) {
@@ -7430,6 +7467,19 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               void importImages(readDroppedImages(e.dataTransfer), { at: { x: e.clientX, y: e.clientY } });
             }}
           >
+            {activeQuickShape && (
+              <div
+                role="status"
+                className="pointer-events-none absolute inset-x-2 top-3 z-30 flex justify-center"
+                data-testid="quickshape-badge"
+                data-shape-kind={activeQuickShape.kind}
+              >
+                <div className="atelier-popover flex flex-wrap justify-center gap-x-2 gap-y-0.5 rounded-full px-3 py-1.5 text-center text-xs text-neutral-100 shadow-md">
+                  <strong>{t.canvas.quickShapeKinds[activeQuickShape.kind]}</strong>
+                  <span className="text-neutral-300">{t.canvas.quickShapeHint}</span>
+                </div>
+              </div>
+            )}
             {imageDragOver && (
               <div aria-hidden className="pointer-events-none absolute inset-3 z-50 flex items-center justify-center rounded-xl border-2 border-dashed border-indigo-400/80 bg-indigo-500/10">
                 <span className="atelier-popover flex items-center gap-1.5 px-3 py-1.5 text-xs text-neutral-100"><ImagePlus className="h-4 w-4 text-indigo-400" />放開以新增圖層</span>

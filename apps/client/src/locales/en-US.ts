@@ -343,6 +343,16 @@ export const enUS: Translations = {
   },
 
   canvas: {
+    quickShapeHint: 'Drag to adjust · Shift to snap angles · Release to confirm',
+    quickShapeKinds: {
+      line: 'Line',
+      arc: 'Arc',
+      circle: 'Circle',
+      ellipse: 'Ellipse',
+      rectangle: 'Rectangle',
+      quadrilateral: 'Quadrilateral',
+      triangle: 'Triangle',
+    },
     resizeTitle: 'Change Canvas Size',
     currentSize: 'Current Dimensions',
     newSize: 'New Dimensions',
@@ -1635,6 +1645,11 @@ export const enUS: Translations = {
     popupPaletteTitle: 'Pop-up Palette',
     popupPaletteEnabled: 'Enable desktop pop-up palette',
     popupPaletteEnabledDesc: 'Quickly pick colors, brushes, and tools on the canvas.',
+    quickShapeTitle: 'QuickShape',
+    quickShapeEnabled: 'Enable QuickShape',
+    quickShapeEnabledDesc: 'Hold the pen or mouse down at the end of a stroke to snap it into shape.',
+    quickShapeDelayLabel: 'Hold delay',
+    quickShapeDelayDesc: 'How long to hold before the stroke snaps.',
     popupPaletteTriggerLabel: 'Pointer trigger',
     popupPaletteTriggerRightClick: 'Right-click',
     popupPaletteTriggerPenSide: 'Pen side button',

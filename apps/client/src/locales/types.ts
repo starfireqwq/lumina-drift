@@ -354,6 +354,8 @@ export interface Translations {
   };
 
   canvas: {
+    quickShapeHint: string;
+    quickShapeKinds: Record<import('../engine/quickShape').QuickShapeKind, string>;
     resizeTitle: string;
     currentSize: string;
     newSize: string;
@@ -1636,6 +1638,11 @@ export interface Translations {
     popupPaletteTitle: string;
     popupPaletteEnabled: string;
     popupPaletteEnabledDesc: string;
+    quickShapeTitle: string;
+    quickShapeEnabled: string;
+    quickShapeEnabledDesc: string;
+    quickShapeDelayLabel: string;
+    quickShapeDelayDesc: string;
     popupPaletteTriggerLabel: string;
     popupPaletteTriggerRightClick: string;
     popupPaletteTriggerPenSide: string;

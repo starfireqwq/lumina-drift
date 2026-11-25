@@ -274,7 +274,7 @@ export class RealtimeRoomManager {
       });
 
       // Transient Preview Brush Dabs stream
-      on('preview_dab', (data: { canvasId: string; layerId: string; color: string; brushSize: number; dabs: Array<{ x: number; y: number; pressure: number }> }) => {
+      on('preview_dab', (data: Omit<PreviewDabPacket, 'type' | 'userId' | 'socketId'>) => {
         this.handlePreviewDab(socket, data);
       });
 
@@ -620,16 +620,7 @@ export class RealtimeRoomManager {
 
   private handlePreviewDab(
     socket: Socket,
-    data: {
-      canvasId: string;
-      layerId: string;
-      color: string;
-      brushSize: number;
-      opacity?: number;
-      isEraser?: boolean;
-      sentAt?: number;
-      dabs: Array<{ x: number; y: number; pressure: number }>;
-    }
+    data: Omit<PreviewDabPacket, 'type' | 'userId' | 'socketId'>
   ) {
     const isGuest = Boolean(socket.data.isGuest);
     if (isGuest) {
@@ -677,7 +668,7 @@ export class RealtimeRoomManager {
   private forwardPreview(
     socket: Socket,
     user: UserPayload,
-    data: { canvasId: string; layerId: string; color: string; brushSize: number; opacity?: number; isEraser?: boolean; sentAt?: number; dabs: Array<{ x: number; y: number; pressure: number }> }
+    data: Omit<PreviewDabPacket, 'type' | 'userId' | 'socketId'>
   ) {
     const packet: PreviewDabPacket = {
       type: 'PREVIEW_DAB',
@@ -690,6 +681,7 @@ export class RealtimeRoomManager {
       brushSize: data.brushSize,
       opacity: data.opacity,
       isEraser: data.isEraser,
+      quickShapePreviewId: Number.isFinite(data.quickShapePreviewId) ? data.quickShapePreviewId : undefined,
       dabs: data.dabs,
     };
     // Not volatile: under load that dropped about a quarter of previews (gaps in live strokes).
@@ -723,7 +715,12 @@ export class RealtimeRoomManager {
     }
     if (!out) this.previewOutbox.set(target.id, (out = { packets: [], timer: null }));
     const last = out.packets[out.packets.length - 1];
-    if (last && last.socketId === packet.socketId && last.layerId === packet.layerId && last.color === packet.color
+    if (packet.quickShapePreviewId !== undefined) {
+      // A snapshot supersedes queued brush dabs and earlier snapshots from this painter.
+      out.packets = out.packets.filter(p => p.socketId !== packet.socketId || p.layerId !== packet.layerId);
+      out.packets.push(packet);
+    } else if (last && last.quickShapePreviewId === undefined
+      && last.socketId === packet.socketId && last.layerId === packet.layerId && last.color === packet.color
       && last.brushSize === packet.brushSize && last.opacity === packet.opacity && last.isEraser === packet.isEraser) {
       // Same stroke: one packet; the oldest sentAt stays, so the receiver's latency figure is honest
       last.dabs = last.dabs.concat(packet.dabs);

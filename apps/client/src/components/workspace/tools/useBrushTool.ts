@@ -6,6 +6,7 @@ import { applyMagFilter } from '../../../engine/TileAtlas';
 import { compressTiles, outlineRings, type OutlineRegion } from '../../../engine/commitWorkers';
 import type { PixiLayerItem } from '../../../engine/LayerManager';
 import type { BrushProperties } from '../../../engine/BrushRenderer';
+import type { StrokeCommitData } from '../../../engine/StrokePipeline';
 import type { Point, ToolContext } from './toolContext';
 import { hasDrawingContact } from '../../../engine/tabletInput';
 import { OfflineSessionStore } from '../../../services/offlineStore';
@@ -279,6 +280,7 @@ export function useBrushTool(ctx: ToolContext) {
   const trackTiles = (e: { buttons: number; pointerType: string }, local: Point, size = ctx.brushProps.size) => {
     const te = ctx.tileEngineRef.current;
     if (!(hasDrawingContact(e) || e.pointerType === 'touch') || !ctx.activeLayer || !te) return;
+    if (ctx.strokePipelineRef.current?.getIsAdjustingQuickShape()) return;
     const radius = size * 1.5;
     for (const c of te.getDirtyTilesForPoints([{ x: local.x, y: local.y, radius }], radius)) {
       strokeTouchedTileCoordsRef.current.add(`${c.col}_${c.row}`);
@@ -325,7 +327,7 @@ export function useBrushTool(ctx: ToolContext) {
   };
 
   /** StrokePipeline's onCommitStroke: one op (and undo step) with every tile the stroke touched */
-  const commitStroke = (strokeData: any, inkRead?: Promise<TileData[]>) => {
+  const commitStroke = (strokeData: StrokeCommitData, inkRead?: Promise<TileData[]>) => {
     // The ring preview stays up until the real outline is written: clearing it now made the ring
     // vanish for the frames the read-back and the worker take, then pop back (閃一下)
     freezeOutlinePreview();
@@ -350,11 +352,25 @@ export function useBrushTool(ctx: ToolContext) {
     }
 
     // Tiles touched by the full stroke, plus those collected during the moves
-    const pts = strokeData.allPoints || strokeData.samplePoints || [];
+    const pts = strokeData.allPoints ?? strokeData.samplePoints;
     const dirtyCoordsMap = new Map<string, { col: number; row: number }>();
     // Tiles along the stroke; scatter throws dabs up to 2 × scatter × size off the path
-    const reach = (strokeData.size || currentProps.size) * (1 + 2 * Math.max(0, currentProps.scatter || 0));
-    for (const c of te.getDirtyTilesForPoints(pts, reach)) dirtyCoordsMap.set(`${c.col}_${c.row}`, c);
+    const reach = (strokeData.size || currentProps.size) * (1 + 2 * Math.max(0, currentProps.scatter || 0)) +
+      (strokeData.quickShapeKind ? 3 : 0);
+    const tilesForPoints = (points: StrokeCommitData['samplePoints'], radius: number) => {
+      if (!strokeData.quickShapeKind) return te.getDirtyTilesForPoints(points, radius);
+      const tiles = new Map<string, { col: number; row: number }>();
+      // QuickShape reports stamped dabs, interleaved with any mirrored copies.
+      for (const point of points) {
+        for (const c of te.getDirtyTilesForPoints([point], radius)) tiles.set(`${c.col}_${c.row}`, c);
+      }
+      return tiles.values();
+    };
+    for (const c of tilesForPoints(pts, reach)) dirtyCoordsMap.set(`${c.col}_${c.row}`, c);
+    if (strokeData.quickShapeKind) {
+      for (const c of tilesForPoints(strokeData.originalPoints ?? [], reach)) dirtyCoordsMap.set(`${c.col}_${c.row}`, c);
+      for (const c of strokeData.originalTiles ?? []) dirtyCoordsMap.set(`${c.col}_${c.row}`, c);
+    }
     for (const key of strokeTouchedTileCoordsRef.current) {
       if (!dirtyCoordsMap.has(key)) {
         const [col, row] = key.split('_').map(Number);
@@ -367,7 +383,11 @@ export function useBrushTool(ctx: ToolContext) {
 
     /** Reads before / after (GPU, here), makes this the next stroke's baseline, compresses off the thread, sends in order */
     const takeTiles = () => {
-      const dirtyCoords = lm.editedSparseTiles(layerId) ?? Array.from(dirtyCoordsMap.values());
+      const sparseTiles = lm.editedSparseTiles(layerId);
+      if (strokeData.quickShapeKind) {
+        for (const c of sparseTiles ?? []) dirtyCoordsMap.set(`${c.col}_${c.row}`, c);
+      }
+      const dirtyCoords = strokeData.quickShapeKind || !sparseTiles ? Array.from(dirtyCoordsMap.values()) : sparseTiles;
       // before = the pre-stroke ping-pong copy, after = the layer now. Both reads are queued on the
       // GPU now (they hold these pixels whatever is drawn next) and arrive without stalling the page;
       // LZ4 happens in workers
@@ -397,8 +417,9 @@ export function useBrushTool(ctx: ToolContext) {
           scopedUndoRef.current.push(undoOp);
           ctx.updateUndoRedoState();
           // The ping-pong copy was synced when the tiles were read (a newer stroke may be under way now)
-          const { allPoints: _allPoints, ...payload } = strokeData;
-          const commitPayload = OfflineSessionStore.isOfflineCanvas(canvas.id) ? payload : strokeData;
+          const { originalPoints: _originalPoints, originalTiles: _originalTiles, ...roomPayload } = strokeData;
+          const { allPoints: _allPoints, quickShapePreviewId: _previewId, ...offlinePayload } = roomPayload;
+          const commitPayload = OfflineSessionStore.isOfflineCanvas(canvas.id) ? offlinePayload : roomPayload;
           ctx.commitOp(layerId, opType, { ...commitPayload, tiles: afterTiles, inkTiles }, true);
           if (!strokeData.isEraser) recordUsedColor(strokeData.color || currentProps.color);
         })
@@ -425,7 +446,7 @@ export function useBrushTool(ctx: ToolContext) {
     const margin = outline.width + 2;
     const places: Array<{ c: { col: number; row: number }; x: number; y: number; w: number; h: number }> = [];
     const rects: Array<{ x: number; y: number; w: number; h: number; ox: number; oy: number }> = [];
-    for (const c of te.getDirtyTilesForPoints(pts, reach + margin)) {
+    for (const c of tilesForPoints(pts, reach + margin)) {
       const x0 = c.col * ts;
       const y0 = c.row * ts;
       const w = Math.min(canvas.width, x0 + ts) - x0;
@@ -523,6 +544,11 @@ export function useBrushTool(ctx: ToolContext) {
     start,
     trackTiles,
     move,
+    refreshOutlinePreview: () => {
+      if (!outlineRef.current.enabled) return;
+      clearOutlinePreview();
+      scheduleOutlinePreview();
+    },
     interrupt,
     finish,
     cancel,

@@ -160,6 +160,8 @@ export interface PreviewDabPacket {
   brushSize: number;
   opacity?: number;
   isEraser?: boolean;
+  /** Full replacement of this painter's preview; an empty replacement clears it. */
+  quickShapePreviewId?: number;
   dabs: DabPoint[];
 }
 

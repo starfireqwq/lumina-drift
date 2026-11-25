@@ -31,16 +31,24 @@ import { DEFAULT_PRESSURE_CURVE, readStylusPressureCurve, saveStylusPressureCurv
 import {
   getDesktopPopupPaletteEnabled,
   getDesktopPopupPaletteTrigger,
+  getQuickShapeDelayMs,
+  getQuickShapeEnabled,
   getShowBrushCrosshair,
   getTouchSimulatedPressure,
   setDesktopPopupPaletteEnabled,
   setDesktopPopupPaletteTrigger,
+  setQuickShapeDelayMs,
+  setQuickShapeEnabled,
   setShowBrushCrosshair,
   setTouchSimulatedPressure,
   subscribeDesktopPopupPaletteEnabled,
   subscribeDesktopPopupPaletteTrigger,
+  subscribeQuickShapeDelayMs,
+  subscribeQuickShapeEnabled,
   subscribeShowBrushCrosshair,
   subscribeTouchSimulatedPressure,
+  QUICK_SHAPE_MAX_DELAY_MS,
+  QUICK_SHAPE_MIN_DELAY_MS,
   type DesktopPopupPaletteTrigger,
 } from '../engine/inputPreferences';
 import {
@@ -205,6 +213,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const showBrushCrosshair = useSyncExternalStore(subscribeShowBrushCrosshair, getShowBrushCrosshair, getShowBrushCrosshair);
   const popupPaletteEnabled = useSyncExternalStore(subscribeDesktopPopupPaletteEnabled, getDesktopPopupPaletteEnabled, getDesktopPopupPaletteEnabled);
   const popupPaletteTrigger = useSyncExternalStore(subscribeDesktopPopupPaletteTrigger, getDesktopPopupPaletteTrigger, getDesktopPopupPaletteTrigger);
+  const quickShapeEnabled = useSyncExternalStore(subscribeQuickShapeEnabled, getQuickShapeEnabled, getQuickShapeEnabled);
+  const quickShapeDelayMs = useSyncExternalStore(subscribeQuickShapeDelayMs, getQuickShapeDelayMs, getQuickShapeDelayMs);
   const touchSimulatedPressure = useSyncExternalStore(subscribeTouchSimulatedPressure, getTouchSimulatedPressure, getTouchSimulatedPressure);
   const touchGestures = useSyncExternalStore(subscribeTouchGestureSettings, getTouchGestureSettings, getTouchGestureSettings);
   const settings = t.settings;
@@ -1033,6 +1043,43 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     {settings.popupPaletteShortcutHint.replace('{shortcut}',
                       shortcutMgr.getDisplayLabel(shortcutMgr.getComboForAction('action_studio_popup_palette')) || settings.shortcutNotSet)}
                   </p>
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-2.5">
+                <h3 className="text-xs font-bold text-neutral-300">{settings.quickShapeTitle}</h3>
+                <div className="flex flex-col gap-2.5 rounded-xl border border-neutral-800 bg-neutral-900/60 px-3 py-2.5 text-xs text-neutral-200">
+                  <label className="flex cursor-pointer items-start justify-between gap-3">
+                    <span className="flex flex-col gap-0.5">
+                      <span className="font-medium text-white">{settings.quickShapeEnabled}</span>
+                      <span className="text-[11px] text-neutral-400">{settings.quickShapeEnabledDesc}</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      data-testid="quickshape-enabled-toggle"
+                      checked={quickShapeEnabled}
+                      onChange={(event) => setQuickShapeEnabled(event.target.checked)}
+                      className="mt-0.5 shrink-0"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 border-t border-neutral-800 pt-2.5">
+                    <span className="flex items-center justify-between gap-2">
+                      <span>{settings.quickShapeDelayLabel}</span>
+                      <span className="tabular-nums">{quickShapeDelayMs} ms</span>
+                    </span>
+                    <input
+                      type="range"
+                      data-testid="quickshape-delay-input"
+                      min={QUICK_SHAPE_MIN_DELAY_MS}
+                      max={QUICK_SHAPE_MAX_DELAY_MS}
+                      step={10}
+                      value={quickShapeDelayMs}
+                      disabled={!quickShapeEnabled}
+                      onChange={(event) => setQuickShapeDelayMs(event.target.valueAsNumber)}
+                      className="w-full accent-indigo-400 disabled:opacity-50"
+                    />
+                    <span className="text-[11px] text-neutral-400">{settings.quickShapeDelayDesc}</span>
+                  </label>
                 </div>
               </div>
 

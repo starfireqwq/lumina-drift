@@ -1,10 +1,13 @@
 import { BrushProperties, BrushRenderer } from './BrushRenderer';
 import { CanvasViewport } from './Viewport';
-import type { TileData } from '@atelier/shared';
+import type { TileCoord, TileData } from '@atelier/shared';
 import { LayerManager, type StrokeInk } from './LayerManager';
 import { FLOATS_PER_DAB, RawPoint, StrokeWorkerEngine } from '../workers/stroke.worker';
 import { RulerManager } from './RulerManager';
 import { startTabletStroke, type TabletMotion, type TabletPoint, type TabletStroke } from './tabletInput';
+import { getQuickShapeDelayMs, getQuickShapeEnabled } from './inputPreferences';
+import { adjustQuickShapeByPointer, buildQuickShapeDabs, recognizeQuickShape, sampleQuickShapePoints,
+  type QuickShapeCandidate, type QuickShapeKind, type QuickShapePoint } from './quickShape';
 
 /** When the pen was there (same clock as performance.now); some synthetic events report 0 */
 const eventTime = (e: { timeStamp?: number }) => (e.timeStamp && e.timeStamp > 0 ? e.timeStamp : performance.now());
@@ -13,10 +16,33 @@ const isDesktopInput = () => typeof window !== 'undefined' && Boolean(
   (window as { atelierDesktop?: { isElectron?: boolean } }).atelierDesktop?.isElectron,
 );
 
+type StrokePoint = { x: number; y: number; pressure: number };
+
+export interface StrokeCommitData {
+  brush: 'CustomBrush' | 'StandardBrush';
+  color: string;
+  size: number;
+  opacity: number;
+  flow: number;
+  hardness: number;
+  spacing: number;
+  isEraser: boolean;
+  pointsCount: number;
+  samplePoints: StrokePoint[];
+  allPoints?: StrokePoint[];
+  quickShapeKind?: QuickShapeKind;
+  quickShapePreviewId?: number;
+  originalTiles?: TileCoord[];
+  originalPoints?: StrokePoint[];
+}
+
 export interface StrokePipelineCallbacks {
   coalesceTouch?: boolean;
-  onEmitPreviewDabs?: (dabs: Array<{ x: number; y: number; pressure: number }>, isEraser: boolean) => void;
-  onCommitStroke?: (strokeData: any, inkTiles?: Promise<TileData[]>) => void;
+  onEmitPreviewDabs?: (
+    dabs: StrokePoint[], isEraser: boolean, quickShapePreviewId?: number, layerId?: string,
+  ) => void;
+  onCommitStroke?: (strokeData: StrokeCommitData, inkTiles?: Promise<TileData[]>) => void;
+  onQuickShapeChange?: (shape: QuickShapeCandidate | null) => void;
 }
 
 export class StrokePipeline {
@@ -30,7 +56,7 @@ export class StrokePipeline {
   private strokeId = 0;
   private cancelledThroughStrokeId = 0;
   private activeLayerId: string | null = null;
-  private currentStrokePoints: Array<{ x: number; y: number; pressure: number }> = [];
+  private currentStrokePoints: StrokePoint[] = [];
   private lastValidPoint: RawPoint | null = null;
   private tabletStroke: TabletStroke | null = null;
   private motionPending = false;
@@ -42,7 +68,8 @@ export class StrokePipeline {
   }
 
   public hasPendingWork(): boolean {
-    return this.motionPending || this.touchMotion.length > 0 || this.frameDabFloats > 0;
+    return this.motionPending || this.touchMotion.length > 0 || this.frameDabFloats > 0 ||
+      Boolean(this.quickShapeCurrent && this.callbacks.onEmitPreviewDabs && this.pendingPreviewDabs.length);
   }
   private frameDabs: Float32Array[] = [];
   private frameDabFloats = 0;
@@ -50,6 +77,21 @@ export class StrokePipeline {
   private releaseTimer?: ReturnType<typeof setTimeout>;
   private eraserProps?: BrushProperties;
   private strokeInk?: StrokeInk;
+  private captureInkForStroke = false;
+  private rawQuickShapePoints: QuickShapePoint[] = [];
+  private quickShapeTimer?: ReturnType<typeof setTimeout>;
+  private quickShapeHoldPoint?: QuickShapePoint;
+  private quickShapeInitial?: QuickShapeCandidate;
+  private quickShapeCurrent?: QuickShapeCandidate;
+  private quickShapeAnchor?: QuickShapePoint;
+  private quickShapePointer?: { point: QuickShapePoint; shift: boolean };
+  private quickShapeShift = false;
+  private quickShapeAvgPressure = 0.7;
+  private quickShapeDabStyle?: { size: number; pressure: number; alpha: number };
+  private quickShapePreviewId?: number;
+  private quickShapeOriginalTiles: TileCoord[] = [];
+  private quickShapeOriginalPoints: StrokePoint[] = [];
+  private quickShapeAllowed = false;
   private strokeProps?: BrushProperties;
   private lastEventTime = 0;
   private strokePeakPressure = 0;
@@ -60,7 +102,7 @@ export class StrokePipeline {
   private pendingSpikePoints: RawPoint[] = [];
 
   // Throttled preview dab buffer for socket streaming
-  private pendingPreviewDabs: Array<{ x: number; y: number; pressure: number }> = [];
+  private pendingPreviewDabs: StrokePoint[] = [];
   private lastPreviewEmitTime: number = 0;
   private previewIntervalMs: number = 24; // ~40Hz streaming for smooth live preview
 
@@ -77,7 +119,16 @@ export class StrokePipeline {
   }
 
   public setActiveLayer(layerId: string | null) {
-    if (this.activeLayerId !== layerId) this.flushFrameDabs();
+    if (this.activeLayerId !== layerId) {
+      if (this.quickShapeCurrent && this.activeLayerId) {
+        this.layerManager.revertToPingPong(this.activeLayerId);
+        this.cancelStroke();
+      } else {
+        this.flushFrameDabs();
+        this.quickShapeAllowed = false;
+        clearTimeout(this.quickShapeTimer);
+      }
+    }
     this.activeLayerId = layerId;
     this.brushRenderer.setMixerTileReader(
       layerId ? (col, row) => this.layerManager.readTileSync(layerId, col, row, 'after') : null
@@ -96,6 +147,7 @@ export class StrokePipeline {
       if (motion) this.applyMotion(this.tabletStroke, motion);
     }
     this.flushFrameDabs();
+    if (this.quickShapeCurrent) this.emitQuickShapePreview();
   }
 
   private queueFrameDabs(dabs: Float32Array) {
@@ -165,7 +217,7 @@ export class StrokePipeline {
                 pressure: Math.round(dabsArray[offset + 3] * 100) / 100,
               };
               this.currentStrokePoints.push(origPt);
-              this.pendingPreviewDabs.push(origPt);
+              if (this.callbacks.onEmitPreviewDabs) this.pendingPreviewDabs.push(origPt);
 
               const symPts = rulerMgr.getSymmetryPoints(origPt);
               // symPts[0] is the original point; subsequent entries are mirrored counterparts
@@ -173,7 +225,7 @@ export class StrokePipeline {
                 const sp = symPts[s];
                 const symDab = { x: sp.x, y: sp.y, pressure: origPt.pressure };
                 this.currentStrokePoints.push(symDab);
-                this.pendingPreviewDabs.push(symDab);
+                if (this.callbacks.onEmitPreviewDabs) this.pendingPreviewDabs.push(symDab);
 
                 extraDabs.push(
                   sp.x,
@@ -215,7 +267,7 @@ export class StrokePipeline {
           // Check throttled preview dab emission
           const now = this.callbacks.onEmitPreviewDabs ? performance.now() : 0;
           if (
-            this.callbacks.onEmitPreviewDabs &&
+            !this.quickShapeCurrent && this.callbacks.onEmitPreviewDabs &&
             this.pendingPreviewDabs.length > 0 &&
             (now - this.lastPreviewEmitTime >= this.previewIntervalMs || isStart || isFinish)
           ) {
@@ -243,6 +295,12 @@ export class StrokePipeline {
           // Spread over the whole stroke (not its first 200 points): others use it as the stroke's footprint
           samplePoints: this.currentStrokePoints.filter((_, i, all) => i % Math.ceil(all.length / 400) === 0 || i === all.length - 1),
           allPoints: [...this.currentStrokePoints],
+          ...(this.quickShapeCurrent && {
+            quickShapeKind: this.quickShapeCurrent.kind,
+            quickShapePreviewId: this.quickShapePreviewId,
+            originalTiles: this.quickShapeOriginalTiles,
+            originalPoints: this.quickShapeOriginalPoints,
+          }),
         }, this.strokeInk && this.layerManager.readStrokeInk(this.strokeInk));
         this.strokeInk = undefined;
       } else if (this.strokeInk) {
@@ -254,7 +312,128 @@ export class StrokePipeline {
       this.lastValidPoint = null;
       this.isDrawing = false;
       this.eraserProps = undefined;
+      this.clearQuickShape();
     }
+  }
+
+  private trackQuickShapePoint(point: QuickShapePoint) {
+    if (!this.quickShapeAllowed || !getQuickShapeEnabled()) return;
+    const mode = RulerManager.getInstance().state.mode;
+    if (mode !== 'off' && mode !== 'symmetry') {
+      this.quickShapeAllowed = false;
+      return;
+    }
+    const previous = this.rawQuickShapePoints.at(-1);
+    if (!previous || Math.hypot(point.x - previous.x, point.y - previous.y) >= 0.5) {
+      this.rawQuickShapePoints.push(point);
+    }
+    const hold = this.quickShapeHoldPoint;
+    const tolerance = Math.max(5, 6 / Math.max(0.1, this.viewport.getState().zoom));
+    if (hold && Math.hypot(point.x - hold.x, point.y - hold.y) <= tolerance) return;
+    this.quickShapeHoldPoint = point;
+    clearTimeout(this.quickShapeTimer);
+    const timer = setTimeout(() => {
+      if (!this.isDrawing || this.pendingRelease || this.quickShapeTimer !== timer) return;
+      // Coalesced or native samples can be waiting for the next frame when the hold expires.
+      this.renderFrame();
+      if (!this.isDrawing || this.quickShapeTimer !== timer) return;
+      this.quickShapeTimer = undefined;
+      const currentMode = RulerManager.getInstance().state.mode;
+      if (!this.quickShapeAllowed || !getQuickShapeEnabled() || (currentMode !== 'off' && currentMode !== 'symmetry')) return;
+      const candidate = recognizeQuickShape(this.rawQuickShapePoints);
+      if (!candidate || !this.activeLayerId) return;
+      let weightedPressure = 0;
+      let length = 0;
+      for (let i = 1; i < this.rawQuickShapePoints.length; i++) {
+        const a = this.rawQuickShapePoints[i - 1];
+        const b = this.rawQuickShapePoints[i];
+        const step = Math.hypot(b.x - a.x, b.y - a.y);
+        weightedPressure += step * ((a.pressure ?? 0.7) + (b.pressure ?? 0.7)) / 2;
+        length += step;
+      }
+      this.quickShapeAvgPressure = length ? weightedPressure / length : 0.7;
+      this.quickShapeAnchor = this.rawQuickShapePoints.at(-1)!;
+      this.quickShapeInitial = candidate;
+      this.quickShapePreviewId = performance.timeOrigin + performance.now();
+      this.quickShapeOriginalTiles = this.layerManager.editedSparseTiles(this.activeLayerId) ?? [];
+      this.quickShapeOriginalPoints = this.currentStrokePoints;
+      // Reuse the worker's pressure/opacity/flow calculation once so adjustments use a stable tip.
+      const dab = this.engine.startSegment({ ...this.lastValidPoint!, ...this.quickShapeAnchor, pressure: this.quickShapeAvgPressure });
+      this.quickShapeDabStyle = { size: dab[2], pressure: dab[3], alpha: dab[4] };
+      this.renderSnappedQuickShape(candidate);
+    }, getQuickShapeDelayMs());
+    this.quickShapeTimer = timer;
+  }
+
+  private renderSnappedQuickShape(candidate: QuickShapeCandidate) {
+    if (!this.activeLayerId || !this.strokeProps || !this.quickShapeDabStyle) return;
+    const props = this.strokeProps;
+    const { size, pressure, alpha } = this.quickShapeDabStyle;
+    this.layerManager.revertToPingPong(this.activeLayerId);
+    if (this.strokeInk) this.layerManager.releaseStrokeInk(this.strokeInk);
+    this.strokeInk = this.captureInkForStroke ? new Map() : undefined;
+    this.brushRenderer.resetStrokeState();
+    this.quickShapeCurrent = candidate;
+    this.currentStrokePoints = [];
+    this.pendingPreviewDabs = [];
+    const points = sampleQuickShapePoints(candidate, size * props.spacing, pressure);
+    const closed = candidate.kind !== 'line' && candidate.kind !== 'arc';
+    const dabs = buildQuickShapeDabs(points, size, alpha, props.angleMode === 'fixed' ? 0 : undefined);
+    // The closing sample supplies the seam tangent. Stamp that position once.
+    const limit = closed ? dabs.length - FLOATS_PER_DAB : dabs.length;
+    for (let i = 0; i < limit; i += maxFrameDabFloats) {
+      this.emitDabs(dabs.subarray(i, Math.min(i + maxFrameDabFloats, limit)), this.strokeId, false, false);
+    }
+    this.emitQuickShapePreview();
+    this.onNeedsRender?.();
+    this.callbacks.onQuickShapeChange?.(candidate);
+  }
+
+  private emitQuickShapePreview(force = false) {
+    const now = performance.now();
+    if (this.pendingPreviewDabs.length && (force || now - this.lastPreviewEmitTime >= this.previewIntervalMs)) {
+      const points = this.pendingPreviewDabs;
+      // The room accepts at most 512 dabs per preview packet. Keep its full footprint.
+      const preview = points.length <= 512 ? points : Array.from({ length: 512 }, (_, i) =>
+        points[Math.round(i * (points.length - 1) / 511)]);
+      this.callbacks.onEmitPreviewDabs?.(
+        preview, Boolean(this.strokeProps?.isEraser), this.quickShapePreviewId, this.activeLayerId ?? undefined,
+      );
+      this.pendingPreviewDabs = [];
+      this.lastPreviewEmitTime = now;
+    }
+  }
+
+  private adjustQuickShape(clientX: number, clientY: number) {
+    if (!this.quickShapeInitial || !this.quickShapeAnchor) return;
+    const point = this.viewport.screenToCanvas(clientX, clientY);
+    const previous = this.quickShapePointer;
+    if (previous?.point.x === point.x && previous.point.y === point.y && previous.shift === this.quickShapeShift) return;
+    this.quickShapePointer = { point, shift: this.quickShapeShift };
+    this.renderSnappedQuickShape(adjustQuickShapeByPointer(this.quickShapeInitial, this.quickShapeAnchor, point, this.quickShapeShift));
+  }
+
+  private clearQuickShape(cancelled = false) {
+    clearTimeout(this.quickShapeTimer);
+    this.quickShapeTimer = undefined;
+    if (cancelled && this.quickShapeCurrent) {
+      this.callbacks.onEmitPreviewDabs?.(
+        [], Boolean(this.strokeProps?.isEraser), this.quickShapePreviewId, this.activeLayerId ?? undefined,
+      );
+    }
+    this.captureInkForStroke = false;
+    this.quickShapeAllowed = false;
+    this.rawQuickShapePoints = [];
+    this.quickShapeHoldPoint = undefined;
+    this.quickShapeInitial = undefined;
+    this.quickShapeCurrent = undefined;
+    this.quickShapeAnchor = undefined;
+    this.quickShapePointer = undefined;
+    this.quickShapeDabStyle = undefined;
+    this.quickShapePreviewId = undefined;
+    this.quickShapeOriginalTiles = [];
+    this.quickShapeOriginalPoints = [];
+    this.callbacks.onQuickShapeChange?.(null);
   }
 
   /**
@@ -266,7 +445,10 @@ export class StrokePipeline {
     const tablet = startTabletStroke(e);
     this.tabletStroke = tablet;
     this.eraserProps = eraserProps;
-    if (captureInk && !eraserProps && !this.brushRenderer.getProperties().colorMixing) this.strokeInk = new Map();
+    this.captureInkForStroke = captureInk && !eraserProps && !this.brushRenderer.getProperties().colorMixing;
+    if (this.captureInkForStroke) this.strokeInk = new Map();
+    this.quickShapeAllowed = getQuickShapeEnabled();
+    this.quickShapeShift = e.shiftKey;
     this.strokeId++;
     this.isDrawing = true;
     this.layerManager.markInteractive();
@@ -311,6 +493,7 @@ export class StrokePipeline {
       time,
     };
     this.lastValidPoint = initialPoint;
+    this.trackQuickShapePoint({ ...localPt, pressure });
     this.resetTailTaperState(initialPoint);
 
     const dabs = this.engine.initStroke(
@@ -348,7 +531,13 @@ export class StrokePipeline {
     const tablet = this.tabletStroke;
     if (!this.isDrawing || !tablet || tablet.pointerId !== e.pointerId) return;
 
+    this.quickShapeShift = e.shiftKey;
     const motion = tablet.contactPoints('nativeEvent' in e ? e.nativeEvent : e);
+    if (this.quickShapeCurrent) {
+      if (motion.lifted) this.finishInterruptedStroke(tablet.pointerId);
+      else this.adjustQuickShape(e.clientX, e.clientY);
+      return;
+    }
     if (this.callbacks.coalesceTouch && e.pointerType === 'touch' && !motion.lifted && motion.runs.length === 1) {
       const samples = motion.runs[0];
       if (this.touchMotion.length + samples.length > 256) this.flushTouchMotion();
@@ -372,6 +561,16 @@ export class StrokePipeline {
   }
 
   private applyMotion(tablet: TabletStroke, { runs, lifted }: TabletMotion) {
+    if (this.quickShapeCurrent) {
+      if (lifted) this.finishInterruptedStroke(tablet.pointerId);
+      else {
+        const last = runs.at(-1)?.at(-1);
+        if (last) this.adjustQuickShape(last.clientX, last.clientY);
+      }
+      return;
+    }
+    // A tablet contact gap is kept as separate painted segments, so it cannot become one shape.
+    if (runs.length > 1) this.quickShapeAllowed = false;
     const rulerMgr = RulerManager.getInstance();
     const props = this.strokeProps!;
     const shouldSnap = props.snapToRuler !== false;
@@ -393,6 +592,7 @@ export class StrokePipeline {
         const local = this.viewport.screenToCanvas(ev.clientX, ev.clientY);
         const snapped = shouldSnap ? rulerMgr.snapPoint(local) : { point: local, snapped: false };
         const pressure = tablet.pressure(ev).normalized;
+        this.trackQuickShapePoint({ ...local, pressure });
         const capturedAt = eventTime(ev);
         time = capturedAt > time ? capturedAt : time + 0.5;
         return {
@@ -533,8 +733,17 @@ export class StrokePipeline {
     this.motionPending = false;
     this.tabletStroke = null;
     tablet.finish();
+    if (this.quickShapeCurrent) {
+      if (this.strokeProps?.snapToRuler !== false) RulerManager.getInstance().onStrokeEnd();
+      this.emitQuickShapePreview(true);
+      this.emitDabs(new Float32Array(), this.strokeId, false, true);
+      return;
+    }
     this.flushPendingSpikePoints(true);
-    if (!this.lastValidPoint) return;
+    if (!this.lastValidPoint) {
+      this.cancelStroke();
+      return;
+    }
     const props = this.strokeProps!;
     if (props.snapToRuler !== false) RulerManager.getInstance().onStrokeEnd();
     const endPt = tablet.isPen && !tablet.hasNativeMotion && props.brushType !== 'pen' && props.minSize > 0
@@ -550,6 +759,10 @@ export class StrokePipeline {
   public handlePointerUp(e: React.PointerEvent<HTMLCanvasElement> | PointerEvent) {
     const tablet = this.tabletStroke;
     if (!this.isDrawing || !tablet || tablet.pointerId !== e.pointerId) return;
+    if (this.quickShapeCurrent) {
+      this.finishInterruptedStroke(e.pointerId);
+      return;
+    }
     this.flushTouchMotion();
     const event = 'nativeEvent' in e ? e.nativeEvent : e;
     if (event.type === 'pointerup' && (tablet.hasNativeMotion || tablet.awaitingNativeStart)) {
@@ -651,6 +864,7 @@ export class StrokePipeline {
   }
 
   public cancelStroke() {
+    this.clearQuickShape(true);
     this.touchMotion.length = 0;
     if (this.strokeInk) this.layerManager.releaseStrokeInk(this.strokeInk);
     this.strokeInk = undefined;
@@ -670,12 +884,16 @@ export class StrokePipeline {
   }
 
   /** Points stamped so far in the stroke being drawn (live outline preview); not a copy */
-  public getCurrentPoints(): ReadonlyArray<{ x: number; y: number; pressure: number }> {
+  public getCurrentPoints(): ReadonlyArray<StrokePoint> {
     return this.currentStrokePoints;
   }
 
   public getIsDrawing() {
     return this.isDrawing;
+  }
+
+  public getIsAdjustingQuickShape() {
+    return this.quickShapeCurrent !== undefined;
   }
 
   public destroy() {
