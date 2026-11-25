@@ -15,7 +15,8 @@ Lumina Drift Paint 是一款開源繪圖軟體。你可以在本機離線作畫�
 - **多倍速重播控制**：支援 `1x` (原速)、`4x`、`16x`、`64x` 極速快進播放，具備時間軸進度滑塊 (Scrubber) 隨意跳轉至任意操作步數。
 - **縮時影片錄影匯出**：基於 HTML5 Canvas `captureStream()` 與 `MediaRecorder`，一鍵即時渲染並匯出 **WebM (VP9 4K支援)** 或 **MP4 (AVC 相容)** 繪圖過程短影片供社群分享。
 
-### 2. 多圖層檔案匯出與跨軟體相容性 (Export & Formats)
+### 2. 多圖層檔案匯入／匯出與跨軟體相容性 (Import, Export & Formats)
+- **多圖層匯入**支援 **Adobe Photoshop (.psd)** 與 **Krita (.kra)**，保留圖層樹與巢狀群組、混合模式、不透明度、顯示狀態、剪裁遮色片（含 Krita 的 `inheritsalpha`）、透明鎖定，以及圖層／群組蒙版。在單機或多人聯機協作工作區皆可將檔案拖曳至視窗直接開啟，也可透過檔案選單或按 `Ctrl+O` 匯入。
 - **標準 Adobe Photoshop (.psd)**：基於 `ag-psd` 純原生產生具備 `8BPS` 標準標頭之 PSD 檔案，完整保留各圖層名稱、不透明度、混合模式（正常、色彩增值、濾色、覆蓋等）與圖層顯示隱藏狀態，相容 Photoshop、CSP、SAI。
 - **OpenRaster (.ora) 開放標準多圖層封裝**：Krita、MyPaint、GIMP 與 CSP 原生支援的開源多圖層打包標準，內含標準 `stack.xml` 圖層樹描述與各圖層無損 PNG。
 - **多圖層 PNG 打包 (.zip)**：將每一圖層個別儲存為獨立 PNG 檔案，並自動產生 `layers_manifest.json` 元資料封裝成 ZIP。
