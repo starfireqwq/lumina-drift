@@ -2,6 +2,26 @@ import type { SelectionMaskData } from '@atelier/shared';
 
 export type SelectionCombineOpMode = 'replace' | 'add' | 'subtract';
 
+export function computeMarqueeRect(
+  start: { x: number; y: number },
+  current: { x: number; y: number },
+  options?: { square?: boolean; fromCenter?: boolean },
+): { x: number; y: number; width: number; height: number } {
+  let dx = current.x - start.x;
+  let dy = current.y - start.y;
+  if (options?.square) {
+    const size = Math.max(Math.abs(dx), Math.abs(dy));
+    dx = Math.sign(dx) * size;
+    dy = Math.sign(dy) * size;
+  }
+  const width = Math.abs(dx);
+  const height = Math.abs(dy);
+  if (options?.fromCenter) {
+    return { x: start.x - width, y: start.y - height, width: width * 2, height: height * 2 };
+  }
+  return { x: start.x + Math.min(0, dx), y: start.y + Math.min(0, dy), width, height };
+}
+
 export function computeMaskBoundsAndCount(
   data: Uint8Array,
   width: number,
@@ -135,6 +155,7 @@ export function rasterizeEllipseMask(
   height: number,
   canvasWidth: number,
   canvasHeight: number,
+  antialias = false,
 ): SelectionMaskData {
   const data = new Uint8Array(canvasWidth * canvasHeight);
   const rx = width / 2;
@@ -164,12 +185,13 @@ export function rasterizeEllipseMask(
   for (let py = y0; py < y1; py++) {
     const dy = (py + 0.5 - cy) / ry;
     const dy2 = dy * dy;
-    if (dy2 > 1) continue;
+    if (!antialias && dy2 > 1) continue;
     const rowOff = py * canvasWidth;
     for (let px = x0; px < x1; px++) {
       const dx = (px + 0.5 - cx) / rx;
-      if (dx * dx + dy2 <= 1) {
-        data[rowOff + px] = 255;
+      const coverage = antialias ? ellipsePixelCoverage(px + 0.5 - cx, py + 0.5 - cy, rx, ry) : (dx * dx + dy2 <= 1 ? 255 : 0);
+      if (coverage > 0) {
+        data[rowOff + px] = coverage;
         count++;
         if (px < minX) minX = px;
         if (px > maxX) maxX = px;
@@ -185,6 +207,31 @@ export function rasterizeEllipseMask(
     activePixelCount: count,
     bounds: count > 0 ? { minX, minY, maxX, maxY } : { minX: 0, minY: 0, maxX: 0, maxY: 0 },
   };
+}
+
+function ellipsePixelCoverage(x: number, y: number, rx: number, ry: number): number {
+  const farX = (Math.abs(x) + 0.375) / rx;
+  const farY = (Math.abs(y) + 0.375) / ry;
+  if (farX * farX + farY * farY <= 1) return 255;
+  const nearX = Math.max(0, Math.abs(x) - 0.375) / rx;
+  const nearY = Math.max(0, Math.abs(y) - 0.375) / ry;
+  if (nearX * nearX + nearY * nearY > 1) return 0;
+
+  let hits = 0;
+  for (let sy = 0; sy < 4; sy++) {
+    const dy = (y + (sy - 1.5) / 4) / ry;
+    for (let sx = 0; sx < 4; sx++) {
+      const dx = (x + (sx - 1.5) / 4) / rx;
+      if (dx * dx + dy * dy <= 1) hits++;
+    }
+  }
+  return Math.round(hits * 255 / 16);
+}
+
+export function applySelectionPostProcess(mask: SelectionMaskData, featherRadius: number): SelectionMaskData {
+  if (!(featherRadius >= 1) || !Number.isFinite(featherRadius)) return mask;
+  const { data, width, height } = mask;
+  return computeMaskBoundsAndCount(featherMaskBuffer(data, width, height, featherRadius), width, height);
 }
 
 export function readMaskSubRect(

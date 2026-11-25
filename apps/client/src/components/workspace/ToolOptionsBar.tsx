@@ -249,10 +249,17 @@ export interface ToolOptionsBarProps {
   hasSelection: boolean;
   selectionMode: SelectionMode;
   onSelectionMode: (m: SelectionMode) => void;
+  selectionAntialias: boolean;
+  onSelectionAntialias: (enabled: boolean) => void;
+  selectionFeather: number;
+  onSelectionFeather: (px: number) => void;
+  polygonPointCount: number;
+  onPolygonFinish: () => void;
+  onPolygonCancel: () => void;
   onSelectionTransform: () => void;
   onSelectionMask: () => void;
   onSelectionGrow: (px: number) => void;
-  onSelectionFeather: (px: number) => void;
+  onFeatherActiveSelection: (px: number) => void;
   /** 依顏色範圍選取: pixels of the active layer near the main colour */
   onColorRange: () => void;
   lassoErase: boolean;
@@ -351,7 +358,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
   const isLassoFill = t === 'bucket' && p.bucketMode === 'lasso';
   const isPaintUnfilled = t === 'paint_unfilled';
   const fillReference = isPaintUnfilled && p.bucketReference === 'none' ? 'current' : p.bucketReference;
-  const isSelectTool = t === 'lasso' || t === 'magic_wand' || t === 'select_brush' || t === 'select_eraser';
+  const isSelectTool = ['select_rect', 'select_ellipse', 'lasso', 'select_polygon', 'magic_wand', 'select_brush', 'select_eraser'].includes(t);
   const selBtn = 'flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-neutral-100 hover:bg-indigo-600/40';
 
   const barRef = useRef<HTMLDivElement>(null);
@@ -611,6 +618,21 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
               { id: 'add', label: tr.toolOptions.selectionAdd, title: tr.toolOptions.selectionAddHint },
               { id: 'subtract', label: tr.toolOptions.selectionSubtract, title: tr.toolOptions.selectionSubtractHint },
             ]} />
+          <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-neutral-300">
+            <input type="checkbox" checked={p.selectionAntialias} onChange={(e) => p.onSelectionAntialias(e.target.checked)} />
+            {tr.toolOptions.selectionAntialias}
+          </label>
+          <SliderField label={tr.toolOptions.selectionFeatherRadius} value={p.selectionFeather} max={64} suffix=" px" onChange={p.onSelectionFeather} />
+          {t === 'select_polygon' && p.polygonPointCount > 0 && (
+            <>
+              <button type="button" onClick={p.onPolygonFinish} className="shrink-0 rounded-md bg-indigo-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-500">
+                {tr.toolOptions.polygonFinish} ({p.polygonPointCount}) Enter
+              </button>
+              <button type="button" onClick={p.onPolygonCancel} className="shrink-0 rounded-md px-2 py-1 text-[11px] text-neutral-300 hover:bg-neutral-800">
+                {tr.toolOptions.polygonCancel} Esc
+              </button>
+            </>
+          )}
         </>
       )}
       {t === 'eraser' && (
@@ -816,7 +838,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
           <button type="button" onClick={p.onSelectionMask} title={tr.toolOptions.selectionMask} className={selBtn}><Crop className="h-3.5 w-3.5" />{tr.toolOptions.selectionMask}</button>
           <button type="button" onClick={() => p.onSelectionGrow(3)} title={`${tr.toolOptions.selectionGrow} 3 px`} aria-label={`${tr.toolOptions.selectionGrow} 3 px`} className="atelier-icon-btn h-7 w-7"><Plus className="h-3.5 w-3.5" /></button>
           <button type="button" onClick={() => p.onSelectionGrow(-3)} title={`${tr.toolOptions.selectionShrink} 3 px`} aria-label={`${tr.toolOptions.selectionShrink} 3 px`} className="atelier-icon-btn h-7 w-7"><Minus className="h-3.5 w-3.5" /></button>
-          <button type="button" onClick={() => p.onSelectionFeather(4)} title={tr.toolOptions.selectionFeatherTooltip} className={selBtn}>{tr.toolOptions.selectionFeather}</button>
+          <button type="button" onClick={() => p.onFeatherActiveSelection(4)} title={tr.toolOptions.selectionFeatherTooltip} className={selBtn}>{tr.toolOptions.selectionFeather}</button>
           <button type="button" onClick={p.onClearSelection} title={`${tr.toolOptions.selectionClear} (${shortcut('action_clear_selection')})`} className={selBtn}><X className="h-3.5 w-3.5" />{tr.toolOptions.selectionClear}</button>
         </div>
       )}

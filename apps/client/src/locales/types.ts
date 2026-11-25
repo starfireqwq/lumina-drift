@@ -182,6 +182,12 @@ export interface Translations {
     gradientHint: string;
     eyedropperHint: string;
     lassoHint: string;
+    selectRect: string;
+    selectRectHint: string;
+    selectEllipse: string;
+    selectEllipseHint: string;
+    selectPolygon: string;
+    selectPolygonHint: string;
     magicWandHint: string;
     selectBrushHint: string;
     selectEraserHint: string;
@@ -265,6 +271,10 @@ export interface Translations {
     gradFgTransparent: string;
     // Selection mode
     selectionMode: string;
+    selectionAntialias: string;
+    selectionFeatherRadius: string;
+    polygonFinish: string;
+    polygonCancel: string;
     selectionNew: string;
     selectionAdd: string;
     selectionSubtract: string;

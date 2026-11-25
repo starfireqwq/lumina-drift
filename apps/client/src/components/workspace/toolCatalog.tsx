@@ -21,10 +21,12 @@ import {
   PaintRoller,
   PenTool,
   Pencil,
+  Pentagon,
   Pipette,
   Sparkles,
   Spline,
   Square,
+  SquareDashed,
   Type,
   Wand2,
   Waves,
@@ -81,7 +83,10 @@ export const TOOL_GROUPS: ToolGroup[] = [
     id: 'select',
     label: '選取與變形',
     tools: [
+      { id: 'select_rect', label: '矩形選框', icon: SquareDashed, shortcutId: 'tool_select_rect', hint: '拖曳矩形選框，Shift 鎖定正方形，Alt 從中心展開' },
+      { id: 'select_ellipse', label: '橢圓選框', icon: CircleDashed, shortcutId: 'tool_select_ellipse', hint: '拖曳橢圓選框，Shift 鎖定正圓，Alt 從中心展開' },
       { id: 'lasso', label: '套索選取', icon: Lasso, shortcutId: 'tool_lasso', hint: '拖曳圈選；Shift 加選、Ctrl 減選' },
+      { id: 'select_polygon', label: '多邊形套索', icon: Pentagon, shortcutId: 'tool_select_polygon', hint: '點擊新增頂點，按 Enter、雙擊或點擊起點閉合' },
       { id: 'magic_wand', label: '魔術棒', icon: Wand2, shortcutId: 'tool_magic_wand', hint: '點擊選取相近顏色；Shift 加選、Ctrl 減選' },
       { id: 'select_brush', label: '選取筆', icon: Highlighter, hint: '用畫的加入選取範圍（筆刷大小＝筆尖大小）' },
       { id: 'select_eraser', label: '選取橡皮擦', icon: CircleDashed, hint: '用畫的從選取範圍挖掉' },
@@ -131,7 +136,10 @@ export const getLocalizedTool = (id: ToolType, t: Translations): { label: string
     case 'paint_unfilled': return { label: t.tools.paintUnfilled, hint: t.tools.paintUnfilledHint };
     case 'gradient': return { label: t.tools.gradient, hint: t.tools.gradientHint };
     case 'eyedropper': return { label: t.tools.eyedropper, hint: t.tools.eyedropperHint };
+    case 'select_rect': return { label: t.tools.selectRect, hint: t.tools.selectRectHint };
+    case 'select_ellipse': return { label: t.tools.selectEllipse, hint: t.tools.selectEllipseHint };
     case 'lasso': return { label: t.tools.lasso, hint: t.tools.lassoHint };
+    case 'select_polygon': return { label: t.tools.selectPolygon, hint: t.tools.selectPolygonHint };
     case 'magic_wand': return { label: t.tools.magicWand, hint: t.tools.magicWandHint };
     case 'select_brush': return { label: t.tools.selectBrush, hint: t.tools.selectBrushHint };
     case 'select_eraser': return { label: t.tools.selectEraser, hint: t.tools.selectEraserHint };
@@ -209,6 +217,11 @@ export interface SubToolParams {
   gapClosingRadius?: number;
   expandRadius?: number;
   brushSize?: number;
+  selectionMode?: 'replace' | 'add' | 'subtract';
+  selectionAntialias?: boolean;
+  selectionFeather?: number;
+  wandTolerance?: number;
+  wandContiguous?: boolean;
   antialias?: 'none' | 'weak' | 'medium' | 'strong';
   outlineEnabled?: boolean;
   lassoErase?: boolean;
@@ -262,6 +275,10 @@ const defineCategory = (
   };
 };
 
+const selectionDefaults: SubToolParams = { selectionMode: 'replace', selectionAntialias: true, selectionFeather: 0 };
+const wandDefaults: SubToolParams = { ...selectionDefaults, wandTolerance: 32, wandContiguous: true };
+const selectionBrushDefaults: SubToolParams = { ...selectionDefaults, brushSize: 24 };
+
 export const TOOL_CATEGORIES: ToolCategoryDef[] = [
   defineCategory('paint', '繪畫', 'brush', ['pencil', 'blur', 'smudge']),
   defineCategory('eraser', '橡皮擦', 'eraser'),
@@ -311,7 +328,22 @@ export const TOOL_CATEGORIES: ToolCategoryDef[] = [
   },
   defineCategory('gradient', '漸層', 'gradient'),
   defineCategory('eyedropper', '滴管', 'eyedropper'),
-  defineCategory('select', '選取', 'lasso', ['magic_wand', 'select_brush', 'select_eraser']),
+  {
+    id: 'select',
+    label: '選取',
+    icon: SquareDashed,
+    shortcutId: 'tool_lasso',
+    defaultSubToolId: 'select_rect',
+    subTools: [
+      defineSubTool('select', 'select_rect', { defaultParams: selectionDefaults }),
+      defineSubTool('select', 'select_ellipse', { defaultParams: selectionDefaults }),
+      defineSubTool('select', 'lasso', { defaultParams: wandDefaults }),
+      defineSubTool('select', 'select_polygon', { defaultParams: selectionDefaults }),
+      defineSubTool('select', 'magic_wand', { defaultParams: wandDefaults }),
+      defineSubTool('select', 'select_brush', { defaultParams: selectionBrushDefaults }),
+      defineSubTool('select', 'select_eraser', { defaultParams: selectionBrushDefaults }),
+    ],
+  },
   defineCategory('transform', '變形與液化', 'transform', ['liquify']),
   defineCategory('vector', '向量', 'vector_pen', ['vector_bezier', 'vector_edit', 'vector_reshape', 'vector_width', 'vector_eraser']),
   defineCategory('shape', '形狀與文字', 'shape', ['text']),

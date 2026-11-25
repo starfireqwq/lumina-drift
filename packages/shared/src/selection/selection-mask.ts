@@ -41,12 +41,13 @@ export function pointInPolygon(x: number, y: number, polygon: Array<{ x: number;
 }
 
 /**
- * Generates a binary selection mask from a closed Lasso polygon
+ * Rasterizes a closed lasso polygon, optionally sampling a 4×4 grid per pixel.
  */
 export function rasterizeLassoMask(
   points: Array<{ x: number; y: number }>,
   width: number,
-  height: number
+  height: number,
+  antialias = false,
 ): SelectionMaskData {
   const mask = new Uint8Array(width * height);
   if (points.length < 3) {
@@ -79,6 +80,49 @@ export function rasterizeLassoMask(
       data: mask,
       bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
       activePixelCount: 0,
+    };
+  }
+
+  if (antialias) {
+    const intersections: number[] = [];
+    const bounds = { minX: width, minY: height, maxX: -1, maxY: -1 };
+    let activePixelCount = 0;
+    for (let y = minY; y <= maxY; y++) {
+      const row = y * width;
+      for (let sy = 0; sy < 4; sy++) {
+        const sampleY = y + (sy + 0.5) / 4;
+        intersections.length = 0;
+        for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+          const a = points[i];
+          const b = points[j];
+          if ((a.y > sampleY) !== (b.y > sampleY)) {
+            intersections.push(a.x + (b.x - a.x) * (sampleY - a.y) / (b.y - a.y));
+          }
+        }
+        intersections.sort((a, b) => a - b);
+        // The even-odd rule fills between pairs of crossings. Each span covers [start, end).
+        for (let i = 0; i + 1 < intersections.length; i += 2) {
+          const start = Math.max(minX * 4, Math.ceil(intersections[i] * 4 - 0.5));
+          const end = Math.min((maxX + 1) * 4, Math.ceil(intersections[i + 1] * 4 - 0.5));
+          for (let x = Math.floor(start / 4); x * 4 < end && start < end; x++) {
+            mask[row + x] += Math.min(end, (x + 1) * 4) - Math.max(start, x * 4);
+          }
+        }
+      }
+      for (let x = minX; x <= maxX; x++) {
+        const hits = mask[row + x];
+        if (!hits) continue;
+        mask[row + x] = Math.round(hits * 255 / 16);
+        activePixelCount++;
+        bounds.minX = Math.min(bounds.minX, x);
+        bounds.maxX = Math.max(bounds.maxX, x);
+        bounds.minY = Math.min(bounds.minY, y);
+        bounds.maxY = y;
+      }
+    }
+    return {
+      width, height, data: mask, activePixelCount,
+      bounds: activePixelCount ? bounds : { minX: 0, minY: 0, maxX: 0, maxY: 0 },
     };
   }
 

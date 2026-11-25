@@ -110,6 +110,9 @@ export interface ScopedUndoOp {
 }
 
 export type ToolType =
+  | 'select_rect'
+  | 'select_ellipse'
+  | 'select_polygon'
   | 'select_brush'
   | 'select_eraser'
   | 'brush'

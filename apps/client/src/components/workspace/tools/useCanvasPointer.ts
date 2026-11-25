@@ -118,6 +118,11 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
   const isLassoErase = () => currentTool === 'eraser' && selection.lassoErase;
   const isTransformActive = transform.isTransformActive;
   const paintUnfilledPointerRef = useRef<number | null>(null);
+  const marqueePointerRef = useRef<number | null>(null);
+  const cancelMarquee = () => {
+    marqueePointerRef.current = null;
+    selection.cancelMarquee();
+  };
   const cancelPaintUnfilled = () => {
     paintUnfilledPointerRef.current = null;
     fill.cancelPaintUnfilled();
@@ -356,6 +361,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     if (e.pointerType === 'touch' && activePointersRef.current.size >= 2) {
       isMultiTouchGestureRef.current = true;
       cancelPaintUnfilled();
+      cancelMarquee();
       clearTimeout(radialLongPressTimerRef.current);
       pendingTouchDownRef.current = null;
       pendingSingleFingerPanRef.current = null;
@@ -522,7 +528,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       }
     }
 
-    const isReadOnlyTool = currentTool === 'eyedropper' || currentTool === 'lasso' || currentTool === 'magic_wand';
+    const isReadOnlyTool = ['eyedropper', 'lasso', 'magic_wand', 'select_rect', 'select_ellipse', 'select_polygon'].includes(currentTool);
     if (!isReadOnlyTool && !canEditPixels(targetLayer)) {
       warn(
         ctx.isCanvasViewer
@@ -534,7 +540,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     }
     const local = viewportRef.current?.screenToCanvas(e.clientX, e.clientY);
     // A text layer's pixels come from its text: only selections and the eyedropper act on it
-    if (targetLayer.layerType === 'text' && !['eyedropper', 'lasso', 'magic_wand'].includes(currentTool)) {
+    if (targetLayer.layerType === 'text' && !isReadOnlyTool) {
       warn('這是文字圖層：用「文字」工具點它就能編輯；要用筆刷畫，請在圖層面板按「點陣化」或新增圖層。', 3500);
       return;
     }
@@ -584,7 +590,18 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       return;
     }
 
-    // Selection: the magic wand selects at once, the lasso (and smart fill) draw an outline
+    if (currentTool === 'select_rect' || currentTool === 'select_ellipse') {
+      if (local) {
+        marqueePointerRef.current = e.pointerId;
+        selection.startMarquee(currentTool === 'select_rect' ? 'rect' : 'ellipse', e, local);
+      }
+      return;
+    }
+    if (currentTool === 'select_polygon') {
+      if (local) selection.handlePolygonPointerDown(e, local, viewportRef.current?.getState().zoom ?? 1);
+      return;
+    }
+    // The magic wand selects at once. The lasso and smart fill draw an outline.
     if (currentTool === 'magic_wand') {
       if (local) selection.selectWand(e, local, targetLayer);
       return;
@@ -795,6 +812,15 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
         return;
       }
 
+      if (currentTool === 'select_rect' || currentTool === 'select_ellipse') {
+        if (marqueePointerRef.current === e.pointerId) selection.updateMarquee(e, local);
+        return;
+      }
+      if (currentTool === 'select_polygon') {
+        selection.updatePolygonHover(local);
+        return;
+      }
+
       if (currentTool === 'paint_unfilled') {
         if (paintUnfilledPointerRef.current === e.pointerId && ((e.buttons & 1) !== 0 || e.pointerType === 'touch')) {
           fill.movePaintUnfilled(local);
@@ -835,6 +861,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     if (!activePointersRef.current.has(e.pointerId)) return;
     const cancelled = e.type === 'pointercancel';
     if (cancelled && paintUnfilledPointerRef.current === e.pointerId) cancelPaintUnfilled();
+    if (cancelled && marqueePointerRef.current === e.pointerId) cancelMarquee();
     try {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     } catch {}
@@ -980,6 +1007,16 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     const pluginUpLocal = viewportRef.current?.screenToCanvas(e.clientX, e.clientY) ?? null;
     if (pluginTool?.onUp(e.nativeEvent, pluginUpLocal, cancelled)) return;
 
+    if (currentTool === 'select_rect' || currentTool === 'select_ellipse') {
+      if (marqueePointerRef.current === e.pointerId) {
+        marqueePointerRef.current = null;
+        if (pluginUpLocal) selection.updateMarquee(e, pluginUpLocal);
+        selection.finishMarquee();
+      }
+      return;
+    }
+    if (currentTool === 'select_polygon') return;
+
     // Lasso outline tools: fill the shape (bucket lasso / smart fill) or make the selection
     if (currentTool === 'smart_fill') {
       fill.executeSmartFill();
@@ -1010,6 +1047,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
   const handleLostPointerCapture = (e: React.PointerEvent<HTMLDivElement>) => {
     if (finishTail(e.pointerId)) return;
     if (paintUnfilledPointerRef.current === e.pointerId) cancelPaintUnfilled();
+    if (marqueePointerRef.current === e.pointerId) cancelMarquee();
     if (activePointersRef.current.has(e.pointerId)) brush.interrupt(e.pointerId);
   };
 
@@ -1019,6 +1057,8 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     clearRapidTimers();
     pluginTool?.onCancel();
     cancelPaintUnfilled();
+    cancelMarquee();
+    selection.cancelPolygonLasso();
     activePointersRef.current.clear();
     tailRef.current = null;
     setEraserHover(false);

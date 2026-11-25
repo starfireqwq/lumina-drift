@@ -337,7 +337,7 @@ const coarsePointer = () => typeof matchMedia === 'function' && matchMedia('(poi
  */
 const ORIGINAL_POSITION_TOOLS: ReadonlySet<ToolType> = new Set<ToolType>([
   'brush', 'pencil', 'eraser', 'bucket', 'smart_fill', 'paint_unfilled', 'gradient', 'blur', 'smudge', 'liquify', 'mesh_warp', 'transform',
-  'shape', 'shape_rect', 'shape_ellipse', 'shape_line', 'shape_arrow', 'magic_wand', 'lasso', 'select_brush', 'select_eraser',
+  'shape', 'shape_rect', 'shape_ellipse', 'shape_line', 'shape_arrow', 'magic_wand', 'lasso', 'select_rect', 'select_ellipse', 'select_polygon', 'select_brush', 'select_eraser',
   'text', 'vector_pen', 'vector_eraser', 'vector_reshape', 'vector_width', 'vector_bezier', 'vector_edit',
 ]);
 const KEEP_CLIPBOARD_KEY = 'atelier_keep_layer_clipboard';
@@ -1092,6 +1092,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const applyingSubToolRef = useRef(false);
   const restoredSubToolRef = useRef(false);
   const [appliedFillSubToolId, setAppliedFillSubToolId] = useState<SubToolId | null>(null);
+  const [appliedSelectionSubToolId, setAppliedSelectionSubToolId] = useState<SubToolId | null>(null);
   const currentToolRef = useRef(currentTool);
   currentToolRef.current = currentTool;
 
@@ -1334,6 +1335,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     stepSize: (_direction: 1 | -1) => {},
     stepOpacity: (_direction: 1 | -1) => {},
     vectorKey: (_ev: KeyboardEvent): boolean => false,
+    selectionKey: (_ev: KeyboardEvent): boolean => false,
     mergeDown: (_layerId: string) => {},
     groupLayers: async (_ids: string[]) => {},
     copyLayers: (_ids: string[]) => {},
@@ -1419,6 +1421,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const { shapeSubtype, setShapeSubtype, shapeFillMode, setShapeFillMode, shapeLineWidth, setShapeLineWidth, shapeCornerRadius, setShapeCornerRadius, gradientMode, setGradientMode, gradientType, setGradientType } = shapes;
   const selection = useSelectionTools(toolCtx);
   const { wandTolerance, setWandTolerance, wandContiguous, setWandContiguous, hasSelectionState, setHasSelectionState, selectionMode, setSelectionMode, handleClearSelection, growSelection } = selection;
+  const { selectionAntialias, setSelectionAntialias, selectionFeather, setSelectionFeather } = selection;
+  useEffect(() => {
+    if (!activePluginToolKey) return;
+    selection.cancelPolygonLasso();
+    selection.cancelMarquee();
+  }, [activePluginToolKey]);
   const fill = useFillTools(toolCtx);
   const { bucketReference, setBucketReference, bucketRefLayerId, setBucketRefLayerId, bucketTolerance, setBucketTolerance, bucketExpand, setBucketExpand, bucketMode, setBucketMode, referenceLayerId, setReferenceLayerId, gapClosingRadius, setGapClosingRadius, expandRadius, setExpandRadius } = fill;
   const { lassoFillErase, setLassoFillErase } = fill;
@@ -2114,7 +2122,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           return;
         }
         // Pen path in progress / selected vector node: Enter, Esc, Backspace, Delete belong to them
-        if (shortcutActionsRef.current.vectorKey(ev)) {
+        if (shortcutActionsRef.current.selectionKey(ev) || shortcutActionsRef.current.vectorKey(ev)) {
           ev.preventDefault();
           return;
         }
@@ -2642,7 +2650,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const handleSelectTool = (tool: ToolType, preset?: BrushProperties) => {
     if (!applyingSubToolRef.current) {
       const sub = subToolStore.syncFromToolType(tool, { bucketMode, bucketReference });
-      if (sub?.categoryId === 'fill') {
+      if (sub?.categoryId === 'fill' || sub?.categoryId === 'select') {
         applySubTool(sub, preset);
         return;
       }
@@ -2652,6 +2660,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       setActivePluginToolKey(null);
     }
     const previousTool = currentToolRef.current;
+    if (tool !== previousTool) {
+      selection.cancelPolygonLasso();
+      selection.cancelMarquee();
+    }
     if (isBrushTool(previousTool)) saveBrushTool(previousTool, brushProps);
     if (transformLayerIdRef.current) cancelTransform();
     vector.onToolChange(tool);
@@ -2714,6 +2726,17 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         handleBrushPropsChange({ size: params.brushSize });
       }
       if (sub.categoryId === 'fill') setAppliedFillSubToolId(sub.id);
+      if (sub.categoryId === 'select') {
+        setSelectionMode(params.selectionMode ?? 'replace');
+        setSelectionAntialias(params.selectionAntialias ?? true);
+        setSelectionFeather(params.selectionFeather ?? 0);
+        setWandTolerance(params.wandTolerance ?? 32);
+        setWandContiguous(params.wandContiguous ?? true);
+        if (typeof params.brushSize === 'number' && Number.isFinite(params.brushSize)) {
+          handleBrushPropsChange({ size: params.brushSize });
+        }
+        setAppliedSelectionSubToolId(sub.id);
+      }
       handleSelectTool(sub.tool, preset);
     } finally {
       applyingSubToolRef.current = false;
@@ -2781,6 +2804,19 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     }
   }, [subToolState.activeSubToolId, appliedFillSubToolId, currentTool, bucketMode, bucketReference, bucketRefLayerId, bucketTolerance, bucketExpand,
     referenceLayerId, gapClosingRadius, expandRadius, brushProps.antiAlias, lassoOutlineEnabled, lassoFillErase, brushProps.size]);
+
+  useEffect(() => {
+    const id = subToolState.activeSubToolId;
+    if (id !== appliedSelectionSubToolId || id !== subToolStore.getState().activeSubToolId || currentTool !== id) return;
+    const params: SubToolParams = { selectionMode, selectionAntialias, selectionFeather };
+    if (id === 'magic_wand' || id === 'lasso') Object.assign(params, { wandTolerance, wandContiguous });
+    if (id === 'select_brush' || id === 'select_eraser') params.brushSize = brushProps.size;
+    const saved = subToolStore.getSubToolParams(id);
+    if (Object.entries(params).some(([key, value]) => !Object.is(value, saved[key]))) {
+      subToolStore.updateSubToolParams(id, params);
+    }
+  }, [subToolState.activeSubToolId, appliedSelectionSubToolId, currentTool, selectionMode, selectionAntialias, selectionFeather,
+    wandTolerance, wandContiguous, brushProps.size]);
 
   const handleUploadCustomBrush = async (file: File) => {
     const renderer = brushRendererRef.current;
@@ -4089,6 +4125,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       handleBrushPropsChange({ opacity: Math.max(0.01, Math.min(1, Math.round((cur + direction * 0.05) * 100) / 100)) });
     },
     vectorKey: handleVectorKey,
+    selectionKey: selection.handleSelectionKey,
     selection: {
       has: () => Boolean(selectionEngineRef.current?.hasSelection()),
       canPaste: () => Boolean(selection.clipboardRef.current),
@@ -7097,9 +7134,16 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         hasSelection={hasSelectionState}
         selectionMode={selectionMode}
         onSelectionMode={setSelectionMode}
+        selectionAntialias={selectionAntialias}
+        onSelectionAntialias={setSelectionAntialias}
+        selectionFeather={selectionFeather}
+        onSelectionFeather={setSelectionFeather}
+        polygonPointCount={selection.polygonPointCount}
+        onPolygonFinish={selection.finishPolygonLasso}
+        onPolygonCancel={selection.cancelPolygonLasso}
         onSelectionTransform={() => startTransformMode()}
         onSelectionMask={() => { if (activeLayer) void addLayerMask(activeLayer.layerType === 'mask' && activeLayer.parentId ? activeLayer.parentId : activeLayer.id); }}
-        onSelectionFeather={selection.featherSelection}
+        onFeatherActiveSelection={selection.featherSelection}
         onColorRange={() => selection.selectColorRange()}
         lassoErase={selection.lassoErase}
         onLassoErase={selection.setLassoErase}

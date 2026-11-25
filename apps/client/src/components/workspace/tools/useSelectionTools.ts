@@ -4,7 +4,7 @@ import type { SelectionMode } from '../ToolOptionsBar';
 import type { Point, ToolContext } from './toolContext';
 import { commitInOrder, diffTilesAsync } from './asyncTiles';
 
-type ModifierKeys = { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean };
+type ModifierKeys = { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean; altKey?: boolean };
 
 function snapshotsEqual(a: SelectionSnapshot | null, b: SelectionSnapshot | null): boolean {
   if (!a && !b) return true;
@@ -23,17 +23,36 @@ function snapshotsEqual(a: SelectionSnapshot | null, b: SelectionSnapshot | null
   return true;
 }
 
-/** Lasso and magic-wand selection, and the selection commands (grow, clear, to layer mask). */
+/** Selection gestures and commands (grow, clear, to layer mask). */
 export function useSelectionTools(ctx: ToolContext) {
   const { canvas, layerManagerRef, tileEngineRef, selectionEngineRef, brushRendererRef } = ctx;
   const [wandTolerance, setWandTolerance] = useState<number>(32);
   const [wandContiguous, setWandContiguous] = useState<boolean>(true);
   const [hasSelectionState, setHasSelectionState] = useState<boolean>(false);
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('replace');
-  // Shift adds to / Ctrl subtracts from the selection, as in CSP and Krita
-  const selectionModeFor = (e: ModifierKeys): SelectionMode =>
-    e.shiftKey ? 'add' : e.ctrlKey || e.metaKey ? 'subtract' : selectionMode;
+  const [selectionAntialias, setSelectionAntialias] = useState(true);
+  const [selectionFeather, setSelectionFeatherState] = useState(0);
+  const [polygonPointCount, setPolygonPointCount] = useState(0);
+  const setSelectionFeather = (radius: number) => setSelectionFeatherState(
+    Number.isFinite(radius) ? Math.max(0, Math.min(64, Math.round(radius))) : 0,
+  );
+  const selectionModeFor = (e: ModifierKeys, options?: { isMarquee?: boolean }): SelectionMode => {
+    if (e.ctrlKey || e.metaKey) return 'subtract';
+    if (options?.isMarquee) {
+      if (selectionEngineRef.current?.hasSelection()) {
+        if (e.altKey) return 'subtract';
+        if (e.shiftKey) return 'add';
+      }
+      return selectionMode;
+    }
+    if (e.shiftKey) return 'add';
+    return e.altKey ? 'subtract' : selectionMode;
+  };
+  const createOptions = { antialias: selectionAntialias, featherRadius: selectionFeather };
   const lassoModeRef = useRef<SelectionMode>('replace');
+  const marqueeModeRef = useRef<SelectionMode>('replace');
+  const polygonModeRef = useRef<SelectionMode>('replace');
+  const polygonLastClickRef = useRef<{ point: Point; time: number } | null>(null);
 
   /** Hands the changed selection to the brush (it paints only inside) and to the toolbars */
   const syncSelection = () => {
@@ -41,6 +60,7 @@ export function useSelectionTools(ctx: ToolContext) {
     if (!engine) return;
     brushRendererRef.current?.setSelectionMask(engine.getMaskArray(), engine.getMaskGraphic());
     setHasSelectionState(engine.hasSelection());
+    setPolygonPointCount(engine.getPolygonPointCount());
   };
 
   const pushSelectionUndo = (before: SelectionSnapshot | null, desc: string) => {
@@ -395,11 +415,9 @@ export function useSelectionTools(ctx: ToolContext) {
         }
       }
     }
-    const before = engine.exportSnapshot();
     void lm.readAsync(layer.id, [{ x: 0, y: 0, w: canvas.width, h: canvas.height }]).then(([pixels]) => {
-      engine.selectWand(pixels, local.x, local.y, wandTolerance, wandContiguous, mode);
-      syncSelection();
-      pushSelectionUndo(before, '魔術棒選取');
+      if (selectionEngineRef.current !== engine) return;
+      withSelectionUndo('魔術棒選取', () => engine.selectWand(pixels, local.x, local.y, wandTolerance, wandContiguous, mode, createOptions));
     });
   };
 
@@ -413,7 +431,81 @@ export function useSelectionTools(ctx: ToolContext) {
 
   /** The lasso stays the active tool (no jump to the brush) so Shift / Ctrl can keep adding or cutting */
   const finishLasso = () => {
-    withSelectionUndo('套索選取', () => selectionEngineRef.current?.finishLasso(lassoModeRef.current));
+    withSelectionUndo('套索選取', () => selectionEngineRef.current?.finishLasso(lassoModeRef.current, createOptions));
+  };
+
+  const updateMarquee = (e: { shiftKey: boolean; altKey: boolean }, local: Point) => {
+    selectionEngineRef.current?.updateMarquee(local.x, local.y, { square: e.shiftKey, fromCenter: e.altKey });
+  };
+
+  const startMarquee = (kind: 'rect' | 'ellipse', e: ModifierKeys, local: Point) => {
+    marqueeModeRef.current = selectionModeFor(e, { isMarquee: true });
+    selectionEngineRef.current?.startMarquee(kind, local.x, local.y);
+    updateMarquee({ shiftKey: e.shiftKey, altKey: Boolean(e.altKey) }, local);
+  };
+
+  const finishMarquee = () => {
+    const engine = selectionEngineRef.current;
+    if (engine?.isMarqueeActive()) {
+      withSelectionUndo('幾何選框', () => engine.finishMarquee(marqueeModeRef.current, createOptions));
+    }
+  };
+
+  const cancelMarquee = () => selectionEngineRef.current?.cancelMarquee();
+
+  const finishPolygonLasso = () => {
+    withSelectionUndo('多邊形套索', () => selectionEngineRef.current?.finishPolygonLasso(polygonModeRef.current, createOptions));
+    polygonLastClickRef.current = null;
+    setPolygonPointCount(0);
+  };
+
+  const cancelPolygonLasso = () => {
+    selectionEngineRef.current?.cancelPolygonLasso();
+    polygonLastClickRef.current = null;
+    setPolygonPointCount(0);
+  };
+
+  const handlePolygonPointerDown = (e: ModifierKeys, local: Point, zoom: number) => {
+    const engine = selectionEngineRef.current;
+    if (!engine) return;
+    const count = engine.getPolygonPointCount();
+    const now = performance.now();
+    if (count === 0) polygonModeRef.current = selectionModeFor(e);
+    if (count >= 3) {
+      const first = engine.getPolygonFirstPoint();
+      const last = polygonLastClickRef.current;
+      const nearStart = first && Math.hypot(local.x - first.x, local.y - first.y) < 9 / zoom;
+      const doubleClick = last && now - last.time <= 350 && Math.hypot(local.x - last.point.x, local.y - last.point.y) < 6 / zoom;
+      if (nearStart || doubleClick) {
+        finishPolygonLasso();
+        return;
+      }
+    }
+    polygonLastClickRef.current = { point: local, time: now };
+    setPolygonPointCount(engine.startOrAddPolygonPoint(local.x, local.y));
+  };
+
+  const updatePolygonHover = (local: Point) => selectionEngineRef.current?.updatePolygonHover(local.x, local.y);
+
+  const undoPolygonPoint = () => {
+    polygonLastClickRef.current = null;
+    setPolygonPointCount(selectionEngineRef.current?.undoPolygonPoint() ?? 0);
+  };
+
+  const handleSelectionKey = (ev: KeyboardEvent): boolean => {
+    const engine = selectionEngineRef.current;
+    if (engine?.isPolygonLassoActive()) {
+      switch (ev.key) {
+        case 'Enter': finishPolygonLasso(); return true;
+        case 'Backspace': undoPolygonPoint(); return true;
+        case 'Escape': cancelPolygonLasso(); return true;
+      }
+    }
+    if (ev.key === 'Escape' && engine?.isMarqueeActive()) {
+      cancelMarquee();
+      return true;
+    }
+    return false;
   };
 
   return {
@@ -421,6 +513,9 @@ export function useSelectionTools(ctx: ToolContext) {
     wandContiguous, setWandContiguous,
     hasSelectionState, setHasSelectionState,
     selectionMode, setSelectionMode,
+    selectionAntialias, setSelectionAntialias,
+    selectionFeather, setSelectionFeather,
+    polygonPointCount,
     handleClearSelection,
     invertSelection,
     copySelection,
@@ -443,5 +538,8 @@ export function useSelectionTools(ctx: ToolContext) {
     startLasso,
     addLassoPoint,
     finishLasso,
+    startMarquee, updateMarquee, finishMarquee, cancelMarquee,
+    handlePolygonPointerDown, updatePolygonHover, undoPolygonPoint, finishPolygonLasso, cancelPolygonLasso,
+    handleSelectionKey,
   };
 }

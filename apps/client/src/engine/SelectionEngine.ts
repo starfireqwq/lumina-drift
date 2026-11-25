@@ -12,6 +12,8 @@ import {
 } from '@atelier/shared';
 import {
   applyMaskRectPatch,
+  applySelectionPostProcess,
+  computeMarqueeRect,
   featherMaskBuffer,
   rasterizeEllipseMask,
   rasterizeRectMask,
@@ -19,9 +21,10 @@ import {
 } from './selectionMaskOps';
 
 export type SelectionCombineMode = 'replace' | 'add' | 'subtract';
+export type SelectionCreateOptions = { antialias?: boolean; featherRadius?: number };
 
 export interface SelectionArea {
-  type: 'lasso' | 'wand' | 'rect';
+  type: 'lasso' | 'wand' | 'rect' | 'ellipse' | 'polygon';
   points: Array<{ x: number; y: number }>;
   bounds: { minX: number; minY: number; maxX: number; maxY: number };
   tolerance?: number;
@@ -40,6 +43,13 @@ export class SelectionEngine {
 
   private isSelecting: boolean = false;
   private currentPoints: Array<{ x: number; y: number }> = [];
+  private marquee: {
+    kind: 'rect' | 'ellipse';
+    start: { x: number; y: number };
+    rect: ReturnType<typeof computeMarqueeRect>;
+  } | null = null;
+  private polygonPoints: Array<{ x: number; y: number }> = [];
+  private polygonHover: { x: number; y: number } | null = null;
 
   // Animated marching ants state
   private animFrameId: number | null = null;
@@ -124,7 +134,7 @@ export class SelectionEngine {
     }
   }
 
-  public finishLasso(mode: SelectionCombineMode = 'replace'): SelectionArea | null {
+  public finishLasso(mode: SelectionCombineMode = 'replace', options?: SelectionCreateOptions): SelectionArea | null {
     if (!this.isSelecting || this.currentPoints.length < 3) {
       this.isSelecting = false;
       this.currentPoints = [];
@@ -138,8 +148,8 @@ export class SelectionEngine {
     }
     this.isSelecting = false;
 
-    // Rasterize Lasso path to binary mask
-    const mask = this.combine(rasterizeLassoMask(this.currentPoints, this.canvasWidth, this.canvasHeight), mode);
+    const next = rasterizeLassoMask(this.currentPoints, this.canvasWidth, this.canvasHeight, options?.antialias);
+    const mask = this.combine(applySelectionPostProcess(next, options?.featherRadius ?? 0), mode);
     if (mask.activePixelCount === 0) {
       this.currentPoints = [];
       if (mode === 'replace' || !this.activeMaskData?.activePixelCount) {
@@ -209,7 +219,8 @@ export class SelectionEngine {
     y: number,
     tolerance: number = 32,
     contiguous: boolean = true,
-    mode: SelectionCombineMode = 'replace'
+    mode: SelectionCombineMode = 'replace',
+    options?: SelectionCreateOptions,
   ): SelectionArea | null {
     const cx = Math.max(0, Math.min(this.canvasWidth - 1, Math.floor(x)));
     const cy = Math.max(0, Math.min(this.canvasHeight - 1, Math.floor(y)));
@@ -240,7 +251,7 @@ export class SelectionEngine {
       }
     }
 
-    const mask = this.combine(rawMask, mode);
+    const mask = this.combine(applySelectionPostProcess(rawMask, options?.featherRadius ?? 0), mode);
     if (mask.activePixelCount === 0) {
       if (mode === 'replace') {
         this.clearSelection();
@@ -533,16 +544,10 @@ export class SelectionEngine {
     width: number,
     height: number,
     mode: SelectionCombineMode = 'replace',
-  ) {
+    options?: SelectionCreateOptions,
+  ): SelectionArea | null {
     const next = rasterizeRectMask(x, y, width, height, this.canvasWidth, this.canvasHeight);
-    const mask = this.combine(next, mode);
-    if (!mask.activePixelCount) {
-      this.clearSelection();
-      return;
-    }
-    this.activeMaskData = mask;
-    this.activeSelection = { type: mode === 'replace' ? 'rect' : 'lasso', points: [], bounds: mask.bounds };
-    this.renderActiveSelection();
+    return this.commitGeometry(next, 'rect', [], mode, options);
   }
 
   /** Selects an ellipse inscribed in (x, y, width, height) combined with the current selection */
@@ -552,28 +557,123 @@ export class SelectionEngine {
     width: number,
     height: number,
     mode: SelectionCombineMode = 'replace',
-  ) {
-    const next = rasterizeEllipseMask(x, y, width, height, this.canvasWidth, this.canvasHeight);
-    const mask = this.combine(next, mode);
-    if (!mask.activePixelCount) {
-      this.clearSelection();
-      return;
-    }
-    this.activeMaskData = mask;
-    this.activeSelection = { type: 'lasso', points: [], bounds: mask.bounds };
-    this.renderActiveSelection();
+    options?: SelectionCreateOptions,
+  ): SelectionArea | null {
+    const next = rasterizeEllipseMask(x, y, width, height, this.canvasWidth, this.canvasHeight, options?.antialias);
+    return this.commitGeometry(next, 'ellipse', [], mode, options);
   }
 
   /** Selects a closed polygon combined with the current selection */
-  public selectPolygon(points: Array<{ x: number; y: number }>, mode: SelectionCombineMode = 'replace') {
-    const next = rasterizeLassoMask(points, this.canvasWidth, this.canvasHeight);
-    const mask = this.combine(next, mode);
+  public selectPolygon(
+    points: SelectionArea['points'],
+    mode: SelectionCombineMode = 'replace',
+    options?: SelectionCreateOptions,
+  ): SelectionArea | null {
+    const next = rasterizeLassoMask(points, this.canvasWidth, this.canvasHeight, options?.antialias);
+    return this.commitGeometry(next, 'polygon', points, mode, options);
+  }
+
+  private commitGeometry(
+    next: SelectionMaskData,
+    type: 'rect' | 'ellipse' | 'polygon',
+    points: SelectionArea['points'],
+    mode: SelectionCombineMode,
+    options?: SelectionCreateOptions,
+  ): SelectionArea | null {
+    const mask = this.combine(applySelectionPostProcess(next, options?.featherRadius ?? 0), mode);
     if (!mask.activePixelCount) {
       this.clearSelection();
-      return;
+      return null;
     }
     this.activeMaskData = mask;
-    this.activeSelection = { type: 'lasso', points: mode === 'replace' ? [...points] : [], bounds: mask.bounds };
+    this.activeSelection = { type: mode === 'replace' ? type : 'lasso', points: mode === 'replace' ? [...points] : [], bounds: mask.bounds };
+    this.renderActiveSelection();
+    return this.activeSelection;
+  }
+
+  public startMarquee(kind: 'rect' | 'ellipse', x: number, y: number) {
+    this.marquee = { kind, start: { x, y }, rect: { x, y, width: 0, height: 0 } };
+  }
+
+  public updateMarquee(x: number, y: number, opts?: { square?: boolean; fromCenter?: boolean }) {
+    if (!this.marquee) return;
+    this.marquee.rect = computeMarqueeRect(this.marquee.start, { x, y }, opts);
+    this.renderDraftMarquee();
+  }
+
+  public isMarqueeActive(): boolean {
+    return this.marquee !== null;
+  }
+
+  public finishMarquee(mode: SelectionCombineMode = 'replace', options?: SelectionCreateOptions): SelectionArea | null {
+    const draft = this.marquee;
+    if (!draft) return this.activeSelection;
+    this.marquee = null;
+    const { x, y, width, height } = draft.rect;
+    if (width < 1 && height < 1) {
+      if (mode === 'replace') this.clearSelection();
+      else this.renderActiveSelection();
+      return this.activeSelection;
+    }
+    return draft.kind === 'rect'
+      ? this.selectRect(x, y, width, height, mode, options)
+      : this.selectEllipse(x, y, width, height, mode, options);
+  }
+
+  public cancelMarquee() {
+    if (!this.marquee) return;
+    this.marquee = null;
+    this.renderActiveSelection();
+  }
+
+  public startOrAddPolygonPoint(x: number, y: number): number {
+    this.polygonPoints.push({ x, y });
+    this.polygonHover = { x, y };
+    this.renderDraftPolygon();
+    return this.polygonPoints.length;
+  }
+
+  public updatePolygonHover(x: number, y: number) {
+    if (!this.isPolygonLassoActive()) return;
+    this.polygonHover = { x, y };
+    this.renderDraftPolygon();
+  }
+
+  public undoPolygonPoint(): number {
+    this.polygonPoints.pop();
+    if (this.polygonPoints.length) this.renderDraftPolygon();
+    else this.cancelPolygonLasso();
+    return this.polygonPoints.length;
+  }
+
+  public getPolygonPointCount(): number {
+    return this.polygonPoints.length;
+  }
+
+  public isPolygonLassoActive(): boolean {
+    return this.polygonPoints.length > 0;
+  }
+
+  public getPolygonFirstPoint(): { x: number; y: number } | null {
+    const first = this.polygonPoints[0];
+    return first ? { ...first } : null;
+  }
+
+  public finishPolygonLasso(mode: SelectionCombineMode = 'replace', options?: SelectionCreateOptions): SelectionArea | null {
+    const points = this.polygonPoints;
+    if (points.length < 3) {
+      this.cancelPolygonLasso();
+      return this.activeSelection;
+    }
+    this.polygonPoints = [];
+    this.polygonHover = null;
+    return this.selectPolygon(points, mode, options);
+  }
+
+  public cancelPolygonLasso() {
+    if (!this.isPolygonLassoActive() && !this.polygonHover) return;
+    this.polygonPoints = [];
+    this.polygonHover = null;
     this.renderActiveSelection();
   }
 
@@ -639,6 +739,9 @@ export class SelectionEngine {
     this.activeMaskData = null;
     this.isSelecting = false;
     this.currentPoints = [];
+    this.marquee = null;
+    this.polygonPoints = [];
+    this.polygonHover = null;
     this.selectionGraphic.clear();
     this.marchingAntsGraphic.clear();
     this.maskGraphic.clear();
@@ -674,7 +777,72 @@ export class SelectionEngine {
     if (Math.abs(s - this.viewScale) < 1e-6) return;
     this.viewScale = s;
     if (this.isSelecting) this.renderDraftLasso();
+    if (this.marquee) this.renderDraftMarquee();
+    if (this.isPolygonLassoActive()) this.renderDraftPolygon();
     this.renderMarchingAnts();
+  }
+
+  private renderDraftMarquee() {
+    const draft = this.marquee;
+    if (!draft) return;
+    const { x, y, width, height } = draft.rect;
+    const g = this.selectionGraphic.clear();
+    if (draft.kind === 'rect') g.rect(x, y, width, height);
+    else g.ellipse(x + width / 2, y + height / 2, width / 2, height / 2);
+    g.fill({ color: 0x60a5fa, alpha: 0.18 }).beginPath();
+
+    const corners = [{ x, y }, { x: x + width, y }, { x: x + width, y: y + height }, { x, y: y + height }, { x, y }];
+    const outline = draft.kind === 'rect' ? corners : Array.from({ length: 129 }, (_, i) => {
+      const angle = i * Math.PI / 64;
+      return { x: x + (1 + Math.cos(angle)) * width / 2, y: y + (1 + Math.sin(angle)) * height / 2 };
+    });
+    const dash = Math.max(6 / this.viewScale, (width + height) / 512);
+    let remaining = dash;
+    let draw = true;
+    for (let i = 1; i < outline.length; i++) {
+      const a = outline[i - 1];
+      const dx = outline[i].x - a.x;
+      const dy = outline[i].y - a.y;
+      const length = Math.hypot(dx, dy);
+      for (let start = 0; start < length;) {
+        const step = Math.min(remaining, length - start);
+        const end = start + step;
+        if (draw) g.moveTo(a.x + dx * start / length, a.y + dy * start / length)
+          .lineTo(a.x + dx * end / length, a.y + dy * end / length);
+        remaining -= step;
+        if (remaining <= 0) {
+          remaining = dash;
+          draw = !draw;
+        }
+        start = end;
+      }
+    }
+    g.stroke({ color: 0x93c5fd, width: 1.5 / this.viewScale });
+    this.onStageChange?.();
+  }
+
+  private renderDraftPolygon() {
+    const g = this.selectionGraphic.clear();
+    const points = this.polygonPoints;
+    const first = points[0];
+    const hover = this.polygonHover;
+    const unit = 1 / this.viewScale;
+    const nearFirst = points.length >= 3 && hover && Math.hypot(hover.x - first.x, hover.y - first.y) < 9 * unit;
+    const color = 0x93c5fd;
+    if (points.length > 1) {
+      g.moveTo(first.x, first.y);
+      for (const point of points.slice(1)) g.lineTo(point.x, point.y);
+      g.stroke({ color, width: 1.5 * unit, join: 'round' });
+    }
+    if (hover) {
+      const last = points[points.length - 1];
+      const end = nearFirst ? first : hover;
+      g.moveTo(last.x, last.y).lineTo(end.x, end.y).stroke({ color, width: 1.5 * unit, alpha: 0.65 });
+    }
+    for (const point of points) g.circle(point.x, point.y, 2.5 * unit);
+    g.fill(color);
+    if (nearFirst) g.circle(first.x, first.y, 6 * unit).stroke({ color, width: 1.5 * unit });
+    this.onStageChange?.();
   }
 
   private renderDraftLasso() {
@@ -801,7 +969,7 @@ export class SelectionEngine {
   }
 
   private renderActiveSelection() {
-    this.selectionGraphic.clear();
+    if (!this.marquee && !this.isPolygonLassoActive()) this.selectionGraphic.clear();
     this.updateMaskGraphic();
     this.renderMarchingAnts();
     this.syncAntsAnimation();
