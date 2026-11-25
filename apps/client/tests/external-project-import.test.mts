@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { initializeCanvas, writePsdBuffer, readPsd } from 'ag-psd';
+import JSZip from 'jszip';
+import { unpackKraProject } from '../src/engine/ExternalProjectImporter.ts';
 import {
   clampImportedCanvasDimensions,
   convertKraTileToRgba8,
@@ -39,6 +41,55 @@ test('project format detection accepts .lumina, .psd, and .kra case-insensitivel
   assert.equal(detectProjectFormatFromName('painting.kra'), 'kra');
   assert.equal(detectProjectFormatFromName('painting.lumina'), 'lumina');
   assert.equal(detectProjectFormatFromName('painting.jpg'), null);
+});
+
+test('KRA layer alpha-inheritance attributes map to clipToBelow', async (t) => {
+  const cases = [
+    { name: 'Enabled', attributes: { inheritsalpha: '1' }, clipped: true },
+    { name: 'Disabled', attributes: { inheritsalpha: '0' }, clipped: false },
+    { name: 'Missing', attributes: {}, clipped: false },
+    { name: 'Legacy lowercase', attributes: { inheritalpha: '1' }, clipped: true },
+    { name: 'Legacy camel case', attributes: { inheritAlpha: '1' }, clipped: true },
+  ];
+  interface XmlElement {
+    tagName: string;
+    getAttribute(key: string): string | null;
+    children: XmlElement[];
+  }
+  function element(tagName: string, attributes: Record<string, string | undefined>, children: XmlElement[] = []): XmlElement {
+    return { tagName, getAttribute: (key: string) => attributes[key] ?? null, children };
+  }
+  const layers = cases.map(({ name, attributes }) => element('layer', { name, ...attributes }));
+  const image = element('IMAGE', { width: '64', height: '64' }, [element('layers', {}, layers)]);
+  const xmlLayers = cases.map(({ name, attributes }) => {
+    const flags = Object.entries(attributes).map(([key, value]) => ` ${key}="${value}"`).join('');
+    return `<layer name="${name}"${flags}/>`;
+  }).join('');
+  const xml = `<DOC><IMAGE width="64" height="64"><layers>${xmlLayers}</layers></IMAGE></DOC>`;
+  const zip = new JSZip();
+  zip.file('maindoc.xml', xml);
+
+  const previousParser = Object.getOwnPropertyDescriptor(globalThis, 'DOMParser');
+  t.after(() => {
+    if (previousParser) Object.defineProperty(globalThis, 'DOMParser', previousParser);
+    else Reflect.deleteProperty(globalThis, 'DOMParser');
+  });
+  Object.defineProperty(globalThis, 'DOMParser', {
+    configurable: true,
+    value: class {
+      parseFromString(source: string, mime: string) {
+        assert.equal(source, xml);
+        assert.equal(mime, 'application/xml');
+        return { querySelector: (tag: string) => tag === 'IMAGE' ? image : null };
+      }
+    },
+  });
+
+  const project = await unpackKraProject(await zip.generateAsync({ type: 'uint8array' }));
+  assert.deepEqual(
+    Object.fromEntries(project.layers.map(({ name, clipToBelow }) => [name, clipToBelow])),
+    Object.fromEntries(cases.map(({ name, clipped }) => [name, clipped])),
+  );
 });
 
 test('clampImportedCanvasDimensions enforces [64, 16384] bounds cleanly', () => {

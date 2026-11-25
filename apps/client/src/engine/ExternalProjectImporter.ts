@@ -14,6 +14,7 @@ import {
   detectProjectFormatFromName,
   mapKraBlendMode,
   mapPsdBlendMode,
+  parseKraInheritAlpha,
   parseKraTileStream,
   type SupportedProjectFormat,
 } from './kraDecoder';
@@ -652,7 +653,6 @@ export async function unpackKraProject(
       const opacity = Number.isFinite(rawOpacity) ? Math.max(0, Math.min(1, rawOpacity / 255)) : 1;
       const isVisible = layerEl.getAttribute('visible') !== '0';
       const isLocked = layerEl.getAttribute('locked') === '1';
-      const inheritAlpha = layerEl.getAttribute('inheritAlpha') === '1';
       const channelLock = layerEl.getAttribute('channellockflags') || '';
       const alphaLocked = channelLock.length >= 4 && channelLock[3] === '0';
       const blendMode = mapKraBlendMode(layerEl.getAttribute('compositeop'));
@@ -705,7 +705,7 @@ export async function unpackKraProject(
           isVisible,
           isLocked,
           alphaLocked,
-          clipToBelow: inheritAlpha,
+          clipToBelow: parseKraInheritAlpha(layerEl),
           sortOrder: sortCounter,
           now,
         })

@@ -23,6 +23,12 @@ export interface ImportedCanvasSize {
 export const MIN_IMPORT_CANVAS_DIM = 64;
 export const MAX_IMPORT_CANVAS_DIM = 16384;
 
+export function parseKraInheritAlpha(layer: Pick<Element, 'getAttribute'>): boolean {
+  return (layer.getAttribute('inheritsalpha') ??
+    layer.getAttribute('inheritalpha') ??
+    layer.getAttribute('inheritAlpha')) === '1';
+}
+
 /**
  * Fits imported PSD / KRA dimensions into AtelierSync's supported [64, 16384] integer bounds.
  * Oversized documents are uniformly scaled down; tiny documents are padded without blurry upscaling.
