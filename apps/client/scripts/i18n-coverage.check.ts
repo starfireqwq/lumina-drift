@@ -225,4 +225,19 @@ for (const lang of REQUIRED_LOCALES) {
   }
 }
 
+// Phase 4 shortcut labels and the pop-up palette's shortcut placeholder.
+const phase4Labels = (t: Translations) => [
+  t.subView.title, t.studio.popupPaletteTitle, t.settings.shortcutSubViewDesc, t.settings.shortcutPopupPaletteDesc,
+];
+const englishPhase4Labels = phase4Labels(translations['en-US']);
+for (const lang of REQUIRED_LOCALES) {
+  const t = translations[lang];
+  assert.match(t.settings.popupPaletteShortcutHint, /\{shortcut\}/, `Missing pop-up shortcut placeholder in ${lang}`);
+  if (lang !== 'en-US') {
+    phase4Labels(t).forEach((label, index) => {
+      assert.notEqual(label, englishPhase4Labels[index], `Untranslated Phase 4 shortcut text in ${lang}`);
+    });
+  }
+}
+
 console.log('--- ALL i18n VERIFICATION CHECKS PASSED SUCCESSFULLY! ---');

@@ -12,6 +12,15 @@ import { ALL_SUB_TOOLS, nextSizeStep, TOOL_CATEGORIES } from '../src/components/
 import { createSubToolStore, SUB_TOOL_STORAGE_KEY, type StorageLike } from '../src/components/workspace/subToolStore';
 import { findContentBounds } from '../src/utils/pixelBounds';
 import {
+  clampSubViewZoom, computeSubViewFitScale, DEFAULT_SUB_VIEW_TRANSFORM, normalizeSubViewRotation,
+  sampleSubViewPixel, subViewImageToScreen, subViewScreenToImage, zoomSubViewAroundPoint,
+} from '../src/utils/subViewMath';
+import { COLOR_HISTORY_MAX, createColorHistoryStore } from '../src/services/colorHistoryStore';
+import { normalizeHexColor, parseAcoPalette, parseGplPalette, serializeAcoPalette, serializeGplPalette } from '../src/utils/colorPaletteIO';
+import { blendPigmentRgba, paintMixingDab, sampleMixingBuffer, seedDefaultMixingPad, strokeMixingSegment } from '../src/utils/mixingPadEngine';
+import { computePopupPalettePosition, computeRadialSlotPositions, hitTestPopupRing } from '../src/utils/popupPaletteMath';
+import { shouldOpenDesktopPopupOnContextMenu } from '../src/engine/inputPreferences';
+import {
   alignCrops, alignDestination, alignManyOffsets, alignOffset, alignTargetsBlocker,
   computeVectorLayerAlignRect, computeVectorStrokeAlignRect, copyRgbaRect,
   distributeOffsets, guideAlignManyOffsets, guideAlignOffset, guideAxisAvailability,
@@ -5539,6 +5548,310 @@ await (async () => {
   }
   for (const [id, { toolScope }] of toolbox) {
     assert.equal(toolScope, categoryShortcutIds.has(id) ? 'category' : 'subtool', `Incorrect toolbox shortcut scope for ${id}`);
+  }
+}
+
+// Phase 4: Sub View transforms, cursor-anchored zoom and pixel sampling.
+{
+  assert.equal(clampSubViewZoom(0.01), 0.1);
+  assert.equal(clampSubViewZoom(20), 16);
+  assert.equal(clampSubViewZoom(2.5), 2.5);
+  assert.equal(clampSubViewZoom(NaN), 1);
+  assert.equal(normalizeSubViewRotation(-35), 325);
+  assert.equal(normalizeSubViewRotation(765), 45);
+  for (const angle of [360, -360, NaN, Infinity, -Infinity]) {
+    assert.equal(normalizeSubViewRotation(angle), 0);
+  }
+  assert.equal(computeSubViewFitScale(224, 124, 400, 100), 0.5);
+  assert.equal(computeSubViewFitScale(224, 124, 100, 400), 0.25);
+  assert.equal(computeSubViewFitScale(224, 124, 0, 100), 1);
+  assert.equal(computeSubViewFitScale(20, 124, 400, 100), 1);
+  assert.equal(computeSubViewFitScale(224, 124, 100, Infinity), 1);
+
+  const imgW = 360;
+  const imgH = 200;
+  const size = [744, 424, imgW, imgH] as const;
+  const transform = { zoom: 2, panX: 24, panY: -16, rotationDeg: 90, flipH: true };
+  const projected = subViewImageToScreen(190, 105, ...size, transform);
+  assert.ok(Math.hypot(projected.x - 376, projected.y - 156) < 1e-6, 'Sub View flip and rotation projection');
+  for (const flipH of [false, true]) {
+    for (const { zoom, panX, panY, rotationDeg } of [
+      { zoom: 0.1, panX: -70.5, panY: 23.25, rotationDeg: -37 },
+      { zoom: 2.75, panX: 32.75, panY: -55.5, rotationDeg: 123.4 },
+      { zoom: 16, panX: -14, panY: -25, rotationDeg: 405 },
+    ]) {
+      const view = { zoom, panX, panY, rotationDeg, flipH };
+      for (const [x, y, inside] of [
+        [96.5, 81.25, true], [0.25, 0.25, true], [imgW - 0.25, imgH - 0.25, true],
+        [-0.25, 50, false], [imgW + 0.25, 50, false], [50, -0.25, false], [50, imgH + 0.25, false],
+      ] as const) {
+        const screen = subViewImageToScreen(x, y, ...size, view);
+        const image = subViewScreenToImage(screen.x, screen.y, ...size, view);
+        const context = `Sub View point (${x}, ${y}), transform ${JSON.stringify(view)}`;
+        assert.ok(Math.hypot(image.x - x, image.y - y) < 1e-6, context);
+        assert.equal(image.inside, inside, context);
+      }
+    }
+  }
+  for (const [x, y, inside] of [[0, 0, true], [imgW, 0, false], [0, imgH, false]] as const) {
+    const screen = subViewImageToScreen(x, y, ...size, DEFAULT_SUB_VIEW_TRANSFORM);
+    assert.deepEqual(subViewScreenToImage(screen.x, screen.y, ...size, DEFAULT_SUB_VIEW_TRANSFORM), { x, y, inside });
+  }
+
+  const anchor = { x: 103.25, y: 74.5 };
+  const view = { ...transform, rotationDeg: 51.5 };
+  const cursor = subViewImageToScreen(anchor.x, anchor.y, ...size, view);
+  for (const [requestedZoom, expectedZoom] of [[0.5, 0.5], [4.75, 4.75], [50, 16]]) {
+    const zoomed = zoomSubViewAroundPoint(view, ...size, cursor.x, cursor.y, requestedZoom);
+    assert.equal(zoomed.zoom, expectedZoom);
+    const nextCursor = subViewImageToScreen(anchor.x, anchor.y, ...size, zoomed);
+    assert.ok(Math.hypot(nextCursor.x - cursor.x, nextCursor.y - cursor.y) < 1e-6, `Sub View cursor anchor at zoom ${expectedZoom}`);
+  }
+
+  const rgba = new Uint8Array([
+    255, 255, 255, 255,  255, 0, 0, 255,
+    10, 188, 241, 128,   161, 2, 206, 0,
+  ]);
+  assert.deepEqual(sampleSubViewPixel(rgba, 2, 2, 0.9, 1.3), { hex: '#0ABCF1', r: 10, g: 188, b: 241, a: 128 });
+  assert.deepEqual(sampleSubViewPixel(rgba, 2, 2, 1, 1), { hex: '#A102CE', r: 161, g: 2, b: 206, a: 0 });
+  for (const [x, y] of [[-0.01, 0], [2, 0], [0, -0.01], [0, 2], [NaN, 0]]) {
+    assert.equal(sampleSubViewPixel(rgba, 2, 2, x, y), null);
+  }
+  assert.equal(sampleSubViewPixel(rgba.subarray(0, 15), 2, 2, 1, 1), null);
+}
+
+// Phase 4: recent colors, pinned palettes and storage round-trip.
+{
+  const saved = new Map<string, string>();
+  const storage: StorageLike = {
+    getItem: (key) => saved.get(key) ?? null,
+    setItem: (key, value) => { saved.set(key, value); },
+  };
+  const store = createColorHistoryStore(storage);
+  const defaultSetId = store.getState().activeSetId;
+  let notifications = 0;
+  const unsubscribe = store.subscribe(() => { notifications++; });
+  assert.equal(store.recordColor('#abc'), '#AABBCC');
+  assert.equal(store.recordColor('a1b2c3'), '#A1B2C3');
+  assert.equal(store.recordColor('#aabbcc'), '#AABBCC');
+  const history = store.getState().history;
+  assert.deepEqual(history.slice(0, 2), ['#AABBCC', '#A1B2C3']);
+  assert.equal(history.filter((hex) => hex === '#AABBCC').length, 1);
+  assert.equal(notifications, 3);
+  assert.equal(store.recordColor(' #AbC '), '#AABBCC');
+  assert.equal(store.recordColor('invalid'), null);
+  assert.equal(notifications, 3);
+  assert.deepEqual(store.getState().history, history);
+  unsubscribe();
+
+  assert.equal(COLOR_HISTORY_MAX, 32);
+  const colors = Array.from({ length: COLOR_HISTORY_MAX + 3 }, (_, index) => `#2300${(index + 1).toString(16).toUpperCase().padStart(2, '0')}`);
+  for (const color of colors) store.recordColor(color);
+  assert.deepEqual(store.getState().history, colors.slice(-COLOR_HISTORY_MAX).reverse());
+
+  const custom = store.createPinnedSet('  Portrait  ', ['#123']);
+  assert.deepEqual(custom, { id: custom.id, name: 'Portrait', colors: [{ hex: '#112233' }] });
+  assert.equal(store.getState().activeSetId, custom.id);
+  assert.equal(store.pinColorToActiveSet(' #def ', '  Highlight  '), true);
+  assert.equal(store.pinColorToActiveSet('#DDEEFF', 'Duplicate'), false);
+  assert.deepEqual(store.getState().pinnedSets.find(({ id }) => id === custom.id)?.colors, [
+    { hex: '#112233' }, { hex: '#DDEEFF', name: 'Highlight' },
+  ]);
+  assert.equal(store.unpinColorFromActiveSet('#123'), true);
+  assert.equal(store.unpinColorFromActiveSet('#112233'), false);
+  assert.deepEqual(store.getState().pinnedSets.find(({ id }) => id === custom.id)?.colors, [{ hex: '#DDEEFF', name: 'Highlight' }]);
+
+  const imported = store.importPaletteSet('  Night sky  ', [{ hex: '#18a', name: '  Night blue  ' }, '#1188AA', 'invalid']);
+  assert.deepEqual(imported, { id: imported.id, name: 'Night sky', colors: [{ hex: '#1188AA', name: 'Night blue' }] });
+  assert.equal(store.getState().activeSetId, imported.id);
+  assert.equal(store.importPaletteSet('Night sky', imported.colors).id, imported.id);
+  assert.deepEqual(store.getState().pinnedSets.map(({ id }) => id), [defaultSetId, custom.id, imported.id]);
+
+  const restored = createColorHistoryStore(storage);
+  assert.deepEqual(restored.getState(), store.getState());
+  assert.equal(restored.deletePinnedSet(imported.id), true);
+  assert.equal(restored.getState().activeSetId, defaultSetId);
+  assert.equal(restored.deletePinnedSet(custom.id), true);
+  const beforeClear = restored.getState();
+  assert.equal(restored.deletePinnedSet(defaultSetId), false);
+  assert.deepEqual(restored.getState().pinnedSets.map(({ id }) => id), [defaultSetId]);
+  restored.clearHistory();
+  assert.deepEqual(restored.getState(), { ...beforeClear, history: [] });
+  assert.deepEqual(createColorHistoryStore(storage).getState(), restored.getState());
+}
+
+// Phase 4: GPL metadata and swatch names, plus ACO version and color-space compatibility.
+{
+  assert.equal(normalizeHexColor('#abc'), '#AABBCC');
+  assert.equal(normalizeHexColor('a1b2c3'), '#A1B2C3');
+  assert.equal(normalizeHexColor(' #ff00aa '), '#FF00AA');
+  for (const invalid of ['', '#12', '#ggg', '#12345678', 'red']) {
+    assert.equal(normalizeHexColor(invalid), null);
+  }
+
+  const gpl = [
+    'GIMP Palette', 'Name: Studio Palette', 'Columns: 4', '# 255 255 255 Ignored comment', '',
+    '255\t0 128   Rose With Spaces', '  10  11  12', 'broken row', '256 0 0 Too bright', '10 20', '-1 0 0 Negative',
+  ].join('\r\n');
+  const palette = parseGplPalette(gpl);
+  assert.deepEqual(palette, { name: 'Studio Palette', colors: [{ hex: '#FF0080', name: 'Rose With Spaces' }, { hex: '#0A0B0C' }] });
+  const serializedGpl = serializeGplPalette(palette.name, palette.colors, 4);
+  assert.deepEqual(serializedGpl.split('\n').slice(0, 4), ['GIMP Palette', 'Name: Studio Palette', 'Columns: 4', '#']);
+  assert.deepEqual(parseGplPalette(serializedGpl), palette);
+
+  const namedSwatches = [{ hex: '#A1B2C3', name: '晨光' }, { hex: '#FF00AA', name: 'Étoile 🎨' }, { hex: '#000000' }];
+  const aco = serializeAcoPalette(namedSwatches);
+  const acoView = new DataView(aco.buffer, aco.byteOffset, aco.byteLength);
+  const version2Offset = 4 + 10 * namedSwatches.length;
+  assert.equal(acoView.getUint16(0), 1);
+  assert.equal(acoView.getUint16(2), namedSwatches.length);
+  assert.equal(acoView.getUint16(version2Offset), 2);
+  assert.equal(acoView.getUint16(version2Offset + 2), namedSwatches.length);
+  const unnamedSwatches = namedSwatches.map(({ hex }) => ({ hex }));
+  assert.deepEqual(parseAcoPalette(aco.subarray(0, version2Offset)), unnamedSwatches);
+  assert.deepEqual(parseAcoPalette(aco.subarray(version2Offset)), namedSwatches);
+  assert.deepEqual(parseAcoPalette(aco), namedSwatches);
+  assert.deepEqual(parseAcoPalette(aco.subarray(0, aco.length - 1)), unnamedSwatches);
+
+  // Big-endian 16-bit words: version, count, then space and four components per swatch.
+  const words = [
+    1, 4,
+    0, 0x1212, 0x3434, 0x5656, 0,
+    1, 21845, 65535, 65535, 0,
+    2, 65535, 32768, 0, 32768,
+    8, 2500, 0, 0, 0,
+  ];
+  const acoFixture = new ArrayBuffer(words.length * 2);
+  const fixtureView = new DataView(acoFixture);
+  words.forEach((word, index) => fixtureView.setUint16(index * 2, word));
+  const expectedSwatches = [{ hex: '#123456' }, { hex: '#00FF00' }, { hex: '#804000' }, { hex: '#BFBFBF' }];
+  assert.deepEqual(parseAcoPalette(acoFixture), expectedSwatches);
+  assert.deepEqual(parseAcoPalette(acoFixture.slice(0, 3)), []);
+  assert.deepEqual(parseAcoPalette(acoFixture.slice(0, -1)), expectedSwatches.slice(0, -1));
+  for (let length = 0; length < aco.length; length++) {
+    assert.doesNotThrow(() => parseAcoPalette(aco.subarray(0, length)), `Truncated ACO at byte ${length}`);
+  }
+}
+
+// Phase 4: opaque pigment blending, paint and smudge on bounded pixel buffers.
+{
+  const red = { r: 255, g: 0, b: 0, a: 255 };
+  const blue = { r: 0, g: 0, b: 255, a: 255 };
+  assert.deepEqual(blendPigmentRgba(red, blue, 0.5), { r: 128, g: 0, b: 128, a: 255 });
+  assert.deepEqual(blendPigmentRgba(red, blue, 0), red);
+  assert.deepEqual(blendPigmentRgba(red, blue, 1), blue);
+
+  const [width, height] = [41, 21];
+  const buffer = new Uint8ClampedArray(width * height * 4);
+  seedDefaultMixingPad(buffer, width, height);
+  const surface = sampleMixingBuffer(buffer, width, height, 0, 0, 0);
+  const pigment = sampleMixingBuffer(buffer, width, height, 9, 6, 0);
+  assert.ok(surface && pigment);
+  assert.equal(surface.a, 255);
+  assert.equal(pigment.a, 255);
+  assert.notDeepEqual(pigment, surface);
+
+  paintMixingDab(buffer, width, height, 9, 6, 2, blue, 1, 1);
+  assert.deepEqual(sampleMixingBuffer(buffer, width, height, 9, 6, 0), blue);
+  assert.deepEqual(sampleMixingBuffer(buffer, width, height, 0, 0, 0), surface);
+
+  assert.deepEqual(strokeMixingSegment(buffer, width, height, 4, 12, 12, 12, {
+    mode: 'paint', color: red, radius: 1.5, strength: 1, hardness: 1,
+  }), red);
+  for (const x of [4, 8, 12]) assert.deepEqual(sampleMixingBuffer(buffer, width, height, x, 12, 0), red);
+  for (const [x, y] of [[-1, 0], [width, 0], [0, -1], [0, height]]) {
+    assert.equal(sampleMixingBuffer(buffer, width, height, x, y), null);
+  }
+
+  const smudgeWidth = 12;
+  const smudgeHeight = 5;
+  const smudge = new Uint8ClampedArray(smudgeWidth * smudgeHeight * 4);
+  for (let y = 0; y < smudgeHeight; y++) {
+    for (let x = 0; x < smudgeWidth; x++) {
+      smudge.set(x < 6 ? [255, 0, 0, 255] : [0, 0, 255, 255], (y * smudgeWidth + x) * 4);
+    }
+  }
+  assert.deepEqual(sampleMixingBuffer(smudge, smudgeWidth, smudgeHeight, 6, 2, 0), blue);
+  const carryColor = strokeMixingSegment(smudge, smudgeWidth, smudgeHeight, 2, 2, 9, 2, {
+    mode: 'smudge', color: { r: 0, g: 255, b: 0, a: 255 }, radius: 1.5, strength: 0.65,
+  });
+  const mixed = sampleMixingBuffer(smudge, smudgeWidth, smudgeHeight, 6, 2, 0);
+  assert.ok(mixed && carryColor, 'Smudging should produce a mixed pixel and a carry color');
+  for (const color of [mixed, carryColor]) {
+    assert.ok(color.r > 0 && color.r < 255 && color.b > 0 && color.b < 255);
+    assert.equal(color.g, 0);
+    assert.equal(color.a, 255);
+  }
+  assert.deepEqual(sampleMixingBuffer(smudge, smudgeWidth, smudgeHeight, 11, 2, 0), blue);
+}
+
+// Phase 4: desktop pop-up placement, slot hit testing and input preferences.
+{
+  const radius = 80;
+  const margin = 12;
+  const width = 640;
+  const height = 480;
+  const inset = radius + margin;
+  assert.deepEqual(computePopupPalettePosition(320, 240, radius, width, height, margin), {
+    cx: 320, cy: 240, clampedX: false, clampedY: false, clamped: false,
+  });
+  for (const [x, y, cx, cy] of [
+    [2, 3, inset, inset], [638, 3, width - inset, inset],
+    [2, 477, inset, height - inset], [638, 477, width - inset, height - inset],
+  ]) {
+    assert.deepEqual(computePopupPalettePosition(x, y, radius, width, height, margin), { cx, cy, clampedX: true, clampedY: true, clamped: true });
+  }
+  assert.deepEqual(computePopupPalettePosition(5, 8, radius, 100, 60, margin), {
+    cx: 50, cy: 30, clampedX: true, clampedY: true, clamped: true,
+  });
+  for (const [x, y] of [[NaN, 40], [10, Infinity]]) {
+    assert.deepEqual(computePopupPalettePosition(x, y, radius, width, height, margin), {
+      cx: 320, cy: 240, clampedX: true, clampedY: true, clamped: true,
+    });
+  }
+
+  const count = 8;
+  const ringRadius = 60;
+  const [cx, cy] = [320, 240];
+  for (const start of [-90, 360]) {
+    const slots = computeRadialSlotPositions(cx, cy, ringRadius, count, start);
+    assert.equal(slots.length, count);
+    slots.forEach(({ x, y, angleDeg }, index) => {
+      const expectedAngle = start + index * 45;
+      const radians = expectedAngle * Math.PI / 180;
+      assert.equal(angleDeg, expectedAngle);
+      assert.ok(Math.hypot(x - cx - ringRadius * Math.cos(radians), y - cy - ringRadius * Math.sin(radians)) < 1e-6);
+      assert.equal(hitTestPopupRing(x - cx, y - cy, 40, 80, count, start), index, `Slot ${index} at start angle ${start}`);
+    });
+  }
+  for (const angle of [359.9, 0, 0.1]) {
+    const radians = angle * Math.PI / 180;
+    assert.equal(hitTestPopupRing(ringRadius * Math.cos(radians), ringRadius * Math.sin(radians), 40, 80, count, 360), 0);
+  }
+  assert.equal(hitTestPopupRing(0, -ringRadius, 40, 80, count), 0);
+  assert.equal(hitTestPopupRing(0, -39, 40, 80, count), null);
+  assert.equal(hitTestPopupRing(0, -81, 40, 80, count), null);
+
+  for (const [enabled, trigger, pointer, hasRightButton, expected] of [
+    [false, 'right-click', 'mouse', true, false],
+    [true, 'right-click', 'touch', true, false],
+    [true, 'shortcut-only', 'mouse', true, false],
+    [true, 'shortcut-only', 'pen', true, false],
+    [true, 'pen-side-button', 'mouse', true, false],
+    [true, 'pen-side-button', 'pen', false, false],
+    [true, 'pen-side-button', 'pen', true, true],
+    [true, 'right-click', 'mouse', true, true],
+    [true, 'right-click', 'pen', false, false],
+    [true, 'right-click', 'pen', true, true],
+  ] as const) {
+    assert.equal(shouldOpenDesktopPopupOnContextMenu(enabled, trigger, pointer, hasRightButton), expected,
+      `Popup context menu: enabled=${enabled}, trigger=${trigger}, pointer=${pointer}, right button=${hasRightButton}`);
+  }
+
+  for (const [id, combo] of [
+    ['action_studio_subview', 'Control+Shift+KeyR'], ['action_studio_popup_palette', 'Alt+KeyQ'],
+  ]) {
+    assert.deepEqual(DEFAULT_SHORTCUTS.filter(({ defaultCombo }) => defaultCombo === combo).map((shortcut) => shortcut.id), [id]);
   }
 }
 
