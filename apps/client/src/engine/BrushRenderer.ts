@@ -10,7 +10,7 @@ import {
   Texture,
   TilingSprite,
 } from 'pixi.js';
-import type { BrushTarget } from './LayerManager';
+import type { BrushTarget, Rect } from './LayerManager';
 import {
   getSelectionMaskFactor,
   MIN_BRUSH_SPACING,
@@ -29,6 +29,7 @@ import {
   type DualBrushBlendMode,
 } from '@atelier/shared';
 import { RulerManager } from './RulerManager';
+import { wrapCoord } from './wrapAround';
 
 export type AntiAliasLevel = 'none' | 'weak' | 'medium' | 'strong';
 export type EraserMode = 'hard' | 'soft';
@@ -698,7 +699,8 @@ export class BrushRenderer {
     overrideColor?: string,
     isEraserOverride?: boolean,
     isAlphaLocked?: boolean,
-    eraserProps?: BrushProperties
+    eraserProps?: BrushProperties,
+    wrappedPoints?: ReadonlyArray<ReadonlyArray<{ x: number; y: number }>>,
   ) {
     if (count <= 0 || dabsArray.length < count * 7) return;
 
@@ -756,10 +758,17 @@ export class BrushRenderer {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (let i = 0; i < count; i++) {
       const r = dabsArray[i * 7 + 2] * (0.75 + tiltSize * 1.5) + 2;
-      minX = Math.min(minX, dabsArray[i * 7] - r);
-      maxX = Math.max(maxX, dabsArray[i * 7] + r);
-      minY = Math.min(minY, dabsArray[i * 7 + 1] - r);
-      maxY = Math.max(maxY, dabsArray[i * 7 + 1] + r);
+      if (wrappedPoints) {
+        for (const { x, y } of wrappedPoints[i]) {
+          minX = Math.min(minX, x - r); maxX = Math.max(maxX, x + r);
+          minY = Math.min(minY, y - r); maxY = Math.max(maxY, y + r);
+        }
+      } else {
+        minX = Math.min(minX, dabsArray[i * 7] - r);
+        maxX = Math.max(maxX, dabsArray[i * 7] + r);
+        minY = Math.min(minY, dabsArray[i * 7 + 1] - r);
+        maxY = Math.max(maxY, dabsArray[i * 7 + 1] + r);
+      }
     }
     const bx = Math.max(0, Math.floor(minX));
     const by = Math.max(0, Math.floor(minY));
@@ -777,8 +786,8 @@ export class BrushRenderer {
     const secondaryRgb = fgBgMix > 0 ? hexToRgb(props.secondaryColor || '#FFFFFF') : null;
 
     const sampleMixerUnder = (gx: number, gy: number): [number, number, number, number] => {
-      const ix = Math.max(0, Math.min(this.canvasWidth - 1, Math.round(gx)));
-      const iy = Math.max(0, Math.min(this.canvasHeight - 1, Math.round(gy)));
+      const ix = wrappedPoints ? wrapCoord(Math.round(gx), this.canvasWidth) : Math.max(0, Math.min(this.canvasWidth - 1, Math.round(gx)));
+      const iy = wrappedPoints ? wrapCoord(Math.round(gy), this.canvasHeight) : Math.max(0, Math.min(this.canvasHeight - 1, Math.round(gy)));
       if (this.mixerTileReader) {
         const col = ix >> 8;
         const row = iy >> 8;
@@ -803,6 +812,7 @@ export class BrushRenderer {
       return [0, 0, 0, 0];
     };
 
+    const dualScatter = wrappedPoints && dual ? new Map<Sprite, number[]>() : undefined;
     for (let i = 0; i < count; i++) {
       const offset = i * 7;
       const x = dabsArray[offset];
@@ -814,7 +824,7 @@ export class BrushRenderer {
       if (size <= 0 || alpha <= 0) continue;
 
       // 1. Strict Selection Mask Restriction (quick bounding skip; exact per-pixel clipping uses dst-in below)
-      if (needsSelectionClip && this.activeSelectionMask) {
+      if (!wrappedPoints && needsSelectionClip && this.activeSelectionMask) {
         const maskFactor = getSelectionMaskFactor(
           this.activeSelectionMask,
           x,
@@ -937,7 +947,7 @@ export class BrushRenderer {
 
       const rulerMgr = RulerManager.getInstance();
       const isSymmetry = !this.previewMode && rulerMgr.state.mode === 'symmetry';
-      const pointsToStamp = isSymmetry ? rulerMgr.getSymmetryPoints({ x, y }) : [{ x, y }];
+      const pointsToStamp = wrappedPoints?.[i] ?? (isSymmetry ? rulerMgr.getSymmetryPoints({ x, y }) : [{ x, y }]);
 
       const dabEntry = customTip
         ? { texture: customTip, scaleRatio: 1 }
@@ -945,6 +955,7 @@ export class BrushRenderer {
           ? this.getOrCreatePencilTipEntry(hardness, antiAlias, size)
           : this.getOrCreateProceduralTipEntry(hardness, antiAlias, size, airbrush);
 
+      const scatterRandom: number[] | undefined = dualScatter && [];
       for (const pt of pointsToStamp) {
         const sprite = this.spritePool.pop() || new Sprite(dabEntry.texture);
         sprite.texture = dabEntry.texture;
@@ -963,7 +974,9 @@ export class BrushRenderer {
           sprite.position.set(pt.x, pt.y);
           sprite.width = size * dabEntry.scaleRatio;
           sprite.height = size * roundness * dabEntry.scaleRatio;
-          sprite.rotation = isPencil ? rotation + (Math.sin(pt.x * 12.9898 + pt.y * 78.233) * Math.PI) : rotation;
+          const grainX = wrappedPoints ? x : pt.x;
+          const grainY = wrappedPoints ? y : pt.y;
+          sprite.rotation = isPencil ? rotation + (Math.sin(grainX * 12.9898 + grainY * 78.233) * Math.PI) : rotation;
         }
 
         const effectiveAlpha = isPixelEdge ? 1.0 : Math.max(0, Math.min(1.0, alpha));
@@ -982,6 +995,7 @@ export class BrushRenderer {
           sprite.blendMode = 'normal';
         }
 
+        if (scatterRandom) dualScatter!.set(sprite, scatterRandom);
         this.stampBatch.addChild(sprite);
       }
     }
@@ -989,10 +1003,14 @@ export class BrushRenderer {
     if (this.stampBatch.children.length > 0) {
       // The box of what was really stamped (symmetry adds mirrored dabs outside the input's box)
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      const regions: Rect[] | undefined = wrappedPoints && [];
       for (const c of this.stampBatch.children as Sprite[]) {
         const r = Math.max(c.width, c.height) * 0.75 + 2; // covers any rotation
-        x0 = Math.min(x0, c.x - r); x1 = Math.max(x1, c.x + r);
-        y0 = Math.min(y0, c.y - r); y1 = Math.max(y1, c.y + r);
+        const x = wrappedPoints && c.roundPixels ? c.x + c.width / 2 : c.x;
+        const y = wrappedPoints && c.roundPixels ? c.y + c.height / 2 : c.y;
+        regions?.push({ x: x - r, y: y - r, w: 2 * r, h: 2 * r });
+        x0 = Math.min(x0, x - r); x1 = Math.max(x1, x + r);
+        y0 = Math.min(y0, y - r); y1 = Math.max(y1, y + r);
       }
       const sbx = Math.max(0, Math.floor(x0));
       const sby = Math.max(0, Math.floor(y0));
@@ -1000,13 +1018,36 @@ export class BrushRenderer {
       const sbh = Math.max(1, Math.min(this.canvasHeight, Math.ceil(y1)) - sby);
       // Accumulate faint dabs before rounding to the layer's 8-bit channels. Repeatedly rounding
       // each dab cuts off its tail and creates visible bands where overlapping dabs cross a byte boundary.
+      const scratchFits = sbw <= AIRBRUSH_SCRATCH_LIMIT && sbh <= AIRBRUSH_SCRATCH_LIMIT;
       const precise = explicitAirbrush && this.supportsFloatColorBuffer && (!isAlphaLocked || useScratch) &&
-        sbw <= AIRBRUSH_SCRATCH_LIMIT && sbh <= AIRBRUSH_SCRATCH_LIMIT;
+        (scratchFits || Boolean(regions));
       if (useScratch || precise) {
-        this.renderShaped(targetRT, sbx, sby, sbw, sbh, textureDensity, dual, tipTexture,
-          isEraser, Boolean(isAlphaLocked), needsSelectionClip, precise, wetEdges);
+        const renderRegion = ({ x, y, w, h }: Rect) =>
+          this.renderShaped(targetRT, x, y, w, h, textureDensity, dual, tipTexture,
+            isEraser, Boolean(isAlphaLocked), needsSelectionClip, precise, wetEdges, regions, dualScatter);
+        if (regions && !scratchFits) {
+          // Opposite-edge copies can make the combined bounds cover the entire canvas.
+          const size = AIRBRUSH_SCRATCH_LIMIT;
+          const chunks = new Map<string, Rect>();
+          for (const region of regions) {
+            const right = Math.min(sbx + sbw, Math.ceil(region.x + region.w));
+            const bottom = Math.min(sby + sbh, Math.ceil(region.y + region.h));
+            for (let y = Math.floor(Math.max(sby, region.y) / size) * size; y < bottom; y += size) {
+              for (let x = Math.floor(Math.max(sbx, region.x) / size) * size; x < right; x += size) {
+                const left = Math.max(x, sbx);
+                const top = Math.max(y, sby);
+                chunks.set(`${x}_${y}`, {
+                  x: left, y: top, w: Math.min(x + size, sbx + sbw) - left, h: Math.min(y + size, sby + sbh) - top,
+                });
+              }
+            }
+          }
+          for (const chunk of chunks.values()) renderRegion(chunk);
+        } else {
+          renderRegion({ x: sbx, y: sby, w: sbw, h: sbh });
+        }
       } else {
-        this.drawInto(targetRT, this.stampBatch, x0, y0, x1 - x0, y1 - y0);
+        this.drawInto(targetRT, this.stampBatch, x0, y0, x1 - x0, y1 - y0, regions);
       }
     }
 
@@ -1024,15 +1065,16 @@ export class BrushRenderer {
    * erased out, second tip intersected), then composited onto the layer like one dab.
    */
   /** A whole texture is rendered into directly; a sparse layer draws the box into the tiles it covers */
-  private drawInto(target: BrushTarget, container: Container, x: number, y: number, w: number, h: number) {
+  private drawInto(target: BrushTarget, container: Container, x: number, y: number, w: number, h: number, regions?: readonly Rect[]) {
     if (target instanceof RenderTexture) this.renderer.render({ container, target, clear: false });
-    else target.draw(container, x, y, w, h);
+    else target.draw(container, x, y, w, h, regions);
   }
 
   private renderShaped(
     targetRT: BrushTarget, bx: number, by: number, bw: number, bh: number,
     textureDensity: number, dual: boolean, tipTexture: Texture, isEraser: boolean, isAlphaLocked: boolean,
-    clipWithSelectionMask = false, precise = false, wetEdges = false
+    clipWithSelectionMask = false, precise = false, wetEdges = false,
+    regions?: readonly Rect[], dualScatter?: ReadonlyMap<Sprite, number[]>,
   ) {
     const props = this.currentProperties;
     const scratch = precise
@@ -1072,14 +1114,16 @@ export class BrushRenderer {
       for (const child of this.stampBatch.children) {
         const main = child as Sprite;
         const n = 2 + Math.round(spread * 2);
+        const stored = dualScatter?.get(main);
+        const random = (i: number) => stored ? (stored[i] ??= Math.random()) : Math.random();
         for (let k = 0; k < n; k++) {
           const d = new Sprite(secondaryTex);
           d.anchor.set(0.5);
-          const r = main.width * 0.5 * spread * Math.sqrt(Math.random());
-          const a = Math.random() * Math.PI * 2;
+          const r = main.width * 0.5 * spread * Math.sqrt(random(k * 3));
+          const a = random(k * 3 + 1) * Math.PI * 2;
           d.position.set(main.x - bx + Math.cos(a) * r, main.y - by + Math.sin(a) * r);
           d.width = d.height = Math.max(1, main.width * ratio);
-          d.rotation = Math.random() * Math.PI * 2;
+          d.rotation = random(k * 3 + 2) * Math.PI * 2;
           this.dualBatch.addChild(d);
         }
       }
@@ -1166,7 +1210,7 @@ export class BrushRenderer {
     this.composite.removeChildren();
     this.composite.addChild(stroke);
     this.composite.mask = null;
-    this.drawInto(targetRT, this.composite, bx, by, bw, bh);
+    this.drawInto(targetRT, this.composite, bx, by, bw, bh, regions);
     this.composite.removeChildren();
     stroke.texture.destroy(false);
     stroke.destroy();

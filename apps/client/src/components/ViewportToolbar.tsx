@@ -4,6 +4,7 @@ import {
   Compass,
   Crop,
   FlipHorizontal,
+  Grid3X3,
   Image as ImageIcon,
   Maximize2,
   RotateCcw,
@@ -29,6 +30,8 @@ interface ViewportToolbarProps {
   onRotate: (deltaRadians: number) => void;
   onResetRotation: () => void;
   onToggleMirror: () => void;
+  wrapAroundEnabled?: boolean;
+  onToggleWrapAround?: () => void;
   onOpenRuler?: () => void;
   onOpenReference?: () => void;
   onOpenRadial?: () => void;
@@ -61,6 +64,8 @@ export const ViewportToolbar: React.FC<ViewportToolbarProps> = ({
   onRotate,
   onResetRotation,
   onToggleMirror,
+  wrapAroundEnabled,
+  onToggleWrapAround,
   onOpenRuler,
   onOpenReference,
   onOpenRadial,
@@ -110,6 +115,12 @@ export const ViewportToolbar: React.FC<ViewportToolbarProps> = ({
         <button type="button" onClick={onToggleMirror} aria-pressed={viewportState.mirrorX} title={t.canvas.flipView} aria-label={t.canvas.flipView} className={btn}>
           <FlipHorizontal className="h-3.5 w-3.5" />{showFlipLabel && <span>{t.canvas.flipViewButton}</span>}
         </button>
+        {onToggleWrapAround && (
+          <button type="button" data-testid="viewport-wrap-around-toggle" onClick={onToggleWrapAround}
+            aria-pressed={Boolean(wrapAroundEnabled)} aria-label={t.canvas.wrapAround} title={t.canvas.wrapAroundHint} className={btn}>
+            <Grid3X3 className="h-3.5 w-3.5" />
+          </button>
+        )}
         <Sep />
         {onOpenRuler && <button type="button" onClick={onOpenRuler} title={t.canvas.rulers} aria-label={t.canvas.rulers} className={btn}><Compass className="h-3.5 w-3.5" />{showRulerLabel && <span>{t.tools.ruler}</span>}</button>}
         {onOpenReference && <button type="button" onClick={onOpenReference} title={t.canvas.referenceImage} aria-label={t.canvas.referenceImage} className={btn}><ImageIcon className="h-3.5 w-3.5" />{showRefLabel && <span>{t.reference.title}</span>}</button>}

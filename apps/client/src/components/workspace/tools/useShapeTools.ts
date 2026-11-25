@@ -3,6 +3,8 @@ import { FillGradient, Graphics, RenderTexture } from 'pixi.js';
 import { getTileBounds, type TileData, type ToolType } from '@atelier/shared';
 import { RulerManager } from '../../../engine/RulerManager';
 import { calculateGradientTiles, compressTiles } from '../../../engine/commitWorkers';
+import type { Rect } from '../../../engine/LayerManager';
+import { getWrapAroundBoundsOffsets, getWrappedDirtyTilesForBounds } from '../../../engine/wrapAround';
 import { recordUsedColor } from '../../../services/colorHistoryStore';
 import type { Point, ToolContext } from './toolContext';
 import { commitInOrder, diffTilesAsync } from './asyncTiles';
@@ -99,6 +101,7 @@ export function useShapeTools(ctx: ToolContext) {
   const [gradientType, setGradientType] = useState<'linear' | 'radial'>('linear');
 
   const shapeStartPos = useRef<Point | null>(null);
+  const wrappedShapeRef = useRef<{ graphic: Graphics; bounds: Rect; regions: Rect[] } | null>(null);
   const isDrawingShape = useRef<boolean>(false);
   const gradientStartPos = useRef<Point | null>(null);
   const isDrawingGradient = useRef<boolean>(false);
@@ -140,27 +143,34 @@ export function useShapeTools(ctx: ToolContext) {
   /** Live preview while dragging; false when no shape / gradient drag is active. */
   const move = (e: PointerLike, local: Point): boolean => {
     const { shapeGraphicRef, brushProps, currentTool } = ctx;
-    const g = shapeGraphicRef.current;
-    if (isDrawingShape.current && shapeStartPos.current && g) {
-      const { effectiveShape, startX, startY, endX, endY } = shapeEnds(e, local, shapeStartPos.current);
-      g.clear();
+    const preview = shapeGraphicRef.current;
+    if (isDrawingShape.current && shapeStartPos.current && preview) {
+      const canvas = ctx.wrapAroundRef.current ? ctx.canvas : null;
+      const wrapped = canvas ? ctx.layerManagerRef.current?.getWrapAroundShapePreview() : null;
+      const g = wrapped ?? preview;
+      const ends = shapeEnds(e, local, shapeStartPos.current);
+      preview.clear();
+      wrapped?.clear();
+      wrappedShapeRef.current = null;
       const hexNum = parseInt(brushProps.color.replace('#', ''), 16) || 0x3b82f6;
       const lineW = currentTool === 'shape' ? shapeLineWidth : Math.max(1, brushProps.size);
       const strokeStyle = { width: lineW, color: hexNum, alpha: brushProps.opacity };
       const shouldFill = currentTool === 'shape' && (shapeFillMode === 'fill' || shapeFillMode === 'stroke_and_fill');
       const shouldStroke = currentTool !== 'shape' || shapeFillMode === 'stroke' || shapeFillMode === 'stroke_and_fill';
 
-      if (effectiveShape === 'ellipse') {
-        g.ellipse((startX + endX) / 2, (startY + endY) / 2, Math.abs(endX - startX) / 2, Math.abs(endY - startY) / 2);
-        if (shouldFill) g.fill({ color: hexNum, alpha: brushProps.opacity });
-        if (shouldStroke) g.stroke(strokeStyle);
-      } else if (effectiveShape === 'line' || effectiveShape === 'arrow') {
-        g.beginPath();
-        g.moveTo(startX, startY);
-        g.lineTo(endX, endY);
-        g.stroke(strokeStyle);
-        if (effectiveShape === 'arrow') {
-          const angle = Math.atan2(endY - startY, endX - startX);
+      const draw = (dx: number, dy: number) => {
+        const { effectiveShape } = ends;
+        const startX = ends.startX + dx, startY = ends.startY + dy;
+        const endX = ends.endX + dx, endY = ends.endY + dy;
+        if (effectiveShape === 'ellipse') {
+          g.ellipse((startX + endX) / 2, (startY + endY) / 2, Math.abs(endX - startX) / 2, Math.abs(endY - startY) / 2);
+        } else if (effectiveShape === 'line' || effectiveShape === 'arrow') {
+          g.beginPath();
+          g.moveTo(startX, startY);
+          g.lineTo(endX, endY);
+          g.stroke(strokeStyle);
+          if (effectiveShape !== 'arrow') return;
+          const angle = Math.atan2(ends.endY - ends.startY, ends.endX - ends.startX);
           const headLen = Math.max(12, lineW * 2.5);
           const a1 = angle - Math.PI / 6;
           const a2 = angle + Math.PI / 6;
@@ -170,25 +180,40 @@ export function useShapeTools(ctx: ToolContext) {
           g.moveTo(endX, endY);
           g.lineTo(endX - headLen * Math.cos(a2), endY - headLen * Math.sin(a2));
           g.stroke(strokeStyle);
-        }
-      } else {
-        const x = Math.min(startX, endX);
-        const y = Math.min(startY, endY);
-        const w = Math.abs(endX - startX);
-        const h = Math.abs(endY - startY);
-        if (effectiveShape === 'rect') {
-          if (shapeCornerRadius > 0) g.roundRect(x, y, w, h, Math.min(shapeCornerRadius, w / 2, h / 2));
-          else g.rect(x, y, w, h);
+          return;
         } else {
-          traceRoundedPolygon(g, shapePolygonPoints(effectiveShape, x, y, w, h), shapeCornerRadius);
+          const x = Math.min(startX, endX);
+          const y = Math.min(startY, endY);
+          const w = Math.abs(endX - startX);
+          const h = Math.abs(endY - startY);
+          if (effectiveShape === 'rect') {
+            if (shapeCornerRadius > 0) g.roundRect(x, y, w, h, Math.min(shapeCornerRadius, w / 2, h / 2));
+            else g.rect(x, y, w, h);
+          } else {
+            traceRoundedPolygon(g, shapePolygonPoints(effectiveShape, x, y, w, h), shapeCornerRadius);
+          }
         }
         if (shouldFill) g.fill({ color: hexNum, alpha: brushProps.opacity });
         if (shouldStroke) g.stroke(strokeStyle);
+      };
+      draw(0, 0);
+      if (wrapped && canvas) {
+        const { x, y, width, height } = g.getLocalBounds();
+        const bounds = { x: x - 1, y: y - 1, w: width + 2, h: height + 2 };
+        const offsets = getWrapAroundBoundsOffsets(bounds.x, bounds.y, bounds.x + bounds.w, bounds.y + bounds.h,
+          canvas.width, canvas.height);
+        if (offsets.length !== 1 || offsets[0].dx || offsets[0].dy) {
+          g.clear();
+          for (const { dx, dy } of offsets) draw(dx, dy);
+        }
+        const regions = offsets.map(({ dx, dy }) => ({ ...bounds, x: bounds.x + dx, y: bounds.y + dy }));
+        wrappedShapeRef.current = { graphic: g, bounds, regions };
       }
       ctx.requestRender();
       return true;
     }
 
+    const g = preview;
     if (isDrawingGradient.current && gradientStartPos.current && g) {
       g.clear();
       g.beginPath();
@@ -214,16 +239,22 @@ export function useShapeTools(ctx: ToolContext) {
 
     const item = Math.hypot(endX - startX, endY - startY) >= 3 ? layerManagerRef.current.getLayerItem(activeLayer.id) : null;
     if (item) {
-      const g = shapeGraphicRef.current;
+      const wrapped = wrappedShapeRef.current;
+      const g = wrapped?.graphic ?? shapeGraphicRef.current;
       const { x, y, width, height } = g.getLocalBounds();
       const lm = layerManagerRef.current;
       const layerId = activeLayer.id;
       const renderer = pixiAppRef.current.renderer;
-      const dirtyCoords = tileEngineRef.current.getDirtyTilesForBounds(x - 1, y - 1, x + width + 1, y + height + 1);
+      const canvas = ctx.canvas;
+      const bounds = wrapped?.bounds;
+      const dirtyCoords = bounds && canvas
+        ? getWrappedDirtyTilesForBounds(bounds.x, bounds.y, bounds.x + bounds.w, bounds.y + bounds.h,
+          canvas.width, canvas.height)
+        : tileEngineRef.current.getDirtyTilesForBounds(x - 1, y - 1, x + width + 1, y + height + 1);
       const diff = diffTilesAsync(lm, layerId, dirtyCoords, () => {
         const target = lm.drawTarget(layerId);
         if (!target) return;
-        if ('draw' in target) target.draw(g, x - 1, y - 1, width + 2, height + 2);
+        if ('draw' in target) target.draw(g, x - 1, y - 1, width + 2, height + 2, wrapped?.regions);
         else renderer.render({ container: g, target, clear: false });
       });
       lm.syncPingPong(layerId);
@@ -239,6 +270,8 @@ export function useShapeTools(ctx: ToolContext) {
       });
     }
     shapeGraphicRef.current.clear();
+    ctx.layerManagerRef.current?.clearWrapAroundShapePreview();
+    wrappedShapeRef.current = null;
     shapeStartPos.current = null;
     ctx.requestRender();
     return true;
@@ -361,6 +394,8 @@ export function useShapeTools(ctx: ToolContext) {
   const cancel = () => {
     isDrawingShape.current = false;
     isDrawingGradient.current = false;
+    ctx.layerManagerRef.current?.clearWrapAroundShapePreview();
+    wrappedShapeRef.current = null;
     shapeStartPos.current = null;
     gradientStartPos.current = null;
   };

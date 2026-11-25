@@ -69,7 +69,7 @@ export interface PixiLayerItem {
 
 /** Something a brush draws into: given the batch's box, it renders the batch where it lands */
 export interface DrawTarget {
-  draw(container: Container, x: number, y: number, w: number, h: number): void;
+  draw(container: Container, x: number, y: number, w: number, h: number, regions?: readonly Rect[]): void;
 }
 /** A whole layer texture (resident layer), or a sparse layer drawn tile by tile */
 export type BrushTarget = RenderTexture | DrawTarget;
@@ -335,6 +335,12 @@ export class LayerManager {
   private previewPainters = new Map<string, { container: ParticleContainer<Particle>; lastAt: number }>();
   private previewParticlePool: Particle[] = [];
   private thumbBlobUrls = new Set<string>();
+  private wrapAroundEnabled = false;
+  private wrapAroundContainer: Container | null = null;
+  private wrapRT: RenderTexture | null = null;
+  private wrapShapeOverlay: Container | null = null;
+  private wrapShapeGraphic: Graphics | null = null;
+  private viewportBounds: LayerManager['viewBounds'] = null;
   private viewBounds: { x0: number; y0: number; x1: number; y1: number } | null = null;
   private cullSuspended = 0;
   private tileStructureVersion = 0;
@@ -707,6 +713,7 @@ export class LayerManager {
     if (this.magFilter === mode) return;
     this.magFilter = mode;
     this.atlas.setMagFilter(mode);
+    if (this.wrapRT) applyMagFilter(this.wrapRT, mode);
     for (const item of this.layersMap.values()) if (item.rt) applyMagFilter(item.rt, mode);
     this.onStageChange?.();
   }
@@ -812,7 +819,11 @@ export class LayerManager {
    * Updates the active canvas viewport rectangle so offscreen layer tiles are culled from Pixi's
    * scene traversal and cold offscreen tiles reheat smoothly within a per-frame time budget.
    */
-  public setViewportBounds(bounds: { x0: number; y0: number; x1: number; y1: number } | null) {
+  public setViewportBounds(viewportBounds: LayerManager['viewBounds']) {
+    this.viewportBounds = viewportBounds;
+    const bounds = this.wrapAroundEnabled
+      ? { x0: 0, y0: 0, x1: this.canvasWidth, y1: this.canvasHeight }
+      : viewportBounds;
     this.viewBounds = bounds;
     const now = performance.now();
     this.lastInteractionAt = now;
@@ -841,6 +852,95 @@ export class LayerManager {
     } else {
       this.reheatPending = false;
     }
+  }
+
+  public getCanvasDimensions(): { width: number; height: number } {
+    return { width: this.canvasWidth, height: this.canvasHeight };
+  }
+
+  public isWrapAroundEnabled(): boolean {
+    return this.wrapAroundEnabled;
+  }
+
+  public setWrapAround(enabled: boolean): void {
+    if (this.wrapAroundEnabled === enabled) return;
+    this.wrapAroundEnabled = enabled;
+    if (!enabled) this.releaseWrapAroundView();
+    this.lastViewGridKey = '';
+    this.setViewportBounds(this.viewportBounds);
+    this.onStageChange?.();
+  }
+
+  public getWrapAroundShapePreview(): Graphics | null {
+    if (!this.wrapAroundEnabled) return null;
+    if (!this.wrapShapeGraphic) {
+      const overlay = new Container();
+      const mask = new Graphics().rect(0, 0, this.canvasWidth, this.canvasHeight).fill(0xffffff);
+      this.wrapShapeGraphic = overlay.addChild(new Graphics());
+      overlay.addChild(mask);
+      overlay.mask = mask;
+      const index = this.wrapAroundContainer ? this.rootContainer.getChildIndex(this.wrapAroundContainer) : this.rootContainer.children.length;
+      this.rootContainer.addChildAt(overlay, index);
+      this.wrapShapeOverlay = overlay;
+    }
+    return this.wrapShapeGraphic;
+  }
+
+  public clearWrapAroundShapePreview(): void {
+    this.wrapShapeGraphic?.clear();
+  }
+
+  public refreshWrapAroundView(): void {
+    if (!this.wrapAroundEnabled) return;
+    const width = this.canvasWidth;
+    const height = this.canvasHeight;
+    if (!this.wrapAroundContainer || !this.wrapRT) {
+      const container = new Container();
+      container.eventMode = 'none';
+      const texture = RenderTexture.create({ width, height, resolution: 1 });
+      applyMagFilter(texture, this.magFilter);
+      for (let row = -1; row <= 1; row++) {
+        for (let col = -1; col <= 1; col++) {
+          if (row === 0 && col === 0) continue;
+          const sprite = new Sprite(texture);
+          sprite.position.set(col * width, row * height);
+          container.addChild(sprite);
+        }
+      }
+
+      const frame = new Graphics();
+      const dash = Math.max(4, Math.max(width, height) / 600);
+      for (let x = 0; x < width; x += dash * 2) {
+        const end = Math.min(width, x + dash);
+        frame.moveTo(x, 0).lineTo(end, 0).moveTo(x, height).lineTo(end, height);
+      }
+      for (let y = 0; y < height; y += dash * 2) {
+        const end = Math.min(height, y + dash);
+        frame.moveTo(0, y).lineTo(0, end).moveTo(width, y).lineTo(width, end);
+      }
+      frame.stroke({ color: 0x808080, alpha: 0.65, pixelLine: true });
+      container.addChild(frame);
+      this.wrapAroundContainer = this.rootContainer.addChild(container);
+      this.wrapRT = texture;
+    }
+
+    // Exclude the repeats from the capture to avoid reading and writing the same texture.
+    this.wrapAroundContainer.visible = false;
+    try {
+      this.renderer.render({ container: this.rootContainer, target: this.wrapRT, clear: true, clearColor: [0, 0, 0, 0] });
+    } finally {
+      this.wrapAroundContainer.visible = true;
+    }
+  }
+
+  private releaseWrapAroundView(): void {
+    this.wrapAroundContainer?.destroy({ children: true });
+    this.wrapAroundContainer = null;
+    this.wrapRT?.destroy(true);
+    this.wrapRT = null;
+    this.wrapShapeOverlay?.destroy({ children: true });
+    this.wrapShapeOverlay = null;
+    this.wrapShapeGraphic = null;
   }
 
   private scheduleReheat() {
@@ -968,9 +1068,17 @@ export class LayerManager {
         }
       }
     }
+    const repeats = this.wrapAroundContainer;
+    const shapeOverlay = this.wrapShapeOverlay;
+    const repeatsVisible = repeats?.visible ?? false;
+    const shapeVisible = shapeOverlay?.visible ?? false;
+    if (repeats) repeats.visible = false;
+    if (shapeOverlay) shapeOverlay.visible = false;
     try {
       return fn();
     } finally {
+      if (repeats) repeats.visible = repeatsVisible;
+      if (shapeOverlay) shapeOverlay.visible = shapeVisible;
       for (let i = tempCold.length - 1; i >= 0; i--) {
         const { item, key, cpu } = tempCold[i];
         const t = item.gpu?.get(key);
@@ -1146,7 +1254,9 @@ export class LayerManager {
    * Draws `container` (canvas coordinates) onto a sparse layer: into every tile its box (x, y, w, h)
    * covers, making tiles where there were none. Each tile is backed up the first time.
    */
-  private drawSparse(item: LayerItem, container: Container, x: number, y: number, w: number, h: number, ink?: StrokeInk) {
+  private drawSparse(item: LayerItem, container: Container, x: number, y: number, w: number, h: number,
+    ink?: StrokeInk, regions?: readonly Rect[],
+  ) {
     const x0 = Math.max(0, Math.floor(x));
     const y0 = Math.max(0, Math.floor(y));
     const x1 = Math.min(this.canvasWidth, Math.ceil(x + w));
@@ -1159,17 +1269,37 @@ export class LayerManager {
     const c1 = Math.min(this.cols - 1, Math.floor((x1 + GUTTER - 1) / TS));
     const r0 = Math.max(0, Math.floor((y0 - GUTTER) / TS));
     const r1 = Math.min(this.rows - 1, Math.floor((y1 + GUTTER - 1) / TS));
+    const covered = regions && new Map<number, boolean>();
+    if (covered) {
+      for (const rect of regions!) {
+        const left = Math.max(0, Math.floor(rect.x));
+        const top = Math.max(0, Math.floor(rect.y));
+        const right = Math.min(this.canvasWidth, Math.ceil(rect.x + rect.w));
+        const bottom = Math.min(this.canvasHeight, Math.ceil(rect.y + rect.h));
+        if (left >= right || top >= bottom) continue;
+        for (let r = Math.max(r0, Math.floor((top - GUTTER) / TS)); r <= Math.min(r1, Math.floor((bottom + GUTTER - 1) / TS)); r++) {
+          for (let c = Math.max(c0, Math.floor((left - GUTTER) / TS)); c <= Math.min(c1, Math.floor((right + GUTTER - 1) / TS)); c++) {
+            const tile = r * this.cols + c;
+            const overlaps = left < (c + 1) * TS && right > c * TS && top < (r + 1) * TS && bottom > r * TS;
+            covered.set(tile, covered.get(tile) || overlaps);
+          }
+        }
+      }
+    }
     for (let row = r0; row <= r1; row++) {
       for (let col = c0; col <= c1; col++) {
+        const coveredTile = covered?.get(row * this.cols + col);
+        if (covered && coveredTile === undefined) continue;
         const tx = col * TS;
         const ty = row * TS;
+        const overlaps = coveredTile ?? (x0 < tx + TS && x1 > tx && y0 < ty + TS && y1 > ty);
         const key = keyOf(col, row);
         let t = gpu.get(key);
-        if (!t && item.coldTiles.has(key) && !(x0 >= tx + TS || x1 <= tx || y0 >= ty + TS || y1 <= ty)) {
+        if (!t && item.coldTiles.has(key) && overlaps) {
           t = this.reheatTile(item, col, row);
         }
         if (!t) {
-          if (x0 >= tx + TS || x1 <= tx || y0 >= ty + TS || y1 <= ty) continue; // only its gutter: no tile for that
+          if (!overlaps) continue; // only its gutter: no tile for that
           this.backup(item, key, undefined);
           t = this.addTile(item, col, row);
         } else {
@@ -1210,9 +1340,9 @@ export class LayerManager {
     }
     if (!item.gpu) this.thaw(item);
     return {
-      draw: (c, x, y, w, h) => {
+      draw: (c, x, y, w, h, regions) => {
         this.lastLocalDrawAt = performance.now();
-        this.drawSparse(item, c, x, y, w, h, ink);
+        this.drawSparse(item, c, x, y, w, h, ink, regions);
       },
     };
   }
@@ -2018,7 +2148,7 @@ export class LayerManager {
     }
 
     // Active visible layers exceeding the soft GPU tile limit spill oldest offscreen tiles to CPU LRU
-    if (!this.evictingOffscreen && this.viewBounds && !this.isActivelyDrawing()) {
+    if (!this.wrapAroundEnabled && !this.evictingOffscreen && this.viewBounds && !this.isActivelyDrawing()) {
       let totalGpuTiles = 0;
       for (const item of this.layersMap.values()) totalGpuTiles += item.gpu?.size ?? 0;
       if (totalGpuTiles > this.softGpuTileLimit) {
@@ -3518,6 +3648,7 @@ export class LayerManager {
   public destroy() {
     this.flushPendingReads();
     this.destroyed = true;
+    this.releaseWrapAroundView();
     clearInterval(this.tickTimer);
     if (this.reheatRaf && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.reheatRaf);
     this.reheatRaf = 0;

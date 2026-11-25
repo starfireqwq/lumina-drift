@@ -1,13 +1,14 @@
 import { BrushProperties, BrushRenderer } from './BrushRenderer';
 import { CanvasViewport } from './Viewport';
 import type { TileCoord, TileData } from '@atelier/shared';
-import { LayerManager, type StrokeInk } from './LayerManager';
+import { LayerManager, type BrushTarget, type StrokeInk } from './LayerManager';
 import { FLOATS_PER_DAB, RawPoint, StrokeWorkerEngine } from '../workers/stroke.worker';
 import { RulerManager } from './RulerManager';
 import { startTabletStroke, type TabletMotion, type TabletPoint, type TabletStroke } from './tabletInput';
 import { getQuickShapeDelayMs, getQuickShapeEnabled } from './inputPreferences';
 import { adjustQuickShapeByPointer, buildQuickShapeDabs, recognizeQuickShape, sampleQuickShapePoints,
   type QuickShapeCandidate, type QuickShapeKind, type QuickShapePoint } from './quickShape';
+import { getWrappedStampPoints } from './wrapAround';
 
 /** When the pen was there (same clock as performance.now); some synthetic events report 0 */
 const eventTime = (e: { timeStamp?: number }) => (e.timeStamp && e.timeStamp > 0 ? e.timeStamp : performance.now());
@@ -34,6 +35,7 @@ export interface StrokeCommitData {
   quickShapePreviewId?: number;
   originalTiles?: TileCoord[];
   originalPoints?: StrokePoint[];
+  wrapAround?: boolean;
 }
 
 export interface StrokePipelineCallbacks {
@@ -56,6 +58,8 @@ export class StrokePipeline {
   private strokeId = 0;
   private cancelledThroughStrokeId = 0;
   private activeLayerId: string | null = null;
+  private wrapAroundEnabled = false;
+  private strokeWrapAroundEnabled = false;
   private currentStrokePoints: StrokePoint[] = [];
   private lastValidPoint: RawPoint | null = null;
   private tabletStroke: TabletStroke | null = null;
@@ -65,6 +69,14 @@ export class StrokePipeline {
 
   public setOnNeedsRender(cb: (() => void) | null) {
     this.onNeedsRender = cb;
+  }
+
+  public setWrapAround(enabled: boolean): void {
+    this.wrapAroundEnabled = enabled;
+  }
+
+  public isStrokeWrapped(): boolean {
+    return this.strokeWrapAroundEnabled;
   }
 
   public hasPendingWork(): boolean {
@@ -197,70 +209,74 @@ export class StrokePipeline {
           whole: this.brushRenderer.needsWholeLayer(), ink: this.strokeInk,
         });
         if (target) {
-          this.brushRenderer.stampDabs(target, dabsArray, count, undefined, undefined, isAlphaLocked, this.eraserProps);
-          this.onNeedsRender?.();
+          if (this.strokeWrapAroundEnabled) {
+            this.stampWrappedDabs(target, dabsArray, count, isAlphaLocked, props);
+          } else {
+            this.brushRenderer.stampDabs(target, dabsArray, count, undefined, undefined, isAlphaLocked, this.eraserProps);
+            this.onNeedsRender?.();
 
-          // Collect points for preview streaming and final Op commit
-          const rulerMgr = RulerManager.getInstance();
-          const shouldSnap = props.snapToRuler !== false;
-          const isSymmetry = shouldSnap && rulerMgr.state.mode === 'symmetry';
+            // Collect points for preview streaming and final Op commit
+            const rulerMgr = RulerManager.getInstance();
+            const shouldSnap = props.snapToRuler !== false;
+            const isSymmetry = shouldSnap && rulerMgr.state.mode === 'symmetry';
 
-          if (isSymmetry) {
-            // Collect and immediately stamp all mirrored dabs across symmetry axes on GPU
-            const extraDabs: number[] = [];
+            if (isSymmetry) {
+              // Collect and immediately stamp all mirrored dabs across symmetry axes on GPU
+              const extraDabs: number[] = [];
 
-            for (let i = 0; i < count; i++) {
-              const offset = i * FLOATS_PER_DAB;
-              const origPt = {
-                x: Math.round(dabsArray[offset] * 10) / 10,
-                y: Math.round(dabsArray[offset + 1] * 10) / 10,
-                pressure: Math.round(dabsArray[offset + 3] * 100) / 100,
-              };
-              this.currentStrokePoints.push(origPt);
-              if (this.callbacks.onEmitPreviewDabs) this.pendingPreviewDabs.push(origPt);
+              for (let i = 0; i < count; i++) {
+                const offset = i * FLOATS_PER_DAB;
+                const origPt = {
+                  x: Math.round(dabsArray[offset] * 10) / 10,
+                  y: Math.round(dabsArray[offset + 1] * 10) / 10,
+                  pressure: Math.round(dabsArray[offset + 3] * 100) / 100,
+                };
+                this.currentStrokePoints.push(origPt);
+                if (this.callbacks.onEmitPreviewDabs) this.pendingPreviewDabs.push(origPt);
 
-              const symPts = rulerMgr.getSymmetryPoints(origPt);
-              // symPts[0] is the original point; subsequent entries are mirrored counterparts
-              for (let s = 1; s < symPts.length; s++) {
-                const sp = symPts[s];
-                const symDab = { x: sp.x, y: sp.y, pressure: origPt.pressure };
-                this.currentStrokePoints.push(symDab);
-                if (this.callbacks.onEmitPreviewDabs) this.pendingPreviewDabs.push(symDab);
+                const symPts = rulerMgr.getSymmetryPoints(origPt);
+                // symPts[0] is the original point; subsequent entries are mirrored counterparts
+                for (let s = 1; s < symPts.length; s++) {
+                  const sp = symPts[s];
+                  const symDab = { x: sp.x, y: sp.y, pressure: origPt.pressure };
+                  this.currentStrokePoints.push(symDab);
+                  if (this.callbacks.onEmitPreviewDabs) this.pendingPreviewDabs.push(symDab);
 
-                extraDabs.push(
-                  sp.x,
-                  sp.y,
-                  dabsArray[offset + 2], // size
-                  dabsArray[offset + 3], // pressure
-                  dabsArray[offset + 4], // alpha
-                  dabsArray[offset + 5], // rotation
-                  dabsArray[offset + 6]  // tilt
+                  extraDabs.push(
+                    sp.x,
+                    sp.y,
+                    dabsArray[offset + 2], // size
+                    dabsArray[offset + 3], // pressure
+                    dabsArray[offset + 4], // alpha
+                    dabsArray[offset + 5], // rotation
+                    dabsArray[offset + 6]  // tilt
+                  );
+                }
+              }
+
+              if (extraDabs.length > 0) {
+                const extraDabsArray = new Float32Array(extraDabs);
+                this.brushRenderer.stampDabs(
+                  target,
+                  extraDabsArray,
+                  extraDabs.length / FLOATS_PER_DAB,
+                  undefined,
+                  undefined,
+                  isAlphaLocked,
+                  this.eraserProps
                 );
               }
-            }
-
-            if (extraDabs.length > 0) {
-              const extraDabsArray = new Float32Array(extraDabs);
-              this.brushRenderer.stampDabs(
-                target,
-                extraDabsArray,
-                extraDabs.length / FLOATS_PER_DAB,
-                undefined,
-                undefined,
-                isAlphaLocked,
-                this.eraserProps
-              );
-            }
-          } else {
-            for (let i = 0; i < count; i++) {
-              const offset = i * FLOATS_PER_DAB;
-              const pt = {
-                x: Math.round(dabsArray[offset] * 10) / 10,
-                y: Math.round(dabsArray[offset + 1] * 10) / 10,
-                pressure: Math.round(dabsArray[offset + 3] * 100) / 100,
-              };
-              this.currentStrokePoints.push(pt);
-              if (this.callbacks.onEmitPreviewDabs) this.pendingPreviewDabs.push(pt);
+            } else {
+              for (let i = 0; i < count; i++) {
+                const offset = i * FLOATS_PER_DAB;
+                const pt = {
+                  x: Math.round(dabsArray[offset] * 10) / 10,
+                  y: Math.round(dabsArray[offset + 1] * 10) / 10,
+                  pressure: Math.round(dabsArray[offset + 3] * 100) / 100,
+                };
+                this.currentStrokePoints.push(pt);
+                if (this.callbacks.onEmitPreviewDabs) this.pendingPreviewDabs.push(pt);
+              }
             }
           }
 
@@ -271,15 +287,16 @@ export class StrokePipeline {
             this.pendingPreviewDabs.length > 0 &&
             (now - this.lastPreviewEmitTime >= this.previewIntervalMs || isStart || isFinish)
           ) {
-            this.callbacks.onEmitPreviewDabs([...this.pendingPreviewDabs], props.isEraser);
-            this.pendingPreviewDabs = [];
-            this.lastPreviewEmitTime = now;
+            this.emitFreehandPreview(props.isEraser, now);
           }
         }
       }
     }
 
     if (isFinish) {
+      if (this.strokeWrapAroundEnabled && !this.quickShapeCurrent && this.pendingPreviewDabs.length) {
+        this.emitFreehandPreview(props.isEraser, performance.now());
+      }
       // Finalize stroke Op
       if (this.callbacks.onCommitStroke && this.currentStrokePoints.length > 0) {
         this.callbacks.onCommitStroke({
@@ -295,6 +312,7 @@ export class StrokePipeline {
           // Spread over the whole stroke (not its first 200 points): others use it as the stroke's footprint
           samplePoints: this.currentStrokePoints.filter((_, i, all) => i % Math.ceil(all.length / 400) === 0 || i === all.length - 1),
           allPoints: [...this.currentStrokePoints],
+          ...(this.strokeWrapAroundEnabled && { wrapAround: true }),
           ...(this.quickShapeCurrent && {
             quickShapeKind: this.quickShapeCurrent.kind,
             quickShapePreviewId: this.quickShapePreviewId,
@@ -314,6 +332,48 @@ export class StrokePipeline {
       this.eraserProps = undefined;
       this.clearQuickShape();
     }
+  }
+
+  private emitFreehandPreview(isEraser: boolean, now: number) {
+    const points = this.pendingPreviewDabs;
+    const chunkSize = this.strokeWrapAroundEnabled ? 512 : points.length;
+    for (let i = 0; i < points.length; i += chunkSize) {
+      this.callbacks.onEmitPreviewDabs?.(points.slice(i, i + chunkSize), isEraser);
+    }
+    this.pendingPreviewDabs = [];
+    this.lastPreviewEmitTime = now;
+  }
+
+  private stampWrappedDabs(target: BrushTarget, dabs: Float32Array, count: number,
+    isAlphaLocked: boolean, props: BrushProperties,
+  ) {
+    const { width, height } = this.layerManager.getCanvasDimensions();
+    const ruler = RulerManager.getInstance();
+    const symmetry = props.snapToRuler !== false && ruler.state.mode === 'symmetry';
+    const instances: Array<Array<{ x: number; y: number }>> = [];
+    const baseDabs: number[] = [];
+    for (let i = 0; i < count; i++) {
+      const offset = i * FLOATS_PER_DAB;
+      const point = { x: dabs[offset], y: dabs[offset + 1] };
+      const size = dabs[offset + 2];
+      const pressure = Math.round(dabs[offset + 3] * 100) / 100;
+      const tiltScale = 1 + (props.tiltSize ?? 0) * dabs[offset + 6] * 1.5;
+      const radius = Math.max(size * 0.65, size * tiltScale * (props.customBrushUrl ? 0.71 : 0.65) + 1);
+      for (const { x, y } of symmetry ? ruler.getSymmetryPoints(point) : [point]) {
+        const copies = getWrappedStampPoints(x, y, radius, width, height);
+        if (!copies.length) continue;
+        instances.push(copies);
+        baseDabs.push(copies[0].x, copies[0].y, size, dabs[offset + 3], dabs[offset + 4], dabs[offset + 5], dabs[offset + 6]);
+        for (const copy of copies) {
+          const preview = { x: copy.x, y: copy.y, pressure };
+          this.currentStrokePoints.push(preview);
+          if (this.callbacks.onEmitPreviewDabs) this.pendingPreviewDabs.push(preview);
+        }
+      }
+    }
+    this.brushRenderer.stampDabs(target, Float32Array.from(baseDabs), instances.length,
+      undefined, undefined, isAlphaLocked, this.eraserProps, instances);
+    this.onNeedsRender?.();
   }
 
   private trackQuickShapePoint(point: QuickShapePoint) {
@@ -450,6 +510,7 @@ export class StrokePipeline {
     this.quickShapeAllowed = getQuickShapeEnabled();
     this.quickShapeShift = e.shiftKey;
     this.strokeId++;
+    this.strokeWrapAroundEnabled = this.wrapAroundEnabled;
     this.isDrawing = true;
     this.layerManager.markInteractive();
     this.currentStrokePoints = [];

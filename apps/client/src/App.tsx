@@ -212,6 +212,8 @@ export const App: React.FC = () => {
   } : undefined;
 
   const [canvases, setCanvases] = useState<CanvasModel[]>([]);
+  const [wrapAroundEnabled, setWrapAroundEnabled] = useState(false);
+  const toggleWrapAround = useCallback(() => setWrapAroundEnabled((enabled) => !enabled), []);
   const canvasIdRef = useRef(activeCanvasId);
   const layerRequestRef = useRef(0);
   // `${canvasId}:${userId}` already given a layer on opening (or refused one) in this tab
@@ -1579,6 +1581,8 @@ export const App: React.FC = () => {
       {!canvasFullscreen && (
         <TopNavbar
           currentCanvas={currentCanvas}
+          wrapAroundEnabled={wrapAroundEnabled}
+          onToggleWrapAround={currentCanvas && !roomLocked ? toggleWrapAround : undefined}
           plugins={plugins}
           openPluginPanels={openPluginPanels}
           activePluginToolKey={activePluginToolKey}
@@ -1628,6 +1632,8 @@ export const App: React.FC = () => {
             <CanvasWorkspace
               folderAccess={folderAccess}
               canvas={currentCanvas}
+              wrapAroundEnabled={wrapAroundEnabled}
+              onToggleWrapAround={toggleWrapAround}
               activeLayer={activeLayer}
               layers={layers}
               layersLoaded={settledLayerListId === currentCanvas?.id}

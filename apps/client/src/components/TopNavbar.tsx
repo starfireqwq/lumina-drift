@@ -10,6 +10,7 @@ import {
   Film,
   FilePlus2,
   FolderOpen,
+  Grid3X3,
   HelpCircle,
   ImagePlus,
   Keyboard,
@@ -73,6 +74,8 @@ const PainterLevelBadge: React.FC<{ visible: boolean }> = ({ visible }) => {
 
 interface TopNavbarProps {
   currentCanvas?: CanvasModel | null;
+  wrapAroundEnabled?: boolean;
+  onToggleWrapAround?: () => void;
   onOpenCreateCanvas?: () => void;
   onOpenAuth: () => void;
   onOpenProfile?: () => void;
@@ -187,6 +190,8 @@ const DropdownMenu: React.FC<{ label: React.ReactNode; title: string; items?: Me
 
 export const TopNavbar: React.FC<TopNavbarProps> = ({
   currentCanvas,
+  wrapAroundEnabled,
+  onToggleWrapAround,
   onOpenCreateCanvas,
   onOpenAuth,
   onOpenProfile,
@@ -260,8 +265,20 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
     ...(onOpenServer ? [{ kind: 'item' as const, label: t.server.title, icon: <Server />, onSelect: onOpenServer }] : []),
   ];
 
+  const shortcutMgr = ShortcutManager.getInstance();
+  const [, setShortcutTick] = useState(0);
+  useEffect(() => shortcutMgr.subscribe(() => setShortcutTick((v) => v + 1)), [shortcutMgr]);
+
   const windowItems: MenuItem[] = [
     { kind: 'title', label: t.navbar.window },
+    ...(onToggleWrapAround ? [{
+      kind: 'item' as const,
+      label: t.canvas.wrapAround,
+      icon: <Grid3X3 />,
+      checked: Boolean(wrapAroundEnabled),
+      hint: shortcutMgr.getDisplayLabel(shortcutMgr.getComboForAction('action_view_wrap_around')) || undefined,
+      onSelect: onToggleWrapAround,
+    }, { kind: 'sep' as const }] : []),
     ...PANEL_IDS.map((id) => ({
       kind: 'item' as const,
       label: getPanelTitle(id, t),
@@ -292,10 +309,6 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
     { kind: 'sep' },
     { kind: 'item', label: `${t.settings.uiScale}…`, icon: <ZoomIn />, onSelect: () => onOpenSettings?.('general') },
   ];
-
-  const shortcutMgr = ShortcutManager.getInstance();
-  const [, setShortcutTick] = useState(0);
-  useEffect(() => shortcutMgr.subscribe(() => setShortcutTick((v) => v + 1)), [shortcutMgr]);
 
   const openPanelSet = new Set(openPluginPanels);
   const enabledPlugins = plugins.filter((plugin) => plugin.enabled);

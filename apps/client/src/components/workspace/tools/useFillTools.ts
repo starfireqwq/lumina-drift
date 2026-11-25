@@ -14,6 +14,7 @@ import {
 } from '@atelier/shared';
 import { applyColorOutline, type OutlineSettings } from '../../../engine/colorOutline';
 import { calculateBucketMask } from '../../../engine/commitWorkers';
+import { wrapPoint } from '../../../engine/wrapAround';
 import { RulerManager } from '../../../engine/RulerManager';
 import type { AntiAliasLevel } from '../../../engine/BrushRenderer';
 import { OfflineSessionStore } from '../../../services/offlineStore';
@@ -477,8 +478,9 @@ export function useFillTools(ctx: ToolContext) {
     if (!activeItem) return;
 
     const local = viewportRef.current.screenToCanvas(screenX, screenY);
-    const clickX = Math.round(local.x);
-    const clickY = Math.round(local.y);
+    const wrap = ctx.wrapAroundRef.current;
+    const pixel = { x: Math.round(local.x), y: Math.round(local.y) };
+    const { x: clickX, y: clickY } = wrap ? wrapPoint(pixel.x, pixel.y, canvas.width, canvas.height) : pixel;
     if (clickX < 0 || clickX >= canvas.width || clickY < 0 || clickY >= canvas.height) return;
 
     const lm = layerManagerRef.current;
@@ -520,7 +522,7 @@ export function useFillTools(ctx: ToolContext) {
         const seeds = ruler.state.mode === 'symmetry'
           ? ruler.getSymmetryPoints({ x: clickX, y: clickY }).map(({ x, y }) => ({ x: Math.round(x), y: Math.round(y) }))
           : [{ x: clickX, y: clickY }];
-        const fill = await calculateBucketMask(pixels, W, H, seeds, bucketTolerance, bucketExpand);
+        const fill = await calculateBucketMask(pixels, W, H, seeds, bucketTolerance, bucketExpand, wrap);
         if (!fill || layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== activeItem) return null;
         maskArray = fill.data;
         bounds = fill.bounds;

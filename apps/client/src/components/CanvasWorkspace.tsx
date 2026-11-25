@@ -416,6 +416,8 @@ export interface CanvasPluginAccess {
 
 interface CanvasWorkspaceProps {
   canvas: CanvasModel | null;
+  wrapAroundEnabled?: boolean;
+  onToggleWrapAround?: () => void;
   activeLayer: LayerModel | null;
   layers: LayerModel[];
   layersLoaded: boolean;
@@ -461,6 +463,8 @@ interface CanvasWorkspaceProps {
 
 export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   canvas,
+  wrapAroundEnabled = false,
+  onToggleWrapAround,
   activeLayer,
   layers,
   layersLoaded,
@@ -592,6 +596,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const pixiAppRef = useRef<Application | null>(null);
   const viewportRef = useRef<CanvasViewport | null>(null);
   const layerManagerRef = useRef<LayerManager | null>(null);
+  const wrapAroundRef = useRef(wrapAroundEnabled);
+  const toggleWrapAroundRef = useRef(onToggleWrapAround);
+  toggleWrapAroundRef.current = onToggleWrapAround;
   const brushRendererRef = useRef<BrushRenderer | null>(null);
   const strokePipelineRef = useRef<StrokePipeline | null>(null);
   const [activeQuickShape, setActiveQuickShape] = useState<QuickShapeCandidate | null>(null);
@@ -607,6 +614,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const requestRenderRef = useRef<() => void>(() => pixiAppRef.current?.render());
   const setPlaybackResolutionRef = useRef<(reduced: boolean) => void>(() => {});
   const presentCanvas = useCallback(() => {
+    layerManagerRef.current?.refreshWrapAroundView();
     pixiAppRef.current?.render();
     setIsCanvasPresented(true);
   }, []);
@@ -1417,6 +1425,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     isCanvasViewer,
     viewerReadOnlyWarn: t.collab.viewerReadOnlyWarn,
     currentTool,
+    wrapAroundRef,
     brushProps,
     setBrushProps,
     pixiAppRef,
@@ -1516,6 +1525,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     smudgeMode,
     setSmudgeMode,
   } = liquify;
+
+  useLayoutEffect(() => {
+    wrapAroundRef.current = wrapAroundEnabled;
+    layerManagerRef.current?.setWrapAround(wrapAroundEnabled);
+    strokePipelineRef.current?.setWrapAround(wrapAroundEnabled);
+    // Blur and smudge keep the same sampling topology for the lifetime of a drag.
+    if (!liquify.isActive()) blurSmudgeEngineRef.current?.setWrapAround(wrapAroundEnabled);
+  }, [wrapAroundEnabled]);
 
   const [eraserHover, setEraserHoverState] = useState(false);
   const eraserHoverRef = useRef(false);
@@ -1904,10 +1921,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         OfflineSessionStore.isOfflineCanvas(canvas.id)
       );
       layerManagerRef.current = layerManager;
+      layerManager.setWrapAround(wrapAroundRef.current);
       prepareLayerView = () => {
         const deviceScale = viewport.getState().zoom * app.renderer.resolution;
         layerManager.setPixelated(deviceScale >= 1 - 1e-6);
         layerManager.prepareView(deviceScale);
+        layerManager.refreshWrapAroundView();
       };
       const syncViewportBounds = () => {
         if (destroyed) return;
@@ -2008,6 +2027,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       liquifyEngineRef.current = liquifyEngine;
 
       const blurSmudgeEngine = new BlurSmudgeEngine(app.renderer, tileEngine, canvas.width, canvas.height);
+      blurSmudgeEngine.setWrapAround(wrapAroundRef.current);
       blurSmudgeEngineRef.current = blurSmudgeEngine;
 
       const vectorEngine = new VectorEngine(tileEngine, canvas.width, canvas.height);
@@ -2049,6 +2069,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         },
       });
       strokePipelineRef.current = pipeline;
+      pipeline.setWrapAround(wrapAroundRef.current);
       pipelineForRender = pipeline;
       pipeline.setOnNeedsRender(scheduleRender);
       pipeline.setActiveLayer(activeLayerRef.current?.id || null);
@@ -2440,6 +2461,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_view_flip'), ev)) {
             ev.preventDefault();
             viewportRef.current?.toggleMirrorX();
+          } else if (hit('action_view_wrap_around') && toggleWrapAroundRef.current) {
+            ev.preventDefault();
+            if (!ev.repeat) toggleWrapAroundRef.current();
           } else if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_anim_prev_frame'), ev)) {
             ev.preventDefault();
             animEngineRef.current?.goToPrevFrame();
@@ -8136,6 +8160,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                   onRotate={(rad) => viewportRef.current?.rotateBy(rad)}
                   onResetRotation={() => viewportRef.current?.resetRotation()}
                   onToggleMirror={() => viewportRef.current?.toggleMirrorX()}
+                  wrapAroundEnabled={wrapAroundEnabled}
+                  onToggleWrapAround={onToggleWrapAround}
                   onOpenRuler={() => setIsRulerModalOpen(true)}
                   onOpenReference={() => setIsReferenceHUDOpen(true)}
                   onOpenFilters={() => openFilterRef.current()}

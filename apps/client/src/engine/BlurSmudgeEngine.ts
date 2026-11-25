@@ -2,6 +2,7 @@ import { Renderer, RenderTexture } from 'pixi.js';
 import { TileEngine } from './TileEngine';
 import { DEFAULT_TILE_SIZE, getSelectionMaskFactor } from '@atelier/shared';
 import type { LayerManager } from './LayerManager';
+import { wrapCoord } from './wrapAround';
 
 const TS = DEFAULT_TILE_SIZE;
 
@@ -34,6 +35,7 @@ export class BlurSmudgeEngine {
   private tileEngine: TileEngine;
   private canvasWidth: number;
   private canvasHeight: number;
+  private wrapAroundEnabled = false;
   /** One tip per mirrored copy of the stroke (symmetry ruler), for the drag in progress */
   private smudgeTips = new Map<number, SmudgeTip>();
   private blendLastPos = new Map<number, { x: number; y: number }>();
@@ -57,7 +59,42 @@ export class BlurSmudgeEngine {
     this.resetSmudge();
   }
 
+  public setWrapAround(enabled: boolean): void {
+    this.wrapAroundEnabled = enabled;
+  }
+
+  private forEachWrappedRegion(x: number, y: number, w: number, h: number,
+    visit: (x: number, y: number, w: number, h: number, offsetX: number, offsetY: number) => void,
+  ) {
+    if (this.canvasWidth <= 0 || this.canvasHeight <= 0) return;
+    for (let offsetY = 0; offsetY < h;) {
+      const wy = wrapCoord(y + offsetY, this.canvasHeight);
+      const height = Math.min(h - offsetY, this.canvasHeight - wy);
+      for (let offsetX = 0; offsetX < w;) {
+        const wx = wrapCoord(x + offsetX, this.canvasWidth);
+        const width = Math.min(w - offsetX, this.canvasWidth - wx);
+        visit(wx, wy, width, height, offsetX, offsetY);
+        offsetX += width;
+      }
+      offsetY += height;
+    }
+  }
+
   private readBox(target: SparseLayerTarget, x: number, y: number, w: number, h: number): Uint8Array {
+    if (!this.wrapAroundEnabled || (x >= 0 && y >= 0 && x + w <= this.canvasWidth && y + h <= this.canvasHeight)) {
+      return this.readCanvasBox(target, x, y, w, h);
+    }
+    const out = new Uint8Array(w * h * 4);
+    this.forEachWrappedRegion(x, y, w, h, (wx, wy, width, height, offsetX, offsetY) => {
+      const region = this.readCanvasBox(target, wx, wy, width, height);
+      for (let row = 0; row < height; row++) {
+        out.set(region.subarray(row * width * 4, (row + 1) * width * 4), ((offsetY + row) * w + offsetX) * 4);
+      }
+    });
+    return out;
+  }
+
+  private readCanvasBox(target: SparseLayerTarget, x: number, y: number, w: number, h: number): Uint8Array {
     if (target instanceof RenderTexture) {
       return this.tileEngine.readRegion(target, x, y, w, h);
     }
@@ -98,6 +135,21 @@ export class BlurSmudgeEngine {
   }
 
   private writeBox(target: SparseLayerTarget, x: number, y: number, w: number, h: number, px: Uint8Array) {
+    if (!this.wrapAroundEnabled || (x >= 0 && y >= 0 && x + w <= this.canvasWidth && y + h <= this.canvasHeight)) {
+      this.writeCanvasBox(target, x, y, w, h, px);
+      return;
+    }
+    this.forEachWrappedRegion(x, y, w, h, (wx, wy, width, height, offsetX, offsetY) => {
+      const region = new Uint8Array(width * height * 4);
+      for (let row = 0; row < height; row++) {
+        const start = ((offsetY + row) * w + offsetX) * 4;
+        region.set(px.subarray(start, start + width * 4), row * width * 4);
+      }
+      this.writeCanvasBox(target, wx, wy, width, height, region);
+    });
+  }
+
+  private writeCanvasBox(target: SparseLayerTarget, x: number, y: number, w: number, h: number, px: Uint8Array) {
     if (target instanceof RenderTexture) {
       this.tileEngine.writeRegion(target, x, y, w, h, px);
       return;
@@ -137,6 +189,22 @@ export class BlurSmudgeEngine {
     layerManager.writeRegion(layerId, x, y, w, h, px);
   }
 
+  /** Limit writes to one copy of each pixel, keeping the copies closest to the dab. */
+  private writeRange(min: number, max: number, period: number): [number, number] {
+    if (!this.wrapAroundEnabled) return [Math.max(0, min), Math.min(period, max)];
+    if (max - min <= period) return [min, max];
+    const start = Math.floor((min + max - period) / 2);
+    return [start, start + period];
+  }
+
+  private selectionFactor(mask: Uint8Array, x: number, y: number): number {
+    const w = this.canvasWidth;
+    const h = this.canvasHeight;
+    return this.wrapAroundEnabled
+      ? getSelectionMaskFactor(mask, wrapCoord(x, w), wrapCoord(y, h), w, h)
+      : getSelectionMaskFactor(mask, x, y, w, h);
+  }
+
   /**
    * Applies localized blur over a brush step region
    */
@@ -150,22 +218,26 @@ export class BlurSmudgeEngine {
     const { radius, strength } = config;
     if (radius <= 2) return null;
 
-    const minX = Math.max(0, Math.floor(cx - radius));
-    const minY = Math.max(0, Math.floor(cy - radius));
-    const maxX = Math.min(this.canvasWidth, Math.ceil(cx + radius));
-    const maxY = Math.min(this.canvasHeight, Math.ceil(cy + radius));
+    const [minX, maxX] = this.writeRange(Math.floor(cx - radius), Math.ceil(cx + radius), this.canvasWidth);
+    const [minY, maxY] = this.writeRange(Math.floor(cy - radius), Math.ceil(cy + radius), this.canvasHeight);
     const w = maxX - minX;
     const h = maxY - minY;
 
-    if (w <= 1 || h <= 1) return null;
+    if (w <= 0 || h <= 0 || (!this.wrapAroundEnabled && (w === 1 || h === 1))) return null;
 
     try {
-      const srcPixels = this.readBox(target, minX, minY, w, h);
-      const dstPixels = new Uint8Array(srcPixels);
-
       const rSq = radius * radius;
       const s = Math.max(0.1, Math.min(1.0, strength));
       const blurRadius = Math.max(1, Math.min(8, Math.round(radius * 0.15 * s)));
+      const pad = this.wrapAroundEnabled ? blurRadius : 0;
+      const sampleW = w + pad * 2;
+      const sampleH = h + pad * 2;
+      const srcPixels = this.readBox(target, minX - pad, minY - pad, sampleW, sampleH);
+      const dstPixels = new Uint8Array(w * h * 4);
+      for (let row = 0; row < h; row++) {
+        const start = ((row + pad) * sampleW + pad) * 4;
+        dstPixels.set(srcPixels.subarray(start, start + w * 4), row * w * 4);
+      }
 
       // Fast box blur kernel
       for (let py = 0; py < h; py++) {
@@ -180,7 +252,7 @@ export class BlurSmudgeEngine {
 
           let maskFactor = 1.0;
           if (selectionMask) {
-            maskFactor = getSelectionMaskFactor(selectionMask, globalX, globalY, this.canvasWidth, this.canvasHeight);
+            maskFactor = this.selectionFactor(selectionMask, globalX, globalY);
             if (maskFactor <= 0.001) continue;
           }
 
@@ -191,13 +263,13 @@ export class BlurSmudgeEngine {
 
           // Box sample
           let sumR = 0, sumG = 0, sumB = 0, sumA = 0, count = 0;
-          const bMinY = Math.max(0, py - blurRadius);
-          const bMaxY = Math.min(h - 1, py + blurRadius);
-          const bMinX = Math.max(0, px - blurRadius);
-          const bMaxX = Math.min(w - 1, px + blurRadius);
+          const bMinY = Math.max(0, py + pad - blurRadius);
+          const bMaxY = Math.min(sampleH - 1, py + pad + blurRadius);
+          const bMinX = Math.max(0, px + pad - blurRadius);
+          const bMaxX = Math.min(sampleW - 1, px + pad + blurRadius);
 
           for (let by = bMinY; by <= bMaxY; by++) {
-            const rowOffset = by * w;
+            const rowOffset = by * sampleW;
             for (let bx = bMinX; bx <= bMaxX; bx++) {
               const idx = (rowOffset + bx) * 4;
               sumR += srcPixels[idx];
@@ -215,10 +287,10 @@ export class BlurSmudgeEngine {
             const avgA = sumA / count;
 
             const dstIdx = (py * w + px) * 4;
-            dstPixels[dstIdx] = Math.round(srcPixels[dstIdx] * (1 - falloff) + avgR * falloff);
-            dstPixels[dstIdx + 1] = Math.round(srcPixels[dstIdx + 1] * (1 - falloff) + avgG * falloff);
-            dstPixels[dstIdx + 2] = Math.round(srcPixels[dstIdx + 2] * (1 - falloff) + avgB * falloff);
-            dstPixels[dstIdx + 3] = Math.round(srcPixels[dstIdx + 3] * (1 - falloff) + avgA * falloff);
+            dstPixels[dstIdx] = Math.round(dstPixels[dstIdx] * (1 - falloff) + avgR * falloff);
+            dstPixels[dstIdx + 1] = Math.round(dstPixels[dstIdx + 1] * (1 - falloff) + avgG * falloff);
+            dstPixels[dstIdx + 2] = Math.round(dstPixels[dstIdx + 2] * (1 - falloff) + avgB * falloff);
+            dstPixels[dstIdx + 3] = Math.round(dstPixels[dstIdx + 3] * (1 - falloff) + avgA * falloff);
           }
         }
       }
@@ -253,7 +325,10 @@ export class BlurSmudgeEngine {
       let j = i + 1;
       for (; j < dabs.length; j++) {
         const [x, y] = dabs[j];
-        if (Math.max(maxCx, x) - Math.min(minCx, x) > 256 || Math.max(maxCy, y) - Math.min(minCy, y) > 256) break;
+        const spanX = Math.max(maxCx, x) - Math.min(minCx, x);
+        const spanY = Math.max(maxCy, y) - Math.min(minCy, y);
+        if (spanX > 256 || spanY > 256 || (this.wrapAroundEnabled &&
+          (spanX + 2 * r + 1 > this.canvasWidth || spanY + 2 * r + 1 > this.canvasHeight))) break;
         minCx = Math.min(minCx, x);
         maxCx = Math.max(maxCx, x);
         minCy = Math.min(minCy, y);
@@ -355,10 +430,10 @@ export class BlurSmudgeEngine {
     const cy = Math.round(y);
     const W = this.canvasWidth;
     const H = this.canvasHeight;
-    const x0 = Math.min(W - 1, Math.max(0, cx - r));
-    const y0 = Math.min(H - 1, Math.max(0, cy - r));
-    const x1 = Math.min(W, Math.max(x0 + 1, cx + r + 1));
-    const y1 = Math.min(H, Math.max(y0 + 1, cy + r + 1));
+    const x0 = this.wrapAroundEnabled ? cx - r : Math.min(W - 1, Math.max(0, cx - r));
+    const y0 = this.wrapAroundEnabled ? cy - r : Math.min(H - 1, Math.max(0, cy - r));
+    const x1 = this.wrapAroundEnabled ? cx + r + 1 : Math.min(W, Math.max(x0 + 1, cx + r + 1));
+    const y1 = this.wrapAroundEnabled ? cy + r + 1 : Math.min(H, Math.max(y0 + 1, cy + r + 1));
     const w = x1 - x0;
     const h = y1 - y0;
     const px = this.readBox(target, x0, y0, w, h);
@@ -391,10 +466,8 @@ export class BlurSmudgeEngine {
   ): Bounds | null {
     const W = this.canvasWidth;
     const H = this.canvasHeight;
-    const minX = Math.max(0, rx0);
-    const minY = Math.max(0, ry0);
-    const maxX = Math.min(W, rx1);
-    const maxY = Math.min(H, ry1);
+    const [minX, maxX] = this.writeRange(rx0, rx1, W);
+    const [minY, maxY] = this.writeRange(ry0, ry1, H);
     const w = maxX - minX;
     const h = maxY - minY;
     if (w <= 0 || h <= 0) return null;
@@ -402,10 +475,10 @@ export class BlurSmudgeEngine {
     const k = Math.max(2, Math.min(18, Math.round(2 + r * 0.28 * (0.35 + 0.65 * s))));
     const k1 = Math.max(1, Math.round(k * 0.65));
     const pad = k1 * 2;
-    const px0 = Math.max(0, minX - pad);
-    const py0 = Math.max(0, minY - pad);
-    const px1 = Math.min(W, maxX + pad);
-    const py1 = Math.min(H, maxY + pad);
+    const px0 = this.wrapAroundEnabled ? minX - pad : Math.max(0, minX - pad);
+    const py0 = this.wrapAroundEnabled ? minY - pad : Math.max(0, minY - pad);
+    const px1 = this.wrapAroundEnabled ? maxX + pad : Math.min(W, maxX + pad);
+    const py1 = this.wrapAroundEnabled ? maxY + pad : Math.min(H, maxY + pad);
     const pw = px1 - px0;
     const ph = py1 - py0;
 
@@ -486,7 +559,7 @@ export class BlurSmudgeEngine {
         const oi = idx * 4;
         let alphaMix = 1 - keep[idx];
         if (alphaMix > 0 && selectionMask) {
-          alphaMix *= getSelectionMaskFactor(selectionMask, gx, gy, W, H);
+          alphaMix *= this.selectionFactor(selectionMask, gx, gy);
         }
         if (alphaMix <= 0.001) {
           out[oi] = src[si];
@@ -520,10 +593,8 @@ export class BlurSmudgeEngine {
   ): Bounds | null {
     const W = this.canvasWidth;
     const H = this.canvasHeight;
-    const minX = Math.max(0, rx0);
-    const minY = Math.max(0, ry0);
-    const maxX = Math.min(W, rx1);
-    const maxY = Math.min(H, ry1);
+    const [minX, maxX] = this.writeRange(rx0, rx1, W);
+    const [minY, maxY] = this.writeRange(ry0, ry1, H);
     const w = maxX - minX;
     const h = maxY - minY;
     if (w <= 0 || h <= 0) return null; // the whole run is past the canvas edge
@@ -550,7 +621,7 @@ export class BlurSmudgeEngine {
           if (dSq >= rSq) continue;
           const n = 1 - dSq / rSq;
           let f = n * n * deposit;
-          if (selectionMask) f *= getSelectionMaskFactor(selectionMask, gx, gy, W, H);
+          if (selectionMask) f *= this.selectionFactor(selectionMask, gx, gy);
           const pi = ((gy - minY) * w + (gx - minX)) * 4;
           const bi = ((oy + r) * side + (ox + r)) * 4;
           for (let c = 0; c < 4; c++) {

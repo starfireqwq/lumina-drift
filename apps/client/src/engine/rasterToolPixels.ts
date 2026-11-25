@@ -1,9 +1,10 @@
 import { expandSelectionMask, floodFillMagicWand, type Point2D, type TileData } from '@atelier/shared';
+import { computeWrappedFloodFillMask } from './wrapAround';
 
 export function bucketMask(
-  pixels: Uint8Array, width: number, height: number, seeds: Point2D[], tolerance: number, expand: number,
+  pixels: Uint8Array, width: number, height: number, seeds: Point2D[], tolerance: number, expand: number, wrap = false,
 ) {
-  const validSeeds = seeds.filter(({ x, y }) => x >= 0 && x < width && y >= 0 && y < height);
+  const validSeeds = wrap ? seeds : seeds.filter(({ x, y }) => x >= 0 && x < width && y >= 0 && y < height);
   if (!validSeeds.length) return null;
   const fullBounds = { minX: 0, minY: 0, maxX: width - 1, maxY: height - 1 };
   const colors = new Uint32Array(pixels.buffer, pixels.byteOffset, width * height);
@@ -11,6 +12,13 @@ export function bucketMask(
   let index = 1;
   while (index < colors.length && colors[index] === first) index++;
   if (index === colors.length) return { data: null, bounds: fullBounds };
+  if (wrap) {
+    const fill = computeWrappedFloodFillMask(pixels, width, height, validSeeds, tolerance, expand);
+    if (fill && fill.bounds.minX === 0 && fill.bounds.minY === 0 &&
+      fill.bounds.maxX === fullBounds.maxX && fill.bounds.maxY === fullBounds.maxY &&
+      fill.data.every((coverage) => coverage === 255)) return { data: null, bounds: fullBounds };
+    return fill;
+  }
 
   let combined: Uint8Array | null = null;
   const bounds = { minX: width, minY: height, maxX: -1, maxY: -1 };

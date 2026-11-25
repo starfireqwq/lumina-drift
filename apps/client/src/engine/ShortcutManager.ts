@@ -753,6 +753,14 @@ export const DEFAULT_SHORTCUTS: ShortcutItem[] = [
     currentCombo: 'Shift+KeyF',
   },
   {
+    id: 'action_view_wrap_around',
+    category: 'navigation',
+    name: '四方連續平鋪 (Wrap-Around)',
+    description: '切換 3×3 平鋪檢視與跨邊界無縫繪製',
+    defaultCombo: 'Alt+KeyW',
+    currentCombo: 'Alt+KeyW',
+  },
+  {
     id: 'action_brush_opacity_up',
     category: 'actions',
     name: '筆刷不透明度 +5% (Opacity Up)',
@@ -1124,6 +1132,8 @@ export class ShortcutManager {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
         const saved: Array<{ id: string; currentCombo: string }> = JSON.parse(raw);
+        const wrap = this.shortcuts.find((s) => s.id === 'action_view_wrap_around')!;
+        let wrapConfigured = false;
         for (const item of saved) {
           if (typeof item?.id !== 'string' || typeof item.currentCombo !== 'string') continue;
           if (item.id.startsWith('plugin:')) {
@@ -1135,10 +1145,14 @@ export class ShortcutManager {
           if (RETIRED_DEFAULTS[item.id] === item.currentCombo) continue;
           // Nor is a key the browser keeps, where this action has a browser default
           if (BROWSER_DEFAULTS[item.id] && ShortcutManager.isBrowserReserved(item.currentCombo)) continue;
-          if (match && item.currentCombo) {
+          if (match === wrap) wrapConfigured = true;
+          if (match && (item.currentCombo || match === wrap)) {
             match.currentCombo = item.currentCombo;
           }
         }
+        // An existing custom binding takes precedence when the Wrap-Around action is first added.
+        if (!wrapConfigured && (this.shortcuts.some((s) => s !== wrap && s.currentCombo === wrap.currentCombo) ||
+          [...this.savedPluginCombos.values()].includes(wrap.currentCombo))) wrap.currentCombo = '';
       }
     } catch (err) {
       console.warn('Failed to load shortcuts from localStorage:', err);

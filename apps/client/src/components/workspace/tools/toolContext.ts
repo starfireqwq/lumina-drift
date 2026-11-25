@@ -28,6 +28,7 @@ export interface ToolContext {
   isCanvasViewer?: boolean;
   viewerReadOnlyWarn?: string;
   currentTool: ToolType;
+  wrapAroundRef: MutableRefObject<boolean>;
   brushProps: BrushProperties;
   setBrushProps: Dispatch<SetStateAction<BrushProperties>>;
 

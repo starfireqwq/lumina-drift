@@ -3,6 +3,7 @@ import type { LayerModel } from '@atelier/shared';
 import { LiquifyEngine, LiquifyMode } from '../../../engine/LiquifyEngine';
 import { BlurSmudgeEngine, SmudgeMode } from '../../../engine/BlurSmudgeEngine';
 import { RulerManager } from '../../../engine/RulerManager';
+import { getWrappedDirtyTilesForBounds } from '../../../engine/wrapAround';
 import type { Bounds, Point, ToolContext } from './toolContext';
 import { commitInOrder, diffTilesAsync } from './asyncTiles';
 
@@ -21,6 +22,7 @@ export function useLiquifyTool(ctx: ToolContext) {
   const isLiquifyingRef = useRef<boolean>(false);
   const lastLiquifyPosRef = useRef<Point | null>(null);
   const liquifyTouchedBoundsRef = useRef<Bounds | null>(null);
+  const wrappedTilesRef = useRef<Map<string, { col: number; row: number }> | null>(null);
 
   const start = (layer: LayerModel, local: Point) => {
     const { layerManagerRef, tileEngineRef, currentTool } = ctx;
@@ -29,9 +31,12 @@ export function useLiquifyTool(ctx: ToolContext) {
     isLiquifyingRef.current = true;
     lastLiquifyPosRef.current = { x: local.x, y: local.y };
     liquifyTouchedBoundsRef.current = null;
+    const wrap = currentTool !== 'liquify' && ctx.wrapAroundRef.current;
+    wrappedTilesRef.current = wrap ? new Map() : null;
     if (currentTool === 'liquify') {
       liquifyEngineRef.current?.beginStroke(layerManagerRef.current, layer.id);
     }
+    blurSmudgeEngineRef.current?.setWrapAround(wrap);
     blurSmudgeEngineRef.current?.resetSmudge();
   };
 
@@ -50,6 +55,12 @@ export function useLiquifyTool(ctx: ToolContext) {
     let stepBounds: Bounds | null = null;
     const mergeBounds = (b: Bounds | null) => {
       if (!b) return;
+      const wrappedTiles = wrappedTilesRef.current;
+      if (wrappedTiles && ctx.canvas) {
+        for (const tile of getWrappedDirtyTilesForBounds(b.minX, b.minY, b.maxX, b.maxY, ctx.canvas.width, ctx.canvas.height)) {
+          wrappedTiles.set(`${tile.col}_${tile.row}`, tile);
+        }
+      }
       stepBounds = stepBounds
         ? { minX: Math.min(stepBounds.minX, b.minX), minY: Math.min(stepBounds.minY, b.minY), maxX: Math.max(stepBounds.maxX, b.maxX), maxY: Math.max(stepBounds.maxY, b.maxY) }
         : { ...b };
@@ -111,11 +122,14 @@ export function useLiquifyTool(ctx: ToolContext) {
     blurSmudgeEngineRef.current?.resetSmudge();
     const item = layerManagerRef.current.getLayerItem(activeLayer.id);
     const bounds = liquifyTouchedBoundsRef.current;
+    const wrappedTiles = wrappedTilesRef.current;
     liquifyTouchedBoundsRef.current = null;
+    wrappedTilesRef.current = null;
     lastLiquifyPosRef.current = null;
     if (!item || !bounds) return true;
 
-    const dirtyCoords = tileEngineRef.current.getDirtyTilesForBounds(bounds.minX, bounds.minY, bounds.maxX, bounds.maxY);
+    const dirtyCoords = wrappedTiles ? [...wrappedTiles.values()]
+      : tileEngineRef.current.getDirtyTilesForBounds(bounds.minX, bounds.minY, bounds.maxX, bounds.maxY);
     const desc = currentTool === 'liquify'
       ? `液化筆刷 (${liquifyMode})`
       : currentTool === 'blur'
@@ -150,6 +164,7 @@ export function useLiquifyTool(ctx: ToolContext) {
   /** Drops a drag without committing (multi-touch gesture, canvas switch); the caller reverts the layer. */
   const cancel = () => {
     isLiquifyingRef.current = false;
+    wrappedTilesRef.current = null;
     liquifyEngineRef.current?.endStroke();
     blurSmudgeEngineRef.current?.resetSmudge();
     lastLiquifyPosRef.current = null;

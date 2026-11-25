@@ -431,6 +431,8 @@ export interface Translations {
     straighten: string;
     flipView: string;
     flipViewButton: string;
+    wrapAround: string;
+    wrapAroundHint: string;
     rulers: string;
     referenceImage: string;
     filters: string;
@@ -1669,6 +1671,8 @@ export interface Translations {
     popupPaletteShortcutHint: string;
     shortcutSubViewDesc: string;
     shortcutPopupPaletteDesc: string;
+    shortcutWrapAroundName: string;
+    shortcutWrapAroundDesc: string;
     showBrushCrosshair: string;
     showBrushCrosshairDesc: string;
     touchSimulatedPressure: string;
