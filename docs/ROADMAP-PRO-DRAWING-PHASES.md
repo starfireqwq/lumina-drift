@@ -15,7 +15,7 @@
 | **Phase 1** | v1.3.2 緊急修補、Phase 6 測試修復與發布收尾 | `v1.3.2` | 單聊天室 | `已完成` | 2026-11-26 / 9b8e713 (v1.3.2) |
 | **Phase 2** | CSP 風格「主工具列 → 輔助工具組（Sub Tool）」核心架構與填充組整合（含間隙填充筆） | `v1.4.0-alpha.1` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-26 / `9481f97` |
 | **Phase 3** | 選取、向量、混色、漫畫工具組整合與矩形／橢圓／多邊形選框補齊 | `v1.4.0-alpha.2` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-26 / `4e90e4a` |
-| **Phase 4** | 子視圖面板（Sub View）、色彩歷史／混色盤與桌面右鍵快顯輪盤（Pop-up Palette） | `v1.4.0-beta.1` | `/teamwork` | `未開始` | — |
+| **Phase 4** | 子視圖面板（Sub View）、色彩歷史／混色盤與桌面右鍵快顯輪盤（Pop-up Palette） | `v1.4.0-beta.1` | `/teamwork` | `已完成` | 2026-11-26 / `0129f04` |
 | **Phase 5** | 快速形狀（QuickShape）、操控變形（Puppet Warp）與四方連續平鋪（Wrap-Around） | `v1.4.0` | `/teamwork` 或 `/swarm` | `未開始` | — |
 | **Phase 6** | 非破壞性調整圖層（Adjustment / Correction Layers）完整管線 | `v1.5.0-alpha` | `/teamwork` 或 `/swarm` | `未開始` | — |
 | **Phase 7** | 自動動作／巨集錄製（Auto Actions）與文字排版引擎深化 | `v1.5.0-beta` | `/teamwork` | `未開始` | — |
@@ -138,25 +138,25 @@
 > **目標**：補齊從 CSP / Krita / Procreate 轉移而來的繪師最常想念的三大日常效率面板，大幅減少視線與游標在畫布與面板間來回奔波的距離。
 
 #### 任務清單
-- [ ] **4.1 獨立「子視圖 / 參考圖面板（CSP Sub View）」**
-  - 新增可停靠於 Dock 系統（`DockSystem.tsx`）或浮動的 `SubViewPanel.tsx`。
-  - 支援本機多圖載入（拖曳或選檔）、圖片切換箭頭、獨立縮放／平移／水平翻轉／旋轉、以及「游標移入自動切換吸色滴管」直接取色至主畫布前景色。
-  - 資料僅存於本機（IndexedDB / 記憶體），不佔用多人房間頻寬。
-- [ ] **4.2 色彩歷史紀錄（Color History）與調色混色盤（Mixing Pad）**
-  - 在 `ColorWheelStudio.tsx` 擴充「最近使用顏色」自動歷史列（可固定常用色票組並匯入／匯出 `.aco` / `.gpl`）。
-  - 新增可選分頁「迷你混色盤（Mixing Pad）」：一塊輕量本機混色畫布，支援用目前筆刷／揉色直接在色盤上調色並即時吸取。
-- [ ] **4.3 桌面端快顯輪盤（Krita Pop-up Palette）**
-  - 延伸現有 `TouchRadialMenu.tsx` 概念，新增桌面滑鼠右鍵（或自訂快捷鍵／數位筆側鍵）於游標位置喚出「快速色環＋最近色票＋常用筆刷／常用子工具」環形輪盤，鬆開或點選即關閉，不遮擋長期視線。
-  - 提供設定開關與觸發鍵自訂（避免與現有右鍵選單衝突）。
+- [x] **4.1 獨立「子視圖 / 參考圖面板（CSP Sub View）」**
+  - 新增可停靠於 Dock 系統（`DockSystem.tsx` / `dockStore.ts`）或浮動的 `SubViewPanel.tsx`（含 `subViewMath.ts`、`subViewStore.ts`、`Ctrl+Shift+R` 快捷鍵）。
+  - 支援本機多圖載入（拖曳、選檔、剪貼簿貼上）、圖片切換箭頭、獨立縮放／平移／水平翻轉／旋轉，以及「游標移入自動切換吸色滴管」直接取色至主畫布前景色。
+  - 資料僅存於本機（IndexedDB `lumina_subview_v1` + 記憶體回退），不佔用多人房間頻寬。
+- [x] **4.2 色彩歷史紀錄（Color History）與調色混色盤（Mixing Pad）**
+  - 在 `ColorWheelStudio.tsx` 擴充「最近使用顏色」自動歷史列（隨落筆／填色／形狀／向量／吸色去重記錄並持久化至本機，支援固定常用色票組與匯入／匯出 `.aco` v1+v2 / `.gpl`）。
+  - 新增可選分頁「迷你混色盤（Mixing Pad）」（`ColorMixingPad.tsx` + `mixingPadEngine.ts`）：一塊輕量本機混色畫布，支援上色／揉色混色／清除／重設預設色點與即時吸取回主畫布前景色。
+- [x] **4.3 桌面端快顯輪盤（Krita Pop-up Palette）**
+  - 延伸現有 `TouchRadialMenu.tsx` 概念，新增桌面端 `DesktopPopupPalette.tsx`（含 `popupPaletteMath.ts` 邊界防裁切定位），透過滑鼠右鍵／數位筆側鍵／自訂快捷鍵（預設 `Alt+Q`）於游標位置喚出「中央 HSV 色環＋內環最近色票＋外環常用筆刷與常用子工具」三層環形輪盤，支援長按鬆開或點選即關閉。
+  - 於設定視窗一般設定提供開關與觸發方式自訂（`right-click` / `pen-side-button` / `shortcut-only`），避免與現有右鍵選單衝突。
 
 #### 驗收標準
-- 單元測試：色票歷史去重與持久化、`.gpl` 色票解析、Sub View 座標與吸色換算、快顯輪盤邊界防裁切定位。
-- 隔離式 Electron 實測：Sub View 載圖縮放翻轉吸色正常、色彩歷史隨落筆自動更新、桌面右鍵／快捷鍵喚出 Pop-up Palette 換筆刷與換色流暢。
+- 單元測試：色票歷史去重與持久化、`.gpl`/`.aco` 色票解析與匯出、混色畫布像素演算法、Sub View 座標與吸色換算、快顯輪盤邊界防裁切定位與觸發規則。
+- 隔離式 Electron 實測：Sub View 載圖縮放翻轉吸色正常、色彩歷史隨落筆自動更新與混色盤調色吸色正常、桌面右鍵／快捷鍵喚出 Pop-up Palette 換筆刷與換色流暢，且本機資料不佔多人房間頻寬。
 
 #### 交接紀錄
-- 狀態：`未開始`
-- 完成 Commit：`待填`
-- 備註：`—`
+- 狀態：`已完成`
+- 完成 Commit：`521f8c5`（4.1 獨立子視圖 Sub View 面板、座標／吸色演算法與本機 IndexedDB 多圖儲存）、`7c1e4de`（4.2 色彩歷史去重持久化、`.aco`/`.gpl` 匯入匯出、固定色票組與迷你混色盤 Mixing Pad）、`4d3a843`（4.3 桌面端快顯輪盤 Pop-up Palette、觸發設定、`Ctrl+Shift+R`/`Alt+Q` 快捷鍵與四語系補齊）、`0129f04`（Phase 4 單元測試與隔離式 Electron 實測腳本）
+- 備註：2026-11-26 完成全套驗證：`ui-logic.check.ts`、`i18n-coverage.check.ts`（4 語系 1,952 鍵完全一致、85 組預設快捷鍵零衝突）、`pnpm --filter @atelier/shared build`、`pnpm --filter @atelier/client build`、`pnpm --filter @atelier/client build:electron`、`pnpm --filter @atelier/server test` 全數通過；隔離式 Electron 單機與 `PORT=0` 多人實測腳本 `apps/client/scripts/phase4-panels-electron-smoke.check.cjs` 全過（驗證 Sub View `Ctrl+Shift+R` 開啟、多圖切換、縮放／翻轉反轉吸色／旋轉／重設與 IndexedDB 重載保留、落筆自動記錄 `#D946EF`、固定色票、`.gpl` 匯入與 Mixing Pad 塗抹揉色吸取 `#F29C0C`、桌面快顯輪盤四角防裁切定位／換色／換橡皮擦與筆刷預設／`shortcut-only` 觸發隔離，以及 `PORT=0` 臨時多人房 0 筆房間 op 外洩與 0 頁錯）。
 
 ---
 
