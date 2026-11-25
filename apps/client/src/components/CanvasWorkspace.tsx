@@ -82,9 +82,11 @@ import {
   CelMark,
   TimelineLabel,
   clampDpi,
-  computeTidiedAscendingNonMaskIds,
+  computeGroupedAscendingNonMaskIds,
   filterTopLevelSelectedLayers,
   findTopAnchorForParent,
+  orderLayersForReparenting,
+  tidyLayerModels,
 } from '@atelier/shared';
 import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
@@ -5351,7 +5353,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
   /** 群組: a new group (inside the layers' common group, so groups nest) holding these layers */
   const groupLayers = async (ids: string[]) => {
-    const current = layersRef.current;
+    const current = tidyLayerModels(layersRef.current).layers;
     const ls = filterTopLevelSelectedLayers(current, ids);
     if (!ls.length || !onCreateLayer) return;
     const blocked = ls.filter((l) => !canManageLayer(l));
@@ -5364,15 +5366,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const group = await createLayerWithUndo(nextGroupName(current), 'normal', 'group', anchor.id, parent, { select: false });
     if (!group) return;
     const selectedRootIds = new Set(ls.map((l) => l.id));
-    for (const l of ls) {
+    const ascendingIds = computeGroupedAscendingNonMaskIds(current, group, anchor.id, parent, selectedRootIds);
+    const preLoopWithGroup = [...current, { ...group, parentId: parent, sortOrder: anchor.sortOrder + 5 }];
+    for (const l of orderLayersForReparenting(preLoopWithGroup, ls, group.id)) {
       await Promise.resolve(onUpdateLayerProps?.(l.id, { parentId: group.id }));
     }
-    const latest = layersRef.current;
-    const hasGroup = latest.some((l) => l.id === group.id);
-    const snapshot = (hasGroup ? latest : [...latest, group]).map((l) =>
-      selectedRootIds.has(l.id) ? { ...l, parentId: group.id } : l
-    );
-    const ascendingIds = computeTidiedAscendingNonMaskIds(snapshot);
     await Promise.resolve(onReorderLayer?.(group.id, 0, ascendingIds));
     onSelectLayer?.(group.id);
   };

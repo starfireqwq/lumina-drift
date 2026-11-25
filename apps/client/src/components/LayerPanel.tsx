@@ -6,6 +6,7 @@ import {
   LayerType,
   computeTidiedAscendingNonMaskIds,
   filterTopLevelSelectedLayers,
+  orderLayersForReparenting,
   selectLayerRange,
   tidyLayerModels,
 } from '@atelier/shared';
@@ -180,7 +181,7 @@ interface LayerPanelProps {
   onReleaseLayer: (layerId: string) => void;
   onClaimLayer: (layerId: string, force?: boolean) => void;
   onTransferLayer?: (layerId: string, targetUserId: string) => void;
-  onReorderLayer: (layerId: string, newSortOrder: number, ascendingIds?: string[]) => void;
+  onReorderLayer: (layerId: string, newSortOrder: number, ascendingIds?: string[]) => void | Promise<void>;
   onUpdateLayerProps?: (layerId: string, props: Partial<LayerModel>) => void | Promise<void>;
   onBakeScreentone?: (layerId: string, params: { density: number; angleRad: number; dotScale: number }) => void;
   /** Per-viewer visibility overrides (not synced): layerId -> shown for me */
@@ -926,12 +927,12 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
     );
     if (!roots.length) return;
     const movedIds = new Set(roots.map((l) => l.id));
-    for (const l of roots) {
-      await Promise.resolve(onUpdateLayerProps(l.id, { parentId: targetGroupId }));
-    }
     const patched = allLayers.map((l) => (movedIds.has(l.id) ? { ...l, parentId: targetGroupId } : l));
     const ascendingIds = computeTidiedAscendingNonMaskIds(patched);
-    onReorderLayer(roots[0].id, 0, ascendingIds);
+    for (const l of orderLayersForReparenting(allLayers, roots, targetGroupId)) {
+      await Promise.resolve(onUpdateLayerProps(l.id, { parentId: targetGroupId }));
+    }
+    await Promise.resolve(onReorderLayer(roots[0].id, 0, ascendingIds));
   };
 
   const handleBatchMoveToGroup = (targetGroupId: string | null) => {

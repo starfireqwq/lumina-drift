@@ -180,6 +180,42 @@ export function computeTidiedAscendingNonMaskIds(all: readonly LayerModel[]): st
     .map((l) => l.id);
 }
 
+/** Moves the roots closest to the target first on each side so tidying keeps their order. */
+export function orderLayersForReparenting<T extends LayerModel>(
+  all: readonly T[],
+  rootsAscending: readonly T[],
+  targetGroupId: string | null,
+): T[] {
+  if (targetGroupId === null) return [...rootsAscending];
+
+  const orderById = new Map(tidyLayerModels(all).layers.map((l) => [l.id, l.sortOrder]));
+  const targetOrder = orderById.get(targetGroupId);
+  if (targetOrder === undefined) return [...rootsAscending];
+
+  const below: T[] = [];
+  const above: T[] = [];
+  for (const layer of rootsAscending) {
+    const sortOrder = orderById.get(layer.id) ?? layer.sortOrder;
+    (sortOrder < targetOrder ? below : above).push(layer);
+  }
+  return [...below.reverse(), ...above];
+}
+
+/** Plans the final order from the stack before any of the selected layers are moved. */
+export function computeGroupedAscendingNonMaskIds(
+  preGroupLayers: readonly LayerModel[],
+  newGroup: LayerModel,
+  anchorId: string,
+  parentId: string | null,
+  selectedRootIds: ReadonlySet<string>,
+): string[] {
+  const tidied = tidyLayerModels(preGroupLayers.filter((l) => l.id !== newGroup.id)).layers;
+  const anchor = tidied.find((l) => l.id === anchorId);
+  const sortOrder = anchor ? anchor.sortOrder + 5 : (tidied.length + 1) * 10;
+  const patched = tidied.map((l) => selectedRootIds.has(l.id) ? { ...l, parentId: newGroup.id } : l);
+  return computeTidiedAscendingNonMaskIds([...patched, { ...newGroup, parentId, sortOrder }]);
+}
+
 /**
  * Selects a contiguous slice of visible layer IDs between `anchorId` and `targetId`.
  * When `additive` is true, unions the range with `existing`.
