@@ -3,6 +3,7 @@ import type React from 'react';
 import type { LayerModel, ToolType } from '@atelier/shared';
 import { RulerManager } from '../../../engine/RulerManager';
 import type { BrushProperties } from '../../../engine/BrushRenderer';
+import type { OutlineSettings } from '../../../engine/colorOutline';
 import { eraserStrokeProperties, loadBrushTool } from '../../../engine/brushToolSettings';
 import { hasDrawingContact, isTabletEraser } from '../../../engine/tabletInput';
 import {
@@ -64,6 +65,7 @@ export interface CanvasTools {
 
 interface PointerDeps {
   containerRef: React.RefObject<HTMLDivElement | null>;
+  lassoOutline?: OutlineSettings;
   /** While a filter dialog or the radial menu is open the canvas ignores the pointer */
   filterModalOpenRef: React.MutableRefObject<boolean>;
   radialMenuOpenRef: React.MutableRefObject<boolean>;
@@ -111,10 +113,15 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
   const {
     containerRef, filterModalOpenRef, radialMenuOpenRef, clipboardMenuOpenRef, resizeModalOpenRef, updateBrushCursor, hideBrushCursor,
     openRadialMenu, onOpenClipboardMenu, onQuickFitCanvas, onToggleFullscreen, onTouchEyedropperChange, onTouchEyedropperCommit,
-    emitCursor, setEraserHover, undo, redo, setCurrentTool, onSelectLayer, onRequestCreateMyLayer, onTextTool, pluginTool,
+    emitCursor, setEraserHover, undo, redo, setCurrentTool, onSelectLayer, onRequestCreateMyLayer, onTextTool, pluginTool, lassoOutline,
   } = deps;
   const isLassoErase = () => currentTool === 'eraser' && selection.lassoErase;
   const isTransformActive = transform.isTransformActive;
+  const paintUnfilledPointerRef = useRef<number | null>(null);
+  const cancelPaintUnfilled = () => {
+    paintUnfilledPointerRef.current = null;
+    fill.cancelPaintUnfilled();
+  };
 
   const lastCursorEmitTimeRef = useRef<number>(0);
   // Mobile touch gestures: Procreate/Procraft multi-touch gestures, deferred one-finger bucket & long press
@@ -348,6 +355,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     // Multi-touch gestures (Pinch-zoom / Quick-pinch fit / 2-finger Undo / 3-finger Redo / 3-finger Swipe / 4-finger Fullscreen)
     if (e.pointerType === 'touch' && activePointersRef.current.size >= 2) {
       isMultiTouchGestureRef.current = true;
+      cancelPaintUnfilled();
       clearTimeout(radialLongPressTimerRef.current);
       pendingTouchDownRef.current = null;
       pendingSingleFingerPanRef.current = null;
@@ -550,6 +558,11 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       } else if (touchSessionRef.current && activePointersRef.current.size === 1) {
         touchSessionRef.current.pendingBucketTarget = targetLayer;
       }
+      return;
+    }
+
+    if (currentTool === 'paint_unfilled') {
+      if (local && fill.startPaintUnfilled(local, targetLayer)) paintUnfilledPointerRef.current = e.pointerId;
       return;
     }
 
@@ -782,6 +795,13 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
         return;
       }
 
+      if (currentTool === 'paint_unfilled') {
+        if (paintUnfilledPointerRef.current === e.pointerId && ((e.buttons & 1) !== 0 || e.pointerType === 'touch')) {
+          fill.movePaintUnfilled(local);
+        }
+        return;
+      }
+
       if (currentTool === 'vector_bezier') {
         vector.penPointerMove(local);
         return;
@@ -814,6 +834,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     if (finishTail(e.pointerId, e.nativeEvent)) return;
     if (!activePointersRef.current.has(e.pointerId)) return;
     const cancelled = e.type === 'pointercancel';
+    if (cancelled && paintUnfilledPointerRef.current === e.pointerId) cancelPaintUnfilled();
     try {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     } catch {}
@@ -926,6 +947,13 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       touchTwistRef.current = null;
     }
 
+    if (paintUnfilledPointerRef.current === e.pointerId) {
+      paintUnfilledPointerRef.current = null;
+      const local = viewportRef.current?.screenToCanvas(e.clientX, e.clientY);
+      if (local) fill.movePaintUnfilled(local);
+      if (fill.finishPaintUnfilled()) return;
+    }
+
     if (currentTool === 'vector_bezier' && !isPanningRef.current) {
       vector.endPenDrag();
       return;
@@ -958,7 +986,8 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       return;
     }
     if (currentTool === 'bucket' && fill.bucketMode === 'lasso') {
-      fill.executeLassoFill(brush.outlineBrush);
+      if (cancelled) selectionEngineRef.current?.clearDraft();
+      else fill.executeLassoFill(lassoOutline);
       return;
     }
     if (currentTool === 'lasso') {
@@ -980,6 +1009,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
 
   const handleLostPointerCapture = (e: React.PointerEvent<HTMLDivElement>) => {
     if (finishTail(e.pointerId)) return;
+    if (paintUnfilledPointerRef.current === e.pointerId) cancelPaintUnfilled();
     if (activePointersRef.current.has(e.pointerId)) brush.interrupt(e.pointerId);
   };
 
@@ -988,6 +1018,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     if (radialLongPressTimerRef.current) clearTimeout(radialLongPressTimerRef.current);
     clearRapidTimers();
     pluginTool?.onCancel();
+    cancelPaintUnfilled();
     activePointersRef.current.clear();
     tailRef.current = null;
     setEraserHover(false);

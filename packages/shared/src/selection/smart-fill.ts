@@ -18,6 +18,32 @@ export interface SmartFillOptions {
   isWhiteBackgroundLineart?: boolean;
 }
 
+type StrokePoint = { x: number; y: number };
+type PixelBuffer = Uint8Array | Uint8ClampedArray;
+
+export interface PaintUnfilledAreaOptions {
+  brushRadius: number;
+  gapClosingRadius?: number;
+  expandRadius?: number;
+  lineThreshold?: number;
+  alphaThreshold?: number;
+  isWhiteBackgroundLineart?: boolean;
+  editPixels?: PixelBuffer;
+}
+
+function detectWhiteBackground(
+  pixels: PixelBuffer, width: number, minX: number, minY: number, maxX: number, maxY: number,
+): boolean {
+  let opaqueWhite = 0;
+  for (let x = minX; x <= maxX; x++) {
+    for (const y of [minY, maxY]) {
+      const i = (y * width + x) * 4;
+      if (pixels[i + 3] > 240 && Math.min(pixels[i], pixels[i + 1], pixels[i + 2]) > 245) opaqueWhite++;
+    }
+  }
+  return opaqueWhite > (maxX - minX + 1) * 2 * 0.6;
+}
+
 /**
  * Executes AI Smart Enclose & Fill on a reference lineart layer.
  *
@@ -87,16 +113,7 @@ export function computeSmartEncloseFillMask(
 
   // 2. Extract lineart mask L within bounding box (1 = line, 0 = non-line)
   // Opaque white reference layers need contrast detection, not alpha detection.
-  let opaqueWhite = 0;
-  let edgeSamples = 0;
-  for (let x = bMinX; x <= bMaxX; x++) {
-    for (const y of [bMinY, bMaxY]) {
-      const i = (y * width + x) * 4;
-      edgeSamples++;
-      if (refPixels[i + 3] > 240 && Math.min(refPixels[i], refPixels[i + 1], refPixels[i + 2]) > 245) opaqueWhite++;
-    }
-  }
-  const whiteBackground = isWhiteBackgroundLineart ?? opaqueWhite > edgeSamples * 0.6;
+  const whiteBackground = isWhiteBackgroundLineart ?? detectWhiteBackground(refPixels, width, bMinX, bMinY, bMaxX, bMaxY);
   const lineMask = new Uint8Array(bSize);
   for (let by = 0; by < bH; by++) {
     const gy = bMinY + by;
@@ -315,4 +332,251 @@ export function computeSmartEncloseFillMask(
         : { minX: 0, minY: 0, maxX: 0, maxY: 0 },
     activePixelCount: activeCount,
   };
+}
+
+/** Inclusive canvas coordinates for the fill solver and its reference readback. */
+export function getPaintUnfilledAreaBounds(
+  strokePoints: StrokePoint[],
+  width: number,
+  height: number,
+  { brushRadius, gapClosingRadius = 0, expandRadius = 0 }: PaintUnfilledAreaOptions,
+): SelectionMaskData['bounds'] | null {
+  const padding = Math.max(1, brushRadius) + Math.max(64,
+    Math.min(6, Math.abs(expandRadius)) + Math.max(0, Math.min(10, gapClosingRadius)) * 2 + 8);
+  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const { x, y } of strokePoints) {
+    left = Math.min(left, x);
+    top = Math.min(top, y);
+    right = Math.max(right, x);
+    bottom = Math.max(bottom, y);
+  }
+  const minX = Math.max(0, Math.floor(left - padding));
+  const minY = Math.max(0, Math.floor(top - padding));
+  const maxX = Math.min(width - 1, Math.ceil(right + padding));
+  const maxY = Math.min(height - 1, Math.ceil(bottom + padding));
+  return minX <= maxX && minY <= maxY ? { minX, minY, maxX, maxY } : null;
+}
+
+function closeBarriers(barriers: Uint8Array, width: number, height: number, radius: number): Uint8Array {
+  if (!radius) return barriers;
+  const scratch = new Uint8Array(barriers.length);
+  const closed = new Uint8Array(barriers.length);
+
+  function sweep(
+    source: Uint8Array, target: Uint8Array, lines: number, length: number, lineStep: number, step: number, erode: boolean,
+  ) {
+    for (let line = 0; line < lines; line++) {
+      const start = line * lineStep;
+      let count = 0;
+      let windowSize = 0;
+      for (let i = 0; i < Math.min(radius, length); i++) {
+        count += source[start + i * step];
+        windowSize++;
+      }
+      for (let i = 0; i < length; i++) {
+        if (i + radius < length) {
+          count += source[start + (i + radius) * step];
+          windowSize++;
+        }
+        target[start + i * step] = Number(erode ? count === windowSize : count > 0);
+        if (i >= radius) {
+          count -= source[start + (i - radius) * step];
+          windowSize--;
+        }
+      }
+    }
+  }
+
+  sweep(barriers, scratch, height, width, width, 1, false);
+  sweep(scratch, closed, width, height, 1, width, false);
+  sweep(closed, scratch, height, width, width, 1, true);
+  sweep(scratch, closed, width, height, 1, width, true);
+  for (let i = 0; i < closed.length; i++) closed[i] |= barriers[i];
+  return closed;
+}
+
+/** Rasterize the union of segment capsules as horizontal spans, including the round ends. */
+function rasterizeBrush(
+  points: StrokePoint[], bounds: SelectionMaskData['bounds'], width: number, height: number,
+  radius: number, spans: Int32Array,
+): Uint8Array {
+  const radiusSq = radius * radius;
+  const brush = new Uint8Array(spans.length);
+  const { minX, minY } = bounds;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[Math.max(0, i - 1)];
+    const b = points[i];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const lengthSq = dx * dx + dy * dy;
+    if (i > 0 && !lengthSq) continue;
+    const length = Math.sqrt(lengthSq);
+    const nx = length ? (-dy / length) * radius : 0;
+    const ny = length ? (dx / length) * radius : 0;
+    const first = Math.max(minY, Math.ceil(Math.min(a.y, b.y) - radius));
+    const last = Math.min(minY + height - 1, Math.floor(Math.max(a.y, b.y) + radius));
+    for (let y = first; y <= last; y++) {
+      let left = Infinity, right = -Infinity;
+      const da = y - a.y;
+      const db = y - b.y;
+      if (da * da <= radiusSq) {
+        const half = Math.sqrt(radiusSq - da * da);
+        left = a.x - half;
+        right = a.x + half;
+      }
+      if (db * db <= radiusSq) {
+        const half = Math.sqrt(radiusSq - db * db);
+        left = Math.min(left, b.x - half);
+        right = Math.max(right, b.x + half);
+      }
+      if (dy !== 0) {
+        for (let side = -1; side <= 1; side += 2) {
+          const t = (da - side * ny) / dy;
+          if (t < 0 || t > 1) continue;
+          const x = a.x + t * dx + side * nx;
+          left = Math.min(left, x);
+          right = Math.max(right, x);
+        }
+      }
+      // The capsule is convex. Only the two endpoints of each span need a distance check.
+      if (left > right) continue;
+      const inside = (x: number) => {
+        const ax = x - a.x;
+        const t = lengthSq ? Math.max(0, Math.min(1, (ax * dx + da * dy) / lengthSq)) : 0;
+        return (ax - t * dx) ** 2 + (da - t * dy) ** 2 <= radiusSq;
+      };
+      let start = Math.max(minX, Math.floor(left));
+      let end = Math.min(minX + width - 1, Math.ceil(right));
+      while (start <= end && !inside(start)) start++;
+      while (end >= start && !inside(end)) end--;
+      if (start > end) continue;
+      const row = (y - minY) * width;
+      spans[row + start - minX]++;
+      if (end - minX + 1 < width) spans[row + end - minX + 1]--;
+    }
+  }
+  for (let y = 0; y < height; y++) {
+    let coverage = 0;
+    for (let i = y * width; i < (y + 1) * width; i++) {
+      coverage += spans[i];
+      brush[i] = Number(coverage > 0);
+    }
+  }
+  return brush;
+}
+
+export function computePaintUnfilledAreaMask(
+  strokePoints: StrokePoint[],
+  refPixels: PixelBuffer,
+  width: number,
+  height: number,
+  options: PaintUnfilledAreaOptions,
+): SelectionMaskData {
+  const result: SelectionMaskData = {
+    width, height, data: new Uint8Array(width * height),
+    bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 }, activePixelCount: 0,
+  };
+  const roi = getPaintUnfilledAreaBounds(strokePoints, width, height, options);
+  if (!roi) return result;
+
+  const { minX, minY, maxX, maxY } = roi;
+  const w = maxX - minX + 1;
+  const h = maxY - minY + 1;
+  const size = w * h;
+  const {
+    gapClosingRadius = 0, expandRadius = 0, alphaThreshold = 30, lineThreshold = 180, editPixels,
+  } = options;
+  const white = options.isWhiteBackgroundLineart ?? detectWhiteBackground(refPixels, width, minX, minY, maxX, maxY);
+  const contrast = Math.max(8, (255 - lineThreshold) * 0.2);
+  const barriers = new Uint8Array(size);
+  const editFilled = editPixels ? new Uint8Array(size) : null;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = ((minY + y) * width + minX + x) * 4;
+      const alpha = refPixels[i + 3];
+      const editAlpha = editPixels?.[i + 3] ?? 0;
+      const isEditFilled = white ? editAlpha > 0 : editAlpha > alphaThreshold;
+      if (editFilled && isEditFilled) editFilled[y * w + x] = 1;
+      barriers[y * w + x] = Number(white
+        ? (255 - Math.min(refPixels[i], refPixels[i + 1], refPixels[i + 2])) * alpha / 255 >= contrast || isEditFilled
+        : alpha > alphaThreshold || isEditFilled);
+    }
+  }
+  const closed = closeBarriers(barriers, w, h, Math.max(0, Math.min(10, Math.round(gapClosingRadius))));
+  const queue = new Int32Array(size);
+  const brush = rasterizeBrush(strokePoints, roi, w, h, Math.max(1, options.brushRadius), queue);
+  const exterior = new Uint8Array(size);
+  let filled: Uint8Array = new Uint8Array(size);
+  let tail = 0;
+
+  function enqueue(i: number, visited: Uint8Array, blocked?: Uint8Array) {
+    if (closed[i] || visited[i] || blocked?.[i]) return;
+    visited[i] = 1;
+    queue[tail++] = i;
+  }
+
+  function flood(visited: Uint8Array, blocked?: Uint8Array) {
+    for (let head = 0; head < tail; head++) {
+      const i = queue[head];
+      const x = i % w;
+      if (x > 0) enqueue(i - 1, visited, blocked);
+      if (x < w - 1) enqueue(i + 1, visited, blocked);
+      if (i >= w) enqueue(i - w, visited, blocked);
+      if (i < size - w) enqueue(i + w, visited, blocked);
+    }
+  }
+
+  for (let x = 0; x < w; x++) {
+    enqueue(x, exterior);
+    enqueue(size - w + x, exterior);
+  }
+  for (let row = w; row < size - w; row += w) {
+    enqueue(row, exterior);
+    enqueue(row + w - 1, exterior);
+  }
+  flood(exterior);
+
+  tail = 0;
+  for (let i = 0; i < size; i++) {
+    if (brush[i]) enqueue(i, filled, exterior);
+  }
+  if (!tail) return result;
+  flood(filled, exterior);
+
+  const steps = Math.min(6, Math.round(Math.abs(expandRadius)));
+  if (steps) {
+    let next = brush;
+    const expand = expandRadius > 0;
+    for (let step = 0; step < steps; step++) {
+      for (let i = 0; i < size; i++) {
+        const x = i % w;
+        const left = x > 0 && filled[i - 1];
+        const right = x < w - 1 && filled[i + 1];
+        const up = i >= w && filled[i - w];
+        const down = i < size - w && filled[i + w];
+        // Tuck under lineart barriers without entering open exterior, another pocket, or already-filled edit pixels.
+        next[i] = Number(expand
+          ? filled[i] || (closed[i] && !exterior[i] && !editFilled?.[i] && (left || right || up || down))
+          : filled[i] && left && right && up && down);
+      }
+      [filled, next] = [next, filled];
+    }
+  }
+
+  const bounds = { minX: width, minY: height, maxX: 0, maxY: 0 };
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!filled[y * w + x]) continue;
+      const gx = minX + x;
+      const gy = minY + y;
+      result.data[gy * width + gx] = 255;
+      result.activePixelCount++;
+      bounds.minX = Math.min(bounds.minX, gx);
+      bounds.minY = Math.min(bounds.minY, gy);
+      bounds.maxX = Math.max(bounds.maxX, gx);
+      bounds.maxY = Math.max(bounds.maxY, gy);
+    }
+  }
+  if (result.activePixelCount) result.bounds = bounds;
+  return result;
 }
