@@ -168,7 +168,16 @@ for (const lang of REQUIRED_LOCALES) {
 }
 console.log('✓ Tool groups, categories, sub-tools and blend mode groups localized helpers verified');
 
-// 5c. Specialized Modules Verification (Canvas resize, Comic, Animation, Rulers, Capsule, Admin, Auth)
+// 5c. Specialized Modules Verification, including the Phase 5 drawing tools.
+const quickShapeSettingKeys = [
+  'quickShapeTitle', 'quickShapeEnabled', 'quickShapeEnabledDesc', 'quickShapeDelayLabel', 'quickShapeDelayDesc',
+] as const;
+const quickShapeKinds = ['line', 'arc', 'circle', 'ellipse', 'rectangle', 'quadrilateral', 'triangle'] as const;
+const puppetWarpKeys = [
+  'title', 'mode', 'perspective', 'parallel', 'free', 'density', 'coarse', 'normal', 'dense',
+  'showMesh', 'pin', 'rotation', 'weight', 'deletePin', 'shortcutDesc', 'renderFailed',
+] as const;
+const unresolvedToken = /\{[^{}]+\}|%[sd]|\b(?:TODO|TBD|FIXME|PLACEHOLDER|TRANSLATE)\b/i;
 for (const lang of REQUIRED_LOCALES) {
   const t = translations[lang];
   assert.ok(t.canvas.resizeTitle.length > 0);
@@ -179,6 +188,22 @@ for (const lang of REQUIRED_LOCALES) {
   assert.ok(t.admin.title.length > 0);
   assert.ok(t.auth.titleLogin.length > 0);
   assert.ok(t.textEditor.editorAria.length > 0);
+
+  const checkPhase5Label = (path: string, value: string) => {
+    assert.ok(typeof value === 'string' && value.trim(), `[${lang}] Missing Phase 5 label '${path}'`);
+    assert.doesNotMatch(value, unresolvedToken, `[${lang}] Unresolved placeholder in '${path}'`);
+    assert.notEqual(value.trim(), path, `[${lang}] Translation key displayed as the label for '${path}'`);
+  };
+  for (const key of quickShapeSettingKeys) checkPhase5Label(`settings.${key}`, t.settings[key]);
+  checkPhase5Label('canvas.quickShapeHint', t.canvas.quickShapeHint);
+  for (const kind of quickShapeKinds) checkPhase5Label(`canvas.quickShapeKinds.${kind}`, t.canvas.quickShapeKinds[kind]);
+  assert.equal(new Set(quickShapeKinds.map((kind) => t.canvas.quickShapeKinds[kind].trim())).size,
+    quickShapeKinds.length, `[${lang}] QuickShape names must be distinct`);
+  for (const key of puppetWarpKeys) checkPhase5Label(`puppetWarp.${key}`, t.puppetWarp[key]);
+  for (const key of ['wrapAround', 'wrapAroundHint'] as const) checkPhase5Label(`canvas.${key}`, t.canvas[key]);
+  for (const key of ['shortcutWrapAroundName', 'shortcutWrapAroundDesc'] as const) {
+    checkPhase5Label(`settings.${key}`, t.settings[key]);
+  }
 }
 console.log('✓ Specialized modules localized strings verified across all 4 locales');
 

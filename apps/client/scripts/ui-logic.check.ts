@@ -19,7 +19,22 @@ import { COLOR_HISTORY_MAX, createColorHistoryStore } from '../src/services/colo
 import { normalizeHexColor, parseAcoPalette, parseGplPalette, serializeAcoPalette, serializeGplPalette } from '../src/utils/colorPaletteIO';
 import { blendPigmentRgba, paintMixingDab, sampleMixingBuffer, seedDefaultMixingPad, strokeMixingSegment } from '../src/utils/mixingPadEngine';
 import { computePopupPalettePosition, computeRadialSlotPositions, hitTestPopupRing } from '../src/utils/popupPaletteMath';
-import { shouldOpenDesktopPopupOnContextMenu } from '../src/engine/inputPreferences';
+import {
+  getQuickShapeDelayMs, getQuickShapeEnabled, setQuickShapeDelayMs, setQuickShapeEnabled,
+  shouldOpenDesktopPopupOnContextMenu,
+} from '../src/engine/inputPreferences';
+import {
+  adjustQuickShapeByPointer, buildQuickShapeDabs, recognizeQuickShape, sampleQuickShapePoints,
+  type QuickShapeCandidate, type QuickShapePoint,
+} from '../src/engine/quickShape';
+import {
+  attachPinToMesh, buildPuppetMeshFromAlpha, rasterizePuppetWarpToRgba, solvePuppetWarp,
+  type PuppetMesh, type PuppetPin,
+} from '../src/engine/PuppetWarpEngine';
+import {
+  computeWrappedFloodFillMask, getWrapAroundBoundsOffsets, getWrappedDirtyTilesForBounds,
+  getWrappedDirtyTilesForPoints, getWrappedStampPoints, wrapCoord, wrapPoint,
+} from '../src/engine/wrapAround';
 import {
   alignCrops, alignDestination, alignManyOffsets, alignOffset, alignTargetsBlocker,
   computeVectorLayerAlignRect, computeVectorStrokeAlignRect, copyRgbaRect,
@@ -5525,15 +5540,8 @@ await (async () => {
   assert.deepEqual(restored.getSubToolParams('gradient'), { gradientType: 'radial' });
 }
 
-// Phase 3: default shortcuts are unique and distinguish categories from individual tools.
+// Phase 3: default shortcuts distinguish categories from individual tools.
 {
-  const seen = new Map<string, string>();
-  for (const { id, defaultCombo } of DEFAULT_SHORTCUTS) {
-    if (!defaultCombo) continue;
-    assert.ok(!seen.has(defaultCombo), `Duplicate default shortcut ${defaultCombo}: ${seen.get(defaultCombo)} and ${id}`);
-    seen.set(defaultCombo, id);
-  }
-
   const toolbox = new Map(DEFAULT_SHORTCUTS.filter(({ category }) => category === 'toolbox').map((shortcut) => [shortcut.id, shortcut]));
   assert.equal(TOOL_CATEGORIES.length, 11);
   const categoryShortcutIds = new Set<string>();
@@ -5852,6 +5860,373 @@ await (async () => {
     ['action_studio_subview', 'Control+Shift+KeyR'], ['action_studio_popup_palette', 'Alt+KeyQ'],
   ]) {
     assert.deepEqual(DEFAULT_SHORTCUTS.filter(({ defaultCombo }) => defaultCombo === combo).map((shortcut) => shortcut.id), [id]);
+  }
+}
+
+// Phase 5.1: QuickShape recognition, pointer adjustment, sampling and preferences.
+{
+  const radians = (degrees: number) => degrees * Math.PI / 180;
+  const distance = (a: QuickShapePoint, b: QuickShapePoint) => Math.hypot(a.x - b.x, a.y - b.y);
+  const center = { x: 140, y: 110 };
+  const ovalTrace = (rx: number, ry: number, rotation: number, sweep: number) => (
+    Array.from({ length: 121 }, (_, i) => {
+      const angle = radians(-25 + sweep * i / 120);
+      const x = (rx + 0.4 * Math.sin(i * 1.7)) * Math.cos(angle);
+      const y = (ry + 0.4 * Math.cos(i * 1.3)) * Math.sin(angle);
+      return {
+        x: center.x + x * Math.cos(rotation) - y * Math.sin(rotation),
+        y: center.y + x * Math.sin(rotation) + y * Math.cos(rotation),
+      };
+    })
+  );
+  const closedTrace = (corners: readonly (readonly [number, number])[], rotation = 0) => {
+    const vertices = corners.map(([x, y]) => ({
+      x: center.x + x * Math.cos(rotation) - y * Math.sin(rotation),
+      y: center.y + x * Math.sin(rotation) + y * Math.cos(rotation),
+    }));
+    const points = vertices.flatMap((start, i) => {
+      const end = vertices[(i + 1) % vertices.length];
+      return Array.from({ length: 18 }, (_, step) => ({
+        x: start.x + (end.x - start.x) * step / 18 + 0.3 * Math.sin(step * 1.7),
+        y: start.y + (end.y - start.y) * step / 18 + 0.3 * Math.sin(step * 1.3),
+      }));
+    });
+    return [...points, vertices[0]];
+  };
+
+  for (const degrees of [0, 30, -45]) {
+    const angle = radians(degrees);
+    const trace = Array.from({ length: 41 }, (_, i) => ({
+      x: 20 + i * 3 * Math.cos(angle) - 0.6 * Math.sin(i * 1.7) * Math.sin(angle),
+      y: 35 + i * 3 * Math.sin(angle) + 0.6 * Math.sin(i * 1.7) * Math.cos(angle),
+    }));
+    const line = recognizeQuickShape(trace);
+    assert.ok(line?.kind === 'line', `Expected line at ${degrees}°, got ${line?.kind}`);
+    assert.ok(distance(line.start, trace[0]) < 1 && distance(line.end, trace[40]) < 1, 'Line endpoints should follow the stroke');
+
+    const pointer = { x: line.start.x + 80 * Math.cos(radians(37)), y: line.start.y + 80 * Math.sin(radians(37)) };
+    const snapped = adjustQuickShapeByPointer(line, line.end, pointer, true);
+    assert.ok(snapped.kind === 'line');
+    assert.ok(Math.abs(Math.atan2(snapped.end.y - snapped.start.y, snapped.end.x - snapped.start.x) - radians(30)) < 1e-6);
+    assert.ok(Math.abs(distance(snapped.start, snapped.end) - 80) < 1e-6);
+  }
+  for (const sweep of [90, 150]) {
+    const arc = recognizeQuickShape(ovalTrace(55, 55, 0, sweep));
+    assert.ok(arc?.kind === 'arc', `Expected an open ${sweep}° arc, got ${arc?.kind}`);
+    assert.ok(distance(arc.center, center) < 2 && Math.abs(arc.radius - 55) < 2, `Inaccurate ${sweep}° arc fit`);
+    assert.ok(Math.abs(arc.sweep - radians(sweep)) < radians(3));
+  }
+
+  const circle = recognizeQuickShape(ovalTrace(48, 48, 0, 370));
+  assert.ok(circle?.kind === 'circle', `Expected a circle with overlapping ends, got ${circle?.kind}`);
+  assert.ok(distance(circle.center, center) < 1 && Math.abs(circle.radius - 48) < 1, 'Inaccurate circle fit');
+  const scaledCircle = adjustQuickShapeByPointer(circle, { x: circle.center.x + circle.radius, y: circle.center.y },
+    { x: circle.center.x, y: circle.center.y + 65 });
+  assert.ok(scaledCircle.kind === 'circle');
+  assert.equal(scaledCircle.radius, 65);
+  assert.equal(scaledCircle.rotation, Math.PI / 2);
+
+  const ellipseAngle = radians(25);
+  const ellipse = recognizeQuickShape(ovalTrace(60, 30, ellipseAngle, 360));
+  assert.ok(ellipse?.kind === 'ellipse', `Expected a rotated ellipse, got ${ellipse?.kind}`);
+  assert.ok(distance(ellipse.center, center) < 1 && Math.abs(ellipse.rx - 60) < 1 && Math.abs(ellipse.ry - 30) < 1);
+  assert.ok(Math.abs(Math.sin(ellipse.rotation - ellipseAngle)) < 0.03, 'Ellipse axis should follow the rotation');
+
+  const closedShapes: QuickShapeCandidate[] = [scaledCircle, ellipse];
+  for (const { label, corners, rotation, kind } of [
+    { label: 'horizontal square', corners: [[-40, -40], [40, -40], [40, 40], [-40, 40]], rotation: 0, kind: 'rectangle' },
+    { label: 'rotated rectangle', corners: [[-60, -30], [60, -30], [60, 30], [-60, 30]], rotation: 20, kind: 'rectangle' },
+    { label: 'trapezoid', corners: [[-32, -35], [32, -35], [63, 35], [-63, 35]], rotation: 0, kind: 'quadrilateral' },
+    { label: 'irregular quadrilateral', corners: [[-52, -32], [53, -42], [37, 43], [-30, 23]], rotation: 0, kind: 'quadrilateral' },
+    { label: 'isosceles triangle', corners: [[0, -48], [51, 30], [-51, 30]], rotation: 0, kind: 'triangle' },
+    { label: 'scalene triangle', corners: [[-21, -48], [59, 27], [-54, 36]], rotation: 0, kind: 'triangle' },
+  ] as const) {
+    const fitted = recognizeQuickShape(closedTrace(corners, radians(rotation)));
+    assert.ok(fitted?.kind === kind, `Expected ${kind} for ${label}, got ${fitted?.kind}`);
+    if (fitted.kind === 'rectangle') {
+      const anchor = { x: fitted.center.x + 40, y: fitted.center.y };
+      const pointer = { x: fitted.center.x, y: fitted.center.y + 60 };
+      const adjusted = adjustQuickShapeByPointer(fitted, anchor, pointer);
+      assert.ok(adjusted.kind === 'rectangle');
+      assert.ok(Math.abs(adjusted.rotation - fitted.rotation - Math.PI / 2) < 1e-6);
+      assert.ok(Math.abs(adjusted.width - fitted.width * 1.5) < 1e-6);
+      assert.ok(Math.abs(adjusted.height - fitted.height * 1.5) < 1e-6);
+      for (const [index, corner] of fitted.corners.entries()) {
+        const expected = {
+          x: fitted.center.x - (corner.y - fitted.center.y) * 1.5,
+          y: fitted.center.y + (corner.x - fitted.center.x) * 1.5,
+        };
+        assert.ok(distance(adjusted.corners[index], expected) < 1e-6, `Adjusted ${label} corner ${index}`);
+      }
+    }
+    closedShapes.push(fitted);
+  }
+
+  assert.equal(recognizeQuickShape(Array.from({ length: 9 }, (_, i) => ({ x: i * 2, y: 0 }))), null,
+    'A 16px stroke should not snap');
+  for (const cycles of [1, 3]) {
+    const scribble = Array.from({ length: 81 }, (_, i) => ({
+      x: i * 2, y: 25 * Math.sin(cycles * 2 * Math.PI * i / 80),
+    }));
+    assert.equal(recognizeQuickShape(scribble), null, `A ${cycles}-cycle wave should not snap`);
+  }
+
+  const spacing = 5;
+  for (const shape of closedShapes) {
+    const points = sampleQuickShapePoints(shape, spacing, 0.6);
+    assert.ok(points.length > 4, `Expected samples for ${shape.kind}`);
+    assert.deepEqual(points[0], points[points.length - 1], `Expected a closed ${shape.kind} path`);
+    for (let i = 1; i < points.length; i++) {
+      const step = distance(points[i - 1], points[i]);
+      assert.ok(step >= spacing * 0.5 && step <= spacing + 1e-6, `Unexpected ${shape.kind} sample spacing: ${step}`);
+    }
+    const dabs = buildQuickShapeDabs(points, 8, 0.85);
+    assert.equal(dabs.length, points.length * 7, `Expected seven floats per ${shape.kind} dab`);
+    assert.ok(dabs.every(Number.isFinite), `Non-finite ${shape.kind} dab`);
+  }
+
+  const initialEnabled = getQuickShapeEnabled();
+  const initialDelay = getQuickShapeDelayMs();
+  try {
+    for (const enabled of [false, true]) {
+      setQuickShapeEnabled(enabled);
+      assert.equal(getQuickShapeEnabled(), enabled);
+    }
+    for (const [requested, expected] of [[0, 180], [625, 625], [2000, 1500]]) {
+      setQuickShapeDelayMs(requested);
+      assert.equal(getQuickShapeDelayMs(), expected, `QuickShape delay for ${requested}ms`);
+    }
+  } finally {
+    setQuickShapeEnabled(initialEnabled);
+    setQuickShapeDelayMs(initialDelay);
+  }
+}
+
+// Phase 5.2: Puppet Warp mesh coverage, pin constraints and premultiplied rasterization.
+{
+  const size = 120;
+  const left = 25, top = 35, right = 95, bottom = 85;
+  const expansion = 4;
+  const whiteOnTransparent = (isForeground: (x: number, y: number) => boolean) => {
+    const rgba = new Uint8ClampedArray(size * size * 4);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        if (isForeground(x, y)) rgba.fill(255, (y * size + x) * 4, (y * size + x + 1) * 4);
+      }
+    }
+    return rgba;
+  };
+  const inRectangle = (x: number, y: number) => x >= left && x < right && y >= top && y < bottom;
+  const checkMesh = (mesh: PuppetMesh, label: string) => {
+    assert.ok(mesh.vertexCount > 0 && mesh.triangleCount > 0, `Empty ${label} mesh`);
+    assert.equal(mesh.vertices.length, mesh.vertexCount * 2);
+    assert.equal(mesh.triangles.length, mesh.triangleCount * 3);
+    assert.ok(mesh.vertices.every(Number.isFinite), `Non-finite ${label} mesh vertex`);
+    assert.ok(mesh.triangles.every((index) => index < mesh.vertexCount), `Invalid ${label} triangle index`);
+    assert.equal(mesh.neighbors.length, mesh.vertexCount);
+    assert.equal(mesh.edgeWeights.length, mesh.vertexCount);
+    for (const [index, weights] of mesh.edgeWeights.entries()) {
+      assert.ok(weights.length > 0);
+      assert.equal(weights.length, mesh.neighbors[index].length);
+      assert.ok(weights.every((weight) => Number.isFinite(weight) && weight > 0), `Invalid ${label} edge weight`);
+    }
+  };
+
+  const inL = (x: number, y: number) => inRectangle(x, y) && (x < 45 || y >= 65);
+  const lSource = whiteOnTransparent(inL);
+  let lastVertexCount = 0;
+  for (const density of ['coarse', 'normal', 'dense'] as const) {
+    const mesh = buildPuppetMeshFromAlpha(lSource, size, size, { density, expansionPx: expansion });
+    checkMesh(mesh, density);
+    assert.ok(mesh.vertexCount > lastVertexCount, `Expected more vertices at ${density} density`);
+    lastVertexCount = mesh.vertexCount;
+    const xs = mesh.vertices.filter((_, i) => i % 2 === 0);
+    const ys = mesh.vertices.filter((_, i) => i % 2 === 1);
+    const padding = 5; // Four pixels of dilation and one pixel of bilinear support.
+    assert.deepEqual([Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)],
+      [left - padding, top - padding, right + padding, bottom + padding], `${density} mesh coverage bounds`);
+    assert.ok(!xs.some((x, i) => x > 70 && ys[i] < 49), `${density} mesh should leave the L-shaped notch open`);
+
+    const identity = rasterizePuppetWarpToRgba(lSource, size, size, mesh, mesh.vertices, 0);
+    for (let y = top; y < bottom; y++) {
+      for (let x = left; x < right; x++) {
+        const alphaIndex = ((y - identity.minY) * identity.width + x - identity.minX) * 4 + 3;
+        assert.equal(identity.rgba[alphaIndex], inL(x, y) ? 255 : 0, `${density} mesh coverage at (${x}, ${y})`);
+      }
+    }
+  }
+  const transparent = buildPuppetMeshFromAlpha(new Uint8ClampedArray(size * size * 4), size, size);
+  checkMesh(transparent, 'transparent fallback');
+  assert.ok(solvePuppetWarp(transparent, []).every(Number.isFinite));
+
+  const source = whiteOnTransparent(inRectangle);
+  const mesh = buildPuppetMeshFromAlpha(source, size, size, { density: 'normal' });
+  assert.deepEqual(solvePuppetWarp(mesh, []), mesh.vertices, 'Zero pins must preserve the rest mesh');
+  const attached = attachPinToMesh(mesh, 60.25, 59.75, 'rigid');
+  assert.deepEqual([attached.restX, attached.restY], [60.25, 59.75]);
+  const rigidPin = { ...attached, x: attached.x + 7.25, y: attached.y - 3.5, rotation: Math.PI / 4 };
+  const rigid = solvePuppetWarp(mesh, [rigidPin]);
+  assert.ok(rigid.every(Number.isFinite), 'Single-pin solve produced a non-finite vertex');
+  for (let i = 0; i < mesh.vertices.length; i += 2) {
+    const x = mesh.vertices[i] - rigidPin.restX;
+    const y = mesh.vertices[i + 1] - rigidPin.restY;
+    const diagonal = Math.SQRT1_2;
+    const movedX = rigid[i] - rigidPin.x;
+    const movedY = rigid[i + 1] - rigidPin.y;
+    assert.ok(Math.hypot(movedX - (x - y) * diagonal, movedY - (x + y) * diagonal) < 1e-5,
+      `Single pin should rigidly transform vertex ${i / 2}`);
+    assert.ok(Math.abs(Math.hypot(movedX, movedY) - Math.hypot(x, y)) < 1e-5,
+      `Single pin should preserve distance to vertex ${i / 2}`);
+  }
+
+  const fixed = attachPinToMesh(mesh, 34.25, 60.5, 'fixed', 2);
+  const drag = attachPinToMesh(mesh, 87.75, 60.5, 'dragged', 4);
+  const bentPin = { ...drag, x: 80, y: 33, rotation: Math.PI / 6 };
+  const bent = solvePuppetWarp(mesh, [fixed, bentPin]);
+  assert.ok(bent.every(Number.isFinite), 'Multi-pin solve produced a non-finite vertex');
+  const checkPinTarget = (pin: PuppetPin) => {
+    let x = 0;
+    let y = 0;
+    for (const [corner, weight] of pin.barycentric.entries()) {
+      const index = mesh.triangles[pin.triangleIndex * 3 + corner] * 2;
+      x += bent[index] * weight;
+      y += bent[index + 1] * weight;
+    }
+    assert.ok(Math.hypot(x - pin.x, y - pin.y) < 0.15, `Pin ${pin.id} missed its target: (${x}, ${y})`);
+  };
+  checkPinTarget(fixed);
+  checkPinTarget(bentPin);
+  const withoutRotation = solvePuppetWarp(mesh, [fixed, { ...bentPin, rotation: 0 }]);
+  const dragFace = mesh.triangles.subarray(bentPin.triangleIndex * 3, bentPin.triangleIndex * 3 + 3);
+  assert.ok(dragFace.some((vertex) =>
+    Math.hypot(bent[vertex * 2] - withoutRotation[vertex * 2], bent[vertex * 2 + 1] - withoutRotation[vertex * 2 + 1]) > 0.1),
+  'The 30° pin rotation should change the deformation around the dragged pin');
+  const edgeLength = (vertices: Float32Array, a: number, b: number) =>
+    Math.hypot(vertices[a * 2] - vertices[b * 2], vertices[a * 2 + 1] - vertices[b * 2 + 1]);
+  for (const [vertex, neighbors] of mesh.neighbors.entries()) {
+    for (const neighbor of neighbors) {
+      const ratio = edgeLength(bent, vertex, neighbor) / edgeLength(mesh.vertices, vertex, neighbor);
+      assert.ok(ratio > 0.55 && ratio < 1.65, `Excessive edge deformation at ${vertex}–${neighbor}: ${ratio}`);
+    }
+  }
+
+  const islandSource = whiteOnTransparent((x, y) => y >= 38 && y < 80 && ((x >= 12 && x < 42) || (x >= 79 && x < 108)));
+  const islands = buildPuppetMeshFromAlpha(islandSource, size, size, { density: 'normal' });
+  const leftIsland = new Set([0]);
+  for (const vertex of leftIsland) {
+    for (const neighbor of islands.neighbors[vertex]) leftIsland.add(neighbor);
+  }
+  assert.ok(leftIsland.size > 0 && leftIsland.size < islands.vertexCount, 'The island fixture must be disconnected');
+  const islandFixed = attachPinToMesh(islands, 19.5, 50.5, 'island-fixed', 2);
+  const islandDrag = attachPinToMesh(islands, 34.5, 68.5, 'island-dragged', 3);
+  for (const pin of [islandFixed, islandDrag]) {
+    assert.ok(leftIsland.has(islands.triangles[pin.triangleIndex * 3]), 'Both pins must attach to the first island');
+  }
+  const deformedIslands = solvePuppetWarp(islands, [islandFixed, { ...islandDrag, y: islandDrag.y + 8, rotation: 0.2 }]);
+  assert.equal(deformedIslands.length, islands.vertices.length);
+  assert.ok(deformedIslands.every(Number.isFinite), 'The unpinned island must solve safely');
+
+  const shifted = solvePuppetWarp(mesh, [{ ...attached, x: attached.x + 0.45, y: attached.y - 0.6, rotation: Math.PI / 36 }]);
+  assert.ok(shifted.every(Number.isFinite), 'Raster fixture needs finite deformed vertices');
+  const raster = rasterizePuppetWarpToRgba(source, size, size, mesh, shifted);
+  assert.ok([raster.minX, raster.minY, raster.width, raster.height].every(Number.isFinite));
+  assert.equal(raster.rgba.length, raster.width * raster.height * 4);
+  assert.ok(raster.rgba.every(Number.isFinite));
+  let translucentCount = 0;
+  let opaqueCount = 0;
+  for (let i = 0; i < raster.rgba.length; i += 4) {
+    const alpha = raster.rgba[i + 3];
+    if (alpha === 255) opaqueCount++;
+    if (alpha <= 0 || alpha >= 255) continue;
+    translucentCount++;
+    assert.ok(raster.rgba[i] >= 250 && raster.rgba[i + 1] >= 250 && raster.rgba[i + 2] >= 250,
+      `Dark fringe at raster pixel ${i / 4}: ${raster.rgba.subarray(i, i + 4).join(',')}`);
+  }
+  assert.ok(opaqueCount > 0 && translucentCount > 0, 'The warped raster must contain an opaque interior and antialiased edges');
+}
+
+// Phase 5.3: Wrap-Around stamps, dirty tiles, flood fill and default shortcuts.
+{
+  const size = 512;
+  const tileSize = 256;
+  for (const [input, expected] of [[-1, 511], [-512, 0], [-513, 511], [0, 0], [512, 0], [1025, 1], [-0, 0]]) {
+    assert.equal(wrapCoord(input, size), expected, `wrapCoord(${Object.is(input, -0) ? '-0' : input})`);
+    assert.deepEqual(wrapPoint(input, input, size, size), { x: expected, y: expected });
+  }
+  assert.deepEqual(wrapPoint(-513, 1025, size, 256), { x: 511, y: 1 });
+
+  const pointKeys = (points: ReadonlyArray<{ x: number; y: number }>) =>
+    points.map(({ x, y }) => `${x},${y}`).sort();
+  const radius = 10;
+  assert.deepEqual(pointKeys(getWrappedStampPoints(256, 256, radius, size, size)), ['256,256']);
+  assert.deepEqual(pointKeys(getWrappedStampPoints(5, 256, radius, size, size)), ['5,256', '517,256']);
+  assert.deepEqual(pointKeys(getWrappedStampPoints(5, 6, radius, size, size)), ['5,518', '5,6', '517,518', '517,6']);
+
+  const offsetKeys = (minX: number, minY: number, maxX: number, maxY: number) =>
+    getWrapAroundBoundsOffsets(minX, minY, maxX, maxY, size, size).map(({ dx, dy }) => `${dx},${dy}`).sort();
+  assert.deepEqual(offsetKeys(-10, 100, 10, 120), ['0,0', '512,0']);
+  assert.deepEqual(offsetKeys(100, -10, 120, 10), ['0,0', '0,512']);
+  assert.deepEqual(offsetKeys(-10, -10, 10, 10), ['0,0', '0,512', '512,0', '512,512']);
+  const tileKeys = (tiles: ReadonlyArray<{ col: number; row: number }>) =>
+    tiles.map(({ col, row }) => `${col},${row}`).sort();
+  const cornerTiles = ['0,0', '0,1', '1,0', '1,1'];
+  assert.deepEqual(tileKeys(getWrappedDirtyTilesForBounds(-10, -10, 10, 10, size, size, tileSize)), cornerTiles);
+  assert.deepEqual(tileKeys(getWrappedDirtyTilesForPoints(
+    [{ x: 0, y: 0 }, { x: -2, y: -2, radius: 8 }, { x: 2, y: 2, radius: 8 }],
+    radius, size, size, tileSize,
+  )), cornerTiles, 'Overlapping stamps must return each corner tile only once');
+
+  const fillSize = 32;
+  const pixelIndex = (x: number, y: number) => y * fillSize + x;
+  for (const axis of ['horizontal', 'vertical'] as const) {
+    const pixels = new Uint8ClampedArray(fillSize * fillSize * 4);
+    const point = (across: number, along: number) => axis === 'horizontal'
+      ? { x: across, y: along } : { x: along, y: across };
+    const index = (across: number, along: number) => {
+      const { x, y } = point(across, along);
+      return pixelIndex(x, y);
+    };
+    // The full-length wall forces wrapping. The sealed box encloses matching transparent pixels.
+    for (let along = 0; along < fillSize; along++) {
+      pixels[index(16, along) * 4 + 3] = 255;
+    }
+    for (let across = 4; across <= 12; across++) {
+      pixels[index(across, 10) * 4 + 3] = 255;
+      pixels[index(across, 22) * 4 + 3] = 255;
+    }
+    for (let along = 10; along <= 22; along++) {
+      pixels[index(4, along) * 4 + 3] = 255;
+      pixels[index(12, along) * 4 + 3] = 255;
+    }
+    const mask = computeWrappedFloodFillMask(pixels, fillSize, fillSize, [point(1, 16)], 0);
+    assert.ok(mask);
+    assert.equal(mask.data[index(1, 16)], 255);
+    assert.equal(mask.data[index(30, 16)], 255, `Flood fill should cross the ${axis} seam`);
+    assert.equal(mask.data[index(16, 16)], 0, `Flood fill should respect the ${axis} barrier`);
+    assert.equal(mask.data[index(8, 16)], 0, 'Matching pixels in the sealed pocket must stay clear');
+  }
+
+  // The only matching pixel is at the corner, so hits across a seam must come from expansion.
+  const expansionSource = new Uint8ClampedArray(fillSize * fillSize * 4).fill(255);
+  expansionSource.fill(0, 0, 4);
+  const expanded = computeWrappedFloodFillMask(expansionSource, fillSize, fillSize, [{ x: 0, y: 0 }], 0, 2);
+  assert.ok(expanded);
+  for (const [x, y, expected] of [[0, 0, 255], [30, 0, 255], [0, 30, 255], [31, 31, 255], [30, 30, 0], [3, 0, 0]]) {
+    assert.equal(expanded.data[pixelIndex(x, y)], expected, `Wrapped radius-2 expansion at (${x}, ${y})`);
+  }
+
+  const seen = new Map<string, string>();
+  for (const { id, defaultCombo } of DEFAULT_SHORTCUTS) {
+    if (!defaultCombo) continue;
+    assert.ok(!seen.has(defaultCombo), `Duplicate default shortcut ${defaultCombo}: ${seen.get(defaultCombo)} and ${id}`);
+    seen.set(defaultCombo, id);
+  }
+  for (const [id, combo] of [
+    ['action_filter_puppet_warp', 'Control+Alt+KeyP'],
+    ['action_view_wrap_around', 'Alt+KeyW'],
+    ['tool_magic_wand', 'KeyW'],
+  ]) {
+    assert.equal(DEFAULT_SHORTCUTS.find((shortcut) => shortcut.id === id)?.defaultCombo, combo, `Default binding for ${id}`);
   }
 }
 
