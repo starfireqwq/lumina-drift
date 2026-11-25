@@ -357,6 +357,7 @@ export class LuminaProjectEngine {
       bgColor: src.bgColor,
       groupId,
     });
+    const defaultIds = (defaults ?? []).map((d) => d.id);
 
     try {
       const byId = new Map(layers.map((l) => [l.id, l]));
@@ -450,10 +451,12 @@ export class LuminaProjectEngine {
       }
 
       // Remove the default initial layer created with the canvas
-      if (layers.length && defaults?.length) {
-        for (const d of defaults) {
-          await ApiService.updateLayer(canvas.id, d.id, { isLocked: false }).catch(() => undefined);
-          await ApiService.deleteLayer(canvas.id, d.id).catch(() => undefined);
+      if (idMap.size) {
+        const importedIds = new Set(idMap.values());
+        for (const id of defaultIds) {
+          if (importedIds.has(id)) continue;
+          await ApiService.updateLayer(canvas.id, id, { isLocked: false }).catch(() => undefined);
+          await ApiService.deleteLayer(canvas.id, id).catch(() => undefined);
         }
       }
 

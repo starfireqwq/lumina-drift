@@ -851,7 +851,7 @@ class OfflineSessionStoreImpl {
 
     this.records.set(canvasId, record);
     await this.persistRecordNow(canvasId);
-    return { canvas, layers };
+    return { canvas: { ...canvas }, layers: layers.map((l) => ({ ...l })) };
   }
 
   private ensureRecord(canvasId: string): OfflineCanvasRecord {
@@ -1013,7 +1013,7 @@ class OfflineSessionStoreImpl {
   public async listLayers(canvasId: string): Promise<LayerModel[]> {
     await this.ensureInitialized();
     const rec = this.ensureRecord(canvasId);
-    return [...rec.layers].sort((a, b) => a.sortOrder - b.sortOrder);
+    return rec.layers.map((l) => ({ ...l })).sort((a, b) => a.sortOrder - b.sortOrder);
   }
 
   public async createLayer(canvasId: string, dto: CreateLayerDto): Promise<LayerModel> {
@@ -1203,7 +1203,7 @@ class OfflineSessionStoreImpl {
     rec.layers = tidyLayerModels(rec.layers).layers;
     rec.updatedAt = Date.now();
     this.schedulePersist(canvasId);
-    return [...rec.layers];
+    return rec.layers.map((l) => ({ ...l }));
   }
 
   public async writeLayerTiles(canvasId: string, layerId: string, tiles: TileData[]): Promise<number> {
