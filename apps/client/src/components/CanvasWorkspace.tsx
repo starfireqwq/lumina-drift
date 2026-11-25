@@ -51,7 +51,13 @@ function parseWorkspaceBgColor(cssColor: string, fallback = 0x0d0e12): number {
   }
   return fallback;
 }
-import { getShowBrushCrosshair, subscribeShowBrushCrosshair } from '../engine/inputPreferences';
+import {
+  getDesktopPopupPaletteEnabled,
+  getDesktopPopupPaletteTrigger,
+  getShowBrushCrosshair,
+  shouldOpenDesktopPopupOnContextMenu,
+  subscribeShowBrushCrosshair,
+} from '../engine/inputPreferences';
 import {
   AtelierBrushPreset,
   MIN_BRUSH_SPACING,
@@ -100,6 +106,7 @@ import { StrokePipeline } from '../engine/StrokePipeline';
 import { normalizeTileBytes, TileEngine } from '../engine/TileEngine';
 import { OFFLINE_UNDO_LIMIT, ONLINE_UNDO_LIMIT, ScopedUndoManager } from '../engine/ScopedUndoManager';
 import { OfflineSessionStore } from '../services/offlineStore';
+import { recordUsedColor } from '../services/colorHistoryStore';
 import { SelectionEngine } from '../engine/SelectionEngine';
 import { WebGLFilterEngine } from '../engine/WebGLFilterEngine';
 import { ShortcutManager } from '../engine/ShortcutManager';
@@ -116,6 +123,7 @@ import { ViewportToolbar } from './ViewportToolbar';
 import { OverlayPresence } from './OverlayPresence';
 import { CanvasStickersOverlay } from './CanvasStickersOverlay';
 import { ColorWheelStudio } from './ColorWheelStudio';
+import { SubViewPanel } from './SubViewPanel';
 import { UserListPanel } from './UserListPanel';
 import { ToolRail } from './workspace/ToolRail';
 import { BrushSideSliders, MobileBrushSliders } from './workspace/BrushSideSliders';
@@ -163,6 +171,7 @@ import { RulerManager } from '../engine/RulerManager';
 import { RulerOverlay } from './RulerOverlay';
 import { FilterPointOverlay } from './FilterPointOverlay';
 import { TouchRadialMenu } from './TouchRadialMenu';
+import { DesktopPopupPalette } from './DesktopPopupPalette';
 import { TouchClipboardMenu } from './TouchClipboardMenu';
 import { TouchEyedropperLoupe, type TouchEyedropperState } from './TouchEyedropperLoupe';
 import {
@@ -246,7 +255,7 @@ import { PluginFilterWorkerClient } from '../plugins/pluginFilterClient';
 import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../utils/filterMemoryGuard';
 import type { FilterTargetOptions } from './FilterTargetBar';
 import { AtelierModal, modalButton } from './AtelierModal';
-import { AlertCircle, AlignCenter, Eye, Grid2x2, ImagePlus, Keyboard, Layers, Minimize2, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
+import { AlertCircle, AlignCenter, Eye, Grid2x2, Image as ImageIcon, ImagePlus, Keyboard, Layers, Minimize2, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
 import { type DroppedImages, type ImageDropTarget, ImageImportError, imageEntries, isImageDrag, loadImageEntry, readDroppedImages } from '../utils/imageImport';
 
 /** Where a key types text (a text field), unlike a focused button, slider, checkbox or the page */
@@ -543,6 +552,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const openMobileSheet = (id: MobilePanelDef['id']) => {
     if (dockLayout.panels.members.visible) dockActions.hide('members');
     if (dockLayout.panels.oplog.visible) dockActions.hide('oplog');
+    if (id === 'subView') dockActions.show('subView');
+    else if (dockLayout.panels.subView.visible) dockActions.hide('subView');
     setMobileSheet(id);
   };
   const openBrushToolset = () => {
@@ -551,6 +562,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
   const membersPanelVisible = dockLayout.panels.members.visible;
   const oplogPanelVisible = dockLayout.panels.oplog.visible;
+  const subViewPanelVisible = dockLayout.panels.subView.visible;
   useEffect(() => {
     if (!isTouchCanvasMode) return;
     if (membersPanelVisible) setMobileSheet('members');
@@ -561,6 +573,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (oplogPanelVisible) setMobileSheet('oplog');
     else setMobileSheet((curr) => (curr === 'oplog' ? null : curr));
   }, [isTouchCanvasMode, oplogPanelVisible]);
+  useEffect(() => {
+    if (!isTouchCanvasMode) return;
+    if (subViewPanelVisible) setMobileSheet('subView');
+    else setMobileSheet((curr) => (curr === 'subView' ? null : curr));
+  }, [isTouchCanvasMode, subViewPanelVisible]);
 
   const workspaceRef = useRef<HTMLDivElement>(null);
   const hasCanvas = Boolean(canvas);
@@ -1266,6 +1283,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const radialMenuOpenRef = useRef(isRadialMenuOpen);
   radialMenuOpenRef.current = isRadialMenuOpen;
   const [radialMenuPos, setRadialMenuPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isDesktopPopupOpen, setIsDesktopPopupOpen] = useState(false);
+  const [desktopPopupPos, setDesktopPopupPos] = useState({ x: 0, y: 0 });
+  const desktopPopupOpenRef = useRef(isDesktopPopupOpen);
+  desktopPopupOpenRef.current = isDesktopPopupOpen;
+  const lastPointerPosRef = useRef<{ x: number; y: number } | null>(null);
   const contextPointerRef = useRef({ type: '', rightButton: false });
 
   // Procraft-inspired Touch Clipboard Menu, Live Eyedropper Loupe & 4-Finger Fullscreen
@@ -1691,6 +1713,20 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     return rect && { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
   };
 
+  const openDesktopPopupAt = (position: { x: number; y: number }) => {
+    setIsRadialMenuOpen(false);
+    setDesktopPopupPos(position);
+    setIsDesktopPopupOpen(true);
+  };
+
+  const isPopupPointerBlocked = () =>
+    isTransformActive || resizeModalOpenRef.current || filterModalOpenRef.current ||
+    radialMenuOpenRef.current || desktopPopupOpenRef.current || clipboardMenuOpenRef.current ||
+    Boolean(document.querySelector('[aria-modal="true"]'));
+
+  const canOpenDesktopPopup = (pointerType: string, hasRightButton: boolean) =>
+    shouldOpenDesktopPopupOnContextMenu(getDesktopPopupPaletteEnabled(), getDesktopPopupPaletteTrigger(), pointerType, hasRightButton);
+
   const zoomAtViewCenter = (factor: number) => {
     const center = getViewCenter();
     if (center) viewportRef.current?.zoomAt(center.x, center.y, factor);
@@ -2088,7 +2124,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         if (document.querySelector('[aria-modal="true"]')) return;
         // Space pans wherever the focus is, except while typing or inside a dialog / menu: the
         // button clicked last kept the focus and was pressed again instead of the canvas panning
-        if (ev.code === 'Space' && !filterModalOpenRef.current && !radialMenuOpenRef.current && !isTypingTarget(ev.target)
+        if (ev.code === 'Space' && !filterModalOpenRef.current && !radialMenuOpenRef.current && !desktopPopupOpenRef.current && !isTypingTarget(ev.target)
           && !(ev.target as HTMLElement | null)?.closest?.('[role="dialog"], [role="menu"]')) {
           ev.preventDefault();
           if (!ev.repeat) {
@@ -2111,6 +2147,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         }
         const shortcutMgr = ShortcutManager.getInstance();
         const hit = (id: string) => shortcutMgr.matchesEvent(shortcutMgr.getComboForAction(id), ev);
+        if (desktopPopupOpenRef.current) {
+          if (!transformLayerIdRef.current && getDesktopPopupPaletteEnabled() && hit('action_studio_popup_palette')) {
+            ev.preventDefault();
+            if (!ev.repeat) setIsDesktopPopupOpen(false);
+          }
+          return;
+        }
         const categoryHit = TOOL_CATEGORIES.find((category) => category.shortcutId && shortcutMgr.matchesEvent(shortcutMgr.getComboForAction(category.shortcutId), ev));
         if (transformLayerIdRef.current) {
           if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z' && !ev.shiftKey) {
@@ -2320,6 +2363,18 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_studio_color_wheel'), ev)) {
             ev.preventDefault();
             setIsColorStudioOpen((prev) => !prev);
+            return;
+          }
+          if (hit('action_studio_subview')) {
+            ev.preventDefault();
+            if (!ev.repeat) dockActions.toggle('subView');
+            return;
+          }
+          if (hit('action_studio_popup_palette') && getDesktopPopupPaletteEnabled() && !clipboardMenuOpenRef.current) {
+            ev.preventDefault();
+            if (!ev.repeat) {
+              openDesktopPopupAt(lastPointerPosRef.current ?? getViewCenter() ?? { x: window.innerWidth / 2, y: window.innerHeight / 2 });
+            }
             return;
           }
 
@@ -2545,6 +2600,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     vector.resetForCanvas();
     setPermissionWarning(null);
     setIsRadialMenuOpen(false);
+    setIsDesktopPopupOpen(false);
+    lastPointerPosRef.current = null;
     resetThumbnails();
     shapes.cancel();
     liquify.cancel();
@@ -6804,11 +6861,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     containerRef,
     filterModalOpenRef,
     radialMenuOpenRef,
+    desktopPopupOpenRef,
     clipboardMenuOpenRef,
     resizeModalOpenRef,
     updateBrushCursor,
     hideBrushCursor,
     openRadialMenu: (pos) => {
+      setIsDesktopPopupOpen(false);
       setRadialMenuPos(pos);
       setIsRadialMenuOpen(true);
     },
@@ -6827,7 +6886,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     },
     onTouchEyedropperCommit: (hex) => {
       setBrushProps((prev) => ({ ...prev, color: hex, isEraser: false }));
-      warn(`💧 已吸取顏色 ${hex}`, 1400);
+      recordUsedColor(hex);
+      warn(`💧 ${t.subView.pickedColor} ${hex}`, 1400);
     },
     emitCursor,
     undo: () => handleScopedUndo(),
@@ -7007,6 +7067,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             onActivateCanvasEyedropper={() => handleSelectTool('eyedropper')} embedded />
         </div>
       ),
+    },
+    {
+      id: 'subView',
+      title: t.subView.title,
+      icon: <ImageIcon />,
+      render: () => <SubViewPanel embedded onPickColor={(hex) => {
+        handleBrushPropsChange({ color: hex, isEraser: false });
+        recordUsedColor(hex);
+      }} />,
     },
     {
       id: 'brushToolset',
@@ -7369,6 +7438,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             <div
               ref={containerRef}
               onPointerDown={(event) => {
+                lastPointerPosRef.current = { x: event.clientX, y: event.clientY };
                 contextPointerRef.current = { type: event.pointerType, rightButton: event.button === 2 || (event.buttons & 2) !== 0 };
                 if (!isCanvasPresented) return;
                 // Typing a text: a click elsewhere on the canvas applies it (and starts nothing else)
@@ -7377,9 +7447,20 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                   else endTextEdit();
                   return;
                 }
+                // Open during the press so the ring is available on platforms that dispatch contextmenu on release.
+                if (event.button === 2 && !isPopupPointerBlocked() &&
+                  !(currentTool === 'vector_bezier' && penPoints.length > 0) &&
+                  canOpenDesktopPopup(event.pointerType, true)) {
+                  event.preventDefault();
+                  openDesktopPopupAt({ x: event.clientX, y: event.clientY });
+                  return;
+                }
                 handlePointerDown(event);
               }}
-              onPointerMove={handlePointerMove}
+              onPointerMove={(event) => {
+                lastPointerPosRef.current = { x: event.clientX, y: event.clientY };
+                handlePointerMove(event);
+              }}
               onPointerUp={handlePointerUp}
               onPointerLeave={(event) => {
                 hideBrushCursor();
@@ -7394,17 +7475,26 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 if (hit && !textEdit) editTextLayer(hit);
               }}
               onContextMenu={(event) => {
-                event.preventDefault();
-                if (isTransformActive || resizeModalOpenRef.current || filterModalOpenRef.current || radialMenuOpenRef.current) return;
-                if (event.nativeEvent instanceof PointerEvent && event.nativeEvent.pointerType === 'touch') return;
+                if (desktopPopupOpenRef.current) {
+                  event.preventDefault();
+                  return;
+                }
+                if (isPopupPointerBlocked()) return;
+                const pointerType = event.nativeEvent instanceof PointerEvent
+                  ? event.nativeEvent.pointerType
+                  : (contextPointerRef.current.type || 'mouse');
+                if (pointerType === 'touch') return;
                 // Windows synthesizes a right-click on pen dwell, even during a primary-tip stroke.
-                if (contextPointerRef.current.type === 'pen' && !contextPointerRef.current.rightButton) return;
-                if (currentTool === 'vector_bezier' && penPoints.length > 0) {
+                const hasRightButton = contextPointerRef.current.rightButton;
+                if (currentTool === 'vector_bezier' && penPoints.length > 0 && (pointerType !== 'pen' || hasRightButton)) {
+                  event.preventDefault();
                   finishPenPath(false);
                   return;
                 }
-                setRadialMenuPos({ x: event.clientX, y: event.clientY });
-                setIsRadialMenuOpen(true);
+                if (canOpenDesktopPopup(pointerType, hasRightButton)) {
+                  event.preventDefault();
+                  openDesktopPopupAt({ x: event.clientX, y: event.clientY });
+                }
               }}
               data-brush-crosshair={showBrushCrosshair ? 'true' : 'false'}
               style={{
@@ -7972,6 +8062,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                   onOpenResize={() => setIsResizeModalOpen(true)}
                   onOpenRadial={() => {
                     if (transformLayerIdRef.current || filterModalOpenRef.current) return;
+                    setIsDesktopPopupOpen(false);
                     setRadialMenuPos(getViewCenter() ?? { x: window.innerWidth / 2, y: window.innerHeight / 2 });
                     setIsRadialMenuOpen(true);
                   }}
@@ -7993,13 +8084,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         quickTabs={[
           { id: 'toolPicker', label: t.navbar.tools, icon: <Grid2x2 /> },
           { id: 'color', label: PANEL_TITLES.color, icon: <Palette /> },
+          { id: 'subView', label: t.subView.title, icon: <ImageIcon /> },
           { id: 'brushToolset', label: t.brushPreset.toolset, icon: <Paintbrush /> },
           { id: 'layers', label: PANEL_TITLES.layers, icon: <Layers /> },
           { id: 'toolProps', label: t.toolOptions.title, icon: <Sliders /> },
         ]}
         onSelectTab={openMobileSheet}
         onClose={() => {
-          if (mobileSheet === 'members' || mobileSheet === 'oplog') dockActions.hide(mobileSheet);
+          if (mobileSheet === 'members' || mobileSheet === 'oplog' || mobileSheet === 'subView') dockActions.hide(mobileSheet);
           setMobileSheet(null);
         }}
       />
@@ -8056,6 +8148,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             onClose={() => setIsReferenceHUDOpen(false)}
             onPickColor={(hex) => {
               setBrushProps((prev) => ({ ...prev, color: hex, isEraser: false }));
+              recordUsedColor(hex);
             }}
           />
         </Suspense>
@@ -8098,6 +8191,27 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           onClearSelection={handleClearSelection}
         />
       )}
+
+      <DesktopPopupPalette
+        isOpen={isDesktopPopupOpen}
+        position={desktopPopupPos}
+        onClose={() => setIsDesktopPopupOpen(false)}
+        currentColor={brushProps.color}
+        secondaryColor={brushProps.secondaryColor || '#FFFFFF'}
+        isEraser={brushProps.isEraser}
+        activeSubToolId={subToolState.activeSubToolId}
+        selectedBrushId={selectedBrushId}
+        onSelectColor={(color) => handleBrushPropsChange({ color, isEraser: false })}
+        onSelectPreset={handleApplyPreset}
+        onSelectSubTool={handleSelectSubTool}
+        onSelectEyedropper={() => handleSelectTool('eyedropper')}
+        onToggleEraser={() => handleSelectTool(brushProps.isEraser ? 'brush' : 'eraser')}
+        onSwapColors={() => handleBrushPropsChange({
+          color: brushProps.secondaryColor || '#FFFFFF',
+          secondaryColor: brushProps.color,
+          isEraser: false,
+        })}
+      />
 
       {!alignDocked && <ToolDockSlot host={toolDockHosts.align} />}
       {!filterDocked && <ToolDockSlot host={toolDockHosts.filters} />}

@@ -625,9 +625,44 @@ export interface Translations {
   };
 
   studio: {
+    popupPaletteTitle: string;
+    popupRecentColors: string;
+    popupQuickBrushes: string;
+    popupQuickTools: string;
+    popupSwapColors: string;
+    popupCloseHint: string;
     // Existing keys
     title: string;
     colorWheel: string;
+    tabWheel: string;
+    tabMixingPad: string;
+    clearHistory: string;
+    pinnedSwatches: string;
+    pinCurrentColor: string;
+    removePinnedColor: string;
+    newPaletteSet: string;
+    deletePaletteSet: string;
+    importPalette: string;
+    exportGpl: string;
+    exportAco: string;
+    importPaletteSuccess: string;
+    importPaletteError: string;
+    exportPaletteError: string;
+    paletteSetDefault: string;
+    paletteSetUntitled: string;
+    mixingPaint: string;
+    mixingSmudge: string;
+    mixingPick: string;
+    mixingBrushSize: string;
+    mixingStrength: string;
+    mixingClear: string;
+    mixingReset: string;
+    mixingPickHint: string;
+    foregroundColor: string;
+    backgroundColor: string;
+    swapColors: string;
+    resetColors: string;
+    eyedropperUnavailable: string;
     brushSettings: string;
     brushSize: string;
     opacity: string;
@@ -1400,6 +1435,27 @@ export interface Translations {
     guideDelete: string;
   };
 
+  subView: {
+    title: string;
+    importImages: string;
+    dropHint: string;
+    prevImage: string;
+    nextImage: string;
+    removeImage: string;
+    clearAll: string;
+    zoomIn: string;
+    zoomOut: string;
+    flipH: string;
+    rotateCcw: string;
+    rotateCw: string;
+    resetView: string;
+    autoEyedropper: string;
+    panMode: string;
+    pickedColor: string;
+    emptyTitle: string;
+    emptyHint: string;
+  };
+
   reference: {
     title: string;
     openImage: string;
@@ -1577,6 +1633,16 @@ export interface Translations {
     serverPlaceholder: string;
     tablistAria: string;
     canvasCursorTitle: string;
+    popupPaletteTitle: string;
+    popupPaletteEnabled: string;
+    popupPaletteEnabledDesc: string;
+    popupPaletteTriggerLabel: string;
+    popupPaletteTriggerRightClick: string;
+    popupPaletteTriggerPenSide: string;
+    popupPaletteTriggerShortcutOnly: string;
+    popupPaletteShortcutHint: string;
+    shortcutSubViewDesc: string;
+    shortcutPopupPaletteDesc: string;
     showBrushCrosshair: string;
     showBrushCrosshairDesc: string;
     touchSimulatedPressure: string;

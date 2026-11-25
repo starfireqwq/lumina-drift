@@ -8,6 +8,7 @@ import {
   Keyboard,
   Minus,
   Moon,
+  Palette,
   PenTool,
   Plus,
   Puzzle,
@@ -28,12 +29,19 @@ import { ThemePicker } from './ThemePicker';
 import { evaluatePressureCurve, type PressureCurveConfig } from '@atelier/shared';
 import { DEFAULT_PRESSURE_CURVE, readStylusPressureCurve, saveStylusPressureCurve } from '../engine/stylusPressure';
 import {
+  getDesktopPopupPaletteEnabled,
+  getDesktopPopupPaletteTrigger,
   getShowBrushCrosshair,
   getTouchSimulatedPressure,
+  setDesktopPopupPaletteEnabled,
+  setDesktopPopupPaletteTrigger,
   setShowBrushCrosshair,
   setTouchSimulatedPressure,
+  subscribeDesktopPopupPaletteEnabled,
+  subscribeDesktopPopupPaletteTrigger,
   subscribeShowBrushCrosshair,
   subscribeTouchSimulatedPressure,
+  type DesktopPopupPaletteTrigger,
 } from '../engine/inputPreferences';
 import {
   getTouchGestureSettings,
@@ -195,6 +203,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   }, []);
   const tablet = useSyncExternalStore(subscribeTablet, getTabletSnapshot);
   const showBrushCrosshair = useSyncExternalStore(subscribeShowBrushCrosshair, getShowBrushCrosshair, getShowBrushCrosshair);
+  const popupPaletteEnabled = useSyncExternalStore(subscribeDesktopPopupPaletteEnabled, getDesktopPopupPaletteEnabled, getDesktopPopupPaletteEnabled);
+  const popupPaletteTrigger = useSyncExternalStore(subscribeDesktopPopupPaletteTrigger, getDesktopPopupPaletteTrigger, getDesktopPopupPaletteTrigger);
   const touchSimulatedPressure = useSyncExternalStore(subscribeTouchSimulatedPressure, getTouchSimulatedPressure, getTouchSimulatedPressure);
   const touchGestures = useSyncExternalStore(subscribeTouchGestureSettings, getTouchGestureSettings, getTouchGestureSettings);
   const settings = t.settings;
@@ -468,14 +478,26 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     }
     return { label: shortcut.name, hint: shortcut.description };
   };
+  const studioShortcutText = (shortcut: ShortcutItem) => {
+    switch (shortcut.id) {
+      case 'action_studio_subview':
+        return { label: t.subView.title, hint: t.settings.shortcutSubViewDesc };
+      case 'action_studio_popup_palette':
+        return { label: t.studio.popupPaletteTitle, hint: t.settings.shortcutPopupPaletteDesc };
+      default:
+        return { label: shortcut.name, hint: shortcut.description };
+    }
+  };
   const matchingShortcuts = query.length ? shortcuts.filter((shortcut) => {
     const toolboxTerms = shortcut.category === 'toolbox' ? toolboxShortcutText(shortcut) : null;
+    const studioTerms = shortcut.category === 'studio' ? studioShortcutText(shortcut) : null;
     const toolboxSectionTerms = shortcut.toolScope === 'category'
       ? `${t.settings.shortcutCatToolCategories} 分類 分类 category categories`
       : `${t.settings.shortcutCatSubTools} 子工具 sub-tool subtool`;
     const haystack = normalizeShortcut([
       shortcut.name, shortcut.description, shortcut.id.replace(/_/g, ' '), categoryLabels[shortcut.category],
       toolboxTerms?.label, toolboxTerms?.hint, toolboxTerms && toolboxSectionTerms,
+      studioTerms?.label, studioTerms?.hint,
       shortcut.currentCombo, shortcutMgr.getDisplayLabel(shortcut.currentCombo),
     ].join(' '));
     return query.every((term) => haystack.includes(term));
@@ -753,6 +775,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     {studioShortcuts.map((s) => {
                       const isRecording = recordingActionId === s.id;
                       const hasConflict = (comboCounts.get(s.currentCombo) || 0) > 1 || ShortcutManager.isBrowserReserved(s.currentCombo);
+                      const { label, hint } = studioShortcutText(s);
 
                       return (
                         <div
@@ -760,8 +783,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           className="flex items-center justify-between p-2.5 rounded-xl bg-neutral-900/80 border border-neutral-800/80 hover:border-neutral-700 text-xs"
                         >
                           <div className="min-w-0 pr-2">
-                            <span className="font-semibold text-white block truncate">{s.name}</span>
-                            <span className="text-[10px] text-neutral-500 block truncate">{s.description}</span>
+                            <span className="font-semibold text-white block truncate">{label}</span>
+                            <span className="text-[10px] text-neutral-500 block truncate">{hint}</span>
                           </div>
 
                           <div className="flex items-center gap-1.5 shrink-0">
@@ -973,6 +996,46 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </label>
               </div>
 
+              <div className="flex flex-col gap-2.5">
+                <h3 className="flex items-center gap-1.5 text-xs font-bold text-neutral-300">
+                  <Palette className="h-3.5 w-3.5 text-indigo-400" aria-hidden />
+                  {settings.popupPaletteTitle}
+                </h3>
+                <div className="flex flex-col gap-2.5 rounded-xl border border-neutral-800 bg-neutral-900/60 px-3 py-2.5 text-xs text-neutral-200">
+                  <label className="flex cursor-pointer items-start justify-between gap-3">
+                    <span className="flex flex-col gap-0.5">
+                      <span className="font-medium text-white">{settings.popupPaletteEnabled}</span>
+                      <span className="text-[11px] text-neutral-400">{settings.popupPaletteEnabledDesc}</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      data-setting="desktop-popup-palette-enabled"
+                      checked={popupPaletteEnabled}
+                      onChange={(event) => setDesktopPopupPaletteEnabled(event.target.checked)}
+                      className="mt-0.5 shrink-0"
+                    />
+                  </label>
+                  <label className="flex flex-wrap items-center justify-between gap-2 border-t border-neutral-800 pt-2.5">
+                    <span>{settings.popupPaletteTriggerLabel}</span>
+                    <select
+                      data-setting="desktop-popup-palette-trigger"
+                      disabled={!popupPaletteEnabled}
+                      value={popupPaletteTrigger}
+                      onChange={(event) => setDesktopPopupPaletteTrigger(event.target.value as DesktopPopupPaletteTrigger)}
+                      className="atelier-field rounded-md px-2 py-1.5 disabled:opacity-50"
+                    >
+                      <option value="right-click">{settings.popupPaletteTriggerRightClick}</option>
+                      <option value="pen-side-button">{settings.popupPaletteTriggerPenSide}</option>
+                      <option value="shortcut-only">{settings.popupPaletteTriggerShortcutOnly}</option>
+                    </select>
+                  </label>
+                  <p className="text-[11px] text-neutral-400">
+                    {settings.popupPaletteShortcutHint.replace('{shortcut}',
+                      shortcutMgr.getDisplayLabel(shortcutMgr.getComboForAction('action_studio_popup_palette')) || settings.shortcutNotSet)}
+                  </p>
+                </div>
+              </div>
+
               {/* Panels (same switches as the 視窗 menu) */}
               <div className="flex flex-col gap-2.5">
                 <span className="text-xs font-bold text-neutral-300 uppercase tracking-wider flex items-center gap-1.5">
@@ -982,8 +1045,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="grid grid-cols-2 gap-2">
                   {PANEL_IDS.map((id) => (
                     <label key={id} className="flex items-center justify-between gap-2 rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-xs text-neutral-200">
-                      <span>{PANEL_TITLES[id]}</span>
-                      <input type="checkbox" checked={dockLayout.panels[id].visible} onChange={() => dockActions.toggle(id)} />
+                      <span>{id === 'subView' ? t.subView.title : PANEL_TITLES[id]}</span>
+                      <input type="checkbox" data-panel-toggle={id} checked={dockLayout.panels[id].visible} onChange={() => dockActions.toggle(id)} />
                     </label>
                   ))}
                 </div>

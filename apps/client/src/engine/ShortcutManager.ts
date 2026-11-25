@@ -587,6 +587,22 @@ export const DEFAULT_SHORTCUTS: ShortcutItem[] = [
     defaultCombo: 'KeyS',
     currentCombo: 'KeyS',
   },
+  {
+    id: 'action_studio_subview',
+    category: 'studio',
+    name: '子視圖 (Sub View)',
+    description: '切換子視圖面板',
+    defaultCombo: 'Control+Shift+KeyR',
+    currentCombo: 'Control+Shift+KeyR',
+  },
+  {
+    id: 'action_studio_popup_palette',
+    category: 'studio',
+    name: '快顯輪盤 (Pop-up Palette)',
+    description: '喚出桌面快顯輪盤',
+    defaultCombo: 'Alt+KeyQ',
+    currentCombo: 'Alt+KeyQ',
+  },
 
   // 5. Actions & Operations (繪圖操作與局部歷程)
   {

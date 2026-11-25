@@ -1,5 +1,9 @@
 export const SHOW_BRUSH_CROSSHAIR_KEY = 'atelier_show_brush_crosshair';
 export const TOUCH_SIMULATED_PRESSURE_KEY = 'atelier_touch_simulated_pressure';
+export const DESKTOP_POPUP_PALETTE_ENABLED_KEY = 'atelier_desktop_popup_palette_enabled';
+export const DESKTOP_POPUP_PALETTE_TRIGGER_KEY = 'atelier_desktop_popup_palette_trigger';
+
+export type DesktopPopupPaletteTrigger = 'right-click' | 'pen-side-button' | 'shortcut-only';
 
 type PointerLike = {
   clientX: number;
@@ -9,30 +13,50 @@ type PointerLike = {
 
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
 
-function readBooleanPreference(key: string, defaultValue: boolean): boolean {
+function readPreference(key: string): string | null {
   try {
-    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null;
-    if (raw === '0' || raw === 'false') return false;
-    if (raw === '1' || raw === 'true') return true;
+    return typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null;
   } catch {
     // Storage may be unavailable in restricted or headless contexts.
+    return null;
   }
-  return defaultValue;
 }
 
-function writeBooleanPreference(key: string, value: boolean) {
+function writePreference(key: string, value: string) {
   try {
-    if (typeof localStorage !== 'undefined') localStorage.setItem(key, value ? '1' : '0');
+    if (typeof localStorage !== 'undefined') localStorage.setItem(key, value);
   } catch {
     // Ignore storage quota or security restrictions.
   }
 }
 
+function readBooleanPreference(key: string, defaultValue: boolean): boolean {
+  const raw = readPreference(key);
+  if (raw === '0' || raw === 'false') return false;
+  if (raw === '1' || raw === 'true') return true;
+  return defaultValue;
+}
+
+function writeBooleanPreference(key: string, value: boolean) {
+  writePreference(key, value ? '1' : '0');
+}
+
+function isDesktopPopupPaletteTrigger(value: unknown): value is DesktopPopupPaletteTrigger {
+  return value === 'right-click' || value === 'pen-side-button' || value === 'shortcut-only';
+}
+
 let showBrushCrosshair = readBooleanPreference(SHOW_BRUSH_CROSSHAIR_KEY, true);
 let touchSimulatedPressure = readBooleanPreference(TOUCH_SIMULATED_PRESSURE_KEY, false);
+let desktopPopupPaletteEnabled = readBooleanPreference(DESKTOP_POPUP_PALETTE_ENABLED_KEY, true);
+const savedPopupPaletteTrigger = readPreference(DESKTOP_POPUP_PALETTE_TRIGGER_KEY);
+let desktopPopupPaletteTrigger: DesktopPopupPaletteTrigger = isDesktopPopupPaletteTrigger(savedPopupPaletteTrigger)
+  ? savedPopupPaletteTrigger
+  : 'right-click';
 
 const crosshairListeners = new Set<() => void>();
 const touchPressureListeners = new Set<() => void>();
+const desktopPopupPaletteEnabledListeners = new Set<() => void>();
+const desktopPopupPaletteTriggerListeners = new Set<() => void>();
 
 export const getShowBrushCrosshair = () => showBrushCrosshair;
 
@@ -67,6 +91,54 @@ export const subscribeTouchSimulatedPressure = (listener: () => void) => {
     touchPressureListeners.delete(listener);
   };
 };
+
+export function getDesktopPopupPaletteEnabled(): boolean {
+  return desktopPopupPaletteEnabled;
+}
+
+export function setDesktopPopupPaletteEnabled(next: boolean): void {
+  const normalized = Boolean(next);
+  if (normalized === desktopPopupPaletteEnabled) return;
+  desktopPopupPaletteEnabled = normalized;
+  writeBooleanPreference(DESKTOP_POPUP_PALETTE_ENABLED_KEY, normalized);
+  desktopPopupPaletteEnabledListeners.forEach((listener) => listener());
+}
+
+export function subscribeDesktopPopupPaletteEnabled(listener: () => void): () => void {
+  desktopPopupPaletteEnabledListeners.add(listener);
+  return () => {
+    desktopPopupPaletteEnabledListeners.delete(listener);
+  };
+}
+
+export function getDesktopPopupPaletteTrigger(): DesktopPopupPaletteTrigger {
+  return desktopPopupPaletteTrigger;
+}
+
+export function setDesktopPopupPaletteTrigger(next: DesktopPopupPaletteTrigger): void {
+  if (!isDesktopPopupPaletteTrigger(next) || next === desktopPopupPaletteTrigger) return;
+  desktopPopupPaletteTrigger = next;
+  writePreference(DESKTOP_POPUP_PALETTE_TRIGGER_KEY, next);
+  desktopPopupPaletteTriggerListeners.forEach((listener) => listener());
+}
+
+export function subscribeDesktopPopupPaletteTrigger(listener: () => void): () => void {
+  desktopPopupPaletteTriggerListeners.add(listener);
+  return () => {
+    desktopPopupPaletteTriggerListeners.delete(listener);
+  };
+}
+
+export function shouldOpenDesktopPopupOnContextMenu(
+  enabled: boolean,
+  trigger: DesktopPopupPaletteTrigger,
+  pointerType: string,
+  hasRightButton: boolean,
+): boolean {
+  if (!enabled || pointerType === 'touch' || trigger === 'shortcut-only') return false;
+  if (trigger === 'pen-side-button') return pointerType === 'pen' && hasRightButton;
+  return pointerType === 'pen' ? hasRightButton : true;
+}
 
 /**
  * Estimates natural pressure for finger-only touch strokes (`pointerType === 'touch'`)

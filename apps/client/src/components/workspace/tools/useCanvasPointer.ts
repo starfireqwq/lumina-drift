@@ -66,9 +66,10 @@ export interface CanvasTools {
 interface PointerDeps {
   containerRef: React.RefObject<HTMLDivElement | null>;
   lassoOutline?: OutlineSettings;
-  /** While a filter dialog or the radial menu is open the canvas ignores the pointer */
+  /** While a filter dialog or a palette is open the canvas ignores the pointer */
   filterModalOpenRef: React.MutableRefObject<boolean>;
   radialMenuOpenRef: React.MutableRefObject<boolean>;
+  desktopPopupOpenRef: React.MutableRefObject<boolean>;
   clipboardMenuOpenRef?: React.MutableRefObject<boolean>;
   /** While the canvas resize frame is open, prevent accidental strokes while still allowing pan/zoom */
   resizeModalOpenRef?: React.MutableRefObject<boolean>;
@@ -111,7 +112,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     viewportRef, layerManagerRef, strokePipelineRef, selectionEngineRef, shapeGraphicRef, activeLayerRef, warn, requestRender,
   } = ctx;
   const {
-    containerRef, filterModalOpenRef, radialMenuOpenRef, clipboardMenuOpenRef, resizeModalOpenRef, updateBrushCursor, hideBrushCursor,
+    containerRef, filterModalOpenRef, radialMenuOpenRef, desktopPopupOpenRef, clipboardMenuOpenRef, resizeModalOpenRef, updateBrushCursor, hideBrushCursor,
     openRadialMenu, onOpenClipboardMenu, onQuickFitCanvas, onToggleFullscreen, onTouchEyedropperChange, onTouchEyedropperCommit,
     emitCursor, setEraserHover, undo, redo, setCurrentTool, onSelectLayer, onRequestCreateMyLayer, onTextTool, pluginTool, lassoOutline,
   } = deps;
@@ -293,7 +294,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
   }, []);
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (filterModalOpenRef.current || radialMenuOpenRef.current || clipboardMenuOpenRef?.current) return;
+    if (filterModalOpenRef.current || radialMenuOpenRef.current || desktopPopupOpenRef.current || clipboardMenuOpenRef?.current) return;
     if ((e.target as HTMLElement | null)?.closest?.('[data-transform-overlay], [data-canvas-resize-overlay], button, select, input, textarea, [role="dialog"], [role="menu"]')) return;
     if ((isTransformActive || resizeModalOpenRef?.current) && e.button !== 1 && !isSpacePressedRef.current && currentTool !== 'hand') return;
     if (e.pointerType === 'mouse' && e.button === 2) return;
@@ -641,7 +642,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const tail = tailRef.current;
     if (tail?.id === e.pointerId) {
-      if (!hasDrawingContact(e) || filterModalOpenRef.current || radialMenuOpenRef.current) {
+      if (!hasDrawingContact(e) || filterModalOpenRef.current || radialMenuOpenRef.current || desktopPopupOpenRef.current) {
         finishTail(e.pointerId);
         return;
       }
@@ -656,7 +657,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       return;
     }
     if (radialTouchRef.current === e.pointerId) return;
-    if (filterModalOpenRef.current || radialMenuOpenRef.current) return;
+    if (filterModalOpenRef.current || radialMenuOpenRef.current || desktopPopupOpenRef.current) return;
     if (e.pointerType === 'touch' && !activePointersRef.current.has(e.pointerId)) return;
     if (!tail) setEraserHover(e.pointerType === 'pen' && isTabletEraser(e.nativeEvent));
     updateBrushCursor(e.clientX, e.clientY);
