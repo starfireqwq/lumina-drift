@@ -133,11 +133,18 @@ for (const lang of REQUIRED_LOCALES) {
     }
   }
 
-  const fill = TOOL_CATEGORIES.find(({ id }) => id === 'fill');
-  assert.ok(fill);
-  const fillLabels = fill.subTools.map(({ id }) => getLocalizedSubTool(id, t).label);
-  assert.equal(fillLabels.length, 5, `Should localize all five fill sub-tools in ${lang}`);
-  assert.equal(new Set(fillLabels).size, 5, `Fill sub-tools must have distinct labels in ${lang}`);
+  const categorySizes = { fill: 5, select: 7, vector: 6, blend: 3, comic: 5 };
+  for (const [categoryId, size] of Object.entries(categorySizes)) {
+    const category = TOOL_CATEGORIES.find(({ id }) => id === categoryId);
+    assert.ok(category, `Missing ${categoryId} category in ${lang}`);
+    assert.equal(category.subTools.length, size, `Expected ${size} ${categoryId} sub-tools in ${lang}`);
+    const labels = category.subTools.map(({ id }) => {
+      const label = getLocalizedSubTool(id, t).label.trim();
+      assert.ok(label, `Sub-tool ${id} label must be translated in ${lang}`);
+      return label;
+    });
+    assert.equal(new Set(labels).size, size, `${categoryId} sub-tools must have distinct labels in ${lang}`);
+  }
   for (const { id } of TOOL_CATEGORIES) {
     assert.ok(getLocalizedCategoryLabel(id, t).trim(), `Category ${id} must be translated in ${lang}`);
   }
@@ -203,5 +210,19 @@ for (const lang of REQUIRED_LOCALES) {
   }
 }
 console.log('✓ Plugin v1/v2 labels and permissions verified across all 4 locales');
+
+// 8. Phase 3 shortcut headings and tool option labels.
+const phase3ToolOptionKeys = ['vectorPartial', 'selectionAntialias', 'selectionFeatherRadius', 'polygonFinish', 'polygonCancel'] as const;
+for (const lang of REQUIRED_LOCALES) {
+  const { settings, toolOptions } = translations[lang];
+  const categoryLabel = settings.shortcutCatToolCategories.trim();
+  const subToolLabel = settings.shortcutCatSubTools.trim();
+  assert.ok(categoryLabel, `settings.shortcutCatToolCategories must be translated in ${lang}`);
+  assert.ok(subToolLabel, `settings.shortcutCatSubTools must be translated in ${lang}`);
+  assert.notEqual(categoryLabel, subToolLabel, `Shortcut headings must be distinct in ${lang}`);
+  for (const key of phase3ToolOptionKeys) {
+    assert.ok(toolOptions[key].trim(), `toolOptions.${key} must be translated in ${lang}`);
+  }
+}
 
 console.log('--- ALL i18n VERIFICATION CHECKS PASSED SUCCESSFULLY! ---');

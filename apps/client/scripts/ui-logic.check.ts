@@ -35,15 +35,18 @@ import {
   computeAudioPlaybackWindow,
   computePaintUnfilledAreaMask,
   computeSmartEncloseFillMask,
+  computeStrokeBounds,
   computeWaveformPeaks,
   DynamicStabilizer,
   clampDpi,
+  eraseStrokePartial,
   evaluateCameraFrame,
   evaluateEasing,
   evaluateTransformKeyframes,
   findCameraLayer,
   formatCanvasDimensions,
   getCanvasRoleCapabilities,
+  hitTestVectorStroke,
   invertAffine,
   isAssignableCanvasRole,
   isAudioLayer,
@@ -54,12 +57,14 @@ import {
   normalizeAudioTrackMeta,
   normalizeCameraMeta,
   pixelsToUnit,
+  rasterizeLassoMask,
   resolveAudioClipFrameRange,
   sampleCameraMotionPath,
   STABILIZER_LEVEL_STEP,
   tileToRgba,
   type ScopedUndoOp,
   type TileData,
+  type VectorStroke,
   transformToAffineMatrix,
   unitToPixels,
 } from '@atelier/shared';
@@ -94,12 +99,20 @@ import {
   computeFrameTimestampUs,
 } from '../src/engine/videoExport';
 import {
+  DEFAULT_SHORTCUTS,
   ShortcutManager,
   makePluginCommandShortcutId,
   makePluginPanelShortcutId,
   makePluginToolShortcutId,
   parsePluginShortcutId,
 } from '../src/engine/ShortcutManager';
+import {
+  applySelectionPostProcess,
+  combineSelectionMasks,
+  computeMarqueeRect,
+  rasterizeEllipseMask,
+  rasterizeRectMask,
+} from '../src/engine/selectionMaskOps';
 import {
   buildInitialToolOptions,
   collectEnabledPluginTools,
@@ -5312,4 +5325,221 @@ await (async () => {
   assert.equal(peaks[1], 0.5);
   assert.equal(peaks[0], 0);
 }
+// Phase 3: marquee geometry and modifier keys.
+{
+  const start = { x: 20, y: 30 };
+  const forward = { x: 28, y: 35 };
+  const backward = { x: 12, y: 25 };
+  assert.deepEqual(computeMarqueeRect(start, forward), { x: 20, y: 30, width: 8, height: 5 });
+  assert.deepEqual(computeMarqueeRect(start, backward), { x: 12, y: 25, width: 8, height: 5 });
+  assert.deepEqual(computeMarqueeRect(start, start), { x: 20, y: 30, width: 0, height: 0 });
+
+  const quadrants = [
+    { end: forward, x: 20, y: 30 },
+    { end: { x: 15, y: 38 }, x: 12, y: 30 },
+    { end: backward, x: 12, y: 22 },
+    { end: { x: 25, y: 22 }, x: 20, y: 22 },
+  ];
+  for (const { end, x, y } of quadrants) {
+    assert.deepEqual(computeMarqueeRect(start, end, { square: true }), { x, y, width: 8, height: 8 });
+    const centered = computeMarqueeRect(start, end, { fromCenter: true });
+    assert.equal(centered.x + centered.width / 2, start.x);
+    assert.equal(centered.y + centered.height / 2, start.y);
+    assert.equal(centered.width, 2 * Math.abs(end.x - start.x));
+    assert.equal(centered.height, 2 * Math.abs(end.y - start.y));
+    assert.deepEqual(computeMarqueeRect(start, end, { square: true, fromCenter: true }), {
+      x: 12, y: 22, width: 16, height: 16,
+    });
+  }
+}
+
+// Phase 3: mask rasterization, anti-aliasing and feathered edges.
+{
+  const width = 24;
+  const height = 20;
+  const at = (x: number, y: number) => y * width + x;
+  const isBinary = (value: number) => value === 0 || value === 255;
+  const isGray = (value: number) => value > 0 && value < 255;
+  const rect = rasterizeRectMask(3, 5, 5, 4, width, height);
+  assert.deepEqual(rect.bounds, { minX: 3, minY: 5, maxX: 7, maxY: 8 });
+  assert.equal(rect.activePixelCount, 20);
+  assert.equal(rect.data.length, width * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const expected = x >= 3 && x <= 7 && y >= 5 && y <= 8 ? 255 : 0;
+      assert.equal(rect.data[at(x, y)], expected, `Rectangle coverage at (${x}, ${y})`);
+    }
+  }
+
+  const ellipse = rasterizeEllipseMask(4, 4, 12, 8, width, height, false);
+  const smoothEllipse = rasterizeEllipseMask(4, 4, 12, 8, width, height, true);
+  assert.ok(ellipse.data.every(isBinary));
+  assert.equal(ellipse.data[at(10, 8)], 255);
+  assert.equal(smoothEllipse.data[at(10, 8)], 255);
+  assert.equal(smoothEllipse.data[at(0, 0)], 0);
+  assert.ok(isGray(smoothEllipse.data[at(5, 5)]), 'Ellipse boundary should have partial coverage');
+
+  const triangle = [{ x: 4, y: 4 }, { x: 16, y: 4 }, { x: 4, y: 16 }];
+  const lasso = rasterizeLassoMask(triangle, width, height, false);
+  const smoothLasso = rasterizeLassoMask(triangle, width, height, true);
+  assert.ok(lasso.data.every(isBinary));
+  assert.equal(lasso.data[at(6, 6)], 255);
+  assert.equal(smoothLasso.data[at(6, 6)], 255);
+  assert.equal(smoothLasso.data[at(0, 0)], 0);
+  assert.ok(isGray(smoothLasso.data[at(9, 10)]), 'Lasso diagonal should have partial coverage');
+
+  const source = rasterizeRectMask(16, 16, 32, 32, 64, 64);
+  assert.equal(applySelectionPostProcess(source, 0), source);
+  const feathered = applySelectionPostProcess(source, 4);
+  const outside = feathered.data[32 * source.width + 15];
+  const edge = feathered.data[32 * source.width + 16];
+  assert.equal(source.data[32 * source.width + 15], 0);
+  assert.equal(source.data[32 * source.width + 16], 255);
+  assert.ok(isGray(outside) && isGray(edge) && outside < edge, 'Feathering should transition across the original edge');
+  assert.equal(feathered.data[32 * source.width + 32], 255);
+  assert.equal(feathered.data[32 * source.width], 0);
+  assert.ok(feathered.activePixelCount > source.activePixelCount);
+  for (const { min, max } of [
+    { min: feathered.bounds.minX, max: feathered.bounds.maxX },
+    { min: feathered.bounds.minY, max: feathered.bounds.maxY },
+  ]) {
+    assert.ok(min > 0 && min < 16 && max > 47 && max < 63, 'Feathered bounds should expand around the selection');
+  }
+}
+
+// Phase 3: replacing, adding and subtracting selection masks.
+{
+  const width = 16;
+  const height = 16;
+  const at = (x: number, y: number) => y * width + x;
+  const a = rasterizeRectMask(2, 3, 6, 5, width, height);
+  const b = rasterizeRectMask(5, 5, 6, 5, width, height);
+  assert.deepEqual(combineSelectionMasks(a, b, 'replace'), b);
+
+  const union = combineSelectionMasks(a, b, 'add');
+  const overlapCount = 3 * 3;
+  assert.equal(union.activePixelCount, a.activePixelCount + b.activePixelCount - overlapCount);
+  assert.deepEqual(union.bounds, { minX: 2, minY: 3, maxX: 10, maxY: 9 });
+  assert.equal(union.data[at(2, 3)], 255);
+  assert.equal(union.data[at(5, 5)], 255);
+  assert.equal(union.data[at(10, 9)], 255);
+  assert.equal(union.data[at(10, 3)], 0);
+
+  const outer = rasterizeRectMask(2, 2, 12, 12, width, height);
+  const inner = rasterizeEllipseMask(5, 5, 6, 6, width, height, false);
+  const cutout = combineSelectionMasks(outer, inner, 'subtract');
+  assert.equal(cutout.data[at(8, 8)], 0);
+  assert.equal(cutout.data[at(2, 8)], 255);
+  assert.equal(cutout.data[at(13, 8)], 255);
+  assert.equal(cutout.activePixelCount, outer.activePixelCount - inner.activePixelCount);
+  assert.deepEqual(cutout.bounds, outer.bounds);
+
+  const empty = rasterizeRectMask(0, 0, 0, 0, width, height);
+  assert.deepEqual(combineSelectionMasks(null, inner, 'subtract'), empty);
+  assert.deepEqual(combineSelectionMasks(empty, inner, 'subtract'), empty);
+}
+
+// Phase 3: partial vector erasing splits a cubic stroke without leaving a hit in the gap.
+{
+  const baseWidth = 2;
+  const anchors: VectorStroke['anchors'] = [
+    { x: 0, y: 50, cp2x: 100 / 3, cp2y: 50, pressure: 1, width: baseWidth },
+    { x: 100, y: 50, cp1x: 200 / 3, cp1y: 50, pressure: 1, width: baseWidth },
+  ];
+  const stroke: VectorStroke = {
+    id: 'phase-3-stroke', layerId: 'vector-layer', color: '#000000', opacity: 1,
+    baseWidth, anchors, bounds: computeStrokeBounds(anchors, baseWidth), createdAt: 0,
+  };
+  assert.equal(hitTestVectorStroke(stroke, 50, 50, 0), true);
+  const pieces = eraseStrokePartial(stroke, 50, 50, 10);
+  assert.equal(pieces.length, 2);
+  assert.equal(new Set(pieces.map(({ id }) => id)).size, 2);
+  for (const piece of pieces) {
+    assert.notEqual(piece.id, stroke.id);
+    assert.equal(hitTestVectorStroke(piece, 50, 50, 0), false);
+  }
+  const leftHits = pieces.filter((piece) => hitTestVectorStroke(piece, 10, 50, 0));
+  const rightHits = pieces.filter((piece) => hitTestVectorStroke(piece, 90, 50, 0));
+  assert.equal(leftHits.length, 1);
+  assert.equal(rightHits.length, 1);
+  assert.notEqual(leftHits[0].id, rightHits[0].id);
+
+  const untouched = eraseStrokePartial(stroke, 50, 200, 10);
+  assert.equal(untouched.length, 1);
+  assert.equal(untouched[0], stroke);
+  assert.deepEqual(eraseStrokePartial(stroke, 50, 50, 60), []);
+}
+
+// Phase 3: select shortcut cycling and independently saved sub-tool parameters.
+{
+  const selectIds = ['select_rect', 'select_ellipse', 'lasso', 'select_polygon', 'magic_wand', 'select_brush', 'select_eraser'];
+  const select = TOOL_CATEGORIES.find(({ id }) => id === 'select');
+  const vector = TOOL_CATEGORIES.find(({ id }) => id === 'vector');
+  assert.ok(select);
+  assert.ok(vector);
+  assert.deepEqual(select.subTools.map(({ id }) => id), selectIds);
+  assert.deepEqual(vector.subTools.map(({ id }) => id), [
+    'vector_pen', 'vector_bezier', 'vector_edit', 'vector_reshape', 'vector_width', 'vector_eraser',
+  ]);
+
+  const saved = new Map<string, string>();
+  const storage: StorageLike = {
+    getItem: (key) => saved.get(key) ?? null,
+    setItem: (key, value) => { saved.set(key, value); },
+  };
+  const store = createSubToolStore(storage);
+  assert.equal(store.selectCategory('select').id, 'select_rect');
+  for (const id of [...selectIds.slice(1), 'select_rect']) {
+    assert.equal(store.activateCategoryShortcut('select').id, id);
+    assert.equal(store.getState().activeSubToolId, id);
+  }
+
+  store.updateSubToolParams('vector_eraser', { vectorEraserMode: 'partial' });
+  store.updateSubToolParams('vector_eraser', { brushSize: 42 });
+  store.updateSubToolParams('vector_width', { vectorWidthMode: 'thin' });
+  store.updateSubToolParams('select_rect', { selectionFeather: 6, selectionAntialias: false });
+  store.updateSubToolParams('shape', { shapeSubtype: 'star', shapeLineWidth: 10 });
+  store.updateSubToolParams('gradient', { gradientType: 'radial' });
+
+  const restored = createSubToolStore(storage);
+  assert.deepEqual(restored.getSubToolParams('vector_eraser'), { vectorEraserMode: 'partial', brushSize: 42 });
+  assert.deepEqual(restored.getSubToolParams('vector_width'), { vectorWidthMode: 'thin', brushSize: 32 });
+  assert.deepEqual(restored.getSubToolParams('select_rect'), {
+    selectionMode: 'replace', selectionFeather: 6, selectionAntialias: false,
+  });
+  assert.deepEqual(restored.getSubToolParams('select_ellipse'), {
+    selectionMode: 'replace', selectionFeather: 0, selectionAntialias: true,
+  });
+  assert.deepEqual(restored.getSubToolParams('shape'), {
+    shapeSubtype: 'star', shapeLineWidth: 10, shapeFillMode: 'stroke', shapeCornerRadius: 0,
+  });
+  assert.deepEqual(restored.getSubToolParams('gradient'), { gradientType: 'radial' });
+}
+
+// Phase 3: default shortcuts are unique and distinguish categories from individual tools.
+{
+  const seen = new Map<string, string>();
+  for (const { id, defaultCombo } of DEFAULT_SHORTCUTS) {
+    if (!defaultCombo) continue;
+    assert.ok(!seen.has(defaultCombo), `Duplicate default shortcut ${defaultCombo}: ${seen.get(defaultCombo)} and ${id}`);
+    seen.set(defaultCombo, id);
+  }
+
+  const toolbox = new Map(DEFAULT_SHORTCUTS.filter(({ category }) => category === 'toolbox').map((shortcut) => [shortcut.id, shortcut]));
+  assert.equal(TOOL_CATEGORIES.length, 11);
+  const categoryShortcutIds = new Set<string>();
+  for (const { id, shortcutId } of TOOL_CATEGORIES) {
+    assert.ok(shortcutId, `Missing shortcut ID for category ${id}`);
+    assert.equal(toolbox.get(shortcutId)?.toolScope, 'category', `Incorrect shortcut scope for category ${id}`);
+    categoryShortcutIds.add(shortcutId);
+  }
+  assert.equal(categoryShortcutIds.size, TOOL_CATEGORIES.length);
+  for (const id of ['tool_select_rect', 'tool_select_polygon', 'tool_vector_eraser', 'tool_magic_wand', 'tool_pencil', 'tool_text']) {
+    assert.equal(toolbox.get(id)?.toolScope, 'subtool', `Incorrect shortcut scope for sub-tool ${id}`);
+  }
+  for (const [id, { toolScope }] of toolbox) {
+    assert.equal(toolScope, categoryShortcutIds.has(id) ? 'category' : 'subtool', `Incorrect toolbox shortcut scope for ${id}`);
+  }
+}
+
 console.log('ui-logic checks passed');
