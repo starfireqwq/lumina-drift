@@ -8,6 +8,7 @@ import { buildPenStroke, deleteAnchor, hitTestNodes, moveAnchor, moveHandle, Pen
 import type { BezierMode } from '../ToolOptionsBar';
 import type { Point, ToolContext } from './toolContext';
 import { commitInOrder, tilesAsync } from './asyncTiles';
+import { recordUsedColor } from '../../../services/colorHistoryStore';
 
 type PenPointer = { pressure: number; pointerType: string; altKey: boolean };
 type StrokePoint = Point & { pressure?: number };
@@ -176,6 +177,7 @@ export function useVectorTools(ctx: ToolContext) {
     });
     updateUndoRedoState();
     commitOp(layer.id, 'STROKE', { tool: 'vector_bezier', vectorStroke: stroke, vectorAdded: [stroke], tiles: res.dirtyTiles });
+    recordUsedColor(stroke.color);
     setVectorStrokesList(vectorEngineRef.current!.getStrokes(layer.id));
   };
 
@@ -495,6 +497,7 @@ export function useVectorTools(ctx: ToolContext) {
         // One commit: the op already carries the tiles. vectorAdded lists the mirrored copies
         // too, which a single vectorStroke lost on reload.
         commitOp(layer.id, 'STROKE', { tool: 'vector_pen', vectorStroke: createdStrokes[0], vectorAdded: createdStrokes, tiles: allDirtyTiles });
+        recordUsedColor(createdStrokes[0].color);
         setVectorStrokesList(engine.getStrokes(layer.id));
       }
     }

@@ -9,6 +9,7 @@ import type { BrushProperties } from '../../../engine/BrushRenderer';
 import type { Point, ToolContext } from './toolContext';
 import { hasDrawingContact } from '../../../engine/tabletInput';
 import { OfflineSessionStore } from '../../../services/offlineStore';
+import { recordUsedColor } from '../../../services/colorHistoryStore';
 
 const OUTLINE_KEY = 'atelier_outline_brush';
 
@@ -399,6 +400,7 @@ export function useBrushTool(ctx: ToolContext) {
           const { allPoints: _allPoints, ...payload } = strokeData;
           const commitPayload = OfflineSessionStore.isOfflineCanvas(canvas.id) ? payload : strokeData;
           ctx.commitOp(layerId, opType, { ...commitPayload, tiles: afterTiles, inkTiles }, true);
+          if (!strokeData.isEraser) recordUsedColor(strokeData.color || currentProps.color);
         })
         .catch((err) => console.warn('[useBrushTool] Stroke commit failed:', err))
         .finally(() => {
@@ -511,6 +513,7 @@ export function useBrushTool(ctx: ToolContext) {
       return;
     }
     ctx.setBrushProps((prev) => ({ ...prev, color: hex, isEraser: false }));
+    recordUsedColor(hex);
   };
 
   return {

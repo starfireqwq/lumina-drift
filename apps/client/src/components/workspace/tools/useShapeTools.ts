@@ -3,6 +3,7 @@ import { FillGradient, Graphics, RenderTexture } from 'pixi.js';
 import { getTileBounds, type TileData, type ToolType } from '@atelier/shared';
 import { RulerManager } from '../../../engine/RulerManager';
 import { calculateGradientTiles, compressTiles } from '../../../engine/commitWorkers';
+import { recordUsedColor } from '../../../services/colorHistoryStore';
 import type { Point, ToolContext } from './toolContext';
 import { commitInOrder, diffTilesAsync } from './asyncTiles';
 
@@ -204,7 +205,7 @@ export function useShapeTools(ctx: ToolContext) {
 
   /** Paints the shape (the previewed graphic) into the layer as one op and undo step. */
   const finishShape = (e: PointerLike, local: Point): boolean => {
-    const { shapeGraphicRef, activeLayer, layerManagerRef, pixiAppRef, tileEngineRef, user, scopedUndoRef, currentTool } = ctx;
+    const { shapeGraphicRef, activeLayer, layerManagerRef, pixiAppRef, tileEngineRef, user, scopedUndoRef, currentTool, brushProps } = ctx;
     if (!isDrawingShape.current || !shapeStartPos.current || !shapeGraphicRef.current || !activeLayer
       || !layerManagerRef.current || !pixiAppRef.current || !tileEngineRef.current) return false;
     move(e, local);
@@ -234,6 +235,7 @@ export function useShapeTools(ctx: ToolContext) {
         });
         ctx.updateUndoRedoState();
         ctx.commitOp(layerId, 'STROKE', { tool: currentTool, shapeSubtype: effectiveShape, tiles: afterTiles }, true);
+        if (afterTiles.length > 0) recordUsedColor(brushProps.color);
       });
     }
     shapeGraphicRef.current.clear();
@@ -343,6 +345,7 @@ export function useShapeTools(ctx: ToolContext) {
         });
         ctx.updateUndoRedoState();
         ctx.commitOp(layerId, 'STROKE', { tool: 'gradient', tiles: res.afterTiles }, true);
+        if (res.afterTiles.length > 0) recordUsedColor(fg);
       });
     }
     shapeGraphicRef.current.clear();

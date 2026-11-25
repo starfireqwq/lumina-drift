@@ -17,6 +17,7 @@ import { calculateBucketMask } from '../../../engine/commitWorkers';
 import { RulerManager } from '../../../engine/RulerManager';
 import type { AntiAliasLevel } from '../../../engine/BrushRenderer';
 import { OfflineSessionStore } from '../../../services/offlineStore';
+import { recordUsedColor } from '../../../services/colorHistoryStore';
 import type { Point, ToolContext } from './toolContext';
 import { commitInOrder, diffTilesAsync } from './asyncTiles';
 
@@ -182,6 +183,7 @@ export function useFillTools(ctx: ToolContext) {
         });
         updateUndoRedoState();
         commitOp(layerId, 'STROKE', { tool: 'lasso_fill', tiles: res.afterTiles }, true);
+        if (!lassoFillErase && res.afterTiles.length > 0) recordUsedColor(props.color);
       },
     );
 
@@ -355,6 +357,7 @@ export function useFillTools(ctx: ToolContext) {
       updateUndoRedoState();
       refreshLayerThumbnail(layerId);
       commitOp(layerId, 'STROKE', { tool: 'paint_unfilled', tiles: res.afterTiles }, true);
+      if (res.afterTiles.length > 0) recordUsedColor(props.color);
     });
     return true;
   };
@@ -463,6 +466,7 @@ export function useFillTools(ctx: ToolContext) {
         updateUndoRedoState();
       }
       commitOp(layerId, 'SMART_FILL', { tiles: afterTiles, refLayerId, color: brushProps.color, bounds }, true);
+      if (afterTiles.length > 0) recordUsedColor(brushProps.color);
     });
   };
 
@@ -645,6 +649,7 @@ export function useFillTools(ctx: ToolContext) {
       refreshLayerThumbnail(layerId);
       // Broadcast to room
       commitTilePatch(layerId, res.afterTiles, false, '油漆桶填充', true);
+      if (res.afterTiles.length > 0) recordUsedColor(color);
     });
   };
 

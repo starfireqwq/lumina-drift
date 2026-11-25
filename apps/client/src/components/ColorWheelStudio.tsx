@@ -2,15 +2,20 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Pipette,
   RotateCcw,
-  Sparkles,
-  X as CloseIcon,
-  Check,
   Palette,
+  Pin,
+  Plus,
+  Trash2,
+  Upload,
+  X,
 } from 'lucide-react';
+import { ColorMixingPad } from './ColorMixingPad';
 import { ToolWindow } from './workspace/ToolWindow';
 import { BrushProperties } from '../engine/BrushRenderer';
 import { useUiScale } from '../theme/uiScale';
 import { useI18n } from '../context/I18nContext';
+import { colorHistoryStore, recordUsedColor, useColorHistoryState } from '../services/colorHistoryStore';
+import { normalizeHexColor, parseAcoPalette, parseGplPalette, serializeAcoPalette, serializeGplPalette } from '../utils/colorPaletteIO';
 import {
   type ColorWheelMode,
   type TriangleVerts,
@@ -58,6 +63,12 @@ const CHECKER_BG_STYLE: React.CSSProperties = {
 
 const WHEEL_MODE_STORAGE_KEY = 'atelier_color_wheel_mode';
 
+function isEmptyAcoPalette(bytes: ArrayBuffer): boolean {
+  const view = new DataView(bytes);
+  if (view.byteLength === 4) return view.getUint32(0) === 0x00010000 || view.getUint32(0) === 0x00020000;
+  return view.byteLength === 8 && view.getUint32(0) === 0x00010000 && view.getUint32(4) === 0x00020000;
+}
+
 export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
   isOpen,
   onClose,
@@ -68,11 +79,13 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
   single = false,
 }) => {
   const { t } = useI18n();
+  const studio = t.studio;
   const fgColor = brushProps.color || '#3B82F6';
   const bgColor = brushProps.secondaryColor || '#FFFFFF';
 
   // Which swatch is currently actively picked: 'fg' (foreground) or 'bg' (background)
-  const [activeSlot, setActiveSlot] = useState<'fg' | 'bg'>('fg');
+  const [selectedSlot, setActiveSlot] = useState<'fg' | 'bg'>('fg');
+  const activeSlot = single ? 'fg' : selectedSlot;
   const [wheelMode, setWheelMode] = useState<ColorWheelMode>(() => {
     try {
       return localStorage.getItem(WHEEL_MODE_STORAGE_KEY) === 'hls-triangle' ? 'hls-triangle' : 'hsv-square';
@@ -96,10 +109,13 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
   const lastEmittedRef = useRef<{ hex: string; slot: 'fg' | 'bg' } | null>(null);
 
   const [hexInput, setHexInput] = useState(currentColor);
-  const [recentSwatches, setRecentSwatches] = useState<string[]>([
-    '#000000', '#FFFFFF', '#EF4444', '#F97316', '#FBBF24', '#10B981',
-    '#06B6D4', '#3B82F6', '#8B5CF6', '#EC4899', '#78350F', '#475569',
-  ]);
+  const [tab, setTab] = useState<'wheel' | 'mixing'>('wheel');
+  const [paletteStatus, setPaletteStatus] = useState<'imported' | 'importError' | 'exportError' | null>(null);
+  const { history, pinnedSets, activeSetId } = useColorHistoryState();
+  const activeSet = pinnedSets.find((set) => set.id === activeSetId) ?? pinnedSets[0];
+  const activeSetName = activeSet.id === 'default-favorites' ? studio.paletteSetDefault : activeSet.name;
+  const paletteInput = useRef<HTMLInputElement>(null);
+  const showWheel = single || tab === 'wheel';
 
   const wheelCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const isDraggingWheel = useRef(false);
@@ -129,14 +145,6 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
     setHsv(next);
   }, [currentColor, activeSlot]);
 
-  // Push to recent swatches
-  const pushRecentSwatch = (color: string) => {
-    setRecentSwatches((prev) => {
-      const filtered = prev.filter((c) => c.toUpperCase() !== color.toUpperCase());
-      return [color, ...filtered].slice(0, 16);
-    });
-  };
-
   // Live color preview during drag (does not pollute history swatches)
   const applyLiveColor = useCallback((hex: string) => {
     const normHex = hex.toUpperCase();
@@ -152,17 +160,10 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
 
   // Commit color to brushProps & push to history swatches on pointer release
   const applyColor = useCallback((hex: string) => {
-    const normHex = hex.toUpperCase();
-    if (normHex !== currentColor.toUpperCase()) {
-      lastEmittedRef.current = { hex: normHex, slot: activeSlot };
-    }
-    if (activeSlot === 'fg') {
-      onUpdateBrushProps({ color: hex, isEraser: false });
-    } else {
-      onUpdateBrushProps({ secondaryColor: hex });
-    }
-    pushRecentSwatch(hex);
-  }, [activeSlot, currentColor, onUpdateBrushProps]);
+    applyLiveColor(hex);
+    setHexInput(hex.toUpperCase());
+    recordUsedColor(hex);
+  }, [applyLiveColor]);
 
   // Swap FG / BG (Key X)
   const handleSwapSlots = useCallback(() => {
@@ -188,7 +189,7 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
   useEffect(() => {
     if (!isOpen || single) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
       if (document.querySelector('[aria-modal="true"]')) return; // an open dialog owns the keyboard
       // Plain X / D only: Ctrl+D (deselect) used to reset the colours too
       if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -360,7 +361,7 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
       ctx.strokeStyle = '#000000';
       ctx.stroke();
     }
-  }, [hsv, wheelMode, isOpen, uiScale, WHEEL_SIZE]);
+  }, [hsv, wheelMode, isOpen, showWheel, uiScale, WHEEL_SIZE]);
 
   // Pointer interactions on Canvas with accurate CSS-to-Canvas coordinate projection
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -427,7 +428,7 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
       const cur = hsvRef.current;
       const [r, g, b] = hsvToRgb(cur[0], cur[1], cur[2]);
       const hex = rgbToHex(r, g, b);
-      pushRecentSwatch(hex);
+      recordUsedColor(hex);
     }
     isDraggingWheel.current = false;
     isDraggingSquare.current = false;
@@ -492,15 +493,86 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
       onActivateCanvasEyedropper();
       onClose();
     } else {
-      alert('請直接切換工具列「滴管」工具點擊畫布吸取顏色！');
+      alert(studio.eyedropperUnavailable);
+    }
+  };
+
+  const createPalette = () => {
+    const base = studio.paletteSetUntitled;
+    let name = base;
+    let suffix = 2;
+    while (pinnedSets.some((set) => set.name === name)) name = base + ' ' + suffix++;
+    colorHistoryStore.createPinnedSet(name);
+    setPaletteStatus(null);
+  };
+
+  const importPalette = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!file) return;
+    setPaletteStatus(null);
+    const fallbackName = file.name.replace(/\.(aco|gpl)$/i, '').trim() || studio.paletteSetUntitled;
+
+    try {
+      if (/\.gpl$/i.test(file.name)) {
+        const lines = (await file.text()).trim().split(/\r\n?|\n/);
+        if (lines.shift()?.trim() !== 'GIMP Palette') throw new Error();
+        const { name, colors } = parseGplPalette(lines.join('\n'));
+        const swatchLines = lines.some((line) => /^(?!#|Name:|Columns:)\S/.test(line.trim()));
+        if (!colors.length && swatchLines) throw new Error();
+        const hasName = lines.some((line) => /^Name:\s*\S/.test(line.trim()));
+        colorHistoryStore.importPaletteSet(hasName ? name : fallbackName, colors);
+      } else if (/\.aco$/i.test(file.name)) {
+        const bytes = await file.arrayBuffer();
+        const colors = parseAcoPalette(bytes);
+        if (!colors.length && !isEmptyAcoPalette(bytes)) throw new Error();
+        colorHistoryStore.importPaletteSet(fallbackName, colors);
+      } else {
+        throw new Error();
+      }
+      setPaletteStatus('imported');
+    } catch {
+      setPaletteStatus('importError');
+    }
+  };
+
+  const exportPalette = (format: 'gpl' | 'aco') => {
+    setPaletteStatus(null);
+    try {
+      const contents = format === 'gpl'
+        ? serializeGplPalette(activeSetName, activeSet.colors)
+        : new Uint8Array(serializeAcoPalette(activeSet.colors));
+      const blob = new Blob([contents], { type: format === 'gpl' ? 'text/plain;charset=utf-8' : 'application/octet-stream' });
+      const url = URL.createObjectURL(blob);
+      try {
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = activeSetName.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_') + '.' + format;
+        link.click();
+      } finally {
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+    } catch {
+      setPaletteStatus('exportError');
     }
   };
 
   if (!isOpen && !embedded) return null;
 
-  const [curR, curG, curB] = hexToRgb(currentColor);
-
   const compactEmbedded = embedded && !single;
+  const normalizedCurrentColor = normalizeHexColor(currentColor);
+  const swatchGrid = 'grid grid-cols-8 ' + (compactEmbedded ? 'gap-1' : 'gap-1.5');
+  const swatchClass = (hex: string) => 'w-full aspect-square rounded-md border transition hover:scale-105 active:scale-95 ' + (
+    normalizedCurrentColor === hex ? 'border-indigo-400 ring-1 ring-indigo-400' : 'border-neutral-600'
+  );
+  const recentColors = (
+    <div className={swatchGrid} data-testid="color-history-list">
+      {(single ? history.slice(0, 16) : showWheel ? history : history.slice(0, 8)).map((color) => (
+        <button key={color} type="button" onClick={() => applyColor(color)} data-color-swatch={color}
+          style={{ backgroundColor: color }} title={color} aria-label={color} className={swatchClass(color)} />
+      ))}
+    </div>
+  );
 
   const innerContent = (
     <div className={`flex w-full flex-col ${compactEmbedded ? 'gap-2' : 'gap-2.5'} text-white`}>
@@ -517,16 +589,16 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
                     type="button"
                     onClick={() => { setActiveSlot('bg'); onUpdateBrushProps({ isEraser: false }); }}
                     style={{ backgroundColor: bgColor }}
-                    title="背景色"
-                    aria-label="背景色"
+                    title={studio.backgroundColor}
+                    aria-label={studio.backgroundColor}
                     className={`absolute bottom-0 right-0 h-5 w-5 rounded border-2 ${!isTransparent && activeSlot === 'bg' ? 'z-10 border-indigo-400' : 'border-neutral-600'}`}
                   />
                   <button
                     type="button"
                     onClick={() => { setActiveSlot('fg'); onUpdateBrushProps({ isEraser: false }); }}
                     style={{ backgroundColor: fgColor }}
-                    title="前景色"
-                    aria-label="前景色"
+                    title={studio.foregroundColor}
+                    aria-label={studio.foregroundColor}
                     className={`absolute left-0 top-0 h-6 w-6 rounded-md border-2 ${!isTransparent && activeSlot === 'fg' ? 'z-10 border-indigo-400' : 'border-neutral-600'}`}
                   />
                 </div>
@@ -543,8 +615,8 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
                       : 'border-neutral-600 hover:border-neutral-400 opacity-90 hover:opacity-100'
                   }`}
                 />
-                <button type="button" onClick={handleSwapSlots} title="交換前景／背景色 (X)" aria-label="交換前景與背景色" className="atelier-icon-btn h-7 w-7 text-xs">⇄</button>
-                <button type="button" onClick={handleResetDefaultColors} title="重設為黑白 (D)" aria-label="重設為黑白" className="atelier-icon-btn h-7 w-7 text-xs">◩</button>
+                <button type="button" onClick={handleSwapSlots} title={`${studio.swapColors} (X)`} aria-label={studio.swapColors} className="atelier-icon-btn h-7 w-7 text-xs">⇄</button>
+                <button type="button" onClick={handleResetDefaultColors} title={`${studio.resetColors} (D)`} aria-label={studio.resetColors} className="atelier-icon-btn h-7 w-7 text-xs">◩</button>
               </>
             )}
             <button type="button" onClick={handleNativeEyedropper} title={t.tools.eyedropper} aria-label={t.tools.eyedropper} className="atelier-icon-btn h-7 w-7"><Pipette className="h-3.5 w-3.5" /></button>
@@ -558,6 +630,18 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
           </div>
         )}
 
+        {!single && (
+          <div role="group" aria-label={studio.colorPalette} className="grid grid-cols-2 gap-1 rounded-lg border border-neutral-800 bg-neutral-900/60 p-0.5">
+            {([['wheel', studio.tabWheel], ['mixing', studio.tabMixingPad]] as const).map(([id, label]) => (
+              <button key={id} type="button" data-testid={`color-tab-${id}`} aria-pressed={tab === id} onClick={() => setTab(id)}
+                className={`min-h-7 rounded-md px-1.5 text-[11px] font-medium ${tab === id ? 'bg-indigo-600 text-white' : 'text-neutral-300 hover:bg-neutral-800'}`}>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {showWheel ? <>
         {/* Color Wheel Geometry Switcher (HSV Square / HLS Triangle) */}
         <div className="grid grid-cols-2 gap-1 bg-neutral-900/60 p-0.5 rounded-lg border border-neutral-800/80">
           {([
@@ -583,9 +667,6 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
           ))}
         </div>
 
-        {/* Foreground / Background Dual Swatches & Tools */}
-
-        {/* HSV Color Wheel Canvas */}
         <div className={`flex items-center justify-center ${compactEmbedded ? 'py-0' : 'py-1'} overflow-hidden w-full`}>
           <canvas
             ref={wheelCanvasRef}
@@ -606,30 +687,87 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
           />
         </div>
 
-        {/* Hex Input & RGB readout */}
+        {single ? recentColors : (
+          <>
+            <section aria-label={studio.recentColors} className="flex flex-col gap-1">
+              <div className="flex items-center gap-1">
+                <h3 className="mr-auto text-[11px] font-medium text-neutral-200">{studio.recentColors}</h3>
+                <button type="button" data-testid="color-pin-current" onClick={() => colorHistoryStore.pinColorToActiveSet(currentColor)}
+                  disabled={!normalizedCurrentColor || activeSet.colors.some((swatch) => swatch.hex === normalizedCurrentColor)}
+                  title={studio.pinCurrentColor} aria-label={studio.pinCurrentColor} className="atelier-icon-btn h-7 w-7 disabled:opacity-40">
+                  <Pin className="h-3.5 w-3.5" />
+                </button>
+                <button type="button" data-testid="color-clear-history" onClick={() => colorHistoryStore.clearHistory()}
+                  disabled={!history.length} title={studio.clearHistory} aria-label={studio.clearHistory} className="atelier-icon-btn h-7 w-7 disabled:opacity-40">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              {recentColors}
+            </section>
 
-        {/* Recent & Swatches Palette */}
-        <div>
-          <div className={`grid grid-cols-8 ${compactEmbedded ? 'gap-1' : 'gap-1.5'}`}>
-            {recentSwatches.map((color, idx) => (
-              <button
-                key={`${color}-${idx}`}
-                type="button"
-                onClick={() => {
-                  applyColor(color);
-                  setHexInput(color.toUpperCase());
-                }}
-                style={{ backgroundColor: color }}
-                title={color}
-                className={`w-full aspect-square rounded-lg border transition transform hover:scale-110 active:scale-95 ${
-                  currentColor.toUpperCase() === color.toUpperCase()
-                    ? 'border-indigo-400 ring-2 ring-indigo-400 scale-105'
-                    : 'border-neutral-700/80'
-                }`}
-              />
-            ))}
-          </div>
-        </div>
+            <section data-testid="color-pinned-section" aria-label={studio.pinnedSwatches} className="flex flex-col gap-1 border-t border-neutral-800 pt-2">
+              <h3 className="text-[11px] font-medium text-neutral-200">{studio.pinnedSwatches}</h3>
+              <div className="flex items-center gap-1">
+                <select data-testid="color-set-select" value={activeSetId} aria-label={studio.pinnedSwatches}
+                  onChange={(event) => { colorHistoryStore.setActiveSet(event.currentTarget.value); setPaletteStatus(null); }}
+                  className="atelier-field h-7 min-w-0 flex-1 px-1.5 text-[11px]">
+                  {pinnedSets.map((set) => (
+                    <option key={set.id} value={set.id}>{set.id === 'default-favorites' ? studio.paletteSetDefault : set.name}</option>
+                  ))}
+                </select>
+                <button type="button" data-testid="color-new-set" onClick={createPalette}
+                  title={studio.newPaletteSet} aria-label={studio.newPaletteSet} className="atelier-icon-btn h-7 w-7">
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+                <button type="button" data-testid="color-delete-set" disabled={pinnedSets.length <= 1}
+                  onClick={() => { colorHistoryStore.deletePinnedSet(activeSetId); setPaletteStatus(null); }}
+                  title={studio.deletePaletteSet} aria-label={studio.deletePaletteSet} className="atelier-icon-btn h-7 w-7 disabled:opacity-40">
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <div className="flex flex-wrap items-center gap-1">
+                <input ref={paletteInput} type="file" accept=".gpl,.aco" data-testid="color-palette-import-input" onChange={importPalette} hidden />
+                <button type="button" data-testid="color-import-palette" onClick={() => paletteInput.current?.click()}
+                  title={studio.importPalette} className="atelier-icon-btn h-7 gap-1 px-1.5 text-[11px]">
+                  <Upload className="h-3.5 w-3.5" /> {studio.importPalette}
+                </button>
+                <button type="button" data-testid="color-export-gpl" onClick={() => exportPalette('gpl')}
+                  title={studio.exportGpl} aria-label={studio.exportGpl} className="atelier-icon-btn h-7 px-1.5 text-[11px]">GPL</button>
+                <button type="button" data-testid="color-export-aco" onClick={() => exportPalette('aco')}
+                  title={studio.exportAco} aria-label={studio.exportAco} className="atelier-icon-btn h-7 px-1.5 text-[11px]">ACO</button>
+              </div>
+              {paletteStatus && (
+                <p role={paletteStatus === 'imported' ? 'status' : 'alert'} className={`text-[11px] ${paletteStatus === 'imported' ? 'text-neutral-300' : 'text-red-300'}`}>
+                  {{ imported: studio.importPaletteSuccess, importError: studio.importPaletteError, exportError: studio.exportPaletteError }[paletteStatus]}
+                </p>
+              )}
+              <div className={swatchGrid}>
+                {activeSet.colors.map(({ hex, name }) => {
+                  const label = name ? `${name} (${hex})` : hex;
+                  return (
+                    <div key={hex} className="group relative">
+                      <button type="button" data-pinned-swatch={hex} style={{ backgroundColor: hex }} title={label} aria-label={label}
+                        onClick={() => applyColor(hex)}
+                        onContextMenu={(event) => { event.preventDefault(); colorHistoryStore.unpinColorFromActiveSet(hex); }}
+                        className={`block ${swatchClass(hex)}`} />
+                      <button type="button" onClick={() => colorHistoryStore.unpinColorFromActiveSet(hex)}
+                        title={studio.removePinnedColor} aria-label={`${studio.removePinnedColor} ${label}`}
+                        className="pointer-events-none absolute -right-1 -top-1 rounded-full bg-neutral-900 p-0.5 text-white opacity-0 outline-offset-1 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          </>
+        )}
+        </> : (
+          <>
+            <ColorMixingPad currentColor={currentColor} onPickColor={applyColor} compact={compactEmbedded} />
+            {recentColors}
+          </>
+        )}
     </div>
   );
 
