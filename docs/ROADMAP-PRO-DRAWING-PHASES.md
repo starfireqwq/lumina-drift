@@ -16,7 +16,7 @@
 | **Phase 2** | CSP 風格「主工具列 → 輔助工具組（Sub Tool）」核心架構與填充組整合（含間隙填充筆） | `v1.4.0-alpha.1` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-26 / `9481f97` |
 | **Phase 3** | 選取、向量、混色、漫畫工具組整合與矩形／橢圓／多邊形選框補齊 | `v1.4.0-alpha.2` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-26 / `4e90e4a` |
 | **Phase 4** | 子視圖面板（Sub View）、色彩歷史／混色盤與桌面右鍵快顯輪盤（Pop-up Palette） | `v1.4.0-beta.1` | `/teamwork` | `已完成` | 2026-11-26 / `0129f04` |
-| **Phase 5** | 快速形狀（QuickShape）、操控變形（Puppet Warp）與四方連續平鋪（Wrap-Around） | `v1.4.0` | `/teamwork` 或 `/swarm` | `未開始` | — |
+| **Phase 5** | 快速形狀（QuickShape）、操控變形（Puppet Warp）與四方連續平鋪（Wrap-Around） | `v1.4.0` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-26 / `7b3351b` |
 | **Phase 6** | 非破壞性調整圖層（Adjustment / Correction Layers）完整管線 | `v1.5.0-alpha` | `/teamwork` 或 `/swarm` | `未開始` | — |
 | **Phase 7** | 自動動作／巨集錄製（Auto Actions）與文字排版引擎深化 | `v1.5.0-beta` | `/teamwork` | `未開始` | — |
 | **Phase 8** | 商業印刷色彩管理（CMYK 軟校樣 / ICC）與雙向 `.kra` 匯出 | `v1.5.0` | 單聊天室 或 `/teamwork` | `未開始` | — |
@@ -165,14 +165,14 @@
 > **目標**：補齊 Procreate、CSP 4.0 / PS、Krita 三大招牌創作利器，強化速寫、修形與無縫材質創作體驗。
 
 #### 任務清單
-- [ ] **5.1 Procreate 風格快速形狀（QuickShape）**
+- [x] **5.1 Procreate 風格快速形狀（QuickShape）**
   - 在 `StrokePipeline.ts` / `useBrushTool.ts` 加入收筆停頓偵測（可於設定自訂延遲 ms 與開關）。
   - 依筆劃幾何特徵自動辨識並吸附為：直線、圓弧、圓形／橢圓、矩形／四邊形、三角形；按住不放拖曳可即時調整角度／半徑／端點，支援單步復原。
-- [ ] **5.2 操控變形（Puppet Warp）**
+- [x] **5.2 操控變形（Puppet Warp）**
   - 新增 `PuppetWarpEngine.ts` 與 `PuppetWarpOverlay.tsx`（入口整合進變形選單／工具組）。
   - 自動針對圖層非透明輪廓（或選區）建立三角網格（Delaunay / 均勻網格裁剪），支援點擊新增／刪除釘點（Pin）、拖曳釘點與旋轉權重，採 ARAP（As-Rigid-As-Possible）或加權剛性變形減少扭曲失真，預覽流暢、確認後一次性寫入 Tile 並同步多人房間。
-- [ ] **5.3 四方連續平鋪模式（Wrap-Around Seamless Mode）**
-  - 新增檢視與繪製開關（快捷鍵 `W` 或檢視列按鈕），在 `Viewport` / `CanvasWorkspace` 以 3×3 無縫重複顯示畫布。
+- [x] **5.3 四方連續平鋪模式（Wrap-Around Seamless Mode）**
+  - 新增檢視與繪製開關（快捷鍵 `Alt+W`，避開既有魔術棒 `W`／向量線寬 `Shift+W`，並整合至檢視列按鈕與視窗選單），在 `Viewport` / `CanvasWorkspace` 以 3×3 無縫重複顯示畫布。
   - 筆刷、橡皮擦、揉色、模糊、油漆桶與形狀工具在平鋪模式啟用時自動對座標與髒瓦片進行 Modulo 環繞繪製，讓跨邊界筆劃自動接合，單機與多人畫布同步正確。
 
 #### 驗收標準
@@ -180,9 +180,9 @@
 - 隔離式 Electron 實測：三項功能皆可流暢互動、Ctrl+Z 完整還原，且多人連線時第二位畫友正確看到變形與跨邊界繪製結果。
 
 #### 交接紀錄
-- 狀態：`未開始`
-- 完成 Commit：`待填`
-- 備註：`—`
+- 狀態：`已完成`
+- 完成 Commit：`23bc416`（5.1 Procreate 風格快速形狀 QuickShape 幾何引擎、設定持久化、停筆吸附拖曳與多人預覽協定）、`186d347`（5.2 ARAP 操控變形 `PuppetWarpEngine.ts` / `PuppetWarpOverlay.tsx`、變形工具列整合與 `Ctrl+Alt+P` 快捷鍵）、`abcd974`（5.3 四方連續平鋪 `wrapAround.ts`、3×3 即時檢視、跨邊界環繞工具繪製與零衝突 `Alt+W` 快捷鍵）、`7b3351b`（Phase 5 單元測試、四語系覆蓋率強化與隔離式單機／雙人 Electron 實測腳本）
+- 備註：2026-11-26 完成全套驗證：`ui-logic.check.ts`（含 QuickShape 7 種形狀＋負向測試／調整／設定、Puppet Warp 網格／ARAP／分離島／零黑邊預乘雙線性光柵化、Wrap-Around Modulo 瓦片／環形填色與 94 組預設快捷鍵零衝突）、`i18n-coverage.check.ts`（4 語系 1,985 鍵全對齊）、`pnpm --filter @atelier/shared build`、`pnpm --filter @atelier/client build`、`pnpm --filter @atelier/client build:electron`、`pnpm --filter @atelier/server test`（17 階段全過）；隔離式 Electron 單機與 `PORT=0` 雙人實測腳本 `apps/client/scripts/phase5-tools-electron-smoke.check.cjs` 全數通過（驗證 QuickShape 設定／直線拖曳調整／圓形吸附／單步 `Ctrl+Z`、Puppet Warp `Ctrl+Alt+P`／2 釘點拖曳＋旋轉權重／確認與 `Ctrl+Z`、Wrap-Around `Alt+W`／跨邊界筆劃與 `Ctrl+Z`，以及雙獨立 Electron 畫友連線時畫友 B 即時收到 1,720 px Puppet Warp 變形與左右各 696 px Wrap-Around 跨邊界筆劃及復原同步，全程 0 頁錯）。
 
 ---
 
