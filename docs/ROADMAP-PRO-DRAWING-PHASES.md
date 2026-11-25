@@ -13,7 +13,7 @@
 | 階段 | 主題 | 對應版本目標 | 建議執行模式 | 狀態 | 最後更新 / Commit |
 | :--- | :--- | :---: | :---: | :---: | :--- |
 | **Phase 1** | v1.3.2 緊急修補、Phase 6 測試修復與發布收尾 | `v1.3.2` | 單聊天室 | `已完成` | 2026-11-26 / 9b8e713 (v1.3.2) |
-| **Phase 2** | CSP 風格「主工具列 → 輔助工具組（Sub Tool）」核心架構與填充組整合（含間隙填充筆） | `v1.4.0-alpha.1` | `/teamwork` 或 `/swarm` | `未開始` | — |
+| **Phase 2** | CSP 風格「主工具列 → 輔助工具組（Sub Tool）」核心架構與填充組整合（含間隙填充筆） | `v1.4.0-alpha.1` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-26 / `9481f97` |
 | **Phase 3** | 選取、向量、混色、漫畫工具組整合與矩形／橢圓／多邊形選框補齊 | `v1.4.0-alpha.2` | `/teamwork` 或 `/swarm` | `未開始` | — |
 | **Phase 4** | 子視圖面板（Sub View）、色彩歷史／混色盤與桌面右鍵快顯輪盤（Pop-up Palette） | `v1.4.0-beta.1` | `/teamwork` | `未開始` | — |
 | **Phase 5** | 快速形狀（QuickShape）、操控變形（Puppet Warp）與四方連續平鋪（Wrap-Around） | `v1.4.0` | `/teamwork` 或 `/swarm` | `未開始` | — |
@@ -71,21 +71,21 @@
 > **目標**：解決左側工具列 27 個扁平按鈕過多、套索填色藏在上方選項列、油漆桶與自動／智能填充分散的問題；建立如 Clip Studio Paint 般的雙層「主工具分類 → 輔助工具組（Sub Tool）」架構，並完整落地「填充」工具組與全新「間隙填充筆」。
 
 #### 任務清單
-- [ ] **2.1 建立「主工具分類（Tool Category）→ 輔助工具組（Sub Tool）」資料模型與狀態持久化**
+- [x] **2.1 建立「主工具分類（Tool Category）→ 輔助工具組（Sub Tool）」資料模型與狀態持久化**
   - 在 `apps/client/src/components/workspace/toolCatalog.tsx`（及獨立 `subToolStore.ts`）定義主分類與對應子工具清單。
   - 每個主分類記憶「上次使用的子工具」；每個子工具記憶獨立參數預設（容差、參照層、消除鋸齒、筆刷尺寸、擴張像素等）並持久化至 `localStorage`。
   - 支援快捷鍵行為：按下主分類快捷鍵切回該分類上次子工具；在已啟用狀態下重複按同一快捷鍵可循環切換該分類內子工具（CSP 肌肉記憶）。
-- [ ] **2.2 精簡左側 `ToolRail` 並整合「工具組（Sub Tool）」選擇面板**
+- [x] **2.2 精簡左側 `ToolRail` 並整合「工具組（Sub Tool）」選擇面板**
   - 左側 `ToolRail.tsx` 改為精簡的 ~10–11 個主分類圖示（可保留「經典展開模式」切換選項降低老用戶適應門檻）。
   - 筆刷／工具集面板（`BrushToolset.tsx` 或統一的 `SubToolPanel.tsx`）隨左側選中的主分類自動切換顯示對應的「工具組」清單（例如點選「填充」主圖示時，右側／側邊直接出現完整的填充工具組列表；點選「筆刷」時維持現有筆刷組與預覽體驗）。
   - 同步適配平板／手機端浮動工具島（`TouchCanvasChrome.tsx`）。
-- [ ] **2.3 完整整合「填充（Fill）」工具組（對齊 CSP 截圖）**
+- [x] **2.3 完整整合「填充（Fill）」工具組（對齊 CSP 截圖）**
   1. **油漆桶 — 參照其他圖層**：`bucket` 模式，預設 `bucketReference = 'all'`。
   2. **油漆桶 — 僅參照編輯圖層**：`bucket` 模式，預設 `bucketReference = 'current'`（亦支援指定參照層）。
   3. **圍住塗抹（Close and Fill）**：整合原本獨立的 `smart_fill`（`computeSmartEncloseFillMask`），可直接在填充工具組中點選。
   4. **套索塗抹（Lasso Fill）**：將原本藏在 `ToolOptionsBar.tsx` 的 `bucketMode = 'lasso'` 提升為獨立子工具，可在填充工具組（及自訂筆刷／工具集）中直接選擇與記憶參數（消除鋸齒、色彩外框、填色／透明擦除）。
   5. **間隙填充筆（Paint Unfilled Area，新增）**：在 `useFillTools.ts` 與共享演算法層實作「依參照圖層／編輯圖層線稿邊界，僅填滿筆刷經過處的未填色封閉微縫且不溢出線外」的演算法（支援擴張縮張像素與閉合間隙設定），並支援單步 Ctrl+Z 與多人 Tile 同步。
-- [ ] **2.4 清理重複選項與補齊四語系**
+- [x] **2.4 清理重複選項與補齊四語系**
   - `ToolOptionsBar.tsx` 依當前啟用的 Sub Tool 顯示精簡對應選項，移除多餘重複的「填色模式」二層切換。
   - 補齊 `zh-TW` / `zh-CN` / `en-US` / `ja-JP` 翻譯。
 
@@ -94,9 +94,9 @@
 - 隔離式 Electron 實測：點擊左側「填充」主按鈕即在工具組面板看見全部 5 個填充子工具並可無縫切換作畫；單機與多人畫布皆正確提交與復原。
 
 #### 交接紀錄
-- 狀態：`未開始`
-- 完成 Commit：`待填`
-- 備註：`—`
+- 狀態：`已完成`
+- 完成 Commit：`bd3dc70`（2.1 主分類／子工具資料模型與持久化）、`62883a4`（2.3 填充工具組 5 子工具與間隙填充筆演算法）、`8339649`（2.2/2.4 精簡 ToolRail、SubToolPanel、TouchCanvasChrome 與選項列清理）、`9481f97`（2.4 四語系翻譯與 Phase 2 單元／Electron 實測）
+- 備註：2026-11-26 完成全套驗證：`pnpm --filter @atelier/shared build`、`pnpm --filter @atelier/client build`、`pnpm --filter @atelier/client build:electron`、`ui-logic.check.ts`、`i18n-coverage.check.ts`（4 語系 1,874 鍵完全一致）、`pnpm --filter @atelier/server test`（17/17 全數通過），以及隔離式 Electron 單機與多人 `PORT=0` 實測腳本 `apps/client/scripts/phase2-subtools-electron-smoke.check.cjs` 全過（實測驗證 11 主分類、5 個填充子工具、`G` 鍵循環、精簡／經典切換、間隙填充筆 5,625 像素零溢出填色、單步 `Ctrl+Z` 與多人 Tile 廣播同步）。
 
 ---
 
