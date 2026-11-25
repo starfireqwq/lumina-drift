@@ -530,6 +530,14 @@ export const DEFAULT_SHORTCUTS: ShortcutItem[] = [
     currentCombo: 'Control+Shift+KeyT',
   },
   {
+    id: 'action_filter_puppet_warp',
+    category: 'filters',
+    name: '操控變形 (Puppet Warp)',
+    description: '用釘點拖曳與旋轉選區或圖層',
+    defaultCombo: 'Control+Alt+KeyP',
+    currentCombo: 'Control+Alt+KeyP',
+  },
+  {
     id: 'action_filter_free_transform',
     category: 'filters',
     name: '自由變形 (Free Transform)',

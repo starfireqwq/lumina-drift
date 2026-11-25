@@ -353,6 +353,25 @@ export interface Translations {
     startTransform: string;
   };
 
+  puppetWarp: {
+    title: string;
+    mode: string;
+    perspective: string;
+    parallel: string;
+    free: string;
+    density: string;
+    coarse: string;
+    normal: string;
+    dense: string;
+    showMesh: string;
+    pin: string;
+    rotation: string;
+    weight: string;
+    deletePin: string;
+    shortcutDesc: string;
+    renderFailed: string;
+  };
+
   canvas: {
     quickShapeHint: string;
     quickShapeKinds: Record<import('../engine/quickShape').QuickShapeKind, string>;

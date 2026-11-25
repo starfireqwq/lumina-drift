@@ -333,6 +333,7 @@ export interface ToolOptionsBarProps {
   onVectorDeleteAnchor: () => void;
   // transform
   onStartTransform: () => void;
+  onStartPuppetWarp: () => void;
   isTransformActive: boolean;
   eraserMode: 'hard' | 'soft';
   onEraserMode: (mode: 'hard' | 'soft') => void;
@@ -825,6 +826,10 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
           <Sep />
           <button type="button" onClick={p.onStartTransform} className="flex shrink-0 items-center gap-1 rounded-md bg-indigo-600 px-2.5 py-1 text-[11px] font-semibold text-white hover:bg-indigo-500">
             <Move className="h-3.5 w-3.5" /> {tr.toolOptions.startTransform}
+          </button>
+          <button type="button" data-testid="tool-options-puppet-warp" onClick={p.onStartPuppetWarp}
+            className="atelier-btn atelier-btn--ghost shrink-0">
+            {tr.puppetWarp.title}
           </button>
         </>
       )}

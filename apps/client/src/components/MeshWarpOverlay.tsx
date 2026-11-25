@@ -2,7 +2,8 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { BarSelect, CanvasActionBar } from './workspace/CanvasActionBar';
 import { Segmented } from './workspace/ToolOptionsBar';
-import { DISTORT_MODES, type DistortMode } from '../utils/distortModes';
+import { DISTORT_MODES, getDistortModeOptions, type DistortMode } from '../utils/distortModes';
+import { useI18n } from '../context/I18nContext';
 
 export { DISTORT_MODES, type DistortMode };
 
@@ -15,7 +16,7 @@ export interface MeshWarpNode {
 
 interface MeshWarpOverlayProps {
   isActive: boolean;
-  mode: DistortMode;
+  mode: Exclude<DistortMode, 'puppet'>;
   onChangeMode: (mode: DistortMode | 'transform') => void;
   sourceCanvas: HTMLCanvasElement | null;
   initialBounds: { minX: number; minY: number; width: number; height: number };
@@ -43,6 +44,7 @@ export const MeshWarpOverlay: React.FC<MeshWarpOverlayProps> = ({
   canvasToScreen,
   screenToCanvas,
 }) => {
+  const { t } = useI18n();
   const [meshSize, setGridSize] = useState(4);
   const gridSize = mode === 'mesh' ? meshSize : 2;
   const [nodes, setNodes] = useState<MeshWarpNode[]>([]);
@@ -439,8 +441,8 @@ export const MeshWarpOverlay: React.FC<MeshWarpOverlayProps> = ({
       </svg>
 
       <CanvasActionBar onApply={handleApply} onCancel={onCancel}>
-        <BarSelect label="變形模式" value={mode as DistortMode | 'transform'}
-          options={[{ id: 'transform', label: '自由變形' }, ...DISTORT_MODES]} onChange={onChangeMode} />
+        <BarSelect label={t.puppetWarp.mode} value={mode}
+          options={getDistortModeOptions(t)} onChange={onChangeMode} />
         {mode === 'mesh' && (
           <Segmented label="網格密度" value={String(gridSize)} onChange={(v) => setGridSize(Number(v))}
             options={[3, 4, 5].map((n) => ({ id: String(n), label: `${n}×${n}` }))} />

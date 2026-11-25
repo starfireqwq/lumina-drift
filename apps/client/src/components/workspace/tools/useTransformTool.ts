@@ -33,7 +33,8 @@ export function useTransformTool(ctx: ToolContext) {
 
   // Mesh Warp State
   const [distortMode, setDistortMode] = useState<DistortMode | 'transform'>('transform');
-  const isMeshWarpActive = isTransformActive && distortMode !== 'transform';
+  const isPuppetWarpActive = isTransformActive && distortMode === 'puppet';
+  const isMeshWarpActive = isTransformActive && distortMode !== 'transform' && distortMode !== 'puppet';
   const meshWarpInitialBoundsRef = useRef<{ minX: number; minY: number; width: number; height: number }>({
     minX: 0,
     minY: 0,
@@ -167,7 +168,10 @@ export function useTransformTool(ctx: ToolContext) {
   };
 
   const startTransformMode = async (mode: DistortMode | 'transform' = 'transform', layer = activeLayerRef.current) => {
-    if (transformLayerIdRef.current) return;
+    if (transformLayerIdRef.current) {
+      if (mode === 'puppet') setDistortMode(mode);
+      return;
+    }
     if (!layer || !canEditPixels(layer)) {
       warn('請先選取可編輯、未鎖定的圖層，再開始變形。', 3000);
       return;
@@ -353,7 +357,8 @@ export function useTransformTool(ctx: ToolContext) {
 
   const applyMeshWarp = (
     warpedCanvas: HTMLCanvasElement,
-    bounds: { minX: number; minY: number; width: number; height: number }
+    bounds: { minX: number; minY: number; width: number; height: number },
+    labelOverride?: string,
   ) => {
     const layerId = transformLayerIdRef.current;
     if (!layerId || !layerManagerRef.current || !pixiAppRef.current || !tileEngineRef.current) {
@@ -382,7 +387,7 @@ export function useTransformTool(ctx: ToolContext) {
 
     const selBefore = transformSelectionBeforeRef.current;
     selectionEngineRef.current?.clearSelection();
-    const label = DISTORT_MODES.find((mode) => mode.id === distortMode)?.label ?? '網格變形';
+    const label = labelOverride ?? DISTORT_MODES.find((mode) => mode.id === distortMode)?.label ?? '網格變形';
     const effectiveUserId = ctx.userRef.current?.id || user?.id || 'guest';
     commitInOrder(diff, ({ beforeTiles, afterTiles }) => {
       const opId = `op_mesh_warp_${Date.now()}`;
@@ -422,6 +427,7 @@ export function useTransformTool(ctx: ToolContext) {
     transformBox, setTransformBox,
     distortMode, setDistortMode,
     isMeshWarpActive,
+    isPuppetWarpActive,
     transformLayerIdRef,
     transformSourceCanvasRef,
     meshWarpInitialBoundsRef,

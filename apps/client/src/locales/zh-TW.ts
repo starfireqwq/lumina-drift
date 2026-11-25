@@ -342,6 +342,25 @@ export const zhTW: Translations = {
     startTransform: '開始變形',
   },
 
+  puppetWarp: {
+    title: '操控變形',
+    mode: '變形模式',
+    perspective: '遠近歪斜',
+    parallel: '平行歪斜',
+    free: '自由歪斜',
+    density: '網格密度',
+    coarse: '粗疏',
+    normal: '標準',
+    dense: '細密',
+    showMesh: '顯示網格',
+    pin: '操控釘點',
+    rotation: '旋轉',
+    weight: '權重',
+    deletePin: '刪除釘點',
+    shortcutDesc: '用釘點拖曳與旋轉選區或圖層',
+    renderFailed: '無法繪製操控變形結果。',
+  },
+
   canvas: {
     quickShapeHint: '拖曳調整・Shift 對齊角度・放開確認',
     quickShapeKinds: {

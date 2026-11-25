@@ -342,6 +342,25 @@ export const enUS: Translations = {
     startTransform: 'Start Transform',
   },
 
+  puppetWarp: {
+    title: 'Puppet Warp',
+    mode: 'Transform Mode',
+    perspective: 'Perspective',
+    parallel: 'Skew',
+    free: 'Distort',
+    density: 'Mesh Density',
+    coarse: 'Coarse',
+    normal: 'Normal',
+    dense: 'Dense',
+    showMesh: 'Show Mesh',
+    pin: 'Warp Pin',
+    rotation: 'Rotation',
+    weight: 'Weight',
+    deletePin: 'Delete Pin',
+    shortcutDesc: 'Drag and rotate a selection or layer using pins',
+    renderFailed: 'Could not render the Puppet Warp result.',
+  },
+
   canvas: {
     quickShapeHint: 'Drag to adjust · Shift to snap angles · Release to confirm',
     quickShapeKinds: {

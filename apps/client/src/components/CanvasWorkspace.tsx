@@ -308,6 +308,7 @@ const TransformOverlay = lazy(() => import('./TransformOverlay').then((m) => ({ 
 const KeyframeTransformOverlay = lazy(() => import('./KeyframeTransformOverlay').then((m) => ({ default: m.KeyframeTransformOverlay })));
 const KeyframeMotionPathOverlay = lazy(() => import('./KeyframeMotionPathOverlay').then((m) => ({ default: m.KeyframeMotionPathOverlay })));
 const MeshWarpOverlay = lazy(() => import('./MeshWarpOverlay').then((m) => ({ default: m.MeshWarpOverlay })));
+const PuppetWarpOverlay = lazy(() => import('./PuppetWarpOverlay').then((m) => ({ default: m.PuppetWarpOverlay })));
 const TextCanvasEditor = lazy(() => import('./TextCanvasEditor').then((m) => ({ default: m.TextCanvasEditor })));
 const ComicStudioOverlay = lazy(() => import('./ComicStudioOverlay').then((m) => ({ default: m.ComicStudioOverlay })));
 const AnimationTimelineBar = lazy(() => import('./AnimationTimelineBar').then((m) => ({ default: m.AnimationTimelineBar })));
@@ -1478,7 +1479,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   brushCommitRef.current = brush.commitStroke;
   const transform = useTransformTool(toolCtx);
   const {
-    isTransformActive, transformPreviewUrl, transformBox, setTransformBox, distortMode, setDistortMode, isMeshWarpActive,
+    isTransformActive, transformPreviewUrl, transformBox, setTransformBox, distortMode, setDistortMode, isMeshWarpActive, isPuppetWarpActive,
     transformLayerIdRef, transformSourceCanvasRef, meshWarpInitialBoundsRef, startTransformMode, startFloatingPaste, applyTransform, cancelTransform, applyMeshWarp,
   } = transform;
   // 對齊・均分: layers/groups, vector strokes, text bounds, and canvas guides
@@ -2167,6 +2168,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z' && !ev.shiftKey) {
             ev.preventDefault();
             cancelTransform();
+          } else if (hit('action_filter_puppet_warp')) {
+            ev.preventDefault();
+            if (!ev.repeat) shortcutActionsRef.current.transform('puppet');
           } else if (currentToolRef.current === 'transform' && (categoryHit?.id === 'transform' || hit('action_filter_free_transform'))) {
             ev.preventDefault();
             if (!ev.repeat) shortcutActionsRef.current.activateCategoryShortcut('transform');
@@ -2345,6 +2349,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_filter_mesh_warp'), ev)) {
             ev.preventDefault();
             shortcutActionsRef.current.transform('mesh');
+            return;
+          }
+          if (hit('action_filter_puppet_warp')) {
+            ev.preventDefault();
+            if (!ev.repeat) shortcutActionsRef.current.transform('puppet');
             return;
           }
           if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_filter_screentone'), ev)) {
@@ -7391,6 +7400,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         onVectorToggleCorner={toggleSelectedAnchorCorner}
         onVectorDeleteAnchor={deleteSelectedAnchor}
         onStartTransform={() => startTransformMode()}
+        onStartPuppetWarp={() => startTransformMode('puppet')}
         isTransformActive={isTransformActive}
         onOpenBrushSettings={() => setIsBrushSettingsOpen(true)}
         activePluginTool={activePluginTool}
@@ -7607,6 +7617,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 active={Boolean(
                   textEdit ||
                   (isTransformActive && distortMode === 'transform') ||
+                  isPuppetWarpActive ||
                   isResizeModalOpen ||
                   keyframeHandlesActive ||
                   activeMotionPath ||
@@ -7641,6 +7652,26 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                           screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
                           viewportZoom={viewportState.zoom}
                           previewUrl={transformPreviewUrl}
+                        />
+                      </Suspense>
+                    )}
+
+                    {isPuppetWarpActive && (
+                      <Suspense fallback={null}>
+                        <PuppetWarpOverlay
+                          isActive
+                          onChangeMode={setDistortMode}
+                          sourceCanvas={transformSourceCanvasRef.current}
+                          initialBounds={meshWarpInitialBoundsRef.current}
+                          canvasWidth={canvas.width}
+                          canvasHeight={canvas.height}
+                          onApply={(warped, bounds) => {
+                            applyMeshWarp(warped, bounds, t.puppetWarp.title);
+                            selection.refreshSelection();
+                          }}
+                          onCancel={cancelTransform}
+                          canvasToScreen={(cx, cy) => viewportRef.current?.canvasToScreen(cx, cy) ?? { x: cx, y: cy }}
+                          screenToCanvas={(sx, sy) => viewportRef.current?.screenToCanvas(sx, sy) ?? { x: sx, y: sy }}
                         />
                       </Suspense>
                     )}
@@ -7795,11 +7826,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 getViewportSnapshot={getViewportSnapshot}
               />
 
-              {isMeshWarpActive && (
+              {isMeshWarpActive && distortMode !== 'transform' && distortMode !== 'puppet' && (
                 <Suspense fallback={null}>
                   <MeshWarpOverlay
                     isActive
-                    mode={distortMode === 'transform' ? 'mesh' : distortMode}
+                    mode={distortMode}
                     onChangeMode={setDistortMode}
                     sourceCanvas={transformSourceCanvasRef.current}
                     canvasWidth={canvas.width}

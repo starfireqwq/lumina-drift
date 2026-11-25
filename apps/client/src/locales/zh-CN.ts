@@ -342,6 +342,25 @@ export const zhCN: Translations = {
     startTransform: '开始变换',
   },
 
+  puppetWarp: {
+    title: '操控变形',
+    mode: '变形模式',
+    perspective: '透视扭曲',
+    parallel: '平行扭曲',
+    free: '自由扭曲',
+    density: '网格密度',
+    coarse: '粗疏',
+    normal: '标准',
+    dense: '细密',
+    showMesh: '显示网格',
+    pin: '操控图钉',
+    rotation: '旋转',
+    weight: '权重',
+    deletePin: '删除图钉',
+    shortcutDesc: '用图钉拖动和旋转选区或图层',
+    renderFailed: '无法绘制操控变形结果。',
+  },
+
   canvas: {
     quickShapeHint: '拖动调整・Shift 对齐角度・松开确认',
     quickShapeKinds: {

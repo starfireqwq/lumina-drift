@@ -5,7 +5,8 @@ import {
   Unlock,
   Crosshair,
 } from 'lucide-react';
-import { DISTORT_MODES, type DistortMode } from '../utils/distortModes';
+import { getDistortModeOptions, type DistortMode } from '../utils/distortModes';
+import { useI18n } from '../context/I18nContext';
 import { BarSelect, BarToggle, CanvasActionBar } from './workspace/CanvasActionBar';
 import { projectTransformBox, getBoxPivotCanvasPoint, type TransformBox } from '../utils/transformProjection';
 
@@ -49,6 +50,7 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
   viewportZoom,
   previewUrl,
 }) => {
+  const { t } = useI18n();
   // Mobile touch toggle for Shift (Keep Aspect Ratio) and Alt (Center scale)
   const [maintainAspect, setMaintainAspect] = useState(false);
   const [centerScale, setCenterScale] = useState(false);
@@ -324,8 +326,8 @@ export const TransformOverlay: React.FC<TransformOverlayProps> = ({
       </div>
 
       <CanvasActionBar onApply={onApply} onCancel={onCancel}>
-        <BarSelect label="變形模式" value={'transform' as DistortMode | 'transform'}
-          options={[{ id: 'transform', label: '自由變形' }, ...DISTORT_MODES]}
+        <BarSelect label={t.puppetWarp.mode} value="transform"
+          options={getDistortModeOptions(t)}
           onChange={(m) => { if (m !== 'transform') onChangeMode(m); }} />
         <BarToggle on={maintainAspect} onClick={() => setMaintainAspect(!maintainAspect)} keyHint="Shift"
           icon={maintainAspect ? <Lock /> : <Unlock />} label="等比" title="等比例縮放" />

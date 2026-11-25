@@ -498,9 +498,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         return { label: shortcut.name, hint: shortcut.description };
     }
   };
+  const filterShortcutText = (shortcut: ShortcutItem) => shortcut.id === 'action_filter_puppet_warp'
+    ? { label: t.puppetWarp.title, hint: t.puppetWarp.shortcutDesc }
+    : { label: shortcut.name, hint: shortcut.description };
   const matchingShortcuts = query.length ? shortcuts.filter((shortcut) => {
     const toolboxTerms = shortcut.category === 'toolbox' ? toolboxShortcutText(shortcut) : null;
     const studioTerms = shortcut.category === 'studio' ? studioShortcutText(shortcut) : null;
+    const filterTerms = shortcut.category === 'filters' ? filterShortcutText(shortcut) : null;
     const toolboxSectionTerms = shortcut.toolScope === 'category'
       ? `${t.settings.shortcutCatToolCategories} 分類 分类 category categories`
       : `${t.settings.shortcutCatSubTools} 子工具 sub-tool subtool`;
@@ -508,6 +512,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       shortcut.name, shortcut.description, shortcut.id.replace(/_/g, ' '), categoryLabels[shortcut.category],
       toolboxTerms?.label, toolboxTerms?.hint, toolboxTerms && toolboxSectionTerms,
       studioTerms?.label, studioTerms?.hint,
+      filterTerms?.label, filterTerms?.hint,
       shortcut.currentCombo, shortcutMgr.getDisplayLabel(shortcut.currentCombo),
     ].join(' '));
     return query.every((term) => haystack.includes(term));
@@ -739,6 +744,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     {filterShortcuts.map((s) => {
                       const isRecording = recordingActionId === s.id;
                       const hasConflict = (comboCounts.get(s.currentCombo) || 0) > 1 || ShortcutManager.isBrowserReserved(s.currentCombo);
+                      const { label, hint } = filterShortcutText(s);
 
                       return (
                         <div
@@ -746,8 +752,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           className="flex items-center justify-between p-2.5 rounded-xl bg-neutral-900/80 border border-neutral-800/80 hover:border-neutral-700 text-xs"
                         >
                           <div className="min-w-0 pr-2">
-                            <span className="font-semibold text-white block truncate">{s.name}</span>
-                            <span className="text-[10px] text-neutral-500 block truncate">{s.description}</span>
+                            <span className="font-semibold text-white block truncate">{label}</span>
+                            <span className="text-[10px] text-neutral-500 block truncate">{hint}</span>
                           </div>
 
                           <div className="flex items-center gap-1.5 shrink-0">

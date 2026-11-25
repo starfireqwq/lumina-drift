@@ -342,6 +342,25 @@ export const jaJP: Translations = {
     startTransform: '変形開始',
   },
 
+  puppetWarp: {
+    title: 'パペットワープ',
+    mode: '変形モード',
+    perspective: '遠近法',
+    parallel: '傾斜',
+    free: '自由なゆがみ',
+    density: 'メッシュの密度',
+    coarse: '粗い',
+    normal: '標準',
+    dense: '細かい',
+    showMesh: 'メッシュを表示',
+    pin: 'ワープピン',
+    rotation: '回転',
+    weight: 'ウェイト',
+    deletePin: 'ピンを削除',
+    shortcutDesc: 'ピンを使って選択範囲やレイヤーを移動・回転します',
+    renderFailed: 'パペットワープの結果を描画できませんでした。',
+  },
+
   canvas: {
     quickShapeHint: 'ドラッグで調整・Shift で角度を固定・離して確定',
     quickShapeKinds: {
