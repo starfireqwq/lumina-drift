@@ -55,15 +55,19 @@ function loadState(storage: StorageLike | undefined): SubToolStoreState {
     // A blocked read or invalid JSON falls back to the catalog defaults.
   }
 
+  const savedLast = isRecord(saved.lastSubToolByCategory) ? saved.lastSubToolByCategory : {};
+  const legacyShape = savedLast.shape === 'shape' || savedLast.shape === 'text' ? savedLast.shape : undefined;
   const lastSubToolByCategory = Object.fromEntries(TOOL_CATEGORIES.map((category) => {
-    const savedId = isRecord(saved.lastSubToolByCategory) ? saved.lastSubToolByCategory[category.id] : undefined;
+    const savedId = category.id === 'comic' && legacyShape ? legacyShape : savedLast[category.id];
     const last = category.subTools.find((subTool) => subTool.id === savedId);
     return [category.id, last?.id ?? category.defaultSubToolId];
   })) as SubToolStoreState['lastSubToolByCategory'];
 
   const savedSubTool = typeof saved.activeSubToolId === 'string' ? findSubTool(saved.activeSubToolId) : undefined;
   const savedCategory = TOOL_CATEGORIES.find((category) => category.id === saved.activeCategoryId);
-  const activeCategoryId = savedCategory?.id ?? savedSubTool?.categoryId ?? 'paint';
+  const activeCategoryId = saved.activeCategoryId === 'shape'
+    ? 'comic'
+    : savedSubTool?.categoryId ?? savedCategory?.id ?? 'paint';
   const activeSubToolId = savedSubTool?.categoryId === activeCategoryId
     ? savedSubTool.id
     : lastSubToolByCategory[activeCategoryId];

@@ -1,19 +1,15 @@
 import React, { useRef, useState } from 'react';
 import {
-  Brush,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   ChevronUp,
-  Eraser,
   Grid2x2,
   GripHorizontal,
   Keyboard,
   Layers,
-  PaintBucket,
   Paintbrush,
   PenTool,
-  Pencil,
   Pipette,
   Redo2,
   SlidersHorizontal,
@@ -21,7 +17,7 @@ import {
   Users,
 } from 'lucide-react';
 import type { ToolType } from '@atelier/shared';
-import { MAX_BRUSH_SIZE, findCategory, findSubToolForTool, getLocalizedCategoryLabel, getLocalizedSubTool } from './toolCatalog';
+import { MAX_BRUSH_SIZE, TOOL_CATEGORIES, findCategory, findSubTool, findSubToolForTool, getLocalizedCategoryLabel, getLocalizedSubTool } from './toolCatalog';
 import type { SubToolId, ToolCategoryId } from './toolCatalog';
 import type { MobilePanelDef } from './DockSystem';
 import { useI18n } from '../../context/I18nContext';
@@ -415,17 +411,12 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
   const [collapsed, setCollapsed] = useState(() => readBool(DOCK_COLLAPSED_KEY));
   const [subToolDisclosure, setSubToolDisclosure] = useState<{ categoryId: ToolCategoryId; expanded: boolean }>();
   const swipeStartYRef = useRef<number | null>(null);
-  const currentSubTool = findSubToolForTool(currentTool);
+  const currentSubTool = (activeSubToolId ? findSubTool(activeSubToolId) : undefined) ?? findSubToolForTool(currentTool);
   const categoryId = activeCategoryId ?? currentSubTool?.categoryId;
   const category = categoryId ? findCategory(categoryId) : undefined;
-  const isFill = categoryId === 'fill';
-  const fillLabel = getLocalizedCategoryLabel('fill', t);
   const showSubTools = Boolean(category && category.subTools.length > 1 && (
-    subToolDisclosure?.categoryId === category.id ? subToolDisclosure.expanded : isFill
+    subToolDisclosure?.categoryId === category.id ? subToolDisclosure.expanded : category.id !== 'paint'
   ));
-  const toggleSubTools = () => {
-    if (categoryId) setSubToolDisclosure({ categoryId, expanded: !showSubTools });
-  };
 
   const setCollapsedState = (next: boolean) => {
     setCollapsed(next);
@@ -505,7 +496,7 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
       style={dockBottomStyle}
     >
       {showSubTools && category && (
-        <div data-touch-subtools role="group" aria-label={getLocalizedCategoryLabel(category.id, t)}
+        <div key={category.id} data-touch-subtools role="group" aria-label={getLocalizedCategoryLabel(category.id, t)}
           onPointerDown={(e) => e.stopPropagation()}
           className="atelier-popover no-scrollbar pointer-events-auto flex max-w-full touch-pan-x gap-1 overflow-x-auto rounded-full p-1 shadow-2xl">
           {category.subTools.map((sub) => {
@@ -513,7 +504,7 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
             const { label } = getLocalizedSubTool(sub.id, t);
             return (
               <button key={sub.id} type="button" data-subtool-id={sub.id}
-                aria-pressed={(activeSubToolId ?? currentSubTool?.id) === sub.id}
+                aria-pressed={currentSubTool?.id === sub.id}
                 onClick={() => {
                   if (onSelectSubTool) onSelectSubTool(sub.id);
                   else onSelectTool(sub.tool);
@@ -553,72 +544,36 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
           <Grid2x2 className={isTablet ? 'h-5 w-5' : 'h-4 w-4'} />
         </button>
 
-        {/* Primary direct tools */}
-        <button
-          type="button"
-          onClick={() => onSelectTool('brush')}
-          aria-label={t.tools.brush}
-          title={t.tools.brush}
-          className={toolBtnClass(currentTool === 'brush')}
-        >
-          <Brush className="h-4 w-4" />
-        </button>
-        {isTablet && (
-          <button
-            type="button"
-            onClick={() => onSelectTool('pencil')}
-            aria-label={t.tools.pencil}
-            title={t.tools.pencil}
-            className={toolBtnClass(currentTool === 'pencil')}
-          >
-            <Pencil className="h-4 w-4" />
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={() => onSelectTool('eraser')}
-          aria-label={t.tools.eraser}
-          title={t.tools.eraser}
-          className={toolBtnClass(currentTool === 'eraser')}
-        >
-          <Eraser className="h-4 w-4" />
-        </button>
-        <button
-          type="button"
-          data-touch-category="fill"
-          aria-label={fillLabel}
-          title={fillLabel}
-          aria-pressed={isFill}
-          aria-expanded={isFill && showSubTools}
-          onClick={() => {
-            if (isFill) toggleSubTools();
-            else {
-              setSubToolDisclosure({ categoryId: 'fill', expanded: true });
-              if (onSelectCategory) onSelectCategory('fill');
-              else onSelectTool('bucket');
-            }
-          }}
-          className={toolBtnClass(isFill)}
-        >
-          <PaintBucket className="h-4 w-4" />
-        </button>
-        {!isFill && category && category.subTools.length > 1 && (
-          <button type="button" aria-expanded={showSubTools}
-            aria-label={`${getLocalizedCategoryLabel(category.id, t)} · ${t.tools.subToolTitle}`}
-            onClick={toggleSubTools} className={toolBtnClass(showSubTools)}>
-            {showSubTools ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={() => onSelectTool(currentTool === 'eyedropper' ? 'brush' : 'eyedropper')}
-          aria-label={t.tools.eyedropper}
-          title={t.tools.eyedropper}
-          aria-pressed={currentTool === 'eyedropper'}
-          className={toolBtnClass(currentTool === 'eyedropper')}
-        >
-          <Pipette className="h-4 w-4" />
-        </button>
+        {TOOL_CATEGORIES.map(({ id, icon, defaultSubToolId, subTools }) => {
+          const active = id === categoryId;
+          const hasSubTools = subTools.length > 1;
+          const activeSubTool = active && currentSubTool?.categoryId === id ? currentSubTool : undefined;
+          const Icon = activeSubTool?.icon ?? icon;
+          const categoryLabel = getLocalizedCategoryLabel(id, t);
+          const subToolLabel = hasSubTools && activeSubTool ? getLocalizedSubTool(activeSubTool.id, t).label : undefined;
+          const label = subToolLabel ? `${categoryLabel} · ${subToolLabel}` : categoryLabel;
+          return (
+            <button key={id} type="button" data-touch-category={id}
+              aria-label={label} title={label} aria-pressed={active}
+              aria-expanded={hasSubTools ? active && showSubTools : undefined}
+              onClick={() => {
+                if (hasSubTools) {
+                  setSubToolDisclosure({ categoryId: id, expanded: !active || !showSubTools });
+                  if (active) return;
+                }
+                if (id === 'eyedropper' && active) onSelectTool('brush');
+                else if (onSelectCategory) onSelectCategory(id);
+                else {
+                  const subTool = subTools.find((sub) => sub.id === defaultSubToolId);
+                  if (subTool) onSelectTool(subTool.tool);
+                }
+              }}
+              className={`${toolBtnClass(active)} ${subToolLabel ? '!w-auto gap-1 px-2' : ''}`}>
+              <Icon className="h-4 w-4 shrink-0" />
+              {subToolLabel && <span className="max-w-24 truncate text-xs">{subToolLabel}</span>}
+            </button>
+          );
+        })}
 
         <div className="mx-0.5 h-6 w-px shrink-0 bg-white/15" />
 

@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { FLOATS_PER_DAB, StrokeWorkerEngine, type WorkerBrushConfig } from '../src/workers/stroke.worker';
 import { contrastRatio, resolveTheme, THEME_PRESETS, DEFAULT_CUSTOM_THEME } from '../src/theme/themes';
 import { ALL_SUB_TOOLS, nextSizeStep, TOOL_CATEGORIES } from '../src/components/workspace/toolCatalog';
-import { createSubToolStore, type StorageLike } from '../src/components/workspace/subToolStore';
+import { createSubToolStore, SUB_TOOL_STORAGE_KEY, type StorageLike } from '../src/components/workspace/subToolStore';
 import { findContentBounds } from '../src/utils/pixelBounds';
 import {
   alignCrops, alignDestination, alignManyOffsets, alignOffset, alignTargetsBlocker,
@@ -1325,8 +1325,8 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
 // Phase 2: category definitions and fill sub-tool defaults
 {
   assert.deepEqual(TOOL_CATEGORIES.map(({ id }) => id), [
-    'paint', 'eraser', 'fill', 'gradient', 'eyedropper', 'select',
-    'transform', 'vector', 'shape', 'comic', 'hand',
+    'paint', 'eraser', 'blend', 'fill', 'gradient', 'eyedropper', 'select',
+    'transform', 'vector', 'comic', 'hand',
   ]);
   for (const category of TOOL_CATEGORIES) {
     assert.ok(category.subTools.some(({ id }) => id === category.defaultSubToolId));
@@ -1396,6 +1396,31 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   assert.deepEqual(afterReset.getSubToolParams('fill_refer_other'), defaultBucket);
   assert.equal(afterReset.getSubToolParams('fill_refer_edit').bucketTolerance, 18);
   assert.equal(afterReset.getState().railMode, 'compact');
+}
+
+// Phase 3.3: legacy shape state and independently remembered blend parameters.
+{
+  const saved = new Map<string, string>([[SUB_TOOL_STORAGE_KEY, JSON.stringify({
+    activeCategoryId: 'shape',
+    lastSubToolByCategory: { shape: 'text', comic: 'comic_balloon' },
+  })]]);
+  const storage: StorageLike = {
+    getItem: (key) => saved.get(key) ?? null,
+    setItem: (key, value) => { saved.set(key, value); },
+  };
+  const migrated = createSubToolStore(storage);
+  assert.equal(migrated.getState().activeCategoryId, 'comic');
+  assert.equal(migrated.getState().activeSubToolId, 'text');
+  assert.equal(migrated.getState().lastSubToolByCategory.comic, 'text');
+  migrated.selectSubTool('blur');
+  migrated.updateSubToolParams('blur', { brushSize: 48, brushStrength: 0.3 });
+  migrated.updateSubToolParams('smudge', { smudgeMode: 'blend' });
+  const restored = createSubToolStore(storage);
+  assert.equal(restored.getState().activeCategoryId, 'blend');
+  assert.deepEqual(restored.getSubToolParams('blur'), { brushSize: 48, brushStrength: 0.3 });
+  assert.deepEqual(restored.getSubToolParams('smudge'), { brushSize: 32, brushStrength: 0.6, smudgeMode: 'blend' });
+  assert.deepEqual(restored.resetSubToolParams('blur'), { brushSize: 32, brushStrength: 0.6 });
+  assert.equal(restored.selectCategory('comic').id, 'text');
 }
 
 // Phase 2: CSP shortcuts recall the last tool on entry and cycle on repeated presses.

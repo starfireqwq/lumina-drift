@@ -1,6 +1,9 @@
 import React from 'react';
 import type { ToolType, VectorEraserMode, VectorWidthMode } from '@atelier/shared';
+import type { SmudgeMode } from '../../engine/BlurSmudgeEngine';
+import type { LiquifyMode } from '../../engine/LiquifyEngine';
 import type { Translations } from '../../locales';
+import type { ShapeSubtype } from './tools/useShapeTools';
 import {
   Activity,
   CircleDashed,
@@ -203,7 +206,7 @@ export const nextSizeStep = (size: number, direction: 1 | -1) => {
   return [...SIZE_STEPS].reverse().find((s) => s < size) ?? 1;
 };
 
-export type ToolCategoryId = 'paint' | 'eraser' | 'fill' | 'gradient' | 'eyedropper' | 'select' | 'transform' | 'vector' | 'shape' | 'comic' | 'hand';
+export type ToolCategoryId = 'paint' | 'eraser' | 'blend' | 'fill' | 'gradient' | 'eyedropper' | 'select' | 'transform' | 'vector' | 'comic' | 'hand';
 
 export type SubToolId = string;
 
@@ -217,6 +220,17 @@ export interface SubToolParams {
   gapClosingRadius?: number;
   expandRadius?: number;
   brushSize?: number;
+  brushStrength?: number;
+  smudgeMode?: SmudgeMode;
+  liquifyMode?: LiquifyMode;
+  liquifyStrength?: number;
+  liquifyHardness?: number;
+  liquifyRefAreaOnly?: boolean;
+  gradientType?: 'linear' | 'radial';
+  shapeSubtype?: ShapeSubtype;
+  shapeFillMode?: 'stroke' | 'fill' | 'stroke_and_fill';
+  shapeLineWidth?: number;
+  shapeCornerRadius?: number;
   vectorEraserMode?: VectorEraserMode;
   vectorWidthMode?: VectorWidthMode;
   bezierMode?: 'pen' | 'curve';
@@ -266,8 +280,9 @@ const defineCategory = (
   label: string,
   defaultTool: ToolType,
   otherTools: ToolType[] = [],
+  defaultParams?: SubToolParams,
 ): ToolCategoryDef => {
-  const primary = defineSubTool(id, defaultTool);
+  const primary = defineSubTool(id, defaultTool, { defaultParams });
   return {
     id,
     label,
@@ -283,8 +298,22 @@ const wandDefaults: SubToolParams = { ...selectionDefaults, wandTolerance: 32, w
 const selectionBrushDefaults: SubToolParams = { ...selectionDefaults, brushSize: 24 };
 
 export const TOOL_CATEGORIES: ToolCategoryDef[] = [
-  defineCategory('paint', '繪畫', 'brush', ['pencil', 'blur', 'smudge']),
+  defineCategory('paint', '繪畫', 'brush', ['pencil']),
   defineCategory('eraser', '橡皮擦', 'eraser'),
+  {
+    id: 'blend',
+    label: '混色修整',
+    icon: Droplets,
+    shortcutId: 'tool_smudge',
+    defaultSubToolId: 'smudge',
+    subTools: [
+      defineSubTool('blend', 'smudge', { defaultParams: { brushSize: 32, smudgeMode: 'smudge', brushStrength: 0.6 } }),
+      defineSubTool('blend', 'blur', { defaultParams: { brushSize: 32, brushStrength: 0.6 } }),
+      defineSubTool('blend', 'liquify', {
+        defaultParams: { brushSize: 64, liquifyMode: 'push', liquifyStrength: 0.5, liquifyHardness: 0.5, liquifyRefAreaOnly: false },
+      }),
+    ],
+  },
   {
     id: 'fill',
     label: '填充',
@@ -329,7 +358,7 @@ export const TOOL_CATEGORIES: ToolCategoryDef[] = [
       }),
     ],
   },
-  defineCategory('gradient', '漸層', 'gradient'),
+  defineCategory('gradient', '漸層', 'gradient', [], { gradientType: 'linear' }),
   defineCategory('eyedropper', '滴管', 'eyedropper'),
   {
     id: 'select',
@@ -347,7 +376,7 @@ export const TOOL_CATEGORIES: ToolCategoryDef[] = [
       defineSubTool('select', 'select_eraser', { defaultParams: selectionBrushDefaults }),
     ],
   },
-  defineCategory('transform', '變形與液化', 'transform', ['liquify']),
+  defineCategory('transform', '變形', 'transform'),
   {
     id: 'vector',
     label: '向量',
@@ -363,8 +392,9 @@ export const TOOL_CATEGORIES: ToolCategoryDef[] = [
       defineSubTool('vector', 'vector_eraser', { defaultParams: { brushSize: 28, vectorEraserMode: 'intersect' } }),
     ],
   },
-  defineCategory('shape', '形狀與文字', 'shape', ['text']),
-  defineCategory('comic', '漫畫與動畫', 'comic_balloon', ['comic_panel', 'animation']),
+  defineCategory('comic', '圖形與漫畫', 'shape', ['text', 'comic_balloon', 'comic_panel', 'animation'], {
+    shapeSubtype: 'rect', shapeFillMode: 'stroke', shapeLineWidth: 4, shapeCornerRadius: 0,
+  }),
   defineCategory('hand', '移動畫面', 'hand'),
 ];
 
@@ -393,13 +423,13 @@ export const findSubToolForTool = (
 const categoryLocaleKeys = {
   paint: 'categoryPaint',
   eraser: 'categoryEraser',
+  blend: 'categoryBlend',
   fill: 'categoryFill',
   gradient: 'categoryGradient',
   eyedropper: 'categoryEyedropper',
   select: 'categorySelect',
   transform: 'categoryTransform',
   vector: 'categoryVector',
-  shape: 'categoryShape',
   comic: 'categoryComic',
   hand: 'categoryHand',
 } as const satisfies Record<ToolCategoryId, keyof Translations['tools']>;

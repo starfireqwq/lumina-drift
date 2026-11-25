@@ -2649,7 +2649,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const handleSelectTool = (tool: ToolType, preset?: BrushProperties) => {
     if (!applyingSubToolRef.current) {
       const sub = subToolStore.syncFromToolType(tool, { bucketMode, bucketReference });
-      if (sub?.categoryId === 'fill' || sub?.categoryId === 'select' || sub?.categoryId === 'vector') {
+      if (sub?.categoryId === 'fill' || sub?.categoryId === 'select' || sub?.categoryId === 'vector' ||
+        sub?.categoryId === 'blend' || sub?.categoryId === 'comic' || sub?.categoryId === 'gradient') {
         applySubTool(sub, preset);
         return;
       }
@@ -2743,6 +2744,33 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           handleBrushPropsChange({ size: params.brushSize });
         }
       }
+      switch (sub.id) {
+        case 'smudge':
+        case 'blur': {
+          if (sub.id === 'smudge' && params.smudgeMode !== undefined) setSmudgeMode(params.smudgeMode);
+          const brushPatch: Partial<BrushProperties> = {};
+          if (typeof params.brushSize === 'number' && Number.isFinite(params.brushSize)) brushPatch.size = params.brushSize;
+          if (typeof params.brushStrength === 'number' && Number.isFinite(params.brushStrength)) brushPatch.flow = params.brushStrength;
+          handleBrushPropsChange(brushPatch);
+          break;
+        }
+        case 'liquify':
+          if (params.liquifyMode !== undefined) setLiquifyMode(params.liquifyMode);
+          if (params.liquifyStrength !== undefined) setLiquifyStrength(params.liquifyStrength);
+          if (params.liquifyHardness !== undefined) setLiquifyHardness(params.liquifyHardness);
+          if (params.liquifyRefAreaOnly !== undefined) setLiquifyRefAreaOnly(params.liquifyRefAreaOnly);
+          if (typeof params.brushSize === 'number' && Number.isFinite(params.brushSize)) setLiquifyRadius(params.brushSize);
+          break;
+        case 'shape':
+          if (params.shapeSubtype !== undefined) setShapeSubtype(params.shapeSubtype);
+          if (params.shapeFillMode !== undefined) setShapeFillMode(params.shapeFillMode);
+          if (params.shapeLineWidth !== undefined) setShapeLineWidth(params.shapeLineWidth);
+          if (params.shapeCornerRadius !== undefined) setShapeCornerRadius(params.shapeCornerRadius);
+          break;
+        case 'gradient':
+          if (params.gradientType !== undefined) setGradientType(params.gradientType);
+          break;
+      }
       setAppliedSubToolId(sub.id);
     } finally {
       applyingSubToolRef.current = false;
@@ -2835,13 +2863,22 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       case 'vector_bezier': params = { brushSize, bezierMode }; break;
       case 'vector_width': params = { brushSize, vectorWidthMode }; break;
       case 'vector_eraser': params = { brushSize, vectorEraserMode }; break;
+      case 'smudge': params = { brushSize, brushStrength: brushProps.flow, smudgeMode }; break;
+      case 'blur': params = { brushSize, brushStrength: brushProps.flow }; break;
+      case 'liquify':
+        params = { brushSize: liquifyRadius, liquifyMode, liquifyStrength, liquifyHardness, liquifyRefAreaOnly };
+        break;
+      case 'shape': params = { shapeSubtype, shapeFillMode, shapeLineWidth, shapeCornerRadius }; break;
+      case 'gradient': params = { gradientType }; break;
       default: return;
     }
     const saved = subToolStore.getSubToolParams(id);
     if (Object.entries(params).some(([key, value]) => !Object.is(value, saved[key]))) {
       subToolStore.updateSubToolParams(id, params);
     }
-  }, [subToolState.activeSubToolId, appliedSubToolId, currentTool, brushProps.size, bezierMode, vectorWidthMode, vectorEraserMode]);
+  }, [subToolState.activeSubToolId, appliedSubToolId, currentTool, brushProps.size, bezierMode, vectorWidthMode, vectorEraserMode,
+    brushProps.flow, smudgeMode, liquifyRadius, liquifyMode, liquifyStrength, liquifyHardness, liquifyRefAreaOnly,
+    shapeSubtype, shapeFillMode, shapeLineWidth, shapeCornerRadius, gradientType]);
 
   const handleUploadCustomBrush = async (file: File) => {
     const renderer = brushRendererRef.current;

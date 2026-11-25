@@ -166,13 +166,13 @@ export interface Translations {
     fillPaintUnfilledHint: string;
     categoryPaint: string;
     categoryEraser: string;
+    categoryBlend: string;
     categoryFill: string;
     categoryGradient: string;
     categoryEyedropper: string;
     categorySelect: string;
     categoryTransform: string;
     categoryVector: string;
-    categoryShape: string;
     categoryComic: string;
     categoryHand: string;
     subToolTitle: string;
