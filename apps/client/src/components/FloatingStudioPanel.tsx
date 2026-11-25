@@ -94,6 +94,7 @@ interface FloatingStudioPanelProps {
   gapClosingRadius?: number;
   onChangeGapClosingRadius?: (r: number) => void;
   // Paint Bucket Tool
+  bucketMode?: 'click' | 'lasso';
   bucketReference?: 'current' | 'all' | 'specific' | 'none';
   onChangeBucketReference?: (ref: 'current' | 'all' | 'specific' | 'none') => void;
   bucketTolerance?: number;
@@ -175,6 +176,7 @@ export const FloatingStudioPanel: React.FC<FloatingStudioPanelProps> = ({
   onChangeReferenceLayerId,
   gapClosingRadius = 4,
   onChangeGapClosingRadius,
+  bucketMode = 'click',
   bucketReference = 'all',
   onChangeBucketReference,
   bucketTolerance = 32,
@@ -230,6 +232,9 @@ export const FloatingStudioPanel: React.FC<FloatingStudioPanelProps> = ({
   const isPencil = currentTool === 'pencil';
   const isEraser = currentTool === 'eraser';
   const isWand = currentTool === 'magic_wand';
+  const isPaintUnfilled = currentTool === 'paint_unfilled';
+  const isClickFill = currentTool === 'bucket' && bucketMode === 'click';
+  const fillReference = isPaintUnfilled && bucketReference === 'none' ? 'current' : bucketReference;
 
   return (
     <div className="flex flex-col gap-2.5 text-xs text-neutral-300">
@@ -526,80 +531,49 @@ export const FloatingStudioPanel: React.FC<FloatingStudioPanelProps> = ({
 
               </div>
             )}
-            {/* Paint Bucket Tool Controls (油漆桶工具) */}
-            {currentTool === 'bucket' && (
+            {(isClickFill || isPaintUnfilled) && (
               <div className="p-2.5 bg-neutral-900/70 rounded-lg border border-amber-800/60 space-y-2.5 animate-in fade-in duration-150">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5 font-semibold text-amber-400 text-[11px]">
-                    <PaintBucket className="w-3.5 h-3.5 text-amber-400" />
-                    <span>{t.tools.bucket}</span>
-                  </div>
-                  <span className="px-1.5 py-0.5 rounded bg-amber-950 text-amber-300 text-[9px] border border-amber-800 font-mono">
-                    Flood Fill
-                  </span>
+                <div className="flex items-center gap-1.5 font-semibold text-amber-400 text-[11px]">
+                  <PaintBucket className="w-3.5 h-3.5 text-amber-400" />
+                  <span>{isPaintUnfilled ? t.tools.paintUnfilled : t.tools.bucket}</span>
                 </div>
 
-                {/* Reference Mode Selector */}
                 <div className="space-y-1">
                   <span className="text-[11px] text-neutral-300 font-medium">{t.toolOptions.bucketRefMode}</span>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-1">
-                    <button
-                      type="button"
-                      onClick={() => onChangeBucketReference?.('current')}
-                      className={`py-1 text-[10px] rounded border transition font-medium ${
-                        bucketReference === 'current'
-                          ? 'bg-amber-600 border-amber-400 text-white shadow'
-                          : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white'
-                      }`}
-                    >
-                      {t.toolOptions.refCurrent}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onChangeBucketReference?.('all')}
-                      className={`py-1 text-[10px] rounded border transition font-medium ${
-                        bucketReference === 'all'
-                          ? 'bg-amber-600 border-amber-400 text-white shadow'
-                          : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white'
-                      }`}
-                    >
-                      {t.toolOptions.refAll}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onChangeBucketReference?.('specific')}
-                      className={`py-1 text-[10px] rounded border transition font-medium ${
-                        bucketReference === 'specific'
-                          ? 'bg-amber-600 border-amber-400 text-white shadow'
-                          : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white'
-                      }`}
-                    >
-                      {t.toolOptions.refSpecific}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => onChangeBucketReference?.('none')}
-                      className={`py-1 text-[10px] rounded border transition font-medium ${
-                        bucketReference === 'none'
-                          ? 'bg-amber-600 border-amber-400 text-white shadow'
-                          : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white'
-                      }`}
-                    >
-                      {t.toolOptions.refNone}
-                    </button>
+                    {([
+                      ['current', t.toolOptions.refCurrent],
+                      ['all', t.toolOptions.refAll],
+                      ['specific', t.toolOptions.refSpecific],
+                      ['none', t.toolOptions.refNone],
+                    ] as const).filter(([reference]) => isClickFill || reference !== 'none').map(([reference, label]) => (
+                      <button
+                        key={reference}
+                        type="button"
+                        aria-pressed={fillReference === reference}
+                        onClick={() => onChangeBucketReference?.(reference)}
+                        className={`py-1 text-[10px] rounded border transition font-medium ${
+                          fillReference === reference
+                            ? 'bg-amber-600 border-amber-400 text-white shadow'
+                            : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
                   </div>
                 </div>
 
-                {/* Specific Layer Dropdown */}
-                {bucketReference === 'specific' && (
+                {fillReference === 'specific' && (
                   <div className="space-y-1">
                     <select
+                      aria-label={t.toolOptions.selectLayer}
                       value={bucketRefLayerId || ''}
                       onChange={(e) => onChangeBucketRefLayerId?.(e.target.value || null)}
                       className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-[11px] text-neutral-200 outline-none focus:border-amber-500"
                     >
                       <option value="">{t.toolOptions.selectLayer}</option>
-                      {layers.map((l) => (
+                      {layers.filter((layer) => !isPaintUnfilled || layer.layerType !== 'group').map((l) => (
                         <option key={l.id} value={l.id}>
                           {l.name}
                         </option>
@@ -608,20 +582,28 @@ export const FloatingStudioPanel: React.FC<FloatingStudioPanelProps> = ({
                   </div>
                 )}
 
-                {/* Gap Closing / Expansion Slider */}
-                <div className="space-y-1">
-                  <div className="flex justify-between items-center text-[11px]">
-                    <span className="text-neutral-300 font-medium">{t.toolOptions.bucketExpand}</span>
-                    <span className="font-mono text-amber-400 font-semibold">+{bucketExpand} px</span>
-                  </div>
-                  <WheelRangeInput
-                    min="0"
-                    max="10"
-                    value={bucketExpand}
-                    onValueChange={(v) => onChangeBucketExpand?.(Math.round(v))}
-                    className="w-full h-1.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer "
-                  />
-                </div>
+                {(isPaintUnfilled ? [
+                  { label: t.toolOptions.tolerance, value: bucketTolerance, min: 0, max: 255, onChange: onChangeBucketTolerance },
+                  { label: t.toolOptions.gapClosing, value: gapClosingRadius, min: 0, max: 10, unit: ' px', onChange: onChangeGapClosingRadius },
+                  { label: t.toolOptions.areaScaling, value: expandRadius, min: -6, max: 6, unit: ' px', signed: true, onChange: onChangeExpandRadius },
+                ] : [
+                  { label: t.toolOptions.bucketExpand, value: bucketExpand, min: 0, max: 10, unit: ' px', signed: true, onChange: onChangeBucketExpand },
+                ]).map(({ label, value, min, max, unit, signed, onChange }) => (
+                  <label key={label} className="block space-y-1">
+                    <span className="flex justify-between items-center gap-2 text-[11px]">
+                      <span className="text-neutral-300 font-medium">{label}</span>
+                      <span className="font-mono text-amber-400 font-semibold">{signed && value > 0 ? '+' : ''}{value}{unit}</span>
+                    </span>
+                    <WheelRangeInput
+                      aria-label={label}
+                      min={min}
+                      max={max}
+                      value={value}
+                      onValueChange={(v) => onChange?.(Math.round(v))}
+                      className="w-full h-1.5 bg-neutral-800 rounded-lg appearance-none cursor-pointer"
+                    />
+                  </label>
+                ))}
               </div>
             )}
 
@@ -698,7 +680,7 @@ export const FloatingStudioPanel: React.FC<FloatingStudioPanelProps> = ({
                   </div>
                   <WheelRangeInput
                     min="0"
-                    max="5"
+                    max="6"
                     step="1"
                     value={expandRadius}
                     onValueChange={(v) =>

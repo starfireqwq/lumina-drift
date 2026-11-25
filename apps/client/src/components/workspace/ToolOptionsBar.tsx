@@ -22,7 +22,7 @@ import { AntiAliasSelector } from '../AntiAliasSelector';
 import { LiquifyMode } from '../../engine/LiquifyEngine';
 import { SmudgeMode } from '../../engine/BlurSmudgeEngine';
 import { OutlineSettings } from '../../engine/colorOutline';
-import { findTool, getLocalizedTool } from './toolCatalog';
+import { findSubTool, findTool, getLocalizedSubTool, getLocalizedTool, type SubToolId } from './toolCatalog';
 import { useShortcutLabel } from './ToolRail';
 import { ColorWheelStudio } from '../ColorWheelStudio';
 import { CommandBar } from './QuickActions';
@@ -235,6 +235,7 @@ const SliderField: React.FC<{
 
 export interface ToolOptionsBarProps {
   currentTool: ToolType;
+  activeSubToolId?: SubToolId;
   compact: boolean;
   onOpenOptions?: () => void;
   inPanel?: boolean;
@@ -276,9 +277,14 @@ export interface ToolOptionsBarProps {
   bucketReference: 'current' | 'all' | 'specific' | 'none';
   onBucketReference: (r: 'current' | 'all' | 'specific' | 'none') => void;
   bucketMode: 'click' | 'lasso';
+  lassoFillErase?: boolean;
+  onLassoFillErase?: (erase: boolean) => void;
+  gapClosingRadius?: number;
+  onGapClosingRadius?: (v: number) => void;
+  expandRadius?: number;
+  onExpandRadius?: (v: number) => void;
   confirmSoloFullFill?: boolean;
   onConfirmSoloFullFill?: (enabled: boolean) => void;
-  onBucketMode: (m: 'click' | 'lasso') => void;
   outline: OutlineSettings;
   onOutline: (patch: Partial<OutlineSettings>) => void;
   /** Canvas eyedropper for the outline colour (picks once, then returns to the brush) */
@@ -335,12 +341,16 @@ export interface ToolOptionsBarProps {
 export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
   const { t: tr, language } = useI18n();
   const pluginStrings = getPluginLabels(language);
-  const rawTool = findTool(p.currentTool);
-  const locTool = getLocalizedTool(p.currentTool, tr);
-  const tool = rawTool ? { ...rawTool, label: locTool.label, hint: locTool.hint } : undefined;
-  const shortcut = useShortcutLabel();
-  const Icon = tool?.icon;
   const t = p.currentTool;
+  const subTool = p.activeSubToolId ? findSubTool(p.activeSubToolId) : undefined;
+  const activeSubToolId = subTool?.tool === t ? subTool.id : undefined;
+  const locTool = activeSubToolId ? getLocalizedSubTool(activeSubToolId, tr) : getLocalizedTool(t, tr);
+  const Icon = (activeSubToolId ? subTool : findTool(t))?.icon;
+  const shortcut = useShortcutLabel();
+  const isClickFill = t === 'bucket' && p.bucketMode === 'click';
+  const isLassoFill = t === 'bucket' && p.bucketMode === 'lasso';
+  const isPaintUnfilled = t === 'paint_unfilled';
+  const fillReference = isPaintUnfilled && p.bucketReference === 'none' ? 'current' : p.bucketReference;
   const isSelectTool = t === 'lasso' || t === 'magic_wand' || t === 'select_brush' || t === 'select_eraser';
   const selBtn = 'flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-neutral-100 hover:bg-indigo-600/40';
 
@@ -510,10 +520,10 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
       }`}>
       {!p.inPanel && <>{historyButtons}<Sep /></>}
 
-      {tool && Icon && (
-        <div className="flex shrink-0 items-center gap-1.5 pr-1" title={tool.hint}>
+      {Icon && (
+        <div className="flex shrink-0 items-center gap-1.5 pr-1" title={locTool.hint}>
           <span className="flex h-7 w-7 items-center justify-center rounded-md bg-indigo-600/20 text-indigo-300"><Icon className="h-4 w-4" /></span>
-          <span className="font-semibold text-neutral-100">{tool.label}</span>
+          <span className="font-semibold text-neutral-100">{locTool.label}</span>
         </div>
       )}
 
@@ -635,44 +645,60 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
         </>
       )}
 
-      {t === 'bucket' && (
+      {(isClickFill || isPaintUnfilled) && (
         <>
           <Sep />
-          <Segmented label={tr.toolOptions.fillMode} value={p.bucketMode} onChange={p.onBucketMode}
+          <Segmented label={tr.toolOptions.referenceLayer} value={fillReference} onChange={p.onBucketReference}
             options={[
-              { id: 'click', label: tr.toolOptions.clickFill, title: tr.toolOptions.clickFill },
-              { id: 'lasso', label: tr.toolOptions.lassoFill, title: tr.toolOptions.lassoFill },
+              { id: 'current', label: tr.toolOptions.currentLayer },
+              { id: 'all', label: tr.toolOptions.allLayers },
+              ...(isClickFill ? [{ id: 'none' as const, label: tr.toolOptions.selectionOnly }] : []),
             ]} />
-          {p.bucketMode === 'click' && (
-            <>
-              <Sep />
-              <Segmented label={tr.toolOptions.referenceLayer} value={p.bucketReference === 'specific' ? 'all' : p.bucketReference} onChange={p.onBucketReference}
-                options={[
-                  { id: 'current', label: tr.toolOptions.currentLayer },
-                  { id: 'all', label: tr.toolOptions.allLayers },
-                  { id: 'none', label: tr.toolOptions.selectionOnly },
-                ]} />
-              <Sep />
-              <SliderField label={tr.toolOptions.tolerance} value={p.bucketTolerance} max={255} suffix="" onChange={p.onBucketTolerance} />
-              {p.onConfirmSoloFullFill && (
-                <label className="flex max-w-full items-center gap-1.5 text-[11px] text-neutral-300">
-                  <input type="checkbox" checked={p.confirmSoloFullFill}
-                    onChange={(e) => p.onConfirmSoloFullFill?.(e.target.checked)} />
-                  {tr.toolOptions.confirmSoloFullFill}
-                </label>
-              )}
-            </>
-          )}
-          {p.bucketMode === 'lasso' && (
-            <div className="flex max-w-full flex-wrap items-center gap-1.5">
-              <span className="text-[11px] text-neutral-400">{tr.studio.antiAlias}</span>
-              <AntiAliasSelector compact value={p.brushProps.antiAlias} onChange={(antiAlias) => p.onBrushProps({ antiAlias })} />
-            </div>
+          <Sep />
+          <SliderField label={tr.toolOptions.tolerance} value={p.bucketTolerance} max={255} suffix="" onChange={p.onBucketTolerance} />
+          {isClickFill && p.onConfirmSoloFullFill && (
+            <label className="flex max-w-full items-center gap-1.5 text-[11px] text-neutral-300">
+              <input type="checkbox" checked={p.confirmSoloFullFill}
+                onChange={(e) => p.onConfirmSoloFullFill?.(e.target.checked)} />
+              {tr.toolOptions.confirmSoloFullFill}
+            </label>
           )}
         </>
       )}
 
-      {(t === 'brush' || t === 'pencil' || (t === 'bucket' && p.bucketMode === 'lasso')) && (
+      {isLassoFill && (
+        <>
+          <Sep />
+          {p.onLassoFillErase && (
+            <Segmented label={tr.toolOptions.lassoFillAction} value={p.lassoFillErase ? 'erase' : 'paint'}
+              onChange={(action) => p.onLassoFillErase?.(action === 'erase')}
+              options={[
+                { id: 'paint', label: tr.toolOptions.lassoFillPaint },
+                { id: 'erase', label: tr.toolOptions.lassoFillTransparent },
+              ]} />
+          )}
+          <div className="flex max-w-full flex-wrap items-center gap-1.5">
+            <span className="text-[11px] text-neutral-400">{tr.studio.antiAlias}</span>
+            <AntiAliasSelector compact value={p.brushProps.antiAlias} onChange={(antiAlias) => p.onBrushProps({ antiAlias })} />
+          </div>
+        </>
+      )}
+
+      {(t === 'smart_fill' || isPaintUnfilled) && (
+        <>
+          <Sep />
+          {p.gapClosingRadius !== undefined && p.onGapClosingRadius && (
+            <SliderField label={tr.toolOptions.gapClosing} value={p.gapClosingRadius} max={10}
+              suffix="px" onChange={p.onGapClosingRadius} />
+          )}
+          {p.expandRadius !== undefined && p.onExpandRadius && (
+            <SliderField label={isPaintUnfilled ? tr.toolOptions.areaScaling : tr.toolOptions.underlineExpansion}
+              value={p.expandRadius} min={isPaintUnfilled ? -6 : 0} max={6} suffix="px" onChange={p.onExpandRadius} />
+          )}
+        </>
+      )}
+
+      {(t === 'brush' || t === 'pencil' || (isLassoFill && !p.lassoFillErase)) && (
         <>
           <Sep />
           <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-neutral-300"

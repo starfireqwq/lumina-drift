@@ -10,6 +10,7 @@ import {
   GripHorizontal,
   Keyboard,
   Layers,
+  PaintBucket,
   Paintbrush,
   PenTool,
   Pencil,
@@ -20,7 +21,8 @@ import {
   Users,
 } from 'lucide-react';
 import type { ToolType } from '@atelier/shared';
-import { MAX_BRUSH_SIZE } from './toolCatalog';
+import { MAX_BRUSH_SIZE, findCategory, findSubToolForTool, getLocalizedCategoryLabel, getLocalizedSubTool } from './toolCatalog';
+import type { SubToolId, ToolCategoryId } from './toolCatalog';
 import type { MobilePanelDef } from './DockSystem';
 import { useI18n } from '../../context/I18nContext';
 
@@ -376,6 +378,10 @@ export const TouchSideIsland: React.FC<TouchSideIslandProps> = ({
 export interface TouchToolIslandProps {
   isTablet: boolean;
   currentTool: ToolType;
+  activeCategoryId?: ToolCategoryId;
+  activeSubToolId?: SubToolId;
+  onSelectCategory?: (categoryId: ToolCategoryId) => void;
+  onSelectSubTool?: (subToolId: SubToolId) => void;
   color: string;
   activeSheet: MobilePanelDef['id'] | null;
   showMembers: boolean;
@@ -393,6 +399,10 @@ export interface TouchToolIslandProps {
 export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
   isTablet,
   currentTool,
+  activeCategoryId,
+  activeSubToolId,
+  onSelectCategory,
+  onSelectSubTool,
   color,
   activeSheet,
   showMembers,
@@ -403,7 +413,19 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
 }) => {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(() => readBool(DOCK_COLLAPSED_KEY));
+  const [subToolDisclosure, setSubToolDisclosure] = useState<{ categoryId: ToolCategoryId; expanded: boolean }>();
   const swipeStartYRef = useRef<number | null>(null);
+  const currentSubTool = findSubToolForTool(currentTool);
+  const categoryId = activeCategoryId ?? currentSubTool?.categoryId;
+  const category = categoryId ? findCategory(categoryId) : undefined;
+  const isFill = categoryId === 'fill';
+  const fillLabel = getLocalizedCategoryLabel('fill', t);
+  const showSubTools = Boolean(category && category.subTools.length > 1 && (
+    subToolDisclosure?.categoryId === category.id ? subToolDisclosure.expanded : isFill
+  ));
+  const toggleSubTools = () => {
+    if (categoryId) setSubToolDisclosure({ categoryId, expanded: !showSubTools });
+  };
 
   const setCollapsedState = (next: boolean) => {
     setCollapsed(next);
@@ -479,9 +501,31 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
     <div
       data-workspace-entry="mobile-tools"
       data-touch-island="dock"
-      className="pointer-events-none absolute inset-x-0 z-30 flex justify-center px-2"
+      className="pointer-events-none absolute inset-x-0 z-30 flex flex-col items-center gap-1.5 px-2"
       style={dockBottomStyle}
     >
+      {showSubTools && category && (
+        <div data-touch-subtools role="group" aria-label={getLocalizedCategoryLabel(category.id, t)}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="atelier-popover no-scrollbar pointer-events-auto flex max-w-full touch-pan-x gap-1 overflow-x-auto rounded-full p-1 shadow-2xl">
+          {category.subTools.map((sub) => {
+            const Icon = sub.icon;
+            const { label } = getLocalizedSubTool(sub.id, t);
+            return (
+              <button key={sub.id} type="button" data-subtool-id={sub.id}
+                aria-pressed={(activeSubToolId ?? currentSubTool?.id) === sub.id}
+                onClick={() => {
+                  if (onSelectSubTool) onSelectSubTool(sub.id);
+                  else onSelectTool(sub.tool);
+                }}
+                className="atelier-icon-btn min-h-9 shrink-0 gap-1.5 !rounded-full px-2.5 text-xs">
+                <Icon className="h-4 w-4" />
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      )}
       <div
         className={`atelier-popover no-scrollbar pointer-events-auto flex max-w-full items-center overflow-x-auto rounded-2xl shadow-2xl ${
           isTablet ? 'gap-1 px-2 py-1.5' : 'gap-0.5 px-1.5 py-1.5'
@@ -539,6 +583,32 @@ export const TouchToolIsland: React.FC<TouchToolIslandProps> = ({
         >
           <Eraser className="h-4 w-4" />
         </button>
+        <button
+          type="button"
+          data-touch-category="fill"
+          aria-label={fillLabel}
+          title={fillLabel}
+          aria-pressed={isFill}
+          aria-expanded={isFill && showSubTools}
+          onClick={() => {
+            if (isFill) toggleSubTools();
+            else {
+              setSubToolDisclosure({ categoryId: 'fill', expanded: true });
+              if (onSelectCategory) onSelectCategory('fill');
+              else onSelectTool('bucket');
+            }
+          }}
+          className={toolBtnClass(isFill)}
+        >
+          <PaintBucket className="h-4 w-4" />
+        </button>
+        {!isFill && category && category.subTools.length > 1 && (
+          <button type="button" aria-expanded={showSubTools}
+            aria-label={`${getLocalizedCategoryLabel(category.id, t)} · ${t.tools.subToolTitle}`}
+            onClick={toggleSubTools} className={toolBtnClass(showSubTools)}>
+            {showSubTools ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => onSelectTool(currentTool === 'eyedropper' ? 'brush' : 'eyedropper')}

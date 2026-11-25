@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronDown, ChevronUp } from 'lucide-react';
+import { ChevronDown, ChevronUp, List, PanelTop } from 'lucide-react';
 import { ToolType } from '@atelier/shared';
 import { ShortcutManager, makePluginToolShortcutId } from '../../engine/ShortcutManager';
-import { ALL_TOOLS, ToolDef, getLocalizedToolGroups } from './toolCatalog';
+import { ALL_TOOLS, TOOL_CATEGORIES, findSubTool, findSubToolForTool, getLocalizedCategoryLabel, getLocalizedSubTool, getLocalizedToolGroups } from './toolCatalog';
+import type { SubToolId, ToolCategoryDef, ToolCategoryId, ToolDef } from './toolCatalog';
+import type { ToolRailMode } from './subToolStore';
 import { RailGrip, startDrag } from './DockSystem';
 import { TOOL_RAIL_WIDTH_MAX, TOOL_RAIL_WIDTH_MIN } from './dockStore';
 import { useI18n } from '../../context/I18nContext';
@@ -23,6 +25,13 @@ export const useShortcutLabel = () => {
 interface ToolRailProps {
   currentTool: ToolType;
   onSelectTool: (tool: ToolType) => void;
+  railMode?: ToolRailMode;
+  onChangeRailMode?: (mode: ToolRailMode) => void;
+  activeCategoryId?: ToolCategoryId;
+  activeSubToolId?: SubToolId;
+  lastSubToolByCategory?: Partial<Record<ToolCategoryId, SubToolId>>;
+  onSelectCategory?: (categoryId: ToolCategoryId) => void;
+  onSelectSubTool?: (subToolId: SubToolId) => void;
   pluginTools?: readonly RegisteredPluginTool[];
   activePluginToolKey?: string | null;
   onSelectPluginTool?: (pluginId: string, toolId: string) => void;
@@ -36,6 +45,13 @@ interface ToolRailProps {
 export const ToolRail: React.FC<ToolRailProps> = ({
   currentTool,
   onSelectTool,
+  railMode,
+  onChangeRailMode,
+  activeCategoryId,
+  activeSubToolId,
+  lastSubToolByCategory,
+  onSelectCategory,
+  onSelectSubTool,
   pluginTools = [],
   activePluginToolKey = null,
   onSelectPluginTool,
@@ -50,11 +66,29 @@ export const ToolRail: React.FC<ToolRailProps> = ({
   const label = useShortcutLabel();
   const [tip, setTip] = useState<{ label: string; hint?: string; shortcutId?: string; x: number; y: number } | null>(null);
   const [scrollState, setScrollState] = useState({ canUp: false, canDown: false });
+  const [localRailMode, setLocalRailMode] = useState<ToolRailMode>('compact');
   const navRef = useRef<HTMLElement>(null);
   const vertical = orientation === 'vertical';
+  const mode = railMode ?? localRailMode;
+  const compact = vertical && mode === 'compact';
+  const currentSubTool = findSubTool(activeSubToolId ?? '') ?? findSubToolForTool(currentTool);
+  const categoryId = activeCategoryId ?? currentSubTool?.categoryId;
   const toolGroups = getLocalizedToolGroups(t);
   const actualWidth = width ?? Math.round(46 * ui);
   const cols = vertical ? Math.max(1, Math.floor((actualWidth - 8 * ui) / (29 * ui))) : 1;
+  const nextRailMode = mode === 'classic' ? 'compact' : 'classic';
+
+  const rememberedSubTool = useCallback((category: ToolCategoryDef) => {
+    const rememberedId = lastSubToolByCategory?.[category.id] ?? currentSubTool?.id;
+    return category.subTools.find((sub) => sub.id === rememberedId)
+      ?? category.subTools.find((sub) => sub.id === category.defaultSubToolId)
+      ?? category.subTools[0];
+  }, [currentSubTool, lastSubToolByCategory]);
+
+  const selectCategory = useCallback((category: ToolCategoryDef) => {
+    if (onSelectCategory) onSelectCategory(category.id);
+    else onSelectTool(rememberedSubTool(category).tool);
+  }, [onSelectCategory, onSelectTool, rememberedSubTool]);
 
   const updateScrollHints = useCallback(() => {
     const el = navRef.current;
@@ -74,28 +108,24 @@ export const ToolRail: React.FC<ToolRailProps> = ({
     const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(updateScrollHints) : null;
     ro?.observe(el);
     return () => ro?.disconnect();
-  }, [updateScrollHints, actualWidth, cols, toolGroups.length]);
+  }, [updateScrollHints, actualWidth, cols, mode, pluginTools.length]);
 
   // Mouse wheel scrolling when tools overflow (and Shift/Alt+wheel to step tool selection directly)
-  const toolRef = useRef(currentTool);
-  toolRef.current = currentTool;
-  const selectToolRef = useRef(onSelectTool);
-  selectToolRef.current = onSelectTool;
-
   useEffect(() => {
     const el = navRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       if (vertical && (e.shiftKey || e.altKey)) {
-        const idx = ALL_TOOLS.findIndex((tool) => tool.id === toolRef.current);
-        if (idx >= 0) {
-          const dir = e.deltaY > 0 ? 1 : e.deltaY < 0 ? -1 : 0;
-          if (dir) {
-            e.preventDefault();
-            e.stopPropagation();
-            const next = ALL_TOOLS[(idx + dir + ALL_TOOLS.length) % ALL_TOOLS.length];
-            selectToolRef.current(next.id);
-          }
+        const dir = Math.sign(e.deltaY);
+        if (!dir) return;
+        const tools = compact ? TOOL_CATEGORIES : ALL_TOOLS;
+        const idx = tools.findIndex((tool) => tool.id === (compact ? categoryId : currentTool));
+        if (idx >= 0 || compact) {
+          e.preventDefault();
+          e.stopPropagation();
+          const next = idx < 0 ? (dir > 0 ? 0 : tools.length - 1) : (idx + dir + tools.length) % tools.length;
+          if (compact) selectCategory(TOOL_CATEGORIES[next]);
+          else onSelectTool(ALL_TOOLS[next].id);
         }
         return;
       }
@@ -116,33 +146,41 @@ export const ToolRail: React.FC<ToolRailProps> = ({
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [vertical, updateScrollHints]);
+  }, [vertical, compact, categoryId, currentTool, onSelectTool, selectCategory, updateScrollHints]);
 
   // Ensure keyboard/wheel-selected tool stays scrolled into view
   useEffect(() => {
     const el = navRef.current;
     if (!el || !vertical) return;
-    const btn = el.querySelector<HTMLElement>(`[data-tool-id="${currentTool}"]`);
+    const btn = el.querySelector<HTMLElement>(compact ? `[data-category-id="${categoryId}"]` : `[data-tool-id="${currentTool}"]`);
     if (btn && el.scrollHeight > el.clientHeight + 2) {
       btn.scrollIntoView({ block: 'nearest' });
     }
-  }, [currentTool, vertical]);
+  }, [categoryId, compact, currentTool, vertical]);
 
-  const button = (tool: ToolDef) => {
+  const toolButton = (tool: ToolDef, options: {
+    categoryId?: ToolCategoryId;
+    subToolId?: SubToolId;
+    multiple?: boolean;
+    active: boolean;
+    onSelect: () => void;
+  }) => {
     const Icon = tool.icon;
     const key = label(tool.shortcutId);
-    const active = !activePluginToolKey && currentTool === tool.id;
+    const grid = orientation === 'grid';
     return (
       <button
-        key={tool.id}
+        key={options.categoryId ?? options.subToolId ?? tool.id}
         data-tool-id={tool.id}
+        data-category-id={options.categoryId}
+        data-subtool-id={options.subToolId}
         type="button"
-        onClick={() => onSelectTool(tool.id)}
-        aria-pressed={active}
+        onClick={options.onSelect}
+        aria-pressed={!activePluginToolKey && options.active}
         aria-label={key ? `${tool.label}（${key}）` : tool.label}
         aria-keyshortcuts={key || undefined}
         onPointerEnter={(e) => {
-          if (e.pointerType !== 'mouse') return;
+          if (grid || e.pointerType !== 'mouse') return;
           const r = e.currentTarget.getBoundingClientRect();
           setTip(
             vertical
@@ -151,11 +189,35 @@ export const ToolRail: React.FC<ToolRailProps> = ({
           );
         }}
         onPointerLeave={() => setTip(null)}
-        className={`atelier-icon-btn shrink-0 ${vertical ? 'h-7 w-7 !rounded-sm' : 'h-10 w-10'}`}
+        className={`atelier-icon-btn relative shrink-0 ${vertical ? 'h-7 w-7 !rounded-sm' : grid ? 'min-h-10 w-full !justify-start gap-2 px-2 text-left text-xs' : 'h-10 w-10'}`}
       >
-        <Icon className={vertical ? 'h-4 w-4' : 'h-5 w-5'} />
+        <Icon className={vertical ? 'h-4 w-4' : 'h-5 w-5 shrink-0'} />
+        {grid && <span>{tool.label}</span>}
+        {options.multiple && <span aria-hidden className="absolute bottom-0.5 right-0.5 border-b-4 border-l-4 border-b-current border-l-transparent opacity-60" />}
       </button>
     );
+  };
+
+  const button = (tool: ToolDef) => toolButton(tool, {
+    active: currentTool === tool.id,
+    onSelect: () => onSelectTool(tool.id),
+  });
+
+  const categoryButton = (category: ToolCategoryDef) => {
+    const sub = rememberedSubTool(category);
+    const { label: subLabel, hint } = getLocalizedSubTool(sub.id, t);
+    return toolButton({
+      id: sub.tool,
+      icon: sub.icon,
+      label: `${getLocalizedCategoryLabel(category.id, t)} · ${subLabel}`,
+      hint,
+      shortcutId: category.shortcutId ?? sub.shortcutId,
+    }, {
+      categoryId: category.id,
+      multiple: category.subTools.length > 1,
+      active: category.id === categoryId,
+      onSelect: () => selectCategory(category),
+    });
   };
 
   const pluginToolButton = (item: RegisteredPluginTool) => {
@@ -209,12 +271,26 @@ export const ToolRail: React.FC<ToolRailProps> = ({
   if (orientation === 'grid') {
     return (
       <nav ref={navRef} aria-label={t.navbar.tools} className="grid gap-3 p-3 sm:grid-cols-2">
-        {toolGroups.map((group) => (
-          <div key={group.id} role="group" aria-label={group.label} className="min-w-0 space-y-1">
-            <div aria-hidden className="text-xs font-medium text-neutral-300">{group.label}</div>
-            <div className="flex flex-wrap gap-1">{group.tools.map(button)}</div>
-          </div>
-        ))}
+        {TOOL_CATEGORIES.map((category) => {
+          const categoryLabel = getLocalizedCategoryLabel(category.id, t);
+          return (
+            <div key={category.id} role="group" aria-label={categoryLabel} className="min-w-0 space-y-1">
+              <div aria-hidden className="text-xs font-medium text-neutral-300">{categoryLabel}</div>
+              <div className="grid gap-1">
+                {category.subTools.map((sub) => toolButton({
+                  id: sub.tool, icon: sub.icon, shortcutId: sub.shortcutId, ...getLocalizedSubTool(sub.id, t),
+                }, {
+                  subToolId: sub.id,
+                  active: currentSubTool?.id === sub.id,
+                  onSelect: () => {
+                    if (onSelectSubTool) onSelectSubTool(sub.id);
+                    else onSelectTool(sub.tool);
+                  },
+                }))}
+              </div>
+            </div>
+          );
+        })}
         {pluginTools.length > 0 && (
           <div role="group" aria-label={pluginStrings.toolsBadge} className="flex min-w-0 flex-wrap gap-1">
             {pluginTools.map(pluginToolButton)}
@@ -264,7 +340,11 @@ export const ToolRail: React.FC<ToolRailProps> = ({
           className={`atelier-chrome flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto overflow-x-hidden px-1 pb-2 pt-1 no-scrollbar ${side === 'right' ? 'border-l' : 'border-r'}`}
         >
           <RailGrip />
-          {toolGroups.map((group, gi) => (
+          {compact ? (
+            <div className="grid justify-items-center gap-0.5" style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}>
+              {TOOL_CATEGORIES.map(categoryButton)}
+            </div>
+          ) : toolGroups.map((group, gi) => (
             <React.Fragment key={group.id}>
               {gi > 0 && <div aria-hidden className="mx-1 h-px shrink-0 bg-neutral-700/70" />}
               <div
@@ -290,6 +370,17 @@ export const ToolRail: React.FC<ToolRailProps> = ({
               </div>
             </>
           )}
+          <div aria-hidden className="mx-1 h-px shrink-0 bg-neutral-700/70" />
+          <button type="button" data-rail-mode-toggle aria-pressed={mode === 'classic'}
+            aria-label={t.tools.railClassicMode} title={nextRailMode === 'classic' ? t.tools.railClassicMode : t.tools.railCompactMode}
+            onClick={() => {
+              setTip(null);
+              setLocalRailMode(nextRailMode);
+              onChangeRailMode?.(nextRailMode);
+            }}
+            className="atelier-icon-btn mx-auto h-7 w-7 shrink-0 !rounded-sm">
+            {mode === 'classic' ? <PanelTop className="h-4 w-4" /> : <List className="h-4 w-4" />}
+          </button>
         </nav>
 
         {scrollState.canUp && (
