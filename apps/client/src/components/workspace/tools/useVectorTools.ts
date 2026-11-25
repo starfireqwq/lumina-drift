@@ -369,9 +369,13 @@ export function useVectorTools(ctx: ToolContext) {
 
   const eraseAt = (item: PixiLayerItem, layer: LayerModel, local: Point, size = brushProps.size) => {
     const engine = vectorEngineRef.current!;
-    const res = vectorEraserMode === 'intersect'
-      ? engine.eraseToIntersections(item.renderTexture, layer.id, local.x, local.y, size)
-      : engine.eraseEntireStrokes(item.renderTexture, layer.id, local.x, local.y, size);
+    const args = [item.renderTexture, layer.id, local.x, local.y, size] as const;
+    let res: VectorEditResult;
+    switch (vectorEraserMode) {
+      case 'intersect': res = engine.eraseToIntersections(...args); break;
+      case 'partial': res = engine.erasePartialStrokes(...args); break;
+      default: res = engine.eraseEntireStrokes(...args); break;
+    }
     commitVectorEditResult(layer.id, res, '向量橡皮擦');
   };
 

@@ -1091,8 +1091,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const subToolState = useSubToolStore();
   const applyingSubToolRef = useRef(false);
   const restoredSubToolRef = useRef(false);
-  const [appliedFillSubToolId, setAppliedFillSubToolId] = useState<SubToolId | null>(null);
-  const [appliedSelectionSubToolId, setAppliedSelectionSubToolId] = useState<SubToolId | null>(null);
+  const [appliedSubToolId, setAppliedSubToolId] = useState<SubToolId | null>(null);
   const currentToolRef = useRef(currentTool);
   currentToolRef.current = currentTool;
 
@@ -2650,7 +2649,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const handleSelectTool = (tool: ToolType, preset?: BrushProperties) => {
     if (!applyingSubToolRef.current) {
       const sub = subToolStore.syncFromToolType(tool, { bucketMode, bucketReference });
-      if (sub?.categoryId === 'fill' || sub?.categoryId === 'select') {
+      if (sub?.categoryId === 'fill' || sub?.categoryId === 'select' || sub?.categoryId === 'vector') {
         applySubTool(sub, preset);
         return;
       }
@@ -2725,7 +2724,6 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       if (sub.id === 'fill_paint_unfilled' && typeof params.brushSize === 'number' && Number.isFinite(params.brushSize)) {
         handleBrushPropsChange({ size: params.brushSize });
       }
-      if (sub.categoryId === 'fill') setAppliedFillSubToolId(sub.id);
       if (sub.categoryId === 'select') {
         setSelectionMode(params.selectionMode ?? 'replace');
         setSelectionAntialias(params.selectionAntialias ?? true);
@@ -2735,9 +2733,17 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         if (typeof params.brushSize === 'number' && Number.isFinite(params.brushSize)) {
           handleBrushPropsChange({ size: params.brushSize });
         }
-        setAppliedSelectionSubToolId(sub.id);
       }
       handleSelectTool(sub.tool, preset);
+      if (sub.categoryId === 'vector') {
+        if (params.vectorEraserMode !== undefined) setVectorEraserMode(params.vectorEraserMode);
+        if (params.vectorWidthMode !== undefined) setVectorWidthMode(params.vectorWidthMode);
+        if (params.bezierMode !== undefined) setBezierMode(params.bezierMode);
+        if (typeof params.brushSize === 'number' && Number.isFinite(params.brushSize)) {
+          handleBrushPropsChange({ size: params.brushSize });
+        }
+      }
+      setAppliedSubToolId(sub.id);
     } finally {
       applyingSubToolRef.current = false;
     }
@@ -2777,7 +2783,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   useEffect(() => {
     const id = subToolState.activeSubToolId;
     // The store can render its new selection before React commits the matching fill settings.
-    if (applyingSubToolRef.current || id !== appliedFillSubToolId || id !== subToolStore.getState().activeSubToolId || findSubTool(id)?.tool !== currentTool) return;
+    if (applyingSubToolRef.current || id !== appliedSubToolId || id !== subToolStore.getState().activeSubToolId || findSubTool(id)?.tool !== currentTool) return;
     let params: SubToolParams;
     switch (id) {
       case 'fill_refer_other':
@@ -2802,12 +2808,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (Object.entries(params).some(([key, value]) => !Object.is(value, saved[key] ?? null))) {
       subToolStore.updateSubToolParams(id, params);
     }
-  }, [subToolState.activeSubToolId, appliedFillSubToolId, currentTool, bucketMode, bucketReference, bucketRefLayerId, bucketTolerance, bucketExpand,
+  }, [subToolState.activeSubToolId, appliedSubToolId, currentTool, bucketMode, bucketReference, bucketRefLayerId, bucketTolerance, bucketExpand,
     referenceLayerId, gapClosingRadius, expandRadius, brushProps.antiAlias, lassoOutlineEnabled, lassoFillErase, brushProps.size]);
 
   useEffect(() => {
     const id = subToolState.activeSubToolId;
-    if (id !== appliedSelectionSubToolId || id !== subToolStore.getState().activeSubToolId || currentTool !== id) return;
+    if (id !== appliedSubToolId || id !== subToolStore.getState().activeSubToolId || currentTool !== id || findSubTool(id)?.categoryId !== 'select') return;
     const params: SubToolParams = { selectionMode, selectionAntialias, selectionFeather };
     if (id === 'magic_wand' || id === 'lasso') Object.assign(params, { wandTolerance, wandContiguous });
     if (id === 'select_brush' || id === 'select_eraser') params.brushSize = brushProps.size;
@@ -2815,8 +2821,27 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (Object.entries(params).some(([key, value]) => !Object.is(value, saved[key]))) {
       subToolStore.updateSubToolParams(id, params);
     }
-  }, [subToolState.activeSubToolId, appliedSelectionSubToolId, currentTool, selectionMode, selectionAntialias, selectionFeather,
+  }, [subToolState.activeSubToolId, appliedSubToolId, currentTool, selectionMode, selectionAntialias, selectionFeather,
     wandTolerance, wandContiguous, brushProps.size]);
+
+  useEffect(() => {
+    const id = subToolState.activeSubToolId;
+    if (id !== appliedSubToolId || id !== subToolStore.getState().activeSubToolId || currentTool !== id) return;
+    const brushSize = brushProps.size;
+    let params: SubToolParams;
+    switch (id) {
+      case 'vector_pen':
+      case 'vector_reshape': params = { brushSize }; break;
+      case 'vector_bezier': params = { brushSize, bezierMode }; break;
+      case 'vector_width': params = { brushSize, vectorWidthMode }; break;
+      case 'vector_eraser': params = { brushSize, vectorEraserMode }; break;
+      default: return;
+    }
+    const saved = subToolStore.getSubToolParams(id);
+    if (Object.entries(params).some(([key, value]) => !Object.is(value, saved[key]))) {
+      subToolStore.updateSubToolParams(id, params);
+    }
+  }, [subToolState.activeSubToolId, appliedSubToolId, currentTool, brushProps.size, bezierMode, vectorWidthMode, vectorEraserMode]);
 
   const handleUploadCustomBrush = async (file: File) => {
     const renderer = brushRendererRef.current;

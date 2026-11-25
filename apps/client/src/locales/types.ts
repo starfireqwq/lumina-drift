@@ -336,6 +336,7 @@ export interface Translations {
     // Vector options
     vectorEraserMode: string;
     vectorIntersect: string;
+    vectorPartial: string;
     vectorEntire: string;
     vectorWidthMode: string;
     vectorThicken: string;

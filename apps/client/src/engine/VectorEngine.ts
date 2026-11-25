@@ -2,6 +2,7 @@ import { RenderTexture } from 'pixi.js';
 import {
   adjustVectorStrokeWidth,
   computeStrokeBounds,
+  eraseStrokePartial,
   eraseStrokeToIntersection,
   fitPointsToBezier,
   hitTestVectorStroke,
@@ -194,6 +195,31 @@ export class VectorEngine {
     const removed = list.filter((s) => hitTestVectorStroke(s, eraserX, eraserY, eraserRadius));
     if (removed.length === 0) return EMPTY_EDIT;
     return this.applyEdit(targetRT, layerId, list.filter((s) => !removed.includes(s)), removed, []);
+  }
+
+  public erasePartialStrokes(
+    targetRT: RenderTexture,
+    layerId: string,
+    eraserX: number,
+    eraserY: number,
+    eraserRadius: number
+  ): VectorEditResult {
+    const removed: VectorStroke[] = [];
+    const added: VectorStroke[] = [];
+    const next: VectorStroke[] = [];
+    for (const stroke of this.getStrokes(layerId)) {
+      if (!hitTestVectorStroke(stroke, eraserX, eraserY, eraserRadius)) {
+        next.push(stroke);
+        continue;
+      }
+      const pieces = eraseStrokePartial(stroke, eraserX, eraserY, eraserRadius);
+      next.push(...pieces);
+      if (pieces[0] === stroke) continue;
+      removed.push(stroke);
+      added.push(...pieces);
+    }
+    if (removed.length === 0) return EMPTY_EDIT;
+    return this.applyEdit(targetRT, layerId, next, removed, added);
   }
 
   /** Vector Eraser 'intersect' (交點消除): erases the touched segment up to its intersections. */

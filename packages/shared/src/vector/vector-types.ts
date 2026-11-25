@@ -28,7 +28,7 @@ export interface VectorStroke {
   createdAt: number;
 }
 
-export type VectorEraserMode = 'intersect' | 'entire';
+export type VectorEraserMode = 'intersect' | 'entire' | 'partial';
 
 export type VectorReshapeMode = 'pinch' | 'anchor_drag';
 

@@ -780,7 +780,11 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
         <>
           <Sep />
           <Segmented label={tr.toolOptions.vectorEraserMode} value={p.vectorEraserMode} onChange={p.onVectorEraserMode}
-            options={[{ id: 'intersect', label: tr.toolOptions.vectorIntersect }, { id: 'entire', label: tr.toolOptions.vectorEntire }]} />
+            options={[
+              { id: 'intersect', label: tr.toolOptions.vectorIntersect },
+              { id: 'partial', label: tr.toolOptions.vectorPartial },
+              { id: 'entire', label: tr.toolOptions.vectorEntire },
+            ]} />
         </>
       )}
       {t === 'vector_width' && (

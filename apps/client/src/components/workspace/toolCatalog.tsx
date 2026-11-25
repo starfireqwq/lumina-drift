@@ -1,5 +1,5 @@
 import React from 'react';
-import type { ToolType } from '@atelier/shared';
+import type { ToolType, VectorEraserMode, VectorWidthMode } from '@atelier/shared';
 import type { Translations } from '../../locales';
 import {
   Activity,
@@ -104,7 +104,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
       { id: 'vector_edit', label: '節點編輯', icon: MousePointer2, shortcutId: 'tool_vector_edit', hint: '拖曳節點與控制桿；雙擊節點切換尖角／平滑；Delete 刪除節點' },
       { id: 'vector_reshape', label: '捏線', icon: Activity, shortcutId: 'tool_vector_reshape', hint: '在筆刷範圍內拖曳整段拉動線條' },
       { id: 'vector_width', label: '線寬修正', icon: Minus, shortcutId: 'tool_vector_width', hint: '塗過的線段加粗或變細' },
-      { id: 'vector_eraser', label: '向量橡皮擦', icon: Eraser, shortcutId: 'tool_vector_eraser', hint: '擦到交點為止或整條刪除，只動線條不動底色' },
+      { id: 'vector_eraser', label: '向量橡皮擦', icon: Eraser, shortcutId: 'tool_vector_eraser', hint: '可擦至交點、局部擦除或整條刪除' },
     ],
   },
   {
@@ -217,6 +217,9 @@ export interface SubToolParams {
   gapClosingRadius?: number;
   expandRadius?: number;
   brushSize?: number;
+  vectorEraserMode?: VectorEraserMode;
+  vectorWidthMode?: VectorWidthMode;
+  bezierMode?: 'pen' | 'curve';
   selectionMode?: 'replace' | 'add' | 'subtract';
   selectionAntialias?: boolean;
   selectionFeather?: number;
@@ -345,7 +348,21 @@ export const TOOL_CATEGORIES: ToolCategoryDef[] = [
     ],
   },
   defineCategory('transform', '變形與液化', 'transform', ['liquify']),
-  defineCategory('vector', '向量', 'vector_pen', ['vector_bezier', 'vector_edit', 'vector_reshape', 'vector_width', 'vector_eraser']),
+  {
+    id: 'vector',
+    label: '向量',
+    icon: Spline,
+    shortcutId: 'tool_vector_pen',
+    defaultSubToolId: 'vector_pen',
+    subTools: [
+      defineSubTool('vector', 'vector_pen', { defaultParams: { brushSize: 4 } }),
+      defineSubTool('vector', 'vector_bezier', { defaultParams: { brushSize: 4, bezierMode: 'pen' } }),
+      defineSubTool('vector', 'vector_edit'),
+      defineSubTool('vector', 'vector_reshape', { defaultParams: { brushSize: 36 } }),
+      defineSubTool('vector', 'vector_width', { defaultParams: { brushSize: 32, vectorWidthMode: 'thicken' } }),
+      defineSubTool('vector', 'vector_eraser', { defaultParams: { brushSize: 28, vectorEraserMode: 'intersect' } }),
+    ],
+  },
   defineCategory('shape', '形狀與文字', 'shape', ['text']),
   defineCategory('comic', '漫畫與動畫', 'comic_balloon', ['comic_panel', 'animation']),
   defineCategory('hand', '移動畫面', 'hand'),

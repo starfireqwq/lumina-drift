@@ -277,6 +277,10 @@ export function distancePointToStroke(
   if (samples.length === 0) {
     return { minDistance: Infinity, closestIndex: -1, samplePoint: { x: 0, y: 0 } };
   }
+  if (samples.length === 1) {
+    const samplePoint = samples[0];
+    return { minDistance: Math.hypot(px - samplePoint.x, py - samplePoint.y), closestIndex: 0, samplePoint };
+  }
 
   let minDistanceSq = Infinity;
   let closestIndex = 0;
@@ -369,6 +373,116 @@ export function hitTestVectorStroke(
   const { minDistance } = distancePointToStroke(eraserX, eraserY, stroke);
   const threshold = eraserRadius + stroke.baseWidth / 2;
   return minDistance <= threshold;
+}
+
+type CubicBezier = [Point2D, Point2D, Point2D, Point2D];
+
+function splitBezierCurve([p0, p1, p2, p3]: CubicBezier, t: number): [CubicBezier, CubicBezier] {
+  const lerp = (a: Point2D, b: Point2D): Point2D => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+  const a = lerp(p0, p1);
+  const b = lerp(p1, p2);
+  const c = lerp(p2, p3);
+  const d = lerp(a, b);
+  const e = lerp(b, c);
+  const midpoint = lerp(d, e);
+  return [[p0, a, d, midpoint], [midpoint, e, c, p3]];
+}
+
+/** Remove the part of a stroke within the eraser circle, allowing for its base line width. */
+export function eraseStrokePartial(
+  stroke: VectorStroke,
+  eraserX: number,
+  eraserY: number,
+  eraserRadius: number
+): VectorStroke[] {
+  const { anchors, baseWidth } = stroke;
+  const radius = eraserRadius + baseWidth / 2;
+  if (anchors.length === 0 || radius < 0) return [stroke];
+  const radiusSq = radius ** 2;
+  const distanceSq = ({ x, y }: Point2D) => (x - eraserX) ** 2 + (y - eraserY) ** 2;
+  if (anchors.length === 1) return distanceSq(anchors[0]) <= radiusSq ? [] : [stroke];
+
+  const pieces: VectorAnchor[][] = [];
+  let piece: VectorAnchor[] = [];
+  let removed = false;
+
+  for (let i = 1; i < anchors.length; i++) {
+    const a = anchors[i - 1];
+    const b = anchors[i];
+    const curve: CubicBezier = [a, { x: a.cp2x ?? a.x, y: a.cp2y ?? a.y }, { x: b.cp1x ?? b.x, y: b.cp1y ?? b.y }, b];
+    const outside: Array<[number, number]> = [];
+    const sample = (segment: CubicBezier, start: number, end: number) => {
+      // The control polygon bounds the curve. Only subdivide where it straddles the circle.
+      if (segment.every((point) => distanceSq(point) <= radiusSq)) return;
+      const xs = segment.map((point) => point.x);
+      const ys = segment.map((point) => point.y);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      const dx = Math.max(0, minX - eraserX, eraserX - maxX);
+      const dy = Math.max(0, minY - eraserY, eraserY - maxY);
+      if (dx ** 2 + dy ** 2 < radiusSq) {
+        const [left, right] = splitBezierCurve(segment, 0.5);
+        if (Math.max(maxX - minX, maxY - minY) > 1 / 1024 && end - start > 2 ** -32) {
+          const mid = (start + end) / 2;
+          sample(left, start, mid);
+          sample(right, mid, end);
+          return;
+        }
+        // Keep the cut endpoints outside the circle so a stationary eraser doesn't recut them.
+        if (Math.min(distanceSq(segment[0]), distanceSq(right[0]), distanceSq(segment[3])) < radiusSq) return;
+      }
+
+      const last = outside[outside.length - 1];
+      if (last?.[1] === start) last[1] = end;
+      else outside.push([start, end]);
+    };
+    sample(curve, 0, 1);
+
+    if (outside.length !== 1 || outside[0][0] !== 0 || outside[0][1] !== 1) removed = true;
+    if (outside[0]?.[0] !== 0 && piece.length) {
+      pieces.push(piece);
+      piece = [];
+    }
+
+    const styleAt = (t: number) => ({ pressure: a.pressure + (b.pressure - a.pressure) * t, width: a.width + (b.width - a.width) * t });
+    for (const [start, end] of outside) {
+      const head = end === 1 ? curve : splitBezierCurve(curve, end)[0];
+      const [p0, p1, p2, p3] = start === 0 ? head : splitBezierCurve(head, start / end)[1];
+      const outgoing = { cp2x: p1.x, cp2y: p1.y };
+      if (piece.length) Object.assign(piece[piece.length - 1], outgoing);
+      else piece.push({ x: p0.x, y: p0.y, ...styleAt(start), ...outgoing });
+      piece.push({ x: p3.x, y: p3.y, ...styleAt(end), cp1x: p2.x, cp1y: p2.y });
+      if (end < 1) {
+        pieces.push(piece);
+        piece = [];
+      }
+    }
+  }
+
+  if (!removed) return [stroke];
+  if (piece.length) pieces.push(piece);
+  if (stroke.closed && pieces.length > 1) {
+    const first = pieces[0];
+    const last = pieces[pieces.length - 1];
+    const end = last[last.length - 1];
+    if (end.x === first[0].x && end.y === first[0].y) {
+      end.cp2x = first[0].cp2x;
+      end.cp2y = first[0].cp2y;
+      pieces[0] = last.concat(first.slice(1));
+      pieces.pop();
+    }
+  }
+
+  const editId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  return pieces.map((anchors, index) => ({
+    ...stroke,
+    id: `vec_part_${editId}_${index}`,
+    anchors,
+    closed: false,
+    bounds: computeStrokeBounds(anchors, baseWidth),
+  }));
 }
 
 /**
