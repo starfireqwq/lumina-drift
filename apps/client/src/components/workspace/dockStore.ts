@@ -7,7 +7,7 @@ import { getUiScale, onUiRescale } from '../../theme/uiScale';
  * or floats as a resizable window. Shared by the top bar's 視窗 menu and the workspace.
  */
 export type ToolDockPanelId = 'filters' | 'align';
-export type PanelId = 'color' | 'brushToolset' | 'toolProps' | 'layers' | 'members' | 'oplog' | 'quickKeys' | ToolDockPanelId;
+export type PanelId = 'color' | 'subView' | 'brushToolset' | 'toolProps' | 'layers' | 'members' | 'oplog' | 'quickKeys' | ToolDockPanelId;
 export const isToolDockPanel = (id: PanelId): id is ToolDockPanelId => id === 'filters' || id === 'align';
 export type DockSide = 'left' | 'right' | 'bottom';
 export type PanelPlace = DockSide | 'float';
@@ -49,7 +49,7 @@ export const TOOL_RAIL_WIDTH_MAX = 220;
 
 const clampNum = (v: number, min: number, max: number) => Math.max(min, Math.min(max, Math.round(v)));
 
-export const PANEL_IDS: PanelId[] = ['color', 'brushToolset', 'toolProps', 'layers', 'members', 'oplog', 'quickKeys'];
+export const PANEL_IDS: PanelId[] = ['color', 'subView', 'brushToolset', 'toolProps', 'layers', 'members', 'oplog', 'quickKeys'];
 const LAYOUT_PANEL_IDS: PanelId[] = [...PANEL_IDS, 'filters', 'align'];
 
 const LAYOUT_VERSION = 4;
@@ -59,6 +59,7 @@ const defaultLayout = (): DockLayoutState => ({
   version: LAYOUT_VERSION,
   panels: {
     color: { visible: true, place: 'right', collapsed: false, weight: 1.28, float: { x: 120, y: 120, w: 280, h: 430 }, group: 'color' },
+    subView: { visible: false, place: 'left', collapsed: false, weight: 1, float: { x: 100, y: 120, w: 300, h: 360 }, group: 'subView' },
     brushToolset: { visible: true, place: 'right', collapsed: false, weight: 1, float: { x: 160, y: 140, w: 280, h: 420 }, group: 'toolProps' },
     toolProps: { visible: true, place: 'right', collapsed: false, weight: 1, float: { x: 160, y: 140, w: 280, h: 420 }, group: 'toolProps' },
     layers: { visible: true, place: 'right', collapsed: false, weight: 1.05, float: { x: 200, y: 160, w: 300, h: 460 }, group: 'layers' },
@@ -305,6 +306,7 @@ export const useDesktopModeAvailable = () => useMediaQuery(TOUCH_UNDER_1280) || 
 export const PANEL_TITLES: Record<PanelId, string> = {
   brushToolset: '筆刷工具集',
   color: '色彩',
+  subView: '子視圖',
   toolProps: '工具屬性',
   layers: '圖層',
   members: '成員',
