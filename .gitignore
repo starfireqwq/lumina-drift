@@ -2,6 +2,7 @@ node_modules
 dist
 dist-electron
 apps/client/resources/wintab/
+apps/client/resources/installer/
 release
 build
 .DS_Store

@@ -118,7 +118,7 @@ GitHub Release [`v1.4.0`](https://github.com/starfireqwq/lumina-drift/releases/t
 
 | 平台 | 檔名 | 檔案大小 |
 | :--- | :--- | :--- |
-| Windows（安裝版） | `Lumina-Drift-Paint-Setup-1.4.0.exe` | `132.85 MB` |
+| Windows（安裝版） | `Lumina-Drift-Paint-Setup-1.4.0.exe` | `133.13 MB` |
 | Windows（免安裝版） | `Lumina-Drift-Paint-Portable-1.4.0.exe` | `121.47 MB` |
 | macOS（Apple Silicon） | `Lumina-Drift-Paint-Mac-1.4.0-arm64.pkg` | `140.36 MB` |
 | macOS（Intel） | `Lumina-Drift-Paint-Mac-1.4.0-x64.pkg` | `148.13 MB` |

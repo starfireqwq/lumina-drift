@@ -1,10 +1,39 @@
 ; NSIS Custom Installer Hooks for Lumina Drift (.lumina File Association & Windows Explorer IThumbnailProvider)
 !ifndef BUILD_UNINSTALLER
+!define MUI_CUSTOMFUNCTION_GUIINIT LuminaGlassGuiInit
+Var LuminaGlassModule
 Var LuminaAction
 Var LuminaProgress
 Var LuminaResult
 Var LuminaIsUpdate
 InstallButtonText "$LuminaAction"
+
+!macro customHeader
+  Function LuminaGlassGuiInit
+    ${If} ${Silent}
+      Return
+    ${EndIf}
+    InitPluginsDir
+    File "/oname=$PLUGINSDIR\LuminaGlassUI.dll" "${PROJECT_DIR}\resources\installer\LuminaGlassUI.dll"
+    File "/oname=$PLUGINSDIR\lumina-icon.png" "${PROJECT_DIR}\resources\icon.png"
+    ; NSIS 3.04 accepts quoted paths as arguments to LoadLibraryW.
+    System::Call 'kernel32::LoadLibraryW(w "$PLUGINSDIR\LuminaGlassUI.dll") p .s'
+    Pop $LuminaGlassModule
+    ${If} $LuminaGlassModule != 0
+      System::Call 'LuminaGlassUI.dll::AttachInstallerGlass(p $HWNDPARENT, w "$PLUGINSDIR\lumina-icon.png") v'
+    ${EndIf}
+  FunctionEnd
+
+  Function .onGUIEnd
+    ${If} ${Silent}
+      Return
+    ${EndIf}
+    ${If} $LuminaGlassModule != ""
+    ${AndIf} $LuminaGlassModule != 0
+      System::Call 'LuminaGlassUI.dll::DetachInstallerGlass() v ?u'
+    ${EndIf}
+  FunctionEnd
+!macroend
 !endif
 
 ; This hook runs before electron-builder inserts its license page.
