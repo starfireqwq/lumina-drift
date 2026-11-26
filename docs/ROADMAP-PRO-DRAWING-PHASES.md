@@ -280,4 +280,36 @@
 - 完成 Commit：`2e96eb1`（8.1 色彩核心：`engine/color/iccProfile.ts` ICC v2／v4 解析與 lut8／lut16／mAB／mBA／matrix-TRC 管線、`gamt`、可重現的 sRGB IEC61966-2.1 v2 描述檔；`cmykPrintModel.ts` Japan Color 2001 Coated／FOGRA39／SWOP 近似印刷模型（Yule–Nielsen Neugebauer＋網點擴大、GCR＋TAC 分色）；`softProof.ts` BPC、色域判定與可中止的 33³ 3D LUT）、`b4565b5`（8.2 `kraEncoder.ts` 與 `ExportEngine.exportKrita`：STORE mimetype、maindoc.xml／documentinfo.xml、mergedimage.png／preview.png、VERSION 2 64×64 Planar BGRA＋liblzf 瓦片流、`.pixelselection` 透明度蒙版、27 種混合模式雙向映射、繼承 Alpha 剪裁、透明鎖定、背景色與 DPI；匯入端同步修正）、`0b9838a`（8.1 匯出嵌入 ICC：PNG iCCP、JPEG APP2、PSD 影像資源）、`ae9348d`（8.1 純本機軟校樣：`softProofStore`、Worker 建 LUT、`SoftProofFilter` 2D atlas 3D LUT＋斜線色域警告、`SoftProofController` 只掛在 viewport 根容器）、`f62a3f9`（「表示／檢視」選單、校樣設定視窗、匯出 .kra 卡片與「嵌入 ICC」選項、四語系與兩個說明主題）、`378e13e`（Phase 8 自檢接入 `ui-logic.check.ts`、測試檔產生器與隔離式 Electron 實測腳本）
 - 設計重點：軟校樣與色域警告只是 viewport 根容器上的 PixiJS 濾鏡，LayerManager 內部合成（吸管、填充、匯出、縮圖、Sub View）與 socket 都不經過它；設定存在 localStorage（開關每次啟動預設關閉），匯入的描述檔存在 IndexedDB。內建三組印刷條件是依公開目標值估算的近似模型（不附帶受授權限制的官方 ICC），要精準校樣請匯入印刷廠的 `.icc`／`.icm`。嵌入匯出檔的一律是 RGB 描述檔（流光像素是 sRGB；匯入的 RGB 描述檔屬「指定」不轉換），CMYK 描述檔不嵌入。`.kra` 以 Krita 原生格式寫出，另加 `lumina-opacity`、`lumina-maskinverted` 兩個 Krita 會忽略的屬性，讓流光往返時不透明度與蒙版反轉旗標完全還原；群組蒙版放在群組的 `<layers>` 內（Krita 只讀圖層的第一個子容器）。匯入端修正：`luminize` 改對應「明度」、`luminosity_sai` 對應「發光」、讀 `channelflags` 的繼承 Alpha、`.pixelselection` 蒙版與 `ProjectionBackgroundColor`。
 - 備註：2026-11-26 完成全套驗證：`pnpm --filter @atelier/shared build`、`pnpm --filter @atelier/client build`、`pnpm --filter @atelier/client build:electron`、`pnpm --filter @atelier/server test`（exit 0，含 Phase 18 調整圖層區段）、`ui-logic.check.ts`（新增 5 個 Phase 8 區段：ICC 解析韌性與合成 lut8／lut16／v4 CMYK 描述檔、CIEDE2000 標準資料、印刷模型反解與 TAC、色域判定與 LUT 精度；設定存放、atlas 與 CPU LUT 一致、控制器重建／卸除／過期結果；PNG／JPEG／PSD 嵌入與 ag-psd 往返；LZF、瓦片流、混合模式、maindoc.xml 與整份 zip 像素一致；介面輔助函式、四語系與說明主題）、`i18n-coverage.check.ts`（4 語系 2,212 鍵全對齊）。隔離式 Electron 實測 `apps/client/scripts/phase8-color-kra-electron-smoke.check.cjs` 第 6 輪全數通過（前 5 輪皆為測試腳本本身的問題：錯誤訊息截斷、群組不在 `getLayers()`、下載攔截時機、穩定判定計數、遠端注入覆蓋，產品程式未因此修改）：單機拖入 .kra 測試檔（15 層：含蒙版的群組、剪裁、multiply／screen 37%／glow／luminosity、反轉與停用蒙版、透明鎖定、隱藏、鎖定）→ 匯出 .kra（STORE mimetype 在首位、33 個項目）→ 拖回流光，圖層樹與屬性完全相同、15 個圖層／蒙版與可見合成像素最大差 0；FOGRA39 軟校樣 LUT 850 ms，純藍 (0,0,255) 顯示為 (46,65,140)、中灰與膚色差 ≤3，圖層像素與內部合成不變；色域警告在藍、綠色塊各 50% 斜線，中灰、膚色 0%；平移 90 幀平均 2.08 → 2.25 ms、p95 3.20 → 3.10 ms；匯入合成 CMYK `.icc` 後套用成功；校樣開啟時匯出的 PNG 含 `sRGB IEC61966-2.1` iCCP，像素與關閉校樣時的匯出完全相同；`PORT=0` 雙人：A 開啟校樣＋警告期間未送出任何非 ping/pong 的 socket frame，B 的螢幕像素不變、B 的校樣未啟用，全程 0 頁面錯誤與 0 對話框。另以隔離 Electron 檢查日文介面 1440×900 與 375×812 的校樣設定與匯出視窗：無超出畫面、無截斷文字。
-- 已知限制：內建三組印刷條件是近似模型；調整圖層不寫入 `.kra`（效果只在 mergedimage.png）；Krita 的繼承 Alpha 以下方全部圖層為範圍，群組內有多個剪裁基底時在 Krita 中外觀可能與流光不同；尚未用 Krita 實機開啟匯出的 `.kra`（本機無可用的 Krita）；匯出 CMYK 分色檔（CMYK PSD／TIFF）不在本 Phase；手機版匯出視窗的既有標題在 375 寬會以省略號截斷（非本 Phase 新增文字）。Codex 在 WO-4 完成後額度用盡，WO-5（介面與四語系）與 WO-6（測試接入與 Electron 腳本）由主代理接手完成。
+- 已知限制：內建三組印刷條件是近似模型；調整圖層不寫入 `.kra`（效果只在 mergedimage.png）；Krita 的繼承 Alpha 以下方全部圖層為範圍，群組內有多個剪裁基底時在 Krita 中外觀可能與流光不同；匯出 CMYK 分色檔（CMYK PSD／TIFF）不在本 Phase；手機版匯出視窗的既有標題在 375 寬會以省略號截斷（非本 Phase 新增文字）。Codex 在 WO-4 完成後額度用盡，WO-5（介面與四語系）與 WO-6（測試接入與 Electron 腳本）由主代理接手完成。
+
+---
+
+## 四、`v1.4.0` 整體收尾與全面回歸紀錄（2026-11-26）
+
+> **版本定案**：因 GitHub 上一個正式 Release 為 `v1.3.2`，經使用者確認將原藍圖 Phase 2 ～ Phase 8 合併正式發布版本定案為 **`v1.4.0`**。
+
+- **版本升級與一致化**：
+  - 根目錄 `package.json`、`apps/client/package.json`、`apps/server/package.json`、`packages/shared/package.json` 統一升為 `1.4.0`。
+  - `apps/server/src/app.ts` `/health` 版本與 `LuminaProjectEngine.ts` `LUMINA_APP_VERSION` 同步更新為 `1.4.0`（維持 `LUMINA_SCHEMA_VERSION = 1` 確保 `.lumina` 向下相容）。
+  - `apps/client/vite.config.ts` 自 `apps/client/package.json` 注入 `__APP_VERSION__`，並於 `HelpCenter.tsx` 顯示版本徽章（實測 `[data-testid="app-version-badge"]` 顯示 `v1.4.0`，與 Electron 打包設定同源一致）。
+  - 撰寫 `docs/CHANGELOG.md`（`[1.4.0]` 條目）與 `docs/CHANGELOG-v1.3.2-to-v1.4.0.md` 完整發布說明。
+- **建置與核心回歸（皆退出碼 0）**：
+  - `pnpm -r build`：通過（`@atelier/shared`、`@atelier/server`、`@atelier/client`）。
+  - `pnpm --filter @atelier/client build:electron`：通過。
+  - `pnpm --filter @atelier/server test`：18 階段全數通過（含 Phase 18 調整圖層）。
+  - `ui-logic.check.ts`：全數通過（含 Phase 6／7／8 所有驗證區段）。
+  - `i18n-coverage.check.ts`：4 語系（`zh-TW`、`zh-CN`、`en-US`、`ja-JP`）各 2,212 鍵全數對齊通過。
+- **隔離式 Electron 煙霧測試（獨立 `APPDATA`、`LOCALAPPDATA`、`--user-data-dir`、`PORT=0`）**：
+  - `phase2-subtools-electron-smoke.check.cjs`：PASS（11.5s）
+  - `phase3-tools-electron-smoke.check.cjs`：PASS（11.9s）
+  - `phase4-panels-electron-smoke.check.cjs`：PASS（14.4s）
+  - `phase5-tools-electron-smoke.check.cjs`：PASS（19.7s）
+  - `phase6-adjustment-electron-smoke.check.cjs`：初跑因 Phase 8 將檔案匯出選單更新為 `Export (PNG/PSD/ORA/KRA)…` 導致舊選取器逾時；修正選取器（`/Export \(PNG\/PSD\/ORA/`）後重跑 PASS（18.4s，單機 PNG 最大差 0＋雙人同步全過）
+  - `phase7-actions-text-electron-smoke.check.cjs`：PASS（19.1s）
+  - `phase8-color-kra-electron-smoke.check.cjs`：PASS（25.9s）
+- **發布前專項檢核**：
+  - **本機 Krita 5.2.6 `.kra` 相容性實測**：以本機 `C:\Program Files\Krita (x64)\bin\krita.exe`（Krita 5.2.6）原生 `--export` 引擎成功解析並渲染流光匯出之 15 層 `.kra`（81,252 bytes、33 項目，exit=0），目視比對流光 `mergedimage.png` 與 Krita 渲染圖，全部色塊、混合模式、蒙版與背景色均正常呈現（群組剪裁如已知限制所述依 Krita 群組範圍 `inheritsalpha` 作用）。註：於自動化終端機工作階段中 Krita GUI 主視窗未暴露前景控制代碼，故以 Krita 原生匯出引擎渲染結果完成實機圖檔驗證。
+  - **日文／英文三解析度防裁切檢查（`1440×900`、平板 `1024×768`、手機 `375×812`）**：說明中心（含 `v1.4.0` 徽章）、色彩校樣設定、匯出視窗（含 `.kra` 與 ICC）與調整圖層視窗於動畫定位後皆無超出視窗邊界或按鈕裁切（日文手機匯出視窗既有標題省略號屬已知樣式行為）。
+  - **手機單機大畫布效能抽測（`375×812`、`2400×2400` 離線單機）**：畫布建立 970 ms（JS Heap 35.6 MB）、45 步連續筆刷筆劃 RAF avg 17.16 ms / p95 16.8 ms、60 幀平移 avg 16.68 ms / p95 17.0 ms / max 17.0 ms，全程 0 頁面錯誤。
+- **待使用者確認動作**：建立 `v1.4.0` Git 標籤、`git push` 至遠端與正式發布均待使用者明確核准後執行。
+
