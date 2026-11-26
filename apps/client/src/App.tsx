@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
-import { BlendMode, CanvasMemberModel, CanvasModel, CanvasUnit, CreateCanvasDto, LayerMeta, LayerModel, LayerType, clampDpi, getCanvasRoleCapabilities, tidyLayerModels } from '@atelier/shared';
+import { BlendMode, CanvasMemberModel, CanvasModel, CanvasUnit, CreateCanvasDto, LayerMeta, LayerModel, LayerType, clampDpi, getCanvasRoleCapabilities, tidyLayerModels, type AdjustmentKind } from '@atelier/shared';
 import { ApiService } from './services/api';
 import { OfflineSessionStore } from './services/offlineStore';
 import { LuminaProjectEngine } from './engine/LuminaProjectEngine';
@@ -625,6 +625,8 @@ export const App: React.FC = () => {
     && !unlockedRooms.has(currentCanvas!.id) && memberOf[currentCanvas!.id] !== true;
   const serverRefused = Boolean(currentCanvas && roomAccessError?.canvasId === currentCanvas.id);
   const roomLocked = Boolean(currentCanvas) && (passwordGate || serverRefused);
+  const canCreateAdjustmentLayer = Boolean(currentCanvas && !roomLocked && !authLoading && user && !isGuest
+    && !isCanvasViewerForUser({ user, isGuest, members, canvasOwnerId: currentCanvas.ownerId }));
   // Remember the canvas that actually opened, for the gateway's "continue" card and room preselection.
   // Only once it has stayed open a moment: entering a room can pass through the list's first room.
   useEffect(() => {
@@ -1592,6 +1594,9 @@ export const App: React.FC = () => {
           currentCanvas={currentCanvas}
           wrapAroundEnabled={wrapAroundEnabled}
           onToggleWrapAround={currentCanvas && !roomLocked ? toggleWrapAround : undefined}
+          onCreateAdjustmentLayer={canCreateAdjustmentLayer ? (kind: AdjustmentKind) => {
+            window.dispatchEvent(new CustomEvent('atelier:create-adjustment-layer', { detail: { kind } }));
+          } : undefined}
           plugins={plugins}
           openPluginPanels={openPluginPanels}
           activePluginToolKey={activePluginToolKey}

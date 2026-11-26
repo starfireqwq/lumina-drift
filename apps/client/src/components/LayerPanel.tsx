@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import {
+  ADJUSTMENT_KINDS,
   BlendMode,
   LayerModel,
   LayerType,
@@ -35,6 +36,7 @@ import {
   Plus,
   Scissors,
   ShieldAlert,
+  SlidersHorizontal,
   Sparkles,
   Grip,
   Spline,
@@ -66,6 +68,7 @@ import { getUserColor } from '../utils/userColors';
 import { nextGroupName } from '../utils/canvasName';
 import { useAnchoredPopover } from '../utils/popoverPosition';
 import { useWheelStep } from '../hooks/useWheelStep';
+import { ADJUSTMENT_KIND_ICONS, mergeIncludesAdjustment } from './adjustmentLayerMenu';
 
 /** Public / ownerless layers: neutral, so they never look like one painter's (every user colour is saturated) */
 const PUBLIC_COLOR = '#9CA3AF';
@@ -426,6 +429,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   onCreateRaster,
   onCreateVector,
   onCreateGroup,
+  onCreateAdjustmentLayer,
+  onEditAdjustmentLayer,
   onRequestCreateMyLayer,
   onToggleLock,
   onToggleVisibility,
@@ -479,6 +484,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   };
   const mergeBlocker = (l: LayerModel) => {
     const below = belowOf(l);
+    if (mergeIncludesAdjustment(l.layerType, below?.layerType)) return t.layers.mergeBlockAdjustment;
     if (l.layerType === 'group') return t.layers.mergeBlockGroup;
     if (!below) return t.layers.mergeBlockNoBelow;
     if (below.layerType === 'group') return t.layers.mergeBlockBelowGroup;
@@ -514,6 +520,16 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   const transferPos = useAnchoredPopover(Boolean(transferLayerId), transferBtnRef, transferPopRef, { align: 'right', gap: 4, margin: 8, fallbackWidth: 208 });
   const batchGroupBtnRef = useRef<HTMLButtonElement>(null);
   const batchGroupPopRef = useRef<HTMLDivElement>(null);
+  const [adjustmentMenuOpen, setAdjustmentMenuOpen] = useState(false);
+  const adjustmentBtnRef = useRef<HTMLButtonElement>(null);
+  const adjustmentPopRef = useRef<HTMLDivElement>(null);
+  const canCreateLayer = Boolean(!readOnly && (onRequestCreateMyLayer || onCreateRaster || onCreateLayer));
+  const showAdjustmentMenu = Boolean(canCreateLayer && onCreateAdjustmentLayer && adjustmentMenuOpen);
+  const adjustmentPos = useAnchoredPopover(showAdjustmentMenu, adjustmentBtnRef, adjustmentPopRef, { gap: 4, margin: 8, fallbackWidth: 208 });
+
+  useEffect(() => {
+    if (!canCreateLayer || !onCreateAdjustmentLayer) setAdjustmentMenuOpen(false);
+  }, [canCreateLayer, onCreateAdjustmentLayer]);
 
   // Group selector popover state
   const [groupSelectLayerId, setGroupSelectLayerId] = useState<string | null>(null);
@@ -523,6 +539,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   const [editingName, setEditingName] = useState<string>('');
   const editInputRef = useRef<HTMLInputElement | null>(null);
   const lastTapRef = useRef<{ id: string; time: number }>({ id: '', time: 0 });
+  const lastAdjustmentTapRef = useRef<{ id: string; time: number }>({ id: '', time: 0 });
 
   // Mobile Batch Selection state
   const [isBatchMode, setIsBatchMode] = useState<boolean>(false);
@@ -533,24 +550,18 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   const batchGroupPos = useAnchoredPopover(batchGroupMenuOpen, batchGroupBtnRef, batchGroupPopRef, { align: 'right', gap: 4, margin: 8, fallbackWidth: 176 });
 
   useEffect(() => {
-    if (!transferLayerId && !batchGroupMenuOpen) return;
+    if (!transferLayerId && !batchGroupMenuOpen && !showAdjustmentMenu) return;
     const onDown = (e: PointerEvent) => {
       const target = e.target as Node;
-      if (
-        transferBtnRef.current?.contains(target) ||
-        transferPopRef.current?.contains(target) ||
-        batchGroupBtnRef.current?.contains(target) ||
-        batchGroupPopRef.current?.contains(target)
-      ) {
-        return;
-      }
-      setTransferLayerId(null);
-      setBatchGroupMenuOpen(false);
+      if (!transferBtnRef.current?.contains(target) && !transferPopRef.current?.contains(target)) setTransferLayerId(null);
+      if (!batchGroupBtnRef.current?.contains(target) && !batchGroupPopRef.current?.contains(target)) setBatchGroupMenuOpen(false);
+      if (!adjustmentBtnRef.current?.contains(target) && !adjustmentPopRef.current?.contains(target)) setAdjustmentMenuOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         setTransferLayerId(null);
         setBatchGroupMenuOpen(false);
+        setAdjustmentMenuOpen(false);
       }
     };
     window.addEventListener('pointerdown', onDown, true);
@@ -559,7 +570,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
       window.removeEventListener('pointerdown', onDown, true);
       window.removeEventListener('keydown', onKey);
     };
-  }, [transferLayerId, batchGroupMenuOpen]);
+  }, [transferLayerId, batchGroupMenuOpen, showAdjustmentMenu]);
 
   // Drag and Drop state
   const [draggedLayerId, setDraggedLayerId] = useState<string | null>(null);
@@ -1018,6 +1029,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   const activeIsOwner = Boolean(active && user?.id === active.ownerId);
   const canEditActive = Boolean(!readOnly && active && activeIsOwner);
   const activeIsGroup = active?.layerType === 'group';
+  const activeIsAdjustment = active?.layerType === 'adjustment';
   const descending = getSortedDescending();
   // Up / down move within the layer's own group
   const activeSiblings = active ? siblingsOf(active) : [];
@@ -1045,7 +1057,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
     user,
     isGuest,
     isCanvasViewer: Boolean(isReadOnly),
-    canCreateLayer: Boolean(!readOnly && (onRequestCreateMyLayer || onCreateRaster || onCreateLayer)),
+    canCreateLayer,
   });
   const guidanceMessage = (() => {
     switch (guidance.kind) {
@@ -1107,20 +1119,20 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             title={t.layers.clippingMaskTooltip} aria-label={t.layers.clippingMask} className={iconBtn(Boolean(active?.clipToBelow))}>
             <CornerDownRight className="h-3.5 w-3.5" />
           </button>
-          <button type="button" disabled={!canEditActive || activeIsGroup} aria-pressed={Boolean(active?.alphaLocked)}
+          {!activeIsAdjustment && <button type="button" disabled={!canEditActive || activeIsGroup} aria-pressed={Boolean(active?.alphaLocked)}
             onClick={() => active && onUpdateLayerProps?.(active.id, { alphaLocked: !active.alphaLocked })}
             title={t.layers.lockAlphaTooltip} aria-label={t.layers.lockAlpha} className={iconBtn(Boolean(active?.alphaLocked))}>
             <AlphaLockIcon />
-          </button>
+          </button>}
           <button type="button" disabled={readOnly || !active || !(activeIsOwner || isAdmin)} aria-pressed={Boolean(active?.isLocked)}
             onClick={() => active && onToggleLock(active)} title={t.layers.lockLayerTooltip} aria-label={t.layers.lockLayerTooltip} className={iconBtn(Boolean(active?.isLocked))}>
             <Lock className="h-3.5 w-3.5" />
           </button>
-          <button type="button" disabled={!canEditActive || activeIsGroup} aria-pressed={Boolean(active?.screentoneEnabled)}
+          {!activeIsAdjustment && <button type="button" disabled={!canEditActive || activeIsGroup} aria-pressed={Boolean(active?.screentoneEnabled)}
             onClick={() => active && onUpdateLayerProps?.(active.id, { screentoneEnabled: !active.screentoneEnabled })}
             title={t.layers.screentoneTooltip} aria-label={t.layers.screentone} className={iconBtn(Boolean(active?.screentoneEnabled))}>
             <Grip className="h-3.5 w-3.5" />
-          </button>
+          </button>}
           {!activeIsGroup && allGroups.length > 0 && canEditActive && active && (
             <div className="relative">
               <button type="button" aria-pressed={Boolean(active.parentId)}
@@ -1230,15 +1242,38 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
           </div>
         </div>
 
-        {/* Row 3: Single-row CSP layer creation & stack commands bar */}
+        {/* Row 3: Layer creation and stack commands */}
         {!readOnly && (
-          <div className="flex items-center gap-0.5 border-t border-neutral-800/60 pt-1">
+          <div className="flex flex-wrap items-center gap-0.5 border-t border-neutral-800/60 pt-1">
             <button type="button" onClick={handleDirectAddRaster} title={t.layers.addRaster} aria-label={t.layers.addRaster}
               className="atelier-icon-btn h-6 w-6"><Plus className="h-3.5 w-3.5" /></button>
             <button type="button" onClick={handleDirectAddVector} title={t.layers.addVector} aria-label={t.layers.addVector}
               className="atelier-icon-btn h-6 w-6"><Spline className="h-3.5 w-3.5" /></button>
             <button type="button" onClick={handleDirectAddGroup} title={t.layers.addGroup} aria-label={t.layers.addGroup}
               className="atelier-icon-btn h-6 w-6"><FolderPlus className="h-3.5 w-3.5" /></button>
+            {canCreateLayer && onCreateAdjustmentLayer && (
+              <>
+                <button ref={adjustmentBtnRef} type="button" onClick={() => setAdjustmentMenuOpen((open) => !open)}
+                  data-testid="layer-add-adjustment" aria-haspopup="menu" aria-expanded={showAdjustmentMenu}
+                  title={t.layers.adjustment.add} aria-label={t.layers.adjustment.add}
+                  className="atelier-icon-btn h-6 w-6">
+                  <SlidersHorizontal className="h-3.5 w-3.5" />
+                </button>
+                {showAdjustmentMenu && typeof document !== 'undefined' && createPortal(
+                  <div ref={adjustmentPos.setPopoverEl} role="menu" aria-label={t.layers.adjustment.add}
+                    style={{ top: adjustmentPos.top, left: adjustmentPos.left, maxHeight: adjustmentPos.maxHeight }}
+                    className="fixed z-[95] w-52 max-w-[calc(100vw-16px)] overflow-y-auto overscroll-contain atelier-popover atelier-menu-in p-1">
+                    {ADJUSTMENT_KINDS.map((kind) => {
+                      const Icon = ADJUSTMENT_KIND_ICONS[kind];
+                      return <MenuItem key={kind} testId={`adjustment-kind-${kind}`} label={t.layers.adjustment.kinds[kind]}
+                        icon={<Icon aria-hidden className="h-3.5 w-3.5 shrink-0 text-neutral-400" />}
+                        onClick={() => { setAdjustmentMenuOpen(false); onCreateAdjustmentLayer(kind); }} />;
+                    })}
+                  </div>,
+                  document.body
+                )}
+              </>
+            )}
             {onRequestCreateMyLayer && (
               <button type="button" onClick={onRequestCreateMyLayer} title={t.layers.myLayer} aria-label={t.layers.myLayer}
                 className={`atelier-icon-btn h-6 w-6 ${!hasDrawableLayer ? 'ring-1 ring-indigo-400 text-indigo-300' : ''}`}>
@@ -1272,7 +1307,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
           </div>
         )}
 
-        {active?.screentoneEnabled && canEditActive && (
+        {!activeIsAdjustment && active?.screentoneEnabled && canEditActive && (
           <div className="grid grid-cols-3 gap-2 rounded-md border border-neutral-700 bg-neutral-950/50 p-1.5 text-[10px] text-neutral-400">
             <label className="flex flex-col gap-0.5">{t.layers.screentoneDensity} {active.screentoneLpi ?? 40}
               <input type="range" min={15} max={100} value={active.screentoneLpi ?? 40} onChange={(e) => onUpdateLayerProps?.(active.id, { screentoneLpi: Number(e.target.value) })} />
@@ -1452,6 +1487,10 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             const isOwner = user?.id === layer.ownerId;
             const canMove = isOwner || isAdmin || layer.isPublic || !layer.ownerId;
             const isGroup = layer.layerType === 'group';
+            const isAdjustment = layer.layerType === 'adjustment';
+            const adjustmentKind = isAdjustment ? layer.meta?.adjustment?.kind : undefined;
+            const adjustmentLabel = adjustmentKind ? t.layers.adjustment.kinds[adjustmentKind] : t.layers.adjustment.title;
+            const AdjustmentIcon = adjustmentKind ? ADJUSTMENT_KIND_ICONS[adjustmentKind] : SlidersHorizontal;
             const isCollapsed = collapsedGroups.has(layer.id);
             const isChild = Boolean(layer.parentId);
             const isClipped = Boolean(layer.clipToBelow);
@@ -1482,9 +1521,10 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             const layerMask = maskOf.get(layer.id);
             const pctText = `${Math.round((layer.opacity ?? 1) * 100)}%`;
             const extraEffects = [
-              layer.screentoneEnabled ? t.layers.screentone : null,
+              !isAdjustment && layer.screentoneEnabled ? t.layers.screentone : null,
               layer.layerType === 'vector' ? t.layers.vectorLayer : null,
               layer.layerType === 'text' ? t.layers.textLayer : null,
+              isAdjustment ? t.layers.adjustment.title : null,
               layer.meta?.animation ? `${t.animation.timeline} ${layer.meta.animation.fps}fps` : null,
               layer.meta?.camera ? `${t.animation.camera} ${layer.meta.camera.width}×${layer.meta.camera.height}` : null,
               layer.meta?.audio ? t.animation.audioTrack : null,
@@ -1623,6 +1663,32 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                         {isCollapsed ? <ChevronRight className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                         {layer.meta?.animation ? <Film className="h-3.5 w-3.5" /> : layer.meta?.camera ? <Camera className="h-3.5 w-3.5 text-sky-400" /> : layer.meta?.audio ? <Music className="h-3.5 w-3.5 text-emerald-400" /> : layer.meta?.cel?.ref === '' ? <span aria-hidden className="text-sm leading-none">×</span> : layer.meta?.cel?.ref !== undefined ? <Repeat className="h-3.5 w-3.5" /> : <Folder className="h-3.5 w-3.5" />}
                       </button>
+                    ) : isAdjustment ? (
+                      <button type="button" data-testid={`adjustment-icon-${layer.id}`}
+                        aria-label={adjustmentLabel} title={adjustmentLabel}
+                        onClick={(e) => {
+                          if (e.detail === 0 && onEditAdjustmentLayer) {
+                            e.stopPropagation();
+                            onSelectLayer(layer.id);
+                            onEditAdjustmentLayer(layer.id);
+                          }
+                        }}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                          const tap = lastAdjustmentTapRef.current;
+                          if (tap.id !== layer.id || Date.now() - tap.time >= 320) onEditAdjustmentLayer?.(layer.id);
+                        }}
+                        onTouchEnd={(e) => {
+                          e.stopPropagation();
+                          const now = Date.now();
+                          const tap = lastAdjustmentTapRef.current;
+                          if (tap.id === layer.id && now - tap.time < 320) onEditAdjustmentLayer?.(layer.id);
+                          lastAdjustmentTapRef.current = { id: layer.id, time: now };
+                          lastTapRef.current = { id: '', time: 0 };
+                        }}
+                        className={`flex h-7 w-9 shrink-0 items-center justify-center rounded border bg-indigo-950/40 text-indigo-300 ${isActive ? 'border-indigo-400 ring-1 ring-indigo-400/60' : 'border-neutral-700'}`}>
+                        <AdjustmentIcon aria-hidden className="h-4 w-4" />
+                      </button>
                     ) : (
                       <button type="button"
                         onClick={(e) => {
@@ -1682,9 +1748,9 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                   <div className="flex shrink-0 items-center gap-1 pr-1 text-neutral-400">
                     {isClipped && <span title={t.layers.clippingMaskTooltip}><CornerDownRight className="h-3 w-3 text-pink-400" /></span>}
                     {isClippingBase && <span className="h-2 w-0.5 rounded bg-pink-400/70" title={t.layers.clippingBaseTooltip} />}
-                    {layer.alphaLocked && <span title={t.layers.lockedAlphaTooltip} className="text-amber-400"><AlphaLockIcon /></span>}
+                    {!isAdjustment && layer.alphaLocked && <span title={t.layers.lockedAlphaTooltip} className="text-amber-400"><AlphaLockIcon /></span>}
                     {layer.isLocked && <span title={t.layers.layerLocked}><Lock className="h-3 w-3 text-amber-400" /></span>}
-                    {!isGroup && !layer.isLocked && !ownerDisplay.isPublicUnclaimed && !canDrawRow && (
+                    {!isGroup && !layer.isLocked && !ownerDisplay.isPublicUnclaimed && (isAdjustment ? readOnly || !canManage(layer) : !canDrawRow) && (
                       <span title={t.layers.readOnlyTooltip} className="text-[10px] text-neutral-500"><Lock className="h-2.5 w-2.5 opacity-60" /></span>
                     )}
                     {canMove && !isBatchMode && (
@@ -1721,15 +1787,19 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
         const close = (fn: () => void) => () => { setMenu(null); fn(); };
         const menuWidth = Math.min(224, window.innerWidth - 16);
         const x = Math.max(8, Math.min(menu.x, window.innerWidth - menuWidth - 8));
-        // Opens down from the click, or up from it in the lower half; never taller than the room it has (scrolls instead)
-        const below = window.innerHeight - menu.y - 8;
-        const place: React.CSSProperties = below >= Math.min(420, menu.y - 8)
-          ? { top: Math.max(8, menu.y), maxHeight: Math.max(160, below) }
-          : { bottom: Math.max(8, window.innerHeight - menu.y), maxHeight: Math.max(160, menu.y - 8) };
-        return (
+        const y = Math.max(8, Math.min(menu.y, window.innerHeight - 8));
+        const above = y - 8;
+        const below = window.innerHeight - y - 8;
+        const place: React.CSSProperties = below >= Math.min(420, above)
+          ? { top: y, maxHeight: below }
+          : { bottom: window.innerHeight - y, maxHeight: above };
+        return createPortal(
           <div data-layer-menu role="menu" aria-label={t.layers.menuAria.replace('{name}', layer.name)} style={{ left: x, width: menuWidth, ...place }}
             className="fixed z-[90] overflow-y-auto overscroll-contain atelier-popover atelier-menu-in p-1">
             <div className="truncate px-2 py-1 text-[10px] text-neutral-500">{ids.length > 1 ? t.layers.selectedCountLayers.replace('{count}', String(ids.length)) : layer.name}</div>
+            {layer.layerType === 'adjustment' && onEditAdjustmentLayer && (
+              <MenuItem testId="layer-menu-edit-adjustment" label={t.layers.adjustment.edit} onClick={close(() => onEditAdjustmentLayer(layer.id))} />
+            )}
             <MenuItem label={ids.length > 1 ? `${t.layers.groupSelected} (${ids.length})` : t.layers.addGroup} hint="Ctrl+G" disabledReason={groupBlocked}
               onClick={close(() => { onGroupLayers?.(ids); setSelectedLayerIds(new Set()); })} />
             {onCopyLayers && <MenuItem label={ids.length > 1 ? `${t.layers.copyLayers} (${ids.length})` : t.layers.copyLayers} hint="Ctrl+Alt+C" onClick={close(() => onCopyLayers(ids))} />}
@@ -1751,14 +1821,15 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
               <MenuItem label={t.layers.rasterizeText} hint={t.layers.rasterizeTextHint} disabledReason={canManage(layer) ? null : t.layers.notYourLayer}
                 onClick={close(() => { if (confirm(t.layers.rasterizeTextConfirm)) onUpdateLayerProps?.(layer.id, { layerType: 'raster' }); })} />
             )}
-            {onOpenAlign && layer.layerType !== 'mask' && (
+            {onOpenAlign && layer.layerType !== 'mask' && layer.layerType !== 'adjustment' && (
               <MenuItem label={t.align.menuItem} onClick={close(() => onOpenAlign(layer.id))} />
             )}
             <MenuItem label={t.layers.renameLayer} hint="F2" disabledReason={canManage(layer) ? null : t.layers.notYourLayer} onClick={close(() => handleStartRename(layer))} />
             <div className="my-1 h-px bg-neutral-700/70" />
             <MenuItem label={t.layers.deleteLayer} danger disabledReason={canManage(layer) && layers.length > 1 ? null : t.layers.cannotDelete}
               onClick={close(() => { if (confirm(t.layers.deleteConfirm)) onDeleteLayer(layer.id); })} />
-          </div>
+          </div>,
+          document.body
         );
       })()}
 
@@ -1777,11 +1848,10 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   );
 };
 
-/** Lock with a small α: "alpha lock" (paint only where there is colour). */
-const MenuItem: React.FC<{ label: string; onClick: () => void; disabledReason?: string | null; danger?: boolean; hint?: string }> = ({ label, onClick, disabledReason, danger, hint }) => (
-  <button type="button" role="menuitem" disabled={Boolean(disabledReason)} onClick={onClick} title={disabledReason || hint}
+const MenuItem: React.FC<{ label: string; onClick: () => void; disabledReason?: string | null; danger?: boolean; hint?: string; icon?: React.ReactNode; testId?: string }> = ({ label, onClick, disabledReason, danger, hint, icon, testId }) => (
+  <button type="button" role="menuitem" data-testid={testId} disabled={Boolean(disabledReason)} onClick={onClick} title={disabledReason || hint}
     className={`flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left text-xs disabled:cursor-not-allowed disabled:opacity-40 ${danger ? 'text-rose-300 hover:bg-rose-950/50' : 'text-neutral-100 hover:bg-neutral-800'}`}>
-    <span>{label}</span>
+    <span className="flex min-w-0 items-center gap-2">{icon}<span>{label}</span></span>
     {(disabledReason || hint) && <span className="text-[10px] text-neutral-500">{disabledReason || hint}</span>}
   </button>
 );

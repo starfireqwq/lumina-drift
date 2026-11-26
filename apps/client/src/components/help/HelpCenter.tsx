@@ -3,8 +3,9 @@ import {
   BookOpen, Brush, Film, FolderDown, Hand, Keyboard, Layers, LayoutPanelLeft, Move, PaintBucket, PenTool, Search, Sparkles, Type, Users, X,
 } from 'lucide-react';
 import { ShortcutCategory, ShortcutManager } from '../../engine/ShortcutManager';
+import { useI18n } from '../../context/I18nContext';
 import { HelpArt } from './HelpArt';
-import { HELP_CATEGORIES, HELP_TOPICS, HelpCategoryId, HelpKey, HelpTopic, normalize, queryTerms, scoreTopic, SUGGESTIONS } from './helpContent';
+import { getAdjustmentHelpTopic, HELP_CATEGORIES, HELP_TOPICS, HelpCategoryId, HelpKey, HelpTopic, normalize, queryTerms, scoreTopic, SUGGESTIONS } from './helpContent';
 
 const CAT_ICON: Record<HelpCategoryId, React.ReactNode> = {
   start: <Sparkles />, draw: <Brush />, fill: <PaintBucket />, select: <Move />, layers: <Layers />, vector: <PenTool />,
@@ -71,12 +72,12 @@ const KeyChip: React.FC<{ k: HelpKey; terms: string[] }> = ({ k, terms }) => {
   );
 };
 
-const TopicCard: React.FC<{ topic: HelpTopic; terms: string[]; showCategory?: boolean }> = ({ topic, terms, showCategory }) => (
+const TopicCard: React.FC<{ topic: HelpTopic; terms: string[]; categoryLabel?: string }> = ({ topic, terms, categoryLabel }) => (
   <article id={`help-${topic.id}`} className="flex gap-4 rounded-xl border border-neutral-800 bg-neutral-900/60 p-4 transition hover:border-neutral-700">
     <div className="min-w-0 flex-1 space-y-2">
-      {showCategory && (
+      {categoryLabel && (
         <div className="text-[10px] font-medium uppercase tracking-wider text-neutral-500">
-          {HELP_CATEGORIES.find((c) => c.id === topic.category)?.label}
+          {categoryLabel}
         </div>
       )}
       <h4 className="text-[13px] font-semibold text-neutral-50"><Highlight text={topic.title} terms={terms} /></h4>
@@ -103,6 +104,9 @@ const TopicCard: React.FC<{ topic: HelpTopic; terms: string[]; showCategory?: bo
  * looks through topics, keywords (synonyms, English) and every keyboard shortcut at once.
  */
 export const HelpCenter: React.FC<{ onClose: () => void; onOpenShortcutSettings?: () => void; initialQuery?: string }> = ({ onClose, onOpenShortcutSettings, initialQuery = '' }) => {
+  const { t } = useI18n();
+  const helpTopics = useMemo(() => [...HELP_TOPICS, getAdjustmentHelpTopic(t)], [t]);
+  const categories = HELP_CATEGORIES;
   const mgr = useShortcutVersion();
   const [query, setQuery] = useState(initialQuery);
   const [cat, setCat] = useState<HelpCategoryId>(() => {
@@ -146,7 +150,7 @@ export const HelpCenter: React.FC<{ onClose: () => void; onOpenShortcutSettings?
 
   const results = useMemo(() => {
     if (!terms.length) return null;
-    const topics = HELP_TOPICS
+    const topics = helpTopics
       .map((t) => ({ t, score: scoreTopic(t, terms, keyText(t)) }))
       .filter((r) => r.score > 0)
       .sort((a, b) => b.score - a.score)
@@ -157,11 +161,11 @@ export const HelpCenter: React.FC<{ onClose: () => void; onOpenShortcutSettings?
     });
     return { topics, keys };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query, shortcuts]);
+  }, [query, shortcuts, helpTopics]);
 
   const countIn = (id: HelpCategoryId) => (results
     ? (id === 'keys' ? results.keys.length : results.topics.filter((t) => t.category === id).length)
-    : (id === 'keys' ? shortcuts.length : HELP_TOPICS.filter((t) => t.category === id).length));
+    : (id === 'keys' ? shortcuts.length : helpTopics.filter((t) => t.category === id).length));
 
   const shortcutTable = (list: typeof shortcuts, grouped: boolean) => (
     <div className="space-y-4">
@@ -185,7 +189,7 @@ export const HelpCenter: React.FC<{ onClose: () => void; onOpenShortcutSettings?
     </div>
   );
 
-  const catLabel = HELP_CATEGORIES.find((c) => c.id === cat)?.label;
+  const catLabel = categories.find((c) => c.id === cat)?.label;
 
   return (
     <div className="atelier-modal-backdrop fixed inset-0 z-[70] flex items-end justify-center sm:items-center sm:p-4" role="dialog" aria-modal="true" aria-label="說明"
@@ -211,7 +215,7 @@ export const HelpCenter: React.FC<{ onClose: () => void; onOpenShortcutSettings?
         <div className="flex min-h-0 flex-1 flex-col sm:flex-row">
           {/* Categories: a column on desktop, a scrolling strip on phones */}
           <nav aria-label="分類" className="no-scrollbar flex shrink-0 gap-1 overflow-x-auto border-b border-neutral-800 p-2 sm:w-52 sm:flex-col sm:overflow-y-auto sm:border-b-0 sm:border-r">
-            {HELP_CATEGORIES.map((c) => {
+            {categories.map((c) => {
               const n = countIn(c.id);
               const current = !results && cat === c.id;
               return (
@@ -244,7 +248,8 @@ export const HelpCenter: React.FC<{ onClose: () => void; onOpenShortcutSettings?
                   {results.topics.length > 0 && (
                     <section className="space-y-3">
                       <h3 className="text-[11px] font-semibold text-neutral-400">說明 · {results.topics.length}</h3>
-                      {results.topics.map((t) => <TopicCard key={t.id} topic={t} terms={terms} showCategory />)}
+                      {results.topics.map((t) => <TopicCard key={t.id} topic={t} terms={terms}
+                        categoryLabel={categories.find((c) => c.id === t.category)?.label} />)}
                     </section>
                   )}
                   {results.keys.length > 0 && (
@@ -268,7 +273,7 @@ export const HelpCenter: React.FC<{ onClose: () => void; onOpenShortcutSettings?
             ) : (
               <div className="space-y-3">
                 <h3 className="pb-1 text-base font-semibold text-white">{catLabel}</h3>
-                {HELP_TOPICS.filter((t) => t.category === cat).map((t) => <TopicCard key={t.id} topic={t} terms={[]} />)}
+                {helpTopics.filter((t) => t.category === cat).map((t) => <TopicCard key={t.id} topic={t} terms={[]} />)}
               </div>
             )}
           </div>

@@ -33,7 +33,7 @@ import {
   ZoomIn,
   Users,
 } from 'lucide-react';
-import { CanvasModel, CanvasUnit, clampDpi, formatCanvasDimensions } from '@atelier/shared';
+import { ADJUSTMENT_KINDS, CanvasModel, CanvasUnit, clampDpi, formatCanvasDimensions, type AdjustmentKind } from '@atelier/shared';
 import { useAuth } from '../context/AuthContext';
 import { useSocket, useSocketTelemetry } from '../context/SocketContext';
 import { memberCardKey, roomMemberCards } from '../utils/roomMembers';
@@ -44,6 +44,7 @@ import type { Translations } from '../locales';
 import { VoiceChatBar } from './VoiceChatBar';
 import { ThemePicker } from './ThemePicker';
 import { OverlayPresence } from './OverlayPresence';
+import { ADJUSTMENT_KIND_ICONS } from './adjustmentLayerMenu';
 const ConnectGuideModal = React.lazy(() => import('./ConnectGuideModal'));
 import { WorkspaceCloudflareToggle } from './WorkspaceCloudflareToggle';
 import { resolvePluginName, resolvePluginText } from '../plugins/pluginApi';
@@ -76,6 +77,7 @@ interface TopNavbarProps {
   currentCanvas?: CanvasModel | null;
   wrapAroundEnabled?: boolean;
   onToggleWrapAround?: () => void;
+  onCreateAdjustmentLayer?: (kind: AdjustmentKind) => void;
   onOpenCreateCanvas?: () => void;
   onOpenAuth: () => void;
   onOpenProfile?: () => void;
@@ -192,6 +194,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
   currentCanvas,
   wrapAroundEnabled,
   onToggleWrapAround,
+  onCreateAdjustmentLayer,
   onOpenCreateCanvas,
   onOpenAuth,
   onOpenProfile,
@@ -264,6 +267,14 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
     ...(onOpenGateway ? [{ kind: 'item' as const, label: t.server.switchMode, icon: <ArrowLeftRight />, onSelect: onOpenGateway }] : []),
     ...(onOpenServer ? [{ kind: 'item' as const, label: t.server.title, icon: <Server />, onSelect: onOpenServer }] : []),
   ];
+
+  const layerItems: MenuItem[] = onCreateAdjustmentLayer ? [
+    { kind: 'title', label: t.layers.adjustment.add },
+    ...ADJUSTMENT_KINDS.map((kind): MenuItem => {
+      const Icon = ADJUSTMENT_KIND_ICONS[kind];
+      return { kind: 'item', label: t.layers.adjustment.kinds[kind], icon: <Icon aria-hidden />, onSelect: () => onCreateAdjustmentLayer(kind) };
+    }),
+  ] : [];
 
   const shortcutMgr = ShortcutManager.getInstance();
   const [, setShortcutTick] = useState(0);
@@ -491,6 +502,9 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
       {showDesktopMenus ? (
         <div className="flex shrink-0 items-center">
           <DropdownMenu label={<>{t.navbar.file}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.file} items={fileItems} />
+          {layerItems.length > 0 && (
+            <DropdownMenu label={<>{t.navbar.layerMenu}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.layerMenu} items={layerItems} />
+          )}
           <DropdownMenu label={<>{t.navbar.window}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.window} items={windowItems} />
           <DropdownMenu label={<>{pluginText.menu}<ChevronDown className="h-3 w-3" /></>} title={pluginText.menu} items={pluginItems} width="w-64" />
           <DropdownMenu label={<>{t.navbar.help}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.help} items={helpItems} />
@@ -509,6 +523,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
                     { kind: 'item' as const, label: t.navbar.logout, icon: <LogOut />, onSelect: logout },
                   ]), { kind: 'sep' as const }] : []),
               { kind: 'title', label: t.navbar.file }, ...fileItems, { kind: 'sep' },
+              ...(layerItems.length > 0 ? [{ kind: 'title' as const, label: t.navbar.layerMenu }, ...layerItems, { kind: 'sep' as const }] : []),
               ...windowItems, { kind: 'sep' },
               { kind: 'title', label: pluginText.menu }, ...pluginItems, { kind: 'sep' }, ...helpItems,
             ]} />

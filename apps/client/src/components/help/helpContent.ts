@@ -3,6 +3,9 @@
  * Key labels are never written here: `keys` names ShortcutManager actions, and the help centre
  * shows whatever the user has bound them to.
  */
+import { ADJUSTMENT_KINDS } from '@atelier/shared';
+import type { Translations } from '../../locales';
+
 export type HelpCategoryId =
   | 'start' | 'draw' | 'fill' | 'select' | 'layers' | 'vector' | 'text' | 'anim' | 'collab' | 'touch' | 'ui' | 'files' | 'keys';
 
@@ -26,6 +29,22 @@ export interface HelpTopic {
   art?: HelpArtId;
   /** Extra search words: synonyms, English, common misspellings */
   keywords: string[];
+}
+
+export function getAdjustmentHelpTopic(t: Translations): HelpTopic {
+  const { add, title, kinds, help } = t.layers.adjustment;
+  const kindLabels = ADJUSTMENT_KINDS.map((kind) => kinds[kind]);
+  return {
+    id: 'adjustment-layers',
+    category: 'layers',
+    title,
+    summary: help.summary,
+    steps: [
+      help.create.replace('{kinds}', kindLabels.join(' · ')),
+      help.scope, help.coverage, help.edit, help.psd, help.psdLimits, help.psdGroup, help.flattened,
+    ],
+    keywords: [add, ...kindLabels, 'PSD', 'ORA', 'Ctrl+Z'],
+  };
 }
 
 export const HELP_CATEGORIES: Array<{ id: HelpCategoryId; label: string }> = [

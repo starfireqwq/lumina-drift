@@ -6698,3 +6698,29 @@ import {
   assert.equal(buildAdjustmentEditUndo({ id: layer.id }, after, 'owner', 'param edit', 'op', 10)?.metaBefore, null);
   console.log('Phase 6 adjustment layer workspace editing checks passed');
 }
+
+// Phase 6: adjustment layers
+import { ADJUSTMENT_KIND_ICONS, mergeIncludesAdjustment } from '../src/components/adjustmentLayerMenu';
+import { getAdjustmentHelpTopic, queryTerms, scoreTopic } from '../src/components/help/helpContent';
+
+{
+  assert.deepEqual(Object.keys(ADJUSTMENT_KIND_ICONS), ADJUSTMENT_KINDS);
+  assert.equal(new Set(Object.values(ADJUSTMENT_KIND_ICONS)).size, ADJUSTMENT_KINDS.length);
+  assert.equal(mergeIncludesAdjustment('adjustment', 'raster'), true);
+  assert.equal(mergeIncludesAdjustment('raster', 'adjustment'), true);
+  assert.equal(mergeIncludesAdjustment('adjustment'), true);
+  assert.equal(mergeIncludesAdjustment('raster', 'raster'), false);
+  assert.equal(mergeIncludesAdjustment('raster'), false);
+
+  for (const t of Object.values(translations)) {
+    const topic = getAdjustmentHelpTopic(t);
+    assert.equal(topic.category, 'layers');
+    assert.ok(!topic.steps?.[0].includes('{kinds}'));
+    for (const kind of ADJUSTMENT_KINDS) {
+      const label = t.layers.adjustment.kinds[kind];
+      assert.ok(topic.steps?.[0].includes(label));
+      assert.ok(scoreTopic(topic, queryTerms(label), '') > 0);
+    }
+  }
+  console.log('Phase 6 adjustment layer menu and help checks passed');
+}

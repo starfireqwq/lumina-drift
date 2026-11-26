@@ -63,6 +63,7 @@ export interface Translations {
     disconnected: string;
     // Extended menu items
     file: string;
+    layerMenu: string;
     window: string;
     help: string;
     newCanvas: string;
@@ -493,6 +494,8 @@ export interface Translations {
     addMask: string;
     adjustment: {
       title: string;
+      add: string;
+      edit: string;
       undo: string;
       pixelWarning: string;
       readOnly: string;
@@ -503,6 +506,17 @@ export interface Translations {
         color_balance: string;
         gradient_map: string;
         brightness_contrast: string;
+      };
+      help: {
+        summary: string;
+        create: string;
+        scope: string;
+        coverage: string;
+        edit: string;
+        psd: string;
+        psdLimits: string;
+        psdGroup: string;
+        flattened: string;
       };
     };
     duplicate: string;
@@ -606,6 +620,7 @@ export interface Translations {
     revokeFolderAccess: string;
     folderAccessFailed: string;
     mergeBlockGroup: string;
+    mergeBlockAdjustment: string;
     mergeBlockNoBelow: string;
     mergeBlockBelowGroup: string;
     mergeBlockTextVector: string;
