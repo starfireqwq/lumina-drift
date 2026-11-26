@@ -6783,6 +6783,7 @@ import { runPhase8IccEmbedChecks } from './phase8-icc-embed.checks';
 import { runPhase8KraRoundTripChecks } from './phase8-kra-roundtrip.checks';
 import { runPhase8UiChecks } from './phase8-ui.checks';
 import { runV15Phase2RulerChecks } from './v15-phase2-rulers.checks';
+import { runDockPillChecks } from './dock-pill.checks';
 
 {
   assert.deepEqual(Object.keys(ADJUSTMENT_KIND_ICONS), ADJUSTMENT_KINDS);
@@ -6830,3 +6831,6 @@ console.log('Phase 8 export / proof UI and locale checks passed');
 
 await runV15Phase2RulerChecks();
 console.log('v1.5 Phase 2 ruler engine checks passed');
+
+runDockPillChecks();
+console.log('Dock floating pill checks passed');

@@ -13,6 +13,19 @@ export type DockSide = 'left' | 'right' | 'bottom';
 export type PanelPlace = DockSide | 'float';
 
 export interface FloatRect { x: number; y: number; w: number; h: number }
+export type FloatPillOrientation = 'horizontal' | 'vertical';
+export interface FloatPillPos { x: number; y: number }
+export interface FloatGroupState {
+  minimized: boolean;
+  orientation: FloatPillOrientation;
+  pillPos: FloatPillPos | null;
+}
+
+export const DEFAULT_FLOAT_GROUP_STATE: FloatGroupState = {
+  minimized: false,
+  orientation: 'horizontal',
+  pillPos: null,
+};
 
 export interface PanelLayout {
   visible: boolean;
@@ -30,8 +43,9 @@ export interface DockLayoutState {
   panels: Record<PanelId, PanelLayout>;
   order: PanelId[];
   dockSize: Record<DockSide, number>;
-  /** The tab shown in each floating group */
+  /** The tab shown in each group */
   activeTab: Record<string, PanelId>;
+  floatGroups: Record<string, FloatGroupState>;
   /** Tablets / Samsung DeX: allow floating windows on a touch screen (phones never float) */
   desktopMode: boolean;
   /** Which edge the tool rail and the size / opacity sliders sit on (left-handed painters move them right) */
@@ -52,8 +66,14 @@ const clampNum = (v: number, min: number, max: number) => Math.max(min, Math.min
 export const PANEL_IDS: PanelId[] = ['color', 'subView', 'autoActions', 'brushToolset', 'toolProps', 'layers', 'members', 'oplog', 'quickKeys'];
 const LAYOUT_PANEL_IDS: PanelId[] = [...PANEL_IDS, 'filters', 'align'];
 
-const LAYOUT_VERSION = 4;
+const LAYOUT_VERSION = 5;
 const STORAGE_KEY = 'atelier_dock_layout';
+
+const ownValue = <T,>(record: Record<string, T>, key: string): T | undefined =>
+  Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined;
+
+export const getFloatGroupState = (layout: DockLayoutState, group: string): FloatGroupState =>
+  ownValue(layout.floatGroups, group) ?? DEFAULT_FLOAT_GROUP_STATE;
 
 const defaultLayout = (): DockLayoutState => ({
   version: LAYOUT_VERSION,
@@ -74,18 +94,45 @@ const defaultLayout = (): DockLayoutState => ({
   order: [...LAYOUT_PANEL_IDS],
   dockSize: { left: 260, right: 300, bottom: 190 },
   activeTab: {},
+  floatGroups: {},
   desktopMode: false,
   railSide: 'left',
   slidersWidth: 44,
   toolRailWidth: 46,
 });
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const roundPillPos = ({ x, y }: FloatPillPos): FloatPillPos => ({ x: Math.round(x), y: Math.round(y) });
+
+const normalizePillPos = (value: unknown): FloatPillPos | null => {
+  if (!isRecord(value)) return null;
+  const { x, y } = value;
+  if (typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return roundPillPos({ x, y });
+};
+
+const normalizeFloatGroups = (value: unknown): DockLayoutState['floatGroups'] => {
+  if (!isRecord(value)) return {};
+  const groups: [string, FloatGroupState][] = [];
+  for (const [group, entry] of Object.entries(value)) {
+    if (!group.trim() || !isRecord(entry)) continue;
+    groups.push([group, {
+      minimized: Boolean(entry.minimized),
+      orientation: entry.orientation === 'vertical' ? 'vertical' : 'horizontal',
+      pillPos: normalizePillPos(entry.pillPos),
+    }]);
+  }
+  return Object.fromEntries(groups);
+};
+
 export const loadDockLayout = (storage?: Pick<Storage, 'getItem'>): DockLayoutState => {
   try {
     const raw = (storage ?? localStorage).getItem(STORAGE_KEY);
     if (!raw) return scaledLayout(defaultLayout(), getUiScale());
-    const parsed = JSON.parse(raw) as DockLayoutState;
-    if (parsed.version !== LAYOUT_VERSION) return scaledLayout(defaultLayout(), getUiScale());
+    const parsed = JSON.parse(raw) as Omit<DockLayoutState, 'floatGroups'> & { floatGroups?: unknown };
+    if (parsed.version !== 4 && parsed.version !== LAYOUT_VERSION) return scaledLayout(defaultLayout(), getUiScale());
     const base = defaultLayout();
     const scale = getUiScale();
     const mergedPanels = { ...base.panels, ...parsed.panels };
@@ -110,10 +157,12 @@ export const loadDockLayout = (storage?: Pick<Storage, 'getItem'>): DockLayoutSt
     return {
       ...base,
       ...parsed,
+      version: LAYOUT_VERSION,
       panels: mergedPanels,
       order: [...order, ...LAYOUT_PANEL_IDS.filter((id) => !order.includes(id))],
       dockSize: { ...base.dockSize, ...parsed.dockSize },
       activeTab: parsed.activeTab ?? {},
+      floatGroups: parsed.version === LAYOUT_VERSION ? normalizeFloatGroups(parsed.floatGroups) : {},
       desktopMode: Boolean(parsed.desktopMode),
       railSide: parsed.railSide === 'right' ? 'right' : 'left',
       slidersWidth: Number.isFinite(parsed.slidersWidth)
@@ -124,7 +173,7 @@ export const loadDockLayout = (storage?: Pick<Storage, 'getItem'>): DockLayoutSt
         : Math.round(base.toolRailWidth * scale),
     };
   } catch {
-    return defaultLayout();
+    return scaledLayout(defaultLayout(), getUiScale());
   }
 };
 
@@ -144,35 +193,185 @@ const commit = (next: DockLayoutState) => {
 const patchPanel = (id: PanelId, patch: Partial<PanelLayout>) =>
   commit({ ...state, panels: { ...state.panels, [id]: { ...state.panels[id], ...patch } } });
 
+const isFloatMember = (panel: PanelLayout | undefined, group: string) =>
+  panel?.place === 'float' && panel.group === group;
+
+const firstVisibleFloatMember = (panels: DockLayoutState['panels'], order: PanelId[], group: string) =>
+  order.find((id) => panels[id].visible && isFloatMember(panels[id], group));
+
+const pruneFloatGroups = (panels: DockLayoutState['panels'], floatGroups: DockLayoutState['floatGroups']) => {
+  const occupied = new Set(Object.values(panels).filter((panel) => panel.place === 'float').map((panel) => panel.group));
+  return Object.fromEntries(Object.entries(floatGroups).filter(([group]) => occupied.has(group)));
+};
+
+const repairSourceActiveTabs = (panels: DockLayoutState['panels'], order: PanelId[], movedIds: PanelId[]) => {
+  const activeTab = { ...state.activeTab };
+  const sourceGroups = new Map<string, PanelPlace>();
+  for (const id of movedIds) {
+    const previous = state.panels[id];
+    if (previous.group === panels[id].group && previous.place === panels[id].place) continue;
+    if (!sourceGroups.has(previous.group) || ownValue(activeTab, previous.group) === id) {
+      sourceGroups.set(previous.group, previous.place);
+    }
+  }
+  for (const [group, place] of sourceGroups) {
+    const id = ownValue(activeTab, group);
+    if (!id) continue;
+    const panel = panels[id];
+    if (panel?.group === group && panel.place === state.panels[id]?.place) continue;
+    const replacement = order.find((member) => panels[member].visible && panels[member].place === place && panels[member].group === group);
+    if (replacement) activeTab[group] = replacement;
+    else delete activeTab[group];
+  }
+  return activeTab;
+};
+
+const unusedGroupKey = (group: string) => {
+  const used = new Set([
+    ...Object.values(state.panels).map((panel) => panel.group),
+    ...Object.keys(state.floatGroups),
+    ...Object.keys(state.activeTab),
+  ]);
+  let suffix = 1;
+  while (used.has(`${group}-${suffix}`)) suffix++;
+  return `${group}-${suffix}`;
+};
+
+const movePanelToOwnGroup = (id: PanelId, patch: Partial<PanelLayout>, order = state.order, pillState?: FloatGroupState) => {
+  const panel = { ...state.panels[id], ...patch, group: id };
+  const panels = { ...state.panels, [id]: panel };
+  const floatGroups = { ...state.floatGroups };
+  const remaining = panel.place === 'float'
+    ? order.filter((member) => member !== id && isFloatMember(panels[member], id))
+    : [];
+  let remainingGroup: string | undefined;
+  if (remaining.length) {
+    // Free the panel ID for its own window while keeping the existing group together.
+    remainingGroup = unusedGroupKey(id);
+    for (const member of remaining) panels[member] = { ...panels[member], group: remainingGroup };
+    const groupState = ownValue(floatGroups, id);
+    if (groupState) floatGroups[remainingGroup] = groupState;
+    const oldLeader = firstVisibleFloatMember(state.panels, state.order, id);
+    const newLeader = firstVisibleFloatMember(panels, order, remainingGroup) ?? remaining[0];
+    if (oldLeader === id) panels[newLeader] = { ...panels[newLeader], float: state.panels[id].float };
+  }
+  if (panel.place === 'float') {
+    const previous = remainingGroup ? DEFAULT_FLOAT_GROUP_STATE : getFloatGroupState(state, id);
+    floatGroups[id] = pillState ?? { ...previous, minimized: false };
+  }
+  const activeTab = repairSourceActiveTabs(panels, order, [id, ...remaining]);
+  if (remainingGroup) {
+    const previous = ownValue(state.activeTab, id);
+    const active = previous && isFloatMember(panels[previous], remainingGroup)
+      ? previous
+      : firstVisibleFloatMember(panels, order, remainingGroup);
+    if (active) activeTab[remainingGroup] = active;
+  }
+  commit({ ...state, order, panels, activeTab, floatGroups: pruneFloatGroups(panels, floatGroups) });
+};
+
+const offsetFloatRect = (id: PanelId, preferVisible = false): FloatRect => {
+  const { group } = state.panels[id];
+  const visibleLeader = preferVisible ? firstVisibleFloatMember(state.panels, state.order, group) : undefined;
+  const leader = visibleLeader ?? state.order.find((member) => isFloatMember(state.panels[member], group)) ?? id;
+  const rect = state.panels[leader].float;
+  return { ...rect, x: rect.x + 32, y: rect.y + 32 };
+};
+
+const patchFloatGroup = (group: string, patch: Partial<FloatGroupState>) => {
+  const groupState = getFloatGroupState(state, group);
+  commit({ ...state, floatGroups: { ...state.floatGroups, [group]: { ...groupState, ...patch } } });
+};
+
+const expandFloatGroup = (group: string, activePanelId?: PanelId) => {
+  const groupState = getFloatGroupState(state, group);
+  const floatGroups = { ...state.floatGroups, [group]: { ...groupState, minimized: false } };
+  if (!activePanelId || !isFloatMember(state.panels[activePanelId], group)) {
+    commit({ ...state, floatGroups });
+    return;
+  }
+  const panels = { ...state.panels, [activePanelId]: { ...state.panels[activePanelId], visible: true, collapsed: false } };
+  const leader = firstVisibleFloatMember(state.panels, state.order, group);
+  if (leader) panels[leader] = { ...panels[leader], collapsed: false };
+  commit({ ...state, panels, activeTab: { ...state.activeTab, [group]: activePanelId }, floatGroups });
+};
+
+const showPanel = (id: PanelId) => {
+  const panel = state.panels[id];
+  if (panel.place === 'float' && getFloatGroupState(state, panel.group).minimized) expandFloatGroup(panel.group, id);
+  else patchPanel(id, { visible: true, collapsed: false });
+};
+
+const mergePanelsInto = (ids: PanelId[], target: PanelId, options?: { keepTargetMinimized?: boolean; activeId?: PanelId }) => {
+  const group = state.panels[target].group;
+  const uniqueIds = [...new Set(ids)];
+  const moved = uniqueIds.filter((id) => !isFloatMember(state.panels[id], group));
+  const others = state.order.filter((id) => !moved.includes(id));
+  const lastTab = others.reduce((at, id, index) => isFloatMember(state.panels[id], group) ? index : at, -1);
+  const order = [...others.slice(0, lastTab + 1), ...moved, ...others.slice(lastTab + 1)];
+  const panels = { ...state.panels };
+  for (const id of moved) panels[id] = { ...panels[id], place: 'float', visible: true, collapsed: false, group };
+
+  const current = getFloatGroupState(state, group);
+  const floatGroups = {
+    ...state.floatGroups,
+    [group]: { ...current, minimized: options?.keepTargetMinimized ?? current.minimized },
+  };
+  const activeTab = repairSourceActiveTabs(panels, order, moved);
+  const selected = options?.activeId ?? uniqueIds[0] ?? target;
+  const previous = ownValue(activeTab, group);
+  const active = isFloatMember(panels[selected], group)
+    ? selected
+    : previous && isFloatMember(panels[previous], group)
+      ? previous
+      : firstVisibleFloatMember(panels, order, group);
+  commit({
+    ...state,
+    order,
+    panels,
+    activeTab: active ? { ...activeTab, [group]: active } : activeTab,
+    floatGroups: pruneFloatGroups(panels, floatGroups),
+  });
+};
+
 export const dockActions = {
-  toggle: (id: PanelId) => patchPanel(id, { visible: !state.panels[id].visible, collapsed: false }),
-  show: (id: PanelId) => patchPanel(id, { visible: true, collapsed: false }),
+  toggle: (id: PanelId) => {
+    if (state.panels[id].visible) patchPanel(id, { visible: false, collapsed: false });
+    else showPanel(id);
+  },
+  show: showPanel,
   hide: (id: PanelId) => patchPanel(id, { visible: false }),
   setCollapsed: (id: PanelId, collapsed: boolean) => patchPanel(id, { collapsed }),
+  minimizeFloatGroup: (group: string, pillPos?: FloatPillPos) => {
+    const current = getFloatGroupState(state, group);
+    const leader = firstVisibleFloatMember(state.panels, state.order, group);
+    const rect = leader ? state.panels[leader].float : undefined;
+    const position = pillPos ?? current.pillPos ?? (rect && rect.x >= 0 && rect.y >= 0 ? rect : undefined);
+    patchFloatGroup(group, { minimized: true, pillPos: normalizePillPos(position) });
+  },
+  expandFloatGroup,
+  setFloatGroupOrientation: (group: string, orientation: FloatPillOrientation) => patchFloatGroup(group, { orientation }),
+  toggleFloatGroupOrientation: (group: string) => {
+    const { orientation } = getFloatGroupState(state, group);
+    patchFloatGroup(group, { orientation: orientation === 'horizontal' ? 'vertical' : 'horizontal' });
+  },
+  setFloatGroupPillPos: (group: string, pillPos: FloatPillPos) => patchFloatGroup(group, { pillPos: roundPillPos(pillPos) }),
   moveTo: (id: PanelId, place: PanelPlace) => {
     // Moving to a dock appends the panel at the end of that dock; floating, it gets a window of its own
     const order = [...state.order.filter((p) => p !== id), id];
-    commit({ ...state, order, panels: { ...state.panels, [id]: { ...state.panels[id], place, visible: true, collapsed: false, group: id } } });
+    movePanelToOwnGroup(id, { place, visible: true, collapsed: false }, order);
   },
   /** Puts a panel into the floating window that holds `target`, as a tab, and shows it */
-  mergeInto: (id: PanelId, target: PanelId) => {
-    const group = state.panels[target].group;
-    // The new tab goes after the window's tabs, so the window keeps its leader (and its place on screen)
-    const others = state.order.filter((p) => p !== id);
-    const lastTab = others.reduce((at, p, i) => (state.panels[p].place === 'float' && state.panels[p].group === group ? i : at), -1);
-    const order = [...others.slice(0, lastTab + 1), id, ...others.slice(lastTab + 1)];
-    commit({
-      ...state,
-      order,
-      panels: { ...state.panels, [id]: { ...state.panels[id], place: 'float', visible: true, collapsed: false, group } },
-      activeTab: { ...state.activeTab, [group]: id },
-    });
-  },
+  mergeInto: (id: PanelId, target: PanelId) => mergePanelsInto([id], target),
+  mergePanelsInto,
   /** Takes a tab out of its floating window into a window of its own, a little offset */
-  detach: (id: PanelId) => {
-    const leader = state.order.find((p) => state.panels[p].group === state.panels[id].group && state.panels[p].place === 'float') ?? id;
-    const r = state.panels[leader].float;
-    commit({ ...state, panels: { ...state.panels, [id]: { ...state.panels[id], group: id, float: { ...r, x: r.x + 32, y: r.y + 32 } } } });
+  detach: (id: PanelId) => movePanelToOwnGroup(id, { float: offsetFloatRect(id) }),
+  detachToPill: (id: PanelId, pillPos: FloatPillPos, orientation?: FloatPillOrientation) => {
+    movePanelToOwnGroup(id, { place: 'float', visible: true, collapsed: false, float: offsetFloatRect(id, true) }, state.order, {
+      minimized: true,
+      orientation: orientation ?? 'horizontal',
+      pillPos: roundPillPos(pillPos),
+    });
   },
   /**
    * Docks panels (a dragged panel, or every tab of a dragged window) into a dock, before the panel
@@ -186,16 +385,20 @@ export const dockActions = {
     const order = [...others.slice(0, at), ...ids, ...others.slice(at)];
     const panels = { ...state.panels };
     for (const id of ids) panels[id] = { ...panels[id], place: side, visible: true, collapsed: false, group: id };
-    commit({ ...state, order, panels });
+    commit({ ...state, order, panels, activeTab: repairSourceActiveTabs(panels, order, ids), floatGroups: pruneFloatGroups(panels, state.floatGroups) });
   },
   /** Takes a panel out (of a dock or a tabbed window) into a floating window of its own at `rect` */
   floatAt: (id: PanelId, rect: FloatRect) => {
     const order = [...state.order.filter((p) => p !== id), id];
-    commit({ ...state, order, panels: { ...state.panels, [id]: { ...state.panels[id], place: 'float', visible: true, collapsed: false, group: id, float: rect } } });
+    movePanelToOwnGroup(id, { place: 'float', visible: true, collapsed: false, float: rect }, order);
   },
   setActiveTab: (group: string, id: PanelId) => commit({ ...state, activeTab: { ...state.activeTab, [group]: id } }),
   activate: (id: PanelId) => {
     const panel = state.panels[id];
+    if (panel.place === 'float' && getFloatGroupState(state, panel.group).minimized) {
+      expandFloatGroup(panel.group, id);
+      return;
+    }
     const panels = { ...state.panels, [id]: { ...panel, visible: true, collapsed: false } };
     const leader = state.order.find((p) => panels[p].visible && panels[p].place === panel.place && panels[p].group === panel.group);
     if (leader) panels[leader] = { ...panels[leader], collapsed: false };
@@ -233,7 +436,7 @@ export const dockActions = {
 };
 
 /** Dock widths and floating window sizes are pixels: they grow / shrink with 介面縮放 */
-const scaledLayout = (s: DockLayoutState, factor: number): DockLayoutState => {
+function scaledLayout(s: DockLayoutState, factor: number): DockLayoutState {
   if (factor === 1) return s;
   const panels = { ...s.panels };
   for (const id of LAYOUT_PANEL_IDS) {
@@ -244,7 +447,7 @@ const scaledLayout = (s: DockLayoutState, factor: number): DockLayoutState => {
   const slidersWidth = Math.round((s.slidersWidth || 44) * factor);
   const toolRailWidth = Math.round((s.toolRailWidth || 78) * factor);
   return { ...s, panels, dockSize, slidersWidth, toolRailWidth };
-};
+}
 onUiRescale((factor) => commit(scaledLayout(state, factor)));
 
 export const getDockLayout = () => state;

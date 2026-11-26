@@ -1617,6 +1617,61 @@ export interface Translations {
     anglePlus15: string;
   };
 
+  dock: {
+    dockRight: string;
+    dockLeft: string;
+    dockBottom: string;
+    floatWindow: string;
+    panelPosition: string;
+    dockOrFloat: string;
+    mergeAsTab: string;
+    detachWindow: string;
+    hidePanel: string;
+    hideTab: string;
+    hidePanelHint: string;
+    expandPanel: string;
+    collapsePanel: string;
+    dragPanelHint: string;
+    dragFloatHeaderHint: string;
+    dragTabDetachHint: string;
+    windowTabsAria: string;
+    minimizeToPill: string;
+    expandFromPill: string;
+    switchToVertical: string;
+    switchToHorizontal: string;
+    dragPillHint: string;
+    dragPillIconHint: string;
+    pillGroupAria: string;
+    dropCancel: string;
+    dropDockLeft: string;
+    dropDockRight: string;
+    dropDockBottom: string;
+    dropMergeTab: string;
+    dropFloat: string;
+    dropRailLeft: string;
+    dropRailRight: string;
+    dropMergePill: string;
+    dropDetachPill: string;
+    dropGroupMergeTab: string;
+    dropGroupMergePill: string;
+    dropGroupDockLeft: string;
+    dropGroupDockRight: string;
+    dropGroupDockBottom: string;
+    panelNames: {
+      color: string;
+      subView: string;
+      autoActions: string;
+      brushToolset: string;
+      toolProps: string;
+      layers: string;
+      members: string;
+      oplog: string;
+      quickKeys: string;
+      filters: string;
+      align: string;
+    };
+  };
+
   subView: {
     title: string;
     importImages: string;
