@@ -97,6 +97,8 @@ export const jaJP: Translations = {
     browserSaveLocation: 'Web 版では選択したファイル名が表示されます。ファイルへの直接書き込みに対応していないブラウザーではダウンロードされます。',
     projectLoading: 'キャンバスの読み込みが完了してから保存してください。',
     projectSaveFailed: '.lumina プロジェクトを保存できませんでした。',
+    psdAdjustmentSkipped: '次の PSD 調整レイヤーは未対応の種類のため読み込みませんでした：',
+    psdAdjustmentPartial: '次の PSD 調整レイヤーは一部の設定のみ変換しました（色域ごとの色相・彩度など）：',
     saveProjectAs: '別名でLuminaプロジェクトを保存 (.lumina)…',
     openProject: 'プロジェクトを開く (.lumina / .psd / .kra)…',
     importCollaborativeProject: '(.lumina / .psd / .kra) を共同キャンバスとして読み込む…',

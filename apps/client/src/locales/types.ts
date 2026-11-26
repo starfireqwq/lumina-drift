@@ -98,6 +98,8 @@ export interface Translations {
     browserSaveLocation: string;
     projectLoading: string;
     projectSaveFailed: string;
+    psdAdjustmentSkipped: string;
+    psdAdjustmentPartial: string;
     saveProjectAs: string;
     openProject: string;
     importCollaborativeProject: string;

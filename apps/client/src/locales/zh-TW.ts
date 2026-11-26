@@ -97,6 +97,8 @@ export const zhTW: Translations = {
     browserSaveLocation: '網頁版會顯示已選擇的檔名。瀏覽器若不支援直接寫入檔案，會將專案下載。',
     projectLoading: '請等畫布載入完成後再儲存。',
     projectSaveFailed: '儲存 .lumina 專案失敗。',
+    psdAdjustmentSkipped: '這些 PSD 調整圖層的類型流光還不支援，已略過：',
+    psdAdjustmentPartial: '這些 PSD 調整圖層只轉換了部分參數（例如個別色域的色相／飽和度）：',
     saveProjectAs: '另存流光專案 (.lumina)…',
     openProject: '開啟專案 (.lumina / .psd / .kra)…',
     importCollaborativeProject: '匯入專案 (.lumina / .psd / .kra) 為多人畫布…',

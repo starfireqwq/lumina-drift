@@ -1351,13 +1351,22 @@ export const App: React.FC = () => {
             ? `📂 已匯入多人 ${formatLabel} 畫布：${restored.title}`
             : `📂 已開啟 ${formatLabel} 畫布：${restored.title}`
         );
+        // PSD adjustment layers that could not be kept as they were: say which, once
+        const notes = unpacked.adjustmentNotes;
+        if (notes && (notes.skipped.length || notes.partial.length)) {
+          const lines = [
+            ...(notes.skipped.length ? [t.navbar.psdAdjustmentSkipped, ...notes.skipped.map((n) => `・${n}`)] : []),
+            ...(notes.partial.length ? [t.navbar.psdAdjustmentPartial, ...notes.partial.map((n) => `・${n}`)] : []),
+          ];
+          window.setTimeout(() => alert(lines.join('\n')), 0);
+        }
       } catch (err: any) {
         alert(err?.message || '無法開啟專案檔（支援 .lumina / .psd / .kra）');
       } finally {
         importingLumina.current = false;
       }
     },
-    [showGateway, currentCanvas?.group, user?.id, handleCanvasThumbnail, showProjectToast]
+    [showGateway, currentCanvas?.group, user?.id, handleCanvasThumbnail, showProjectToast, t]
   );
 
   const handleOpenLuminaProject = async () => {

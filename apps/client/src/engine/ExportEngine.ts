@@ -1,8 +1,9 @@
-import { LayerModel, BlendMode } from '@atelier/shared';
+import { LayerModel, BlendMode, normalizeAdjustment } from '@atelier/shared';
 import JSZip from 'jszip';
 import { writePsd, Psd, Layer as PsdLayer } from 'ag-psd';
 
 import { LayerCanvasItem, LayerTree, compositeLayers, isAdjustmentItem, maskCoverage } from './layerComposite';
+import { luminaToPsdAdjustment, psdIsolatedGroupIds } from './psdAdjustmentMapping';
 import {
   binarizeLineArt,
   cropAndScaleCanvas,
@@ -896,30 +897,39 @@ ${await stackXml(null, '    ')}  </stack>
   ): Promise<Blob> {
     const compositeCanvas = this.compositeLayers(layerItems, width, height, bgColor);
     const tree = new LayerTree(layerItems);
+    const isolatedGroups = psdIsolatedGroupIds(layerItems.map((i) => i.layer));
 
-    const toPsd = (item: LayerCanvasItem): PsdLayer => {
+    const toPsd = (item: LayerCanvasItem): PsdLayer | null => {
       const isGroup = tree.isGroup(item);
       const blend = this.mapToPsdBlendMode(item.layer.blendMode);
       const layer: PsdLayer = {
         name: item.layer.name,
         opacity: item.layer.opacity,
-        // Groups here never isolate their blending, which is Photoshop's pass through
-        blendMode: (isGroup && blend === 'normal' ? 'pass through' : blend) as any,
+        // Groups here never isolate their blending, which is Photoshop's pass through — except a
+        // group whose adjustment layers act on it alone (Lumina's group scope = an isolated group)
+        blendMode: (isGroup && blend === 'normal' && !isolatedGroups.has(item.layer.id) ? 'pass through' : blend) as any,
         hidden: !item.layer.isVisible,
         clipping: Boolean(item.layer.clipToBelow) && !isGroup,
         ...(item.mask ? {
           mask: { canvas: greyMaskCanvas(item.mask.canvas, item.mask.inverted), top: 0, left: 0, bottom: height, right: width, defaultColor: 0, disabled: !item.mask.enabled },
         } : {}),
       };
-      if (isGroup) return { ...layer, opened: true, children: tree.childrenOf(item.layer.id).filter((c) => !isAdjustmentItem(c)).map(toPsd) };
+      if (isGroup) return { ...layer, opened: true, children: childrenOf(item.layer.id) };
+      if (isAdjustmentItem(item)) {
+        // A real Photoshop adjustment layer: no pixels, its parameters only
+        const adjustment = normalizeAdjustment(item.layer.meta?.adjustment);
+        return adjustment ? { ...layer, adjustment: luminaToPsdAdjustment(adjustment).adjustment } : null;
+      }
       return { ...layer, canvas: item.canvas, top: 0, left: 0, bottom: height, right: width };
     };
+    const childrenOf = (parentId: string | null): PsdLayer[] =>
+      tree.childrenOf(parentId).map(toPsd).filter((l): l is PsdLayer => l !== null);
 
     const psdDoc: Psd = {
       width,
       height,
       canvas: compositeCanvas,
-      children: tree.childrenOf(null).filter((c) => !isAdjustmentItem(c)).map(toPsd),
+      children: childrenOf(null),
     };
 
     const psdBuffer = writePsd(psdDoc);

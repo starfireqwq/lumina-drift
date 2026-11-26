@@ -97,6 +97,8 @@ export const enUS: Translations = {
     browserSaveLocation: 'The web app displays the selected file name. Browsers without direct file access download the project.',
     projectLoading: 'Wait for the canvas to load before saving.',
     projectSaveFailed: 'Could not save the .lumina project.',
+    psdAdjustmentSkipped: 'These PSD adjustment layers use types Lumina Drift does not support yet and were skipped:',
+    psdAdjustmentPartial: 'These PSD adjustment layers were only partly converted (e.g. per-colour hue/saturation ranges):',
     saveProjectAs: 'Save Lumina Project As (.lumina)…',
     openProject: 'Open Project (.lumina / .psd / .kra)…',
     importCollaborativeProject: 'Import (.lumina / .psd / .kra) as a collaborative canvas…',

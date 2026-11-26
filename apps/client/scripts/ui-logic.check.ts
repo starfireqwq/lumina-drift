@@ -111,6 +111,7 @@ import {
 import { getBoxPivotCanvasPoint, type TransformBox } from '../src/utils/transformProjection';
 import { normalizeLuminaLayers } from '../src/engine/LuminaProjectEngine';
 import { combineMaskCoverages, isAdjustmentItem } from '../src/engine/layerComposite';
+import { luminaToPsdAdjustment, psdIsolatedGroupIds, psdToLuminaAdjustment } from '../src/engine/psdAdjustmentMapping';
 import {
   applyKeyframeHandleDrag,
   buildKeyframeFromEval,
@@ -6543,4 +6544,88 @@ console.log('ui-logic checks passed');
   assert.deepStrictEqual(resolveAdjustmentScope(stack, 'adj'), { kind: 'group', groupId: 'g', memberIds: ['inner'] });
   assert.deepStrictEqual(resolveAdjustmentScope(stack.filter((l) => l.layerType !== 'group'), 'adj'), { kind: 'root' });
   console.log('Phase 6 adjustment layer export compositing checks passed');
+}
+
+// Phase 6: adjustment layers (PSD compatibility)
+{
+  const samples: LayerAdjustment[] = [
+    { kind: 'brightness_contrast', params: { brightness: -40, contrast: 35 } },
+    { kind: 'levels', params: {
+      master: { inBlack: 10, inWhite: 240, gamma: 1.25, outBlack: 5, outWhite: 250 },
+      red: { inBlack: 0, inWhite: 200, gamma: 0.8, outBlack: 0, outWhite: 255 },
+      green: { inBlack: 0, inWhite: 255, gamma: 1, outBlack: 0, outWhite: 255 },
+      blue: { inBlack: 30, inWhite: 255, gamma: 1, outBlack: 20, outWhite: 230 },
+    } },
+    { kind: 'curves', params: {
+      master: [{ x: 0, y: 0 }, { x: 128, y: 160 }, { x: 255, y: 255 }],
+      red: [{ x: 0, y: 20 }, { x: 255, y: 235 }], green: [{ x: 0, y: 0 }, { x: 255, y: 255 }], blue: [{ x: 0, y: 255 }, { x: 255, y: 0 }],
+    } },
+    { kind: 'hsl', params: { hue: 45, saturation: -20, lightness: 10, colorize: false } },
+    { kind: 'hsl', params: { hue: 210, saturation: 60, lightness: -15, colorize: true } },
+    { kind: 'color_balance', params: {
+      shadows: { cyanRed: 20, magentaGreen: 0, yellowBlue: -30 }, midtones: { cyanRed: 0, magentaGreen: 15, yellowBlue: 0 },
+      highlights: { cyanRed: -10, magentaGreen: 0, yellowBlue: 40 }, preserveLuminosity: false,
+    } },
+    { kind: 'gradient_map', params: { stops: [{ offset: 0, color: '#102030' }, { offset: 0.4, color: '#ff8000' }, { offset: 1, color: '#ffffff' }], reverse: true } },
+  ];
+  for (const sample of samples) {
+    const normalized = normalizeAdjustment(sample)!;
+    const out = luminaToPsdAdjustment(normalized);
+    assert.equal(out.lossy, false, sample.kind);
+    const back = psdToLuminaAdjustment(JSON.parse(JSON.stringify(out.adjustment)));
+    assert.equal(back.partial, false, sample.kind);
+    assert.deepStrictEqual(back.adjustment, normalized, sample.kind);
+  }
+  // Through real PSD bytes (ag-psd writePsd → readPsd, no pixel data needed for adjustment layers)
+  {
+    const { createRequire } = await import('node:module');
+    const agPsd = createRequire(import.meta.url)('ag-psd') as typeof import('ag-psd');
+    const written = agPsd.writePsd({
+      width: 4, height: 4,
+      children: samples.map((sample, i) => ({ name: `adj ${i}`, adjustment: luminaToPsdAdjustment(normalizeAdjustment(sample)!).adjustment })),
+    }, { generateThumbnail: false });
+    const read = agPsd.readPsd(written, { skipLayerImageData: true, skipCompositeImageData: true, skipThumbnail: true });
+    assert.equal(read.children?.length, samples.length);
+    read.children!.forEach((layer, i) => {
+      assert.equal(layer.name, `adj ${i}`);
+      assert.deepStrictEqual(psdToLuminaAdjustment(layer.adjustment!).adjustment, normalizeAdjustment(samples[i]), `psd bytes ${samples[i].kind}`);
+    });
+  }
+
+  // Lossy / partial / unsupported
+  assert.equal(luminaToPsdAdjustment(normalizeAdjustment({ kind: 'hsl', params: { hue: 12.5 } })!).lossy, true);
+  assert.equal(psdToLuminaAdjustment({ type: 'brightness/contrast', brightness: 10, contrast: 5, useLegacy: true }).partial, true);
+  const ranged = psdToLuminaAdjustment({
+    type: 'hue/saturation', master: { hue: 10, saturation: 0, lightness: 0 },
+    reds: { a: 315, b: 345, c: 15, d: 45, hue: 30, saturation: 0, lightness: 0 },
+  });
+  assert.equal(ranged.partial, true);
+  assert.equal(ranged.adjustment?.kind, 'hsl');
+  const noise = psdToLuminaAdjustment({ type: 'gradient map', gradientType: 'noise', colorStops: [] });
+  assert.equal(noise.partial, true);
+  assert.deepStrictEqual(noise.adjustment, createDefaultAdjustment('gradient_map'));
+  const pencil = psdToLuminaAdjustment({ type: 'curves', values: [Array.from({ length: 256 }, (_, v) => 255 - v)] });
+  assert.equal(pencil.partial, true);
+  assert.ok(pencil.adjustment?.kind === 'curves' && pencil.adjustment.params.master.length === 16);
+  for (const type of ['exposure', 'vibrance', 'black & white', 'photo filter', 'channel mixer', 'invert', 'posterize', 'threshold', 'selective color'] as const) {
+    const r = psdToLuminaAdjustment({ type } as never);
+    assert.equal(r.adjustment, null, type);
+    assert.ok(r.kindLabel.length > 0);
+  }
+
+  // Groups whose adjustment layers act on them alone are written isolated, others stay pass through
+  const L = (id: string, layerType: LayerModel['layerType'], sortOrder: number, extra: Partial<LayerModel> = {}) =>
+    ({ id, layerType, sortOrder, parentId: null, clipToBelow: false, createdAt: sortOrder, ...extra }) as LayerModel;
+  const stack = [
+    L('base', 'raster', 10),
+    L('in1', 'raster', 20, { parentId: 'g1' }),
+    L('adjInG1', 'adjustment', 30, { parentId: 'g1' }),
+    L('g1', 'group', 40),
+    L('in2', 'raster', 50, { parentId: 'g2' }),
+    L('clipAdj', 'adjustment', 60, { parentId: 'g2', clipToBelow: true }),
+    L('g2', 'group', 70),
+    L('rootAdj', 'adjustment', 80),
+  ];
+  assert.deepStrictEqual([...psdIsolatedGroupIds(stack)], ['g1']);
+  console.log('Phase 6 adjustment layer PSD compatibility checks passed');
 }

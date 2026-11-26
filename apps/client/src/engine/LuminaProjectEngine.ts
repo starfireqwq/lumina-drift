@@ -50,6 +50,8 @@ export interface UnpackedLuminaProject {
   vectorStrokes: Record<string, VectorStroke[]>;
   previewDataUrl: string | null;
   filePath?: string;
+  /** PSD import: adjustment layers left out (unsupported type) / converted only in part, as "name（type）" */
+  adjustmentNotes?: { skipped: string[]; partial: string[] };
 }
 
 async function computeSha256Hex(text: string): Promise<string> {

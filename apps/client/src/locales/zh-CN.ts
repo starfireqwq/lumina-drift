@@ -97,6 +97,8 @@ export const zhCN: Translations = {
     browserSaveLocation: '网页端会显示选中的文件名。浏览器若不支持直接写入文件，将下载工程文件。',
     projectLoading: '请等待画布加载完成后再保存。',
     projectSaveFailed: '无法保存 .lumina 工程。',
+    psdAdjustmentSkipped: '这些 PSD 调整图层的类型流光还不支持，已跳过：',
+    psdAdjustmentPartial: '这些 PSD 调整图层只转换了部分参数（例如单独色域的色相/饱和度）：',
     saveProjectAs: '另存流光工程 (.lumina)…',
     openProject: '打开工程 (.lumina / .psd / .kra)…',
     importCollaborativeProject: '导入工程 (.lumina / .psd / .kra) 为多人画布…',

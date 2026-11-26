@@ -1,5 +1,6 @@
 import JSZip from 'jszip';
 import { readPsd, type Layer as PsdLayer, type Psd } from 'ag-psd';
+import { psdToLuminaAdjustment } from './psdAdjustmentMapping';
 import { clampDpi, tidyLayerModels, type BlendMode, type LayerModel } from '@atelier/shared';
 import {
   LuminaProjectEngine,
@@ -217,6 +218,9 @@ export async function unpackPsdProject(
   let sortCounter = 10;
 
   const nextId = (prefix: string) => `${prefix}_${++seq}`;
+  /** Photoshop adjustment layers that were left out / only partly converted ("name（type）") */
+  const importNotes: string[] = [];
+  const partialNotes: string[] = [];
 
   const addMaskIfPresent = (ownerId: string, mask: PsdLayer['mask'] | undefined) => {
     if (!mask) return;
@@ -272,6 +276,34 @@ export async function unpackPsdProject(
             now,
           })
         );
+        sortCounter += 10;
+        addMaskIfPresent(id, node.mask);
+      } else if (node.adjustment) {
+        // Photoshop adjustment layers: six kinds become Lumina adjustment layers, the rest are left out
+        const mapped = psdToLuminaAdjustment(node.adjustment);
+        const label = node.name || mapped.kindLabel;
+        if (!mapped.adjustment) {
+          importNotes.push(`${label}（${mapped.kindLabel}）`);
+          continue;
+        }
+        if (mapped.partial) partialNotes.push(`${label}（${mapped.kindLabel}）`);
+        layers.push({
+          ...makeLayerModel({
+            id,
+            canvasId,
+            parentId,
+            name: label,
+            layerType: 'adjustment',
+            blendMode,
+            opacity,
+            isVisible: !node.hidden,
+            isLocked: Boolean(node.protected?.composite),
+            clipToBelow: Boolean(node.clipping),
+            sortOrder: sortCounter,
+            now,
+          }),
+          meta: { adjustment: mapped.adjustment },
+        });
         sortCounter += 10;
         addMaskIfPresent(id, node.mask);
       } else {
@@ -397,6 +429,7 @@ export async function unpackPsdProject(
     layerPngDataUrls,
     vectorStrokes: {},
     previewDataUrl,
+    ...(importNotes.length || partialNotes.length ? { adjustmentNotes: { skipped: importNotes, partial: partialNotes } } : {}),
     // Never bind .psd path as .lumina autosave target
     filePath: undefined,
   };
