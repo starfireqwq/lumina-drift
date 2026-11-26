@@ -19,7 +19,7 @@
 | **Phase 5** | 快速形狀（QuickShape）、操控變形（Puppet Warp）與四方連續平鋪（Wrap-Around） | `v1.4.0` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-26 / `7b3351b` |
 | **Phase 6** | 非破壞性調整圖層（Adjustment / Correction Layers）完整管線 | `v1.5.0-alpha` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-26 / `4b402b8` |
 | **Phase 7** | 自動動作／巨集錄製（Auto Actions）與文字排版引擎深化 | `v1.5.0-beta` | `/teamwork` | `已完成` | 2026-11-26 / `4296304` |
-| **Phase 8** | 商業印刷色彩管理（CMYK 軟校樣 / ICC）與雙向 `.kra` 匯出 | `v1.5.0` | 單聊天室 或 `/teamwork` | `未開始` | — |
+| **Phase 8** | 商業印刷色彩管理（CMYK 軟校樣 / ICC）與雙向 `.kra` 匯出 | `v1.5.0` | 單聊天室 或 `/teamwork` | `已完成` | 2026-11-26 / `378e13e` |
 
 ---
 
@@ -260,11 +260,11 @@
 > **目標**：打通商業出版與同人誌印刷最後一哩路，並完成與 Krita 的雙向無損專案互通。
 
 #### 任務清單
-- [ ] **8.1 CMYK 軟校樣（Soft Proofing）與色域警告**
+- [x] **8.1 CMYK 軟校樣（Soft Proofing）與色域警告**
   - 實作輕量 ICC Profile 解析與 3D LUT（RGB ↔ CMYK 近似／精準轉換）檢視濾鏡，可在「檢視 → 色彩校樣」一鍵開關軟校樣預覽（如 sRGB → Japan Color 2001 Coated / FOGRA39 / US Web Coated SWOP）。
   - 提供「超色域警告（Gamut Warning）」高亮疊層，讓繪師在作畫期間即時察覺螢光色印刷溢色區域。
   - 支援使用者自訂匯入本機 `.icc` / `.icm` 描述檔，並於匯出 PNG / JPEG / PSD 時選擇嵌入 ICC Profile。
-- [ ] **8.2 雙向 `.kra` 匯出（Export `.kra`）**
+- [x] **8.2 雙向 `.kra` 匯出（Export `.kra`）**
   - 在 `ExportEngine.ts` 與 `kraEncoder.ts`（對應現有 `kraDecoder.ts`）實作 Krita 專案打包：
     - 產出標準 `mimetype`（STORE 無壓縮）、`maindoc.xml`、`mergedimage.png`、`preview.png`
     - 產出各圖層與透明度蒙版的 `VERSION 2` 64×64 Planar BGRA + LZF 壓縮瓦片流
@@ -276,6 +276,8 @@
 - 隔離式 Electron 實測：開啟軟校樣與色域警告無明顯掉幀；匯出 `.kra` 後直接再拖回流光開啟，圖層結構、群組、混合模式與畫面像素完全一致。
 
 #### 交接紀錄
-- 狀態：`未開始`
-- 完成 Commit：`待填`
-- 備註：`—`
+- 狀態：`已完成`
+- 完成 Commit：`2e96eb1`（8.1 色彩核心：`engine/color/iccProfile.ts` ICC v2／v4 解析與 lut8／lut16／mAB／mBA／matrix-TRC 管線、`gamt`、可重現的 sRGB IEC61966-2.1 v2 描述檔；`cmykPrintModel.ts` Japan Color 2001 Coated／FOGRA39／SWOP 近似印刷模型（Yule–Nielsen Neugebauer＋網點擴大、GCR＋TAC 分色）；`softProof.ts` BPC、色域判定與可中止的 33³ 3D LUT）、`b4565b5`（8.2 `kraEncoder.ts` 與 `ExportEngine.exportKrita`：STORE mimetype、maindoc.xml／documentinfo.xml、mergedimage.png／preview.png、VERSION 2 64×64 Planar BGRA＋liblzf 瓦片流、`.pixelselection` 透明度蒙版、27 種混合模式雙向映射、繼承 Alpha 剪裁、透明鎖定、背景色與 DPI；匯入端同步修正）、`0b9838a`（8.1 匯出嵌入 ICC：PNG iCCP、JPEG APP2、PSD 影像資源）、`ae9348d`（8.1 純本機軟校樣：`softProofStore`、Worker 建 LUT、`SoftProofFilter` 2D atlas 3D LUT＋斜線色域警告、`SoftProofController` 只掛在 viewport 根容器）、`f62a3f9`（「表示／檢視」選單、校樣設定視窗、匯出 .kra 卡片與「嵌入 ICC」選項、四語系與兩個說明主題）、`378e13e`（Phase 8 自檢接入 `ui-logic.check.ts`、測試檔產生器與隔離式 Electron 實測腳本）
+- 設計重點：軟校樣與色域警告只是 viewport 根容器上的 PixiJS 濾鏡，LayerManager 內部合成（吸管、填充、匯出、縮圖、Sub View）與 socket 都不經過它；設定存在 localStorage（開關每次啟動預設關閉），匯入的描述檔存在 IndexedDB。內建三組印刷條件是依公開目標值估算的近似模型（不附帶受授權限制的官方 ICC），要精準校樣請匯入印刷廠的 `.icc`／`.icm`。嵌入匯出檔的一律是 RGB 描述檔（流光像素是 sRGB；匯入的 RGB 描述檔屬「指定」不轉換），CMYK 描述檔不嵌入。`.kra` 以 Krita 原生格式寫出，另加 `lumina-opacity`、`lumina-maskinverted` 兩個 Krita 會忽略的屬性，讓流光往返時不透明度與蒙版反轉旗標完全還原；群組蒙版放在群組的 `<layers>` 內（Krita 只讀圖層的第一個子容器）。匯入端修正：`luminize` 改對應「明度」、`luminosity_sai` 對應「發光」、讀 `channelflags` 的繼承 Alpha、`.pixelselection` 蒙版與 `ProjectionBackgroundColor`。
+- 備註：2026-11-26 完成全套驗證：`pnpm --filter @atelier/shared build`、`pnpm --filter @atelier/client build`、`pnpm --filter @atelier/client build:electron`、`pnpm --filter @atelier/server test`（exit 0，含 Phase 18 調整圖層區段）、`ui-logic.check.ts`（新增 5 個 Phase 8 區段：ICC 解析韌性與合成 lut8／lut16／v4 CMYK 描述檔、CIEDE2000 標準資料、印刷模型反解與 TAC、色域判定與 LUT 精度；設定存放、atlas 與 CPU LUT 一致、控制器重建／卸除／過期結果；PNG／JPEG／PSD 嵌入與 ag-psd 往返；LZF、瓦片流、混合模式、maindoc.xml 與整份 zip 像素一致；介面輔助函式、四語系與說明主題）、`i18n-coverage.check.ts`（4 語系 2,212 鍵全對齊）。隔離式 Electron 實測 `apps/client/scripts/phase8-color-kra-electron-smoke.check.cjs` 第 6 輪全數通過（前 5 輪皆為測試腳本本身的問題：錯誤訊息截斷、群組不在 `getLayers()`、下載攔截時機、穩定判定計數、遠端注入覆蓋，產品程式未因此修改）：單機拖入 .kra 測試檔（15 層：含蒙版的群組、剪裁、multiply／screen 37%／glow／luminosity、反轉與停用蒙版、透明鎖定、隱藏、鎖定）→ 匯出 .kra（STORE mimetype 在首位、33 個項目）→ 拖回流光，圖層樹與屬性完全相同、15 個圖層／蒙版與可見合成像素最大差 0；FOGRA39 軟校樣 LUT 850 ms，純藍 (0,0,255) 顯示為 (46,65,140)、中灰與膚色差 ≤3，圖層像素與內部合成不變；色域警告在藍、綠色塊各 50% 斜線，中灰、膚色 0%；平移 90 幀平均 2.08 → 2.25 ms、p95 3.20 → 3.10 ms；匯入合成 CMYK `.icc` 後套用成功；校樣開啟時匯出的 PNG 含 `sRGB IEC61966-2.1` iCCP，像素與關閉校樣時的匯出完全相同；`PORT=0` 雙人：A 開啟校樣＋警告期間未送出任何非 ping/pong 的 socket frame，B 的螢幕像素不變、B 的校樣未啟用，全程 0 頁面錯誤與 0 對話框。另以隔離 Electron 檢查日文介面 1440×900 與 375×812 的校樣設定與匯出視窗：無超出畫面、無截斷文字。
+- 已知限制：內建三組印刷條件是近似模型；調整圖層不寫入 `.kra`（效果只在 mergedimage.png）；Krita 的繼承 Alpha 以下方全部圖層為範圍，群組內有多個剪裁基底時在 Krita 中外觀可能與流光不同；尚未用 Krita 實機開啟匯出的 `.kra`（本機無可用的 Krita）；匯出 CMYK 分色檔（CMYK PSD／TIFF）不在本 Phase；手機版匯出視窗的既有標題在 375 寬會以省略號截斷（非本 Phase 新增文字）。Codex 在 WO-4 完成後額度用盡，WO-5（介面與四語系）與 WO-6（測試接入與 Electron 腳本）由主代理接手完成。
