@@ -5,7 +5,7 @@ import {
 import { ShortcutCategory, ShortcutManager } from '../../engine/ShortcutManager';
 import { useI18n } from '../../context/I18nContext';
 import { HelpArt } from './HelpArt';
-import { getAdjustmentHelpTopic, HELP_CATEGORIES, HELP_TOPICS, HelpCategoryId, HelpKey, HelpTopic, normalize, queryTerms, scoreTopic, SUGGESTIONS } from './helpContent';
+import { getHelpTopics, HELP_CATEGORIES, HelpCategoryId, HelpKey, HelpTopic, normalize, queryTerms, scoreTopic, SUGGESTIONS } from './helpContent';
 
 const CAT_ICON: Record<HelpCategoryId, React.ReactNode> = {
   start: <Sparkles />, draw: <Brush />, fill: <PaintBucket />, select: <Move />, layers: <Layers />, vector: <PenTool />,
@@ -105,7 +105,7 @@ const TopicCard: React.FC<{ topic: HelpTopic; terms: string[]; categoryLabel?: s
  */
 export const HelpCenter: React.FC<{ onClose: () => void; onOpenShortcutSettings?: () => void; initialQuery?: string }> = ({ onClose, onOpenShortcutSettings, initialQuery = '' }) => {
   const { t } = useI18n();
-  const helpTopics = useMemo(() => [...HELP_TOPICS, getAdjustmentHelpTopic(t)], [t]);
+  const helpTopics = useMemo(() => getHelpTopics(t), [t]);
   const categories = HELP_CATEGORIES;
   const mgr = useShortcutVersion();
   const [query, setQuery] = useState(initialQuery);

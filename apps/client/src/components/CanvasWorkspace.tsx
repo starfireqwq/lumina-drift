@@ -96,6 +96,7 @@ import {
   ADJUSTMENT_KINDS,
   createDefaultAdjustment,
   normalizeAdjustment,
+  normalizeTextMeta,
   toneHistogram,
   type AdjustmentKind,
   type LayerAdjustment,
@@ -6687,10 +6688,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       warn('這是其他畫友的文字圖層，不能編輯。');
       return;
     }
+    const meta = normalizeTextMeta(layer.meta?.text);
+    if (!meta) return;
     onSelectLayer?.(layer.id);
     const item = layerManagerRef.current?.getLayerItem(layer.id);
     if (item) item.sprite.visible = false; // the live preview stands in for it while editing
-    setTextEdit({ layerId: layer.id, meta: layer.meta!.text! });
+    setTextEdit({ layerId: layer.id, meta });
   };
   /** Text tool click: edit the text layer under it, or start a new text there */
   const handleTextTool = (local: { x: number; y: number }) => {

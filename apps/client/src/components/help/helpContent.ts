@@ -718,6 +718,13 @@ export const normalize = (s: string) =>
 export const queryTerms = (q: string) =>
   q.normalize('NFKC').toLowerCase().split(/[\s,，、]+/).map((t) => t.trim()).filter(Boolean);
 
+export function getHelpTopics(t: Translations): HelpTopic[] {
+  return [
+    ...HELP_TOPICS.map((topic) => topic.id === 'text' ? { ...topic, steps: t.textEditor.helpSteps } : topic),
+    getAdjustmentHelpTopic(t),
+  ];
+}
+
 /** Score of a topic for the query (0 = no match). Every term must appear somewhere. */
 export const scoreTopic = (topic: HelpTopic, terms: string[], keyText: string) => {
   if (!terms.length) return 0;

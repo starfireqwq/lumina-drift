@@ -48,7 +48,15 @@ const Sep = () => <div aria-hidden className="mx-1 h-6 w-px shrink-0 bg-neutral-
  * The outline colour: a swatch that opens the same colour wheel as the colour panel (with the
  * eyedropper). Fixed-position so the scrolling options bar does not clip it.
  */
-export const ColorPopoverButton: React.FC<{ color: string; onChange: (hex: string) => void; onPick?: () => void; label?: string }> = ({ color, onChange, onPick, label = '描邊顏色' }) => {
+export const ColorPopoverButton: React.FC<{
+  color: string;
+  onChange: (hex: string) => void;
+  onPick?: () => void;
+  label?: string;
+  title?: string;
+  mixed?: boolean;
+  'data-testid'?: string;
+}> = ({ color, onChange, onPick, label = '描邊顏色', title, mixed, 'data-testid': testId }) => {
   const [open, setOpen] = useState(false);
   const btnRef = useRef<HTMLButtonElement>(null);
   const popRef = useRef<HTMLDivElement>(null);
@@ -56,21 +64,23 @@ export const ColorPopoverButton: React.FC<{ color: string; onChange: (hex: strin
   useEffect(() => {
     if (!open) return;
     const close = (e: PointerEvent) => {
-      if (!(e.target as HTMLElement).closest?.('[data-outline-color]')) setOpen(false);
+      const target = e.target as Node | null;
+      if (!btnRef.current?.contains(target) && !popRef.current?.contains(target)) setOpen(false);
     };
     const esc = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
-    window.addEventListener('pointerdown', close);
+    window.addEventListener('pointerdown', close, true);
     window.addEventListener('keydown', esc);
     return () => {
-      window.removeEventListener('pointerdown', close);
+      window.removeEventListener('pointerdown', close, true);
       window.removeEventListener('keydown', esc);
     };
   }, [open]);
   return (
     <>
-      <button ref={btnRef} type="button" data-outline-color aria-label={label} aria-expanded={open} title={`${label}（色輪與滴管）`}
+      <button ref={btnRef} type="button" data-outline-color data-testid={testId} aria-label={label} aria-expanded={open} title={title ?? `${label}（色輪與滴管）`}
         onClick={() => setOpen((v) => !v)}
-        className="h-7 w-8 shrink-0 rounded border-2 border-neutral-600" style={{ backgroundColor: color }} />
+        className="h-7 w-8 shrink-0 rounded border-2 border-neutral-600"
+        style={{ backgroundColor: color, backgroundImage: mixed ? 'repeating-linear-gradient(135deg, transparent 0 4px, #737373 4px 8px)' : undefined }} />
       {open && typeof document !== 'undefined' && createPortal(
         <div ref={pos.setPopoverEl} data-outline-color role="dialog" aria-label={label}
           style={{ left: pos.left, top: pos.top, maxHeight: pos.maxHeight }}

@@ -1,173 +1,272 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Check, Move, X } from 'lucide-react';
-import type { LayerTextMeta } from '@atelier/shared';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { AlignCenter, AlignLeft, AlignRight, Bold, Check, Italic, Move, X } from 'lucide-react';
+import { applyTextStyleToRange, type LayerTextMeta } from '@atelier/shared';
 import type { CanvasViewport, ViewportState } from '../engine/Viewport';
-import { caretRect, renderText, TEXT_FONTS } from '../engine/textLayer';
-import { ColorPopoverButton } from './workspace/ToolOptionsBar';
+import { caretRectFromLayout, createCanvasMeasurer, indexAtPoint, layoutText, selectionRectsFromLayout, textBoxRect, TEXT_FONTS } from '../engine/textLayer';
 import { useI18n } from '../context/I18nContext';
+import { TextNumberField, TextStylePopover, textToolButton } from './TextStylePopover';
+import { getToolbarTextStyle, initialTextBox, resizeTextBox, updateTextContent } from './textEditorState';
+import { ColorPopoverButton } from './workspace/ToolOptionsBar';
 
 interface TextCanvasEditorProps {
   meta: LayerTextMeta;
   isNew: boolean;
   viewport: CanvasViewport | null;
-  /** Re-renders on pan / zoom / rotate so the box stays on the text */
   viewportState: ViewportState;
   onChange: (meta: LayerTextMeta) => void;
   onCommit: () => void;
   onCancel: () => void;
 }
 
-/**
- * Text typed straight onto the canvas (no dialog). A transparent textarea sits exactly over the
- * text block (it follows zoom, rotation and flip); what you see is the live canvas preview, which
- * is the same rendering the layer gets (vertical forms, sideways Latin, 縱中橫). A small bar above
- * holds the text settings. Ctrl+Enter / 完成 / a click elsewhere on the canvas applies, Esc cancels.
- */
+type Point = { x: number; y: number };
+type Drag =
+  | { kind: 'select'; id: number; anchor: number }
+  | { kind: 'move'; id: number; start: Point; origin: Point }
+  | { kind: 'box'; id: number; start: Point; x: number; box: NonNullable<LayerTextMeta['box']>; vertical: boolean };
+
+function capturePointer(event: React.PointerEvent<HTMLElement>) {
+  try {
+    event.currentTarget.setPointerCapture(event.pointerId);
+  } catch {
+    // Synthetic events may lack an active pointer.
+  }
+}
+
 export const TextCanvasEditor: React.FC<TextCanvasEditorProps> = ({ meta, isNew, viewport, viewportState, onChange, onCommit, onCancel }) => {
-  const { t } = useI18n();
+  const { t: { textEditor: t } } = useI18n();
   const areaRef = useRef<HTMLTextAreaElement>(null);
-  const dragRef = useRef<{ x: number; y: number; mx: number; my: number } | null>(null);
   const barRef = useRef<HTMLDivElement>(null);
-  // Keep the settings bar inside the canvas area (on a phone it ran off the right edge)
-  useLayoutEffect(() => {
-    const bar = barRef.current;
-    const parent = bar?.offsetParent as HTMLElement | null;
-    if (!bar || !parent) return;
-    const want = Number(bar.dataset.left) || 8;
-    bar.style.left = `${Math.max(8, Math.min(want, parent.clientWidth - bar.offsetWidth - 8))}px`;
-  });
+  const drag = useRef<Drag | null>(null);
+  const composition = useRef<LayerTextMeta | null>(null);
+  const currentMeta = useRef(meta);
+  const [selection, setSelection] = useState({ start: 0, end: 0 });
+  const [focused, setFocused] = useState(false);
+  const measurer = useMemo(createCanvasMeasurer, []);
+  const layout = useMemo(() => layoutText(meta, measurer), [meta, measurer]);
+  const toolbarStyle = useMemo(() => getToolbarTextStyle(meta, selection.start, selection.end), [meta, selection]);
+  const caret = focused && selection.start === selection.end ? caretRectFromLayout(layout, meta, selection.end) : null;
+  const highlights = useMemo(() => selectionRectsFromLayout(layout, selection.start, selection.end), [layout, selection]);
+  const origin = viewport?.canvasToScreen(meta.x, meta.y);
+
+  const readSelection = () => {
+    const area = areaRef.current;
+    if (!area) return;
+    const { selectionStart: start, selectionEnd: end } = area;
+    setSelection((previous) => previous.start === start && previous.end === end ? previous : { start, end });
+  };
   useEffect(() => {
-    areaRef.current?.focus({ preventScroll: true });
-  }, []);
-  // The caret is drawn where the canvas puts the next character (the textarea's own caret follows
-  // the browser's vertical layout, which drifts after digits and spaces); IME text being composed
-  // is part of the value, so the caret sits after it
-  const [caret, setCaret] = useState<number | null>(null);
-  const [hasSelection, setHasSelection] = useState(false);
-  useEffect(() => {
-    const read = () => {
-      const a = areaRef.current;
-      if (!a) return;
-      setCaret(document.activeElement === a ? a.selectionEnd : null);
-      setHasSelection(a.selectionStart !== a.selectionEnd);
-    };
-    read();
+    const area = areaRef.current;
+    if (!area) return;
+    area.focus({ preventScroll: true });
+    readSelection();
+    const read = () => { if (document.activeElement === area) readSelection(); };
     document.addEventListener('selectionchange', read);
     return () => document.removeEventListener('selectionchange', read);
-  }, []);
-  useEffect(() => {
-    const a = areaRef.current;
-    if (a && document.activeElement === a) setCaret(a.selectionEnd);
-  }, [meta.content]);
-  if (!viewport) return null;
-  const set = (patch: Partial<LayerTextMeta>) => onChange({ ...meta, ...patch });
+  }, [viewport]);
+  useLayoutEffect(() => { currentMeta.current = meta; }, [meta]);
+  useLayoutEffect(() => {
+    const bar = barRef.current;
+    const parent = bar?.offsetParent;
+    if (!bar || !(parent instanceof HTMLElement) || !origin) return;
+    const place = () => {
+      bar.style.left = `${Math.max(8, Math.min(origin.x, parent.clientWidth - bar.offsetWidth - 8))}px`;
+      bar.style.top = `${Math.max(8, Math.min(origin.y - bar.offsetHeight - 8, parent.clientHeight - bar.offsetHeight - 8))}px`;
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    observer.observe(parent);
+    observer.observe(bar);
+    return () => observer.disconnect();
+  }, [origin?.x, origin?.y]);
 
-  const r = renderText(meta);
-  const pad = Math.ceil(meta.strokeWidth + 2);
-  const boxW = Math.max(meta.fontSize, r.canvas.width - pad * 2);
-  const boxH = Math.max(meta.fontSize, r.canvas.height - pad * 2);
-  const origin = viewport.canvasToScreen(meta.x, meta.y);
+  if (!viewport || !origin) return null;
   const { zoom, rotation, mirrorX } = viewportState;
-  const stop = (e: React.PointerEvent | React.MouseEvent) => e.stopPropagation();
+  const boxW = meta.box?.width ?? Math.max(meta.fontSize, Math.ceil(layout.width) + (meta.vertical ? 0 : meta.fontSize));
+  const boxH = meta.box?.height ?? Math.max(meta.fontSize, Math.ceil(layout.height) + (meta.vertical ? meta.fontSize : 0));
 
-  // Drag the grip: the text block follows the pointer in canvas pixels
-  const startMove = (e: React.PointerEvent) => {
-    e.stopPropagation();
-    try {
-      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    } catch {
-      // synthetic events cannot capture
+  const replace = (next: LayerTextMeta) => {
+    currentMeta.current = next;
+    onChange(next);
+  };
+  const patch = (next: Partial<LayerTextMeta>) => replace({ ...currentMeta.current, ...next });
+  const readRange = () => {
+    const area = areaRef.current;
+    return area ? { start: area.selectionStart, end: area.selectionEnd } : selection;
+  };
+  const styleRange = (next: Parameters<typeof applyTextStyleToRange>[3]) => {
+    const { start, end } = readRange();
+    replace(applyTextStyleToRange(currentMeta.current, start, end, next));
+  };
+  const toggleStyle = (key: 'bold' | 'italic') => {
+    const { start, end } = readRange();
+    const current = currentMeta.current;
+    const { style, mixed } = getToolbarTextStyle(current, start, end);
+    replace(applyTextStyleToRange(current, start, end, { [key]: mixed[key] || !style[key] }));
+  };
+  const changeContent = (content: string) => {
+    const before = currentMeta.current;
+    if (content !== before.content) replace(updateTextContent(before, content, composition.current ?? before));
+    readSelection();
+  };
+
+  const pointAt = (event: React.PointerEvent) => viewport.screenToCanvas(event.clientX, event.clientY);
+  const textIndexAt = (point: Point) => indexAtPoint(layout, meta, point.x - meta.x, point.y - meta.y);
+  const selectBetween = (anchor: number, at: number) => {
+    areaRef.current?.setSelectionRange(Math.min(anchor, at), Math.max(anchor, at), at < anchor ? 'backward' : 'forward');
+    readSelection();
+  };
+  const startSelection = (event: React.PointerEvent<HTMLTextAreaElement>) => {
+    if (event.button !== 0 || !event.isPrimary || composition.current) return;
+    event.preventDefault();
+    const area = event.currentTarget;
+    const at = textIndexAt(pointAt(event));
+    const anchor = event.shiftKey ? (area.selectionDirection === 'backward' ? area.selectionEnd : area.selectionStart) : at;
+    area.focus({ preventScroll: true });
+    selectBetween(anchor, at);
+    drag.current = { kind: 'select', id: event.pointerId, anchor };
+    capturePointer(event);
+  };
+
+  const startMove = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0 || !event.isPrimary) return;
+    event.preventDefault();
+    drag.current = { kind: 'move', id: event.pointerId, start: pointAt(event), origin: { x: meta.x, y: meta.y } };
+    capturePointer(event);
+  };
+  const startResize = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0 || !event.isPrimary || !meta.box) return;
+    event.preventDefault();
+    drag.current = { kind: 'box', id: event.pointerId, start: pointAt(event), x: meta.x, box: meta.box, vertical: meta.vertical };
+    capturePointer(event);
+  };
+  const updateDrag = (event: React.PointerEvent) => {
+    const active = drag.current;
+    if (!active || active.id !== event.pointerId) return;
+    const point = pointAt(event);
+    if (active.kind === 'select') {
+      selectBetween(active.anchor, textIndexAt(point));
+    } else {
+      const dx = point.x - active.start.x;
+      const dy = point.y - active.start.y;
+      if (active.kind === 'move') patch({ x: Math.round(active.origin.x + dx), y: Math.round(active.origin.y + dy) });
+      else patch(resizeTextBox(active.box, active.x, active.vertical, dx, dy));
     }
-    const p = viewport.screenToCanvas(e.clientX, e.clientY);
-    dragRef.current = { x: meta.x, y: meta.y, mx: p.x, my: p.y };
   };
-  const move = (e: React.PointerEvent) => {
-    const d = dragRef.current;
-    if (!d) return;
-    const p = viewport.screenToCanvas(e.clientX, e.clientY);
-    set({ x: Math.round(d.x + p.x - d.mx), y: Math.round(d.y + p.y - d.my) });
+  const endDrag = (event: React.PointerEvent) => {
+    if (drag.current?.id === event.pointerId) drag.current = null;
   };
-  const endMove = () => {
-    dragRef.current = null;
-  };
+  const toggleBox = () => patch({ box: meta.box ? null : initialTextBox(meta, textBoxRect(meta)) });
+  const stop = (event: React.SyntheticEvent) => event.stopPropagation();
 
-  const field = 'atelier-field h-7 px-1 text-[11px]';
+  const align = meta.align ?? 'start';
+  const alignment = [
+    { value: 'start', label: meta.vertical ? t.alignTop : t.alignLeft, Icon: AlignLeft },
+    { value: 'center', label: t.alignCenter, Icon: AlignCenter },
+    { value: 'end', label: meta.vertical ? t.alignBottom : t.alignRight, Icon: AlignRight },
+  ] as const;
+  const { style, mixed } = toolbarStyle;
   return (
-    <>
-      {/* The text block itself: typing happens here */}
-      <div onPointerDown={stop} onDoubleClick={stop} className="absolute left-0 top-0 z-30"
+    <div className="contents" onPointerDown={stop} onDoubleClick={stop}
+      onPointerMove={(event) => { stop(event); updateDrag(event); }}
+      onPointerUp={(event) => { stop(event); endDrag(event); }}
+      onPointerCancel={endDrag} onLostPointerCapture={endDrag}
+      onKeyDown={(event) => {
+        if (event.nativeEvent.isComposing || composition.current) return;
+        if (event.key === 'Escape' || (event.key === 'Enter' && (event.ctrlKey || event.metaKey))) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.key === 'Escape') onCancel();
+          else onCommit();
+        }
+      }}>
+      <div className="absolute left-0 top-0 z-30"
         style={{ transform: `translate(${origin.x}px, ${origin.y}px) rotate(${rotation}rad) scale(${mirrorX ? -zoom : zoom}, ${zoom})`, transformOrigin: '0 0' }}>
-        <textarea ref={areaRef} value={meta.content} aria-label={t.textEditor.editorAria} spellCheck={false}
-          placeholder={isNew ? t.textEditor.newTextPlaceholder : ''}
-          onChange={(e) => set({ content: e.target.value })}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape') {
-              e.preventDefault();
-              onCancel();
-            } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-              e.preventDefault();
-              onCommit();
-            }
+        <textarea ref={areaRef} value={meta.content} aria-label={t.editorAria} spellCheck={false}
+          placeholder={isNew ? t.newTextPlaceholder : ''}
+          onChange={(event) => changeContent(event.currentTarget.value)}
+          onCompositionStart={() => { composition.current = currentMeta.current; }}
+          onCompositionEnd={(event) => {
+            changeContent(event.currentTarget.value);
+            composition.current = null;
           }}
-          className="block resize-none overflow-hidden border-0 bg-transparent p-0 outline-none placeholder:text-neutral-400/70"
+          onPointerDown={startSelection} onSelect={readSelection}
+          onFocus={() => { setFocused(true); readSelection(); }}
+          onBlur={() => setFocused(false)}
+          className="block touch-none resize-none overflow-hidden border-0 bg-transparent p-0 outline-none placeholder:text-neutral-400/70 selection:bg-transparent selection:text-transparent"
           style={{
-            width: meta.vertical ? boxW : boxW + meta.fontSize, // room for the next character
-            height: meta.vertical ? boxH + meta.fontSize : boxH,
+            width: boxW,
+            height: boxH,
             font: `${meta.fontSize}px ${meta.fontFamily}`,
             lineHeight: meta.lineHeight,
             writingMode: meta.vertical ? 'vertical-rl' : 'horizontal-tb',
-            textOrientation: 'mixed',
-            color: 'transparent', // the canvas preview shows the real rendering
-            caretColor: 'transparent', // drawn below, where the canvas puts the next character
+            textAlign: align,
+            letterSpacing: `${(meta.letterSpacing ?? 0) / 1000}em`,
+            color: 'transparent',
+            caretColor: 'transparent',
             outline: `${1.5 / zoom}px dashed rgba(99, 102, 241, 0.9)`,
-            outlineOffset: `${pad / 2}px`,
-            whiteSpace: 'pre',
+            whiteSpace: meta.box ? 'pre-wrap' : 'pre',
+            overflowWrap: meta.box ? 'anywhere' : undefined,
           }} />
-        {caret !== null && !hasSelection && (() => {
-          const c = caretRect(meta, caret);
-          return <span aria-hidden className="atelier-text-caret pointer-events-none absolute"
-            style={{ left: c.x, top: c.y, width: c.w, height: c.h, background: meta.color === '#ffffff' ? '#6366f1' : meta.color }} />;
-        })()}
+        {highlights.map((rect, i) => (
+          <span key={i} aria-hidden className="pointer-events-none absolute bg-indigo-400/[0.35]"
+            style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }} />
+        ))}
+        {caret && <span aria-hidden className="atelier-text-caret pointer-events-none absolute"
+          style={{ left: caret.x, top: caret.y, width: caret.w, height: caret.h, background: style.color.toLowerCase() === '#ffffff' ? '#6366f1' : style.color }} />}
+        {meta.box && <button type="button" data-testid="text-editor-box-handle" aria-label={t.resizeBox} title={t.resizeBox}
+          onPointerDown={startResize} className="absolute touch-none rounded-sm border-2 border-white bg-indigo-500"
+          style={{
+            left: meta.vertical ? 0 : boxW,
+            top: boxH,
+            width: 20 / zoom,
+            height: 20 / zoom,
+            transform: 'translate(-50%, -50%)',
+            cursor: meta.vertical !== mirrorX ? 'nesw-resize' : 'nwse-resize',
+          }} />}
       </div>
-
-      {/* Settings bar just above the block (screen space, so it stays readable at any zoom) */}
-      <div ref={barRef} data-left={Math.round(origin.x)} onPointerDown={stop} onDoubleClick={stop} role="toolbar" aria-label={t.textEditor.toolbarAria}
-        className="no-scrollbar absolute z-40 flex max-w-[calc(100%-16px)] items-center gap-1 overflow-x-auto rounded-lg border border-neutral-700 bg-neutral-900/95 p-1 text-[11px] text-neutral-200 shadow-xl"
-        style={{ left: Math.max(8, origin.x), top: Math.max(8, origin.y - 44) }}>
-        <button type="button" onPointerDown={startMove} onPointerMove={move} onPointerUp={endMove} onPointerCancel={endMove}
-          title={t.textEditor.dragMove} aria-label={t.textEditor.dragMove} style={{ touchAction: 'none' }}
-          className="flex h-7 w-7 shrink-0 cursor-move items-center justify-center rounded hover:bg-neutral-800"><Move className="h-3.5 w-3.5" /></button>
-        <div role="radiogroup" aria-label={t.textEditor.directionAria} className="flex shrink-0 overflow-hidden rounded border border-neutral-700">
-          {[{ v: false, label: t.textEditor.horizontal }, { v: true, label: t.textEditor.vertical }].map((o) => (
-            <button key={o.label} type="button" role="radio" aria-checked={meta.vertical === o.v} onClick={() => set({ vertical: o.v })}
-              className={`h-7 px-2 ${meta.vertical === o.v ? 'bg-indigo-600 text-white' : 'hover:bg-neutral-800'}`}>{o.label}</button>
+      <div ref={barRef} data-testid="text-editor-toolbar" role="toolbar" aria-label={t.toolbarAria}
+        className="absolute z-40 flex w-max max-w-[calc(100%-16px)] flex-wrap items-center gap-1 rounded-lg border border-neutral-700 bg-neutral-900/95 p-1 text-[11px] text-neutral-200 shadow-xl">
+        <button type="button" onPointerDown={startMove} title={t.dragMove} aria-label={t.dragMove}
+          className={`${textToolButton} cursor-move touch-none`}><Move size={14} /></button>
+        <div role="radiogroup" aria-label={t.directionAria} className="flex shrink-0 rounded border border-neutral-700">
+          {[{ vertical: false, label: t.horizontal }, { vertical: true, label: t.vertical }].map((choice) => (
+            <button key={choice.label} type="button" role="radio" aria-checked={meta.vertical === choice.vertical}
+              onClick={() => patch({ vertical: choice.vertical })}
+              className={`${textToolButton} aria-checked:bg-indigo-600/80`}>{choice.label}</button>
           ))}
         </div>
-        <select value={meta.fontFamily} onChange={(e) => set({ fontFamily: e.target.value })} aria-label={t.textEditor.fontAria} className={`${field} w-16 shrink-0`}>
-          {TEXT_FONTS.map((f) => <option key={f.id} value={f.id}>{f.label}</option>)}
+        <select value={meta.fontFamily} onChange={(event) => patch({ fontFamily: event.target.value })} aria-label={t.fontAria}
+          className="atelier-field h-7 w-20 shrink-0 px-1 text-[11px]">
+          {!TEXT_FONTS.some((font) => font.id === meta.fontFamily) && <option value={meta.fontFamily}>{meta.fontFamily}</option>}
+          {TEXT_FONTS.map((font) => <option key={font.id} value={font.id}>{font.label}</option>)}
         </select>
-        <label className="flex shrink-0 items-center gap-0.5" title={t.textEditor.fontSize}>
-          <span className="text-neutral-500">{t.textEditor.fontSize[0]}</span>
-          <input type="number" min={8} max={400} value={meta.fontSize} aria-label={t.textEditor.fontSize}
-            onChange={(e) => set({ fontSize: Math.max(8, Math.min(400, Number(e.target.value) || 8)) })} className={`${field} w-12`} />
-        </label>
-        <ColorPopoverButton label={t.textEditor.textColor} color={meta.color} onChange={(color) => set({ color })} />
-        <label className="flex shrink-0 items-center gap-0.5" title={t.textEditor.strokeWidth}>
-          <span className="text-neutral-500">{t.textEditor.strokeWidth[0]}</span>
-          <input type="number" min={0} max={30} value={meta.strokeWidth} aria-label={t.textEditor.strokeWidth}
-            onChange={(e) => set({ strokeWidth: Math.max(0, Math.min(30, Number(e.target.value) || 0)) })} className={`${field} w-10`} />
-        </label>
-        {meta.strokeWidth > 0 && <ColorPopoverButton label={t.textEditor.strokeColor} color={meta.strokeColor} onChange={(strokeColor) => set({ strokeColor })} />}
-        <label className="flex shrink-0 items-center gap-0.5" title={t.textEditor.lineHeight}>
-          <span className="text-neutral-500">{t.textEditor.lineHeight}</span>
-          <input type="number" min={0.8} max={3} step={0.1} value={meta.lineHeight} aria-label={t.textEditor.lineHeight}
-            onChange={(e) => set({ lineHeight: Math.max(0.8, Math.min(3, Number(e.target.value) || 1.3)) })} className={`${field} w-12`} />
-        </label>
-        <button type="button" onClick={onCommit} disabled={!meta.content.trim()} title={t.textEditor.apply}
-          className="flex h-7 shrink-0 items-center gap-1 rounded bg-indigo-600 px-2 font-bold text-white hover:bg-indigo-500 disabled:opacity-40"><Check className="h-3.5 w-3.5" />{t.textEditor.apply}</button>
-        <button type="button" onClick={onCancel} title={t.textEditor.cancel} aria-label={t.textEditor.cancel}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded hover:bg-neutral-800"><X className="h-3.5 w-3.5" /></button>
+        <TextNumberField label={t.fontSize} compact min={8} max={400} value={mixed.fontSize ? null : style.fontSize}
+          testId="text-editor-size" onChange={(fontSize) => styleRange({ fontSize })} />
+        <ColorPopoverButton label={t.textColor} title={t.textColor} color={style.color} mixed={mixed.color} data-testid="text-editor-color"
+          onChange={(color) => styleRange({ color })} />
+        <div className="flex shrink-0">
+          <button type="button" data-testid="text-editor-bold" title={t.bold} aria-label={t.bold} aria-pressed={mixed.bold ? 'mixed' : style.bold}
+            onClick={() => toggleStyle('bold')}
+            className={`${textToolButton} aria-[pressed=mixed]:bg-indigo-600/[0.35]`}><Bold size={15} /></button>
+          <button type="button" data-testid="text-editor-italic" title={t.italic} aria-label={t.italic} aria-pressed={mixed.italic ? 'mixed' : style.italic}
+            onClick={() => toggleStyle('italic')}
+            className={`${textToolButton} aria-[pressed=mixed]:bg-indigo-600/[0.35]`}><Italic size={15} /></button>
+        </div>
+        <div className="flex shrink-0">
+          {alignment.map(({ value, label, Icon }) => (
+            <button key={value} type="button" data-testid={`text-editor-align-${value}`} title={label} aria-label={label}
+              aria-pressed={align === value} onClick={() => patch({ align: value })}
+              className={textToolButton}><Icon size={15} className={meta.vertical ? 'rotate-90' : undefined} /></button>
+          ))}
+        </div>
+        <TextStylePopover meta={meta} onPatch={patch} onToggleBox={toggleBox} />
+        <div className="flex shrink-0 gap-1">
+          <button type="button" data-testid="text-editor-apply" onClick={onCommit} disabled={!meta.content.trim()} title={t.apply} aria-label={t.apply}
+            className={`${textToolButton} bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40`}><Check size={15} /></button>
+          <button type="button" data-testid="text-editor-cancel" onClick={onCancel} title={t.cancel} aria-label={t.cancel}
+            className={textToolButton}><X size={15} /></button>
+        </div>
       </div>
-    </>
+    </div>
   );
 };

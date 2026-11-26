@@ -2107,6 +2107,27 @@ export interface Translations {
   };
 
   textEditor: {
+    bold: string;
+    italic: string;
+    alignLeft: string;
+    alignCenter: string;
+    alignRight: string;
+    alignTop: string;
+    alignBottom: string;
+    more: string;
+    letterSpacing: string;
+    strokeBehind: string;
+    strokeFront: string;
+    wrapBox: string;
+    resizeBox: string;
+    shadow: string;
+    shadowEnabled: string;
+    shadowColor: string;
+    shadowX: string;
+    shadowY: string;
+    shadowBlur: string;
+    shadowOpacity: string;
+    helpSteps: string[];
     editorAria: string;
     newTextPlaceholder: string;
     toolbarAria: string;
