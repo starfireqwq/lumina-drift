@@ -1,5 +1,15 @@
 export type TileCompression = 'lz4' | 'webp' | 'png' | 'raw';
 
+/** Undoable layer properties carried by ScopedUndoOp.propsBefore / propsAfter */
+export interface LayerPropsSnapshot {
+  name?: string;
+  blendMode?: string;
+  opacity?: number;
+  isVisible?: boolean;
+  clipToBelow?: boolean;
+  alphaLocked?: boolean;
+}
+
 export interface TileCoord {
   col: number;
   row: number;
@@ -91,6 +101,9 @@ export interface ScopedUndoOp {
   /** Layer meta (text source) before / after the op: undo of a text edit restores the editable text too */
   metaBefore?: any;
   metaAfter?: any;
+  /** Layer properties (blend mode, opacity, …) before / after the op: undo / redo puts them back */
+  propsBefore?: LayerPropsSnapshot;
+  propsAfter?: LayerPropsSnapshot;
   /** The op made this layer (a new text layer): undo deletes it, redo makes it again */
   layerCreated?: { model: any };
   /** The op removed this layer (merged down or deleted): undo brings it back with its pixels, mask and vectors, redo removes it again */

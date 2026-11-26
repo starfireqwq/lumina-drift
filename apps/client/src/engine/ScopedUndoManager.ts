@@ -37,6 +37,7 @@ export class ScopedUndoManager {
   private foreignTiles = new WeakMap<ScopedUndoOp, Map<string, ForeignTileEdit[]>>();
   private originalTiles = new WeakMap<ScopedUndoOp, Map<string, { before: TileData; after: TileData }>>();
   private maxStackSize: number;
+  private activeGroup: { id: string; depth: number } | null = null;
 
   constructor(maxStackSize: number = ONLINE_UNDO_LIMIT) {
     this.maxStackSize = maxStackSize;
@@ -47,7 +48,41 @@ export class ScopedUndoManager {
     this.trimStacks();
   }
 
+  public beginGroup(groupId: string): void {
+    if (this.activeGroup) {
+      this.activeGroup.depth++;
+    } else {
+      this.activeGroup = { id: groupId, depth: 1 };
+    }
+  }
+
+  public endGroup(): void {
+    if (this.activeGroup && --this.activeGroup.depth === 0) this.activeGroup = null;
+  }
+
+  public getActiveGroup(): string | null {
+    return this.activeGroup?.id ?? null;
+  }
+
+  /** Counts applied ops available to undo. */
+  public countGroupOps(groupId: string): number {
+    return this.undoStack.reduce((count, op) => count + Number(op.groupId === groupId), 0);
+  }
+
+  public getLatestUndoGroup(userId?: string): string | undefined {
+    for (let i = this.undoStack.length - 1; i >= 0; i--) {
+      const op = this.undoStack[i];
+      if (userId === undefined || op.userId === userId) return op.groupId;
+    }
+    return undefined;
+  }
+
+  public discardRedoGroup(groupId: string): void {
+    this.redoStack = this.redoStack.filter((op) => op.groupId !== groupId);
+  }
+
   public push(op: ScopedUndoOp) {
+    if (this.activeGroup) op.groupId = this.activeGroup.id;
     this.undoStack.push(op);
     this.trimStacks();
     // Any new action clears the redo stack
@@ -220,7 +255,8 @@ export class ScopedUndoManager {
     to: ScopedUndoOp[],
     label: 'ScopedUndo' | 'ScopedRedo',
     userId?: string,
-    checkPermission?: (layerId: string, op?: ScopedUndoOp) => boolean
+    checkPermission?: (layerId: string, op: ScopedUndoOp, group: readonly ScopedUndoOp[]) => boolean,
+    requiredGroupId?: string,
   ): ScopedUndoOp[] {
     for (let i = from.length - 1; i >= 0; i--) {
       const op = from[i];
@@ -233,6 +269,7 @@ export class ScopedUndoManager {
         }
         continue;
       }
+      if (requiredGroupId !== undefined && gid !== requiredGroupId) return [];
 
       let start = i;
       if (gid) {
@@ -243,9 +280,9 @@ export class ScopedUndoManager {
 
       let denied: ScopedUndoOp | undefined;
       if (checkPermission) {
-        for (let k = start; k <= i; k++) {
-          const item = from[k];
-          if (item.opType !== 'SELECTION' && !checkPermission(item.layerId, item)) {
+        const group = from.slice(start, i + 1);
+        for (const item of group) {
+          if (item.opType !== 'SELECTION' && !checkPermission(item.layerId, item, group)) {
             denied = item;
             break;
           }
@@ -253,6 +290,7 @@ export class ScopedUndoManager {
       }
       if (denied) {
         console.warn(`[${label}] User does not have permission on layer ${denied.layerId}`);
+        if (requiredGroupId !== undefined) return [];
         i = start;
         continue;
       }
@@ -271,9 +309,10 @@ export class ScopedUndoManager {
    */
   public undoGroup(
     userId?: string,
-    checkPermission?: (layerId: string, op?: ScopedUndoOp) => boolean
+    checkPermission?: (layerId: string, op: ScopedUndoOp, group: readonly ScopedUndoOp[]) => boolean,
+    requiredGroupId?: string,
   ): ScopedUndoOp[] {
-    return this.popGroup(this.undoStack, this.redoStack, 'ScopedUndo', userId, checkPermission);
+    return this.popGroup(this.undoStack, this.redoStack, 'ScopedUndo', userId, checkPermission, requiredGroupId);
   }
 
   /**
