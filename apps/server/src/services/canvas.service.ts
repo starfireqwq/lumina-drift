@@ -17,6 +17,7 @@ import {
   CreateCanvasDto,
   DEFAULT_TILE_SIZE,
   getCanvasRoleCapabilities,
+  normalizeHexColor,
   ServerRole,
   UpdateCanvasDto,
 } from '@atelier/shared';
@@ -197,7 +198,11 @@ export async function updateCanvas(
   };
 
   if (dto.title !== undefined) updates.title = dto.title.trim();
-  if (dto.bgColor !== undefined) updates.bgColor = dto.bgColor;
+  if (dto.bgColor !== undefined) {
+    const bgColor = normalizeHexColor(dto.bgColor);
+    if (!bgColor) throw new Error('背景色格式無效');
+    updates.bgColor = bgColor;
+  }
   if (dto.accessMode !== undefined) updates.accessMode = dto.accessMode;
   if (dto.roomPassword !== undefined) {
     if (current.group) throw new Error('組內畫布共用畫布組的密碼');

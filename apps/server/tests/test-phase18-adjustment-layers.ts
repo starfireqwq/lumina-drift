@@ -137,6 +137,41 @@ async function runTest() {
     assert.equal(rasterPatch.data.layer.layerType, 'raster');
     assert.deepEqual(rasterPatch.data.layer.meta, { keyframes: [] });
 
+    const rasterUrl = `${url}/${raster.data.layer.id}`;
+    const colors = { paletteColor: '#AABBCC', layerColor: { enabled: true, mainColor: '#112233', subColor: '#DDEEFF' } };
+    const colorPatch = await api(alice, 'PATCH', rasterUrl, {
+      meta: { paletteColor: ' #abc ', layerColor: { enabled: true, mainColor: '#123', subColor: '#def' } },
+    });
+    assert.equal(colorPatch.status, 200);
+    assert.deepEqual(colorPatch.data.layer.meta, colors);
+    for (const [invalid, error] of [
+      [{ paletteColor: '#xyz' }, '圖層標籤色格式無效'],
+      [{ layerColor: { enabled: true, mainColor: '#1234' } }, '圖層顯示顏色格式無效'],
+      [{ layerColor: { enabled: true, mainColor: '#123', subColor: '#xyz' } }, '圖層顯示顏色格式無效'],
+    ] as const) {
+      const rejected = await api(alice, 'PATCH', rasterUrl, { meta: invalid });
+      assert.equal(rejected.status, 400);
+      assert.deepEqual(rejected.data, { error });
+    }
+    assert.deepEqual((await getLayers()).find((layer) => layer.id === raster.data.layer.id)?.meta, colors);
+    const cleared = await api(alice, 'PATCH', rasterUrl, { meta: { paletteColor: '', layerColor: null } });
+    assert.equal(cleared.status, 200);
+    assert.deepEqual(cleared.data.layer.meta, {});
+
+    const canvasUrl = `/api/canvases/${canvasId}`;
+    const [canvasPatch, canvasEvent] = await Promise.all([
+      api(alice, 'PATCH', canvasUrl, { bgColor: ' #a3d ' }),
+      nextEvent(sb, 'canvas_updated'),
+    ]);
+    assert.equal(canvasPatch.status, 200);
+    const { title, bgColor, accessMode, updatedAt, ownerId } = canvasPatch.data.canvas;
+    assert.equal(bgColor, '#AA33DD');
+    assert.deepEqual(canvasEvent, { canvasId, title, bgColor, accessMode, updatedAt, byUser: ownerId });
+    const badBackground = await api(alice, 'PATCH', canvasUrl, { bgColor: 'transparent' });
+    assert.equal(badBackground.status, 400);
+    assert.deepEqual(badBackground.data, { error: '背景色格式無效' });
+    assert.equal((await api(alice, 'GET', canvasUrl)).data.canvas.bgColor, bgColor);
+
     const reason = '調整圖層沒有像素，無法直接繪製';
     const pixels = Uint8Array.of(255, 255, 255, 255);
     const tile = { col: 0, row: 0, width: 1, height: 1, compression: 'raw' };
@@ -162,10 +197,11 @@ async function runTest() {
     sa.emit('op_commit', { canvasId, layerId: adjustmentId, opType: 'LAYER_OP', payload: { name: 'HSL' } });
     assert.equal((await nonPixel).opType, 'LAYER_OP');
 
-    const mask = await api(alice, 'POST', url, { name: 'Mask', layerType: 'mask', parentId: adjustmentId });
+    const mask = await api(alice, 'POST', url, { name: 'Mask', layerType: 'mask', parentId: adjustmentId, meta: colors });
     assert.equal(mask.status, 201);
     const maskId = mask.data.layer.id;
     assert.equal(mask.data.layer.parentId, adjustmentId);
+    assert.deepEqual(mask.data.layer.meta, { paletteColor: colors.paletteColor });
     assert.equal((await api(alice, 'POST', `${url}/${maskId}/tiles`, tileBody)).status, 201);
     assert.equal((await api(alice, 'DELETE', adjustmentUrl)).status, 200);
     assert.ok(!(await getLayers()).some((layer) => layer.id === adjustmentId || layer.id === maskId));

@@ -175,6 +175,7 @@ export const canvasRoutes: FastifyPluginAsync = async (fastify) => {
 
       try {
         const updated = await updateCanvas(id, request.body || {});
+        fastify.roomManager.broadcastCanvasUpdated(updated, user.id);
         return reply.send({ canvas: toPublic(updated) });
       } catch (err: any) {
         return reply.code(400).send({ error: err.message });

@@ -8,6 +8,7 @@ import {
   AtelierPacket,
   calculatePainterLevel,
   canUserPerformLayerAction,
+  CanvasModel,
   CanvasRole,
   CanvasSticker,
   CursorPacket,
@@ -1422,6 +1423,17 @@ export class RealtimeRoomManager {
 
   public broadcastLayerUpdated(layer: LayerModel, action: 'create' | 'update', byUser: string) {
     this.io.to(`canvas_${layer.canvasId}`).emit('layer_updated', { canvasId: layer.canvasId, layer, action, byUser });
+  }
+
+  public broadcastCanvasUpdated(canvas: Pick<CanvasModel, 'id' | 'title' | 'bgColor' | 'accessMode' | 'updatedAt'>, byUser: string) {
+    this.io.to(`canvas_${canvas.id}`).emit('canvas_updated', {
+      canvasId: canvas.id,
+      title: canvas.title,
+      bgColor: canvas.bgColor,
+      accessMode: canvas.accessMode,
+      updatedAt: canvas.updatedAt,
+      byUser,
+    });
   }
 
   /** Tells everyone in the room (the resizer's other tabs too) to rebuild the canvas at its new size */
