@@ -14,6 +14,7 @@
 | :--- | :---: | :--- | :---: | :---: | :---: | :--- |
 | **Phase 1** | **P0-A** | CSP 圖層／資料夾面板標籤色、草稿染色與「用紙」底色系統（單機完整＋多人雙軌） | `v1.5.0-alpha.1` | 單聊天室 | `已完成` | 2026-11-27 / `4f91d70`, `336ad90` |
 | **Phase 2** | **P0-B** | 尺規系統 v2（集中線／放射狀尺規、曲線／貝茲特殊尺規、圖層綁定尺規與透視空間網格） | `v1.5.0-alpha.2` | 單聊天室 或 `/teamwork` | `已完成` | 2026-11-27 / `e5e0ce5`, `292f54d` |
+| **Phase 2.5** | **工作區增強** | 懸浮視窗可伸縮圖標小球／膠囊 Dock（單視窗縮球、多視窗自動拉長膠囊、橫直切換、點擊展開切換、拖出拆球與磁吸合併） | `v1.5.0-alpha.3` | 單聊天室 | `已完成` | 2026-11-27 / `1eb83fd`, `112e793` |
 | **Phase 3** | **P0-C** | 筆刷引擎 v3（雙筆刷、色彩動態、濕邊／顏料混色、多筆尖輪播與 `.sut`/`.brushset` 深度還原） | `v1.5.0-beta.1` | `/teamwork` | `待啟動` | — |
 | **Phase 4** | **P1-A** | 非破壞性圖層樣式（Layer Effects：邊界／水彩邊界／陰影／發光）＋快速遮色片（Quick Mask）與進階色域選取 | `v1.5.0-beta.2` | `/teamwork` 或 `/swarm` | `待啟動` | — |
 | **Phase 5** | **P1-B** | 多人繪茶 2.0（跟隨繪師視角、分格認領／接龍格線、房間共用色票盤與參考圖同步） | `v1.5.0-rc.1` | `/teamwork` | `待啟動` | — |
@@ -114,7 +115,38 @@
   - `ui-logic.check.ts`：通過（含 `apps/client/scripts/v15-phase2-rulers.checks.ts` 引擎與圖層綁定／唯讀／轉綁斷言）。
   - `pnpm --filter @atelier/client build:electron`：通過。
   - 隔離式 Electron 煙霧測試 `node apps/client/scripts/v15-phase2-rulers-electron-smoke.check.cjs`：通過（`0 console errors, 0 page errors`；實測單機集中線／曲線增節點與吸附／2D 透視 XY·XZ·YZ 網格／CSP 圖層綁定與範圍切換＋徽章啟停，以及雙人房間圖層尺規即時 Socket.IO 同步）。
-- **下一階段接續點**：Phase 3（P0-C：筆刷引擎 v3——雙筆刷、色彩動態、濕邊／顏料混色與 `.sut`/`.brushset` 深度映射）；另使用者提出「懸浮視窗／群組收折為可伸縮橫／直式圖標小球（膠囊 Dock）」新構想，待使用者確認是否穿插於 Phase 3 之前實作。
+- **下一階段接續點**：已穿插完成「Phase 2.5 工作區增強｜懸浮視窗可伸縮圖標小球／膠囊 Dock」，後續接續 Phase 3（P0-C：筆刷引擎 v3）。
+
+---
+
+### Phase 2.5（工作區增強）：懸浮視窗可伸縮圖標小球／膠囊 Dock
+> **建議執行模式**：單聊天室
+> **目標**：在不破壞既有左右下停靠欄與懸浮分頁的前提下，讓懸浮視窗與懸浮群組能一鍵收折成不遮擋畫布的圓形圖標小球或自動拉長膠囊，並支援橫／直式切換、拖曳定位、單圖標拆球與磁吸合併。
+
+#### 任務清單
+- [x] **2.5.1 狀態擴充與 v4→v5 平滑遷移（`dockStore.ts`）**
+  - `DockLayoutState` 新增群組層級 `floatGroups: Record<string, FloatGroupState>`（含 `minimized`、`orientation: 'horizontal' | 'vertical'`、`pillPos`），版本升至 `v5` 並支援 `v4 → v5` 平滑遷移不遺失既有停靠與懸浮設定。
+  - 新增 `minimizeFloatGroup`、`expandFloatGroup`、`setFloatGroupOrientation`、`toggleFloatGroupOrientation`、`setFloatGroupPillPos`、`detachToPill`、`mergePanelsInto` 與 `getFloatGroupState`，並確保 `activate`/`show`/`toggle`/`dockAt` 與拆出群組主分頁時狀態一致、不殘留髒資料。
+- [x] **2.5.2 收折、展開、橫直切換、拆球與磁吸合併互動（`DockSystem.tsx`、`index.css`）**
+  - 單視窗與多視窗懸浮標題列及浮動選單新增「縮小成小球」按鈕（停靠欄面板不受影響）。
+  - 單視窗收折為圓形小球，多視窗分組依成員數自動拉長為圓角膠囊，支援橫式／直式一鍵切換、視口內自動 clamp 拖曳定位，以及點擊任一圖標展開並切換顯示對應分頁。
+  - 支援從多視窗膠囊拖出單一圖標到空白處獨立成新小球，支援小球／膠囊／單圖標拖曳至另一小球／膠囊（12px 磁吸半徑）自動合併拉長，並維持與展開懸浮視窗（合併分頁）及左／右／下停靠欄的 DnD 完整互通。
+- [x] **2.5.3 專屬面板圖標、四語系與測試驗證**
+  - 新增 `apps/client/src/components/workspace/panelIcons.tsx`，為 11 個面板提供互不重複的專屬 Lucide 圖標與四語系標題輔助，並同步整合至 `CanvasWorkspace.tsx`。
+  - 補齊 `zh-TW`、`zh-CN`、`en-US`、`ja-JP` 四語系 `dock` 命名空間（各新增 50 個鍵值，總計 2358 keys 100% 齊全），並完成單元測試與隔離式 Electron 煙霧測試。
+
+#### 交接紀錄
+- **完成日期**：2026-11-27
+- **相關提交**：
+  - `1eb83fd`：`feat(dock): add floating pill group state, v4->v5 migration, panel icons, and locales`
+  - `112e793`：`feat(client): add collapsible floating icon pills, capsule orientation toggle, and magnetic merge/detach DnD`
+- **實際驗證結果**：
+  - `i18n-coverage.check.ts`：通過（四語系各 2358 keys 100% 齊全）。
+  - `ui-logic.check.ts`：通過（含 `apps/client/scripts/dock-pill.checks.ts` 的 v4→v5 遷移、縮球、橫直切換、拆球、磁吸合併、停靠清理、11 專屬圖標與四語系斷言）。
+  - `pnpm -r build`：通過（`@atelier/shared`、`@atelier/server`、`@atelier/client` 全數編譯成功）。
+  - `pnpm --filter @atelier/client build:electron`：通過。
+  - 隔離式 Electron 煙霧測試 `node apps/client/scripts/v15-dock-pills-electron-smoke.check.cjs`：通過（`0 console errors, 0 page errors`；實測 v4→v5 遷移、單視窗縮球與拖曳定位、小球磁吸互併拉長、橫直一鍵切換、點擊指定圖標展開切換分頁、多視窗膠囊拖出拆球、三球合併與膠囊圖標拖回右側停靠欄）。
+- **下一階段接續點**：Phase 3（P0-C：筆刷引擎 v3——雙筆刷、色彩動態、濕邊／顏料混色、多筆尖輪播與 `.sut`/`.brushset` 深度還原）。
 
 ---
 
