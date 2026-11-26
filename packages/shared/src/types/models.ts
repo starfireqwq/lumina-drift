@@ -55,6 +55,7 @@ import type { CameraFrameMeta } from '../animation/camera';
 import type { AudioTrackMeta } from '../animation/audio';
 import type { CanvasUnit } from '../canvas/canvas-units';
 import type { LayerColorMeta } from '../canvas/layer-color';
+import type { LayerEffectsMeta } from '../canvas/layer-effects';
 import type { LayerAdjustment } from '../adjustment/adjustment-layer';
 import type { LayerRulerMeta } from '../ruler/layer-ruler';
 
@@ -70,6 +71,7 @@ export interface LayerMeta {
   originalAuthor?: string;
   paletteColor?: string | null;
   layerColor?: LayerColorMeta | null;
+  effects?: LayerEffectsMeta | null;
   ruler?: LayerRulerMeta | null;
   /**
    * On a group: it is a CSP-style animation folder, each child layer one cel (bottom = first).
