@@ -36,7 +36,56 @@ export interface BrushDynamicsConfig {
 
 export type BrushMixMode = 'blend' | 'smudge' | 'dilute';
 export type BrushTextureBlendMode = 'subtract' | 'multiply' | 'overlay';
-export type DualBrushBlendMode = 'multiply' | 'subtract' | 'darken';
+export type DualBrushBlendMode = 'multiply' | 'subtract' | 'darken' | 'screen' | 'overlay';
+export type DualTipShape = 'same' | 'round' | 'soft' | 'speckle' | 'bristle' | 'square' | 'custom';
+export type BrushTipPlayMode = 'single' | 'sequential' | 'random' | 'randomNoRepeat';
+export type ColorDynamicsScope = 'perDab' | 'perStroke';
+
+export interface BrushColorDynamicsConfig {
+  scope?: ColorDynamicsScope;
+  hueJitter?: number;
+  saturationJitter?: number;
+  lightnessJitter?: number;
+  huePressure?: number;
+  saturationPressure?: number;
+  lightnessPressure?: number;
+  hueGradient?: number;
+  saturationGradient?: number;
+  lightnessGradient?: number;
+  gradientLength?: number;
+  fgBgMix?: number;
+  fgBgGradient?: boolean;
+}
+
+interface LegacyColorDynamics {
+  hueJitter?: number;
+  satJitter?: number;
+  valJitter?: number;
+  fgBgMix?: number;
+}
+
+interface BrushRgb {
+  r: number;
+  g: number;
+  b: number;
+}
+
+interface BrushColorDynamicsInput {
+  pressure: number;
+  strokeProgress: number;
+  randH: number;
+  randS: number;
+  randL: number;
+  randMix: number;
+  strokeRandH: number;
+  strokeRandS: number;
+  strokeRandL: number;
+  strokeRandMix: number;
+  fgBgChannel?: BrushDynamicChannel;
+  tilt?: number;
+  velocity?: number;
+  mixColor?: (a: BrushRgb, b: BrushRgb, t: number) => BrushRgb;
+}
 
 export interface BrushDynamicInput {
   /** Curve-mapped pen pressure (0..1) */
@@ -50,6 +99,162 @@ export interface BrushDynamicInput {
 }
 
 const clamp01 = (v: number): number => (Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0);
+const clamp = (v: number, min: number, max: number): number => Math.max(min, Math.min(max, v));
+const finiteOr = (v: number | undefined, fallback: number): number =>
+  typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+
+const colorJitterKeys = ['hueJitter', 'saturationJitter', 'lightnessJitter', 'fgBgMix'] as const;
+const colorModulationKeys = [
+  'huePressure', 'saturationPressure', 'lightnessPressure',
+  'hueGradient', 'saturationGradient', 'lightnessGradient',
+] as const;
+
+export function normalizeColorDynamics(cfg?: BrushColorDynamicsConfig | null): BrushColorDynamicsConfig | undefined {
+  if (!cfg || typeof cfg !== 'object') return undefined;
+  const out: BrushColorDynamicsConfig = {};
+  if (cfg.scope === 'perDab' || cfg.scope === 'perStroke') out.scope = cfg.scope;
+  if (typeof cfg.fgBgGradient === 'boolean') out.fgBgGradient = cfg.fgBgGradient;
+
+  for (const key of colorJitterKeys) {
+    const value = cfg[key];
+    if (typeof value === 'number' && Number.isFinite(value)) out[key] = clamp01(value);
+  }
+  for (const key of colorModulationKeys) {
+    const value = cfg[key];
+    if (typeof value === 'number' && Number.isFinite(value)) out[key] = clamp(value, -1, 1);
+  }
+  const length = cfg.gradientLength;
+  if (typeof length === 'number' && Number.isFinite(length)) {
+    out.gradientLength = clamp(length, 50, 4000);
+  } else if (out.hueGradient || out.saturationGradient || out.lightnessGradient || out.fgBgGradient) {
+    out.gradientLength = 400;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+export function hasActiveColorDynamics(cfg?: BrushColorDynamicsConfig | null, legacy?: LegacyColorDynamics): boolean {
+  return clamp01(cfg?.hueJitter ?? legacy?.hueJitter ?? 0) > 0
+    || clamp01(cfg?.saturationJitter ?? legacy?.satJitter ?? 0) > 0
+    || clamp01(cfg?.lightnessJitter ?? legacy?.valJitter ?? 0) > 0
+    || clamp01(cfg?.fgBgMix ?? legacy?.fgBgMix ?? 0) > 0
+    || cfg?.fgBgGradient === true
+    || colorModulationKeys.some((key) => finiteOr(cfg?.[key], 0) !== 0);
+}
+
+export function rgbToHsl(r: number, g: number, b: number): { h: number; s: number; l: number } {
+  const red = clamp01(r / 255);
+  const green = clamp01(g / 255);
+  const blue = clamp01(b / 255);
+  const max = Math.max(red, green, blue);
+  const min = Math.min(red, green, blue);
+  const chroma = max - min;
+  const l = (max + min) / 2;
+  if (chroma === 0) return { h: 0, s: 0, l };
+
+  let hue;
+  if (max === red) hue = (green - blue) / chroma;
+  else if (max === green) hue = (blue - red) / chroma + 2;
+  else hue = (red - green) / chroma + 4;
+  const s = clamp01(chroma / (1 - Math.abs(2 * l - 1)));
+  return { h: (hue * 60 + 360) % 360, s, l };
+}
+
+export function hslToRgb(h: number, s: number, l: number): BrushRgb {
+  const hue = ((finiteOr(h, 0) % 360) + 360) % 360;
+  const lightness = clamp01(l);
+  const amplitude = clamp01(s) * Math.min(lightness, 1 - lightness);
+  const channel = (offset: number) => {
+    const k = (offset + hue / 30) % 12;
+    return Math.round(255 * (lightness - amplitude * clamp(Math.min(k - 3, 9 - k), -1, 1)));
+  };
+  return { r: channel(0), g: channel(8), b: channel(4) };
+}
+
+export function selectBrushTipIndex(
+  tipCount: number, mode: BrushTipPlayMode, dabIndex: number, prevIndex: number, rand: number,
+): number {
+  if (tipCount <= 1 || mode === 'single') return 0;
+  if (mode === 'sequential') return ((dabIndex % tipCount) + tipCount) % tipCount;
+
+  if (mode === 'randomNoRepeat' && Number.isInteger(prevIndex) && prevIndex >= 0 && prevIndex < tipCount) {
+    const index = Math.min(tipCount - 2, Math.floor(clamp01(rand) * (tipCount - 1)));
+    return index >= prevIndex ? index + 1 : index;
+  }
+  return Math.min(tipCount - 1, Math.floor(clamp01(rand) * tipCount));
+}
+
+export function evaluateColorDynamics(
+  baseRgb: BrushRgb,
+  secondaryRgb: BrushRgb | null,
+  cfg: BrushColorDynamicsConfig | undefined,
+  input: BrushColorDynamicsInput,
+  legacy?: LegacyColorDynamics,
+): BrushRgb {
+  const perStroke = cfg?.scope === 'perStroke';
+  const pressure = clamp01(input.pressure);
+  const progress = clamp01(input.strokeProgress);
+  let rgb = baseRgb;
+
+  if (secondaryRgb) {
+    const amount = clamp01(cfg?.fgBgMix ?? legacy?.fgBgMix ?? 0);
+    const gradient = cfg?.fgBgGradient === true;
+    const strength = gradient ? progress * (amount || 1) : amount;
+    const mixInput = {
+      pressure,
+      tilt: input.tilt ?? 0,
+      velocity: input.velocity ?? 0,
+      rand: perStroke ? input.strokeRandMix : input.randMix,
+    };
+    const ratio = gradient && !hasActiveDynamicSource(input.fgBgChannel)
+      ? strength
+      : evaluateFgBgMixRatio(strength, input.fgBgChannel, mixInput);
+    if (ratio > 0) {
+      rgb = input.mixColor ? input.mixColor(baseRgb, secondaryRgb, ratio) : {
+        r: baseRgb.r + (secondaryRgb.r - baseRgb.r) * ratio,
+        g: baseRgb.g + (secondaryRgb.g - baseRgb.g) * ratio,
+        b: baseRgb.b + (secondaryRgb.b - baseRgb.b) * ratio,
+      };
+    }
+  }
+
+  const pressureOffset = (pressure - 0.5) * 2;
+  const offset = (rand: number, jitter: number, pressureMod?: number, gradientMod?: number): number =>
+    (clamp01(rand) * 2 - 1) * clamp01(jitter)
+    + pressureOffset * clamp(finiteOr(pressureMod, 0), -1, 1)
+    + progress * clamp(finiteOr(gradientMod, 0), -1, 1);
+  const hue = offset(perStroke ? input.strokeRandH : input.randH,
+    cfg?.hueJitter ?? legacy?.hueJitter ?? 0, cfg?.huePressure, cfg?.hueGradient);
+  const saturation = offset(perStroke ? input.strokeRandS : input.randS,
+    cfg?.saturationJitter ?? legacy?.satJitter ?? 0, cfg?.saturationPressure, cfg?.saturationGradient);
+  const lightness = offset(perStroke ? input.strokeRandL : input.randL,
+    cfg?.lightnessJitter ?? legacy?.valJitter ?? 0, cfg?.lightnessPressure, cfg?.lightnessGradient);
+
+  if (hue === 0 && saturation === 0 && lightness === 0) {
+    return {
+      r: Math.round(clamp01(rgb.r / 255) * 255),
+      g: Math.round(clamp01(rgb.g / 255) * 255),
+      b: Math.round(clamp01(rgb.b / 255) * 255),
+    };
+  }
+  const { h, s, l } = rgbToHsl(rgb.r, rgb.g, rgb.b);
+  return hslToRgb(h + hue * 180, s + saturation, l + lightness * 0.5);
+}
+
+export function computeWetEdgeParams(
+  strength?: number, width?: number, darkness?: number, baseRgb?: BrushRgb,
+): { innerScale: number; innerEraseAlpha: number; rimAlpha: number; rimRgb: BrushRgb } {
+  const edgeStrength = clamp01(finiteOr(strength, 0.55));
+  const edgeWidth = clamp(finiteOr(width, 0.22), 0.05, 0.5);
+  const edgeDarkness = clamp01(finiteOr(darkness, 0.35));
+  const { h, s, l } = baseRgb ? rgbToHsl(baseRgb.r, baseRgb.g, baseRgb.b) : { h: 0, s: 0, l: 0 };
+
+  return {
+    innerScale: clamp(1 - edgeWidth * 1.1, 0.42, 0.94),
+    innerEraseAlpha: clamp(edgeStrength * 0.58, 0, 0.65),
+    rimAlpha: clamp(edgeStrength * edgeDarkness * 0.65, 0, 0.6),
+    rimRgb: hslToRgb(h, s + edgeDarkness * 0.14, l - edgeDarkness * 0.26),
+  };
+}
 
 /**
  * Normalizes and clamps a single dynamic channel so untrusted/imported presets stay in safe bounds.

@@ -4,11 +4,15 @@
  */
 
 import { MIN_BRUSH_SPACING } from './brush-spacing';
+import type { PigmentBlendModel } from '../color/pigment-blend';
 import type {
+  BrushColorDynamicsConfig,
   BrushDynamicsConfig,
   BrushMixMode,
   BrushTextureBlendMode,
+  BrushTipPlayMode,
   DualBrushBlendMode,
+  DualTipShape,
 } from './brush-dynamics';
 
 export interface ParsedBrushTip {
@@ -39,15 +43,26 @@ export interface ParsedBrushTip {
   textureDataUrl?: string | null;
   dualBrush?: boolean;
   dualSize?: number;
+  dualSpacing?: number;
   dualScatter?: number;
   dualTipDataUrl?: string | null;
   dualBlendMode?: DualBrushBlendMode;
+  dualTipShape?: DualTipShape;
+  tipUrls?: string[];
+  tipPlayMode?: BrushTipPlayMode;
   hueJitter?: number;
   satJitter?: number;
   valJitter?: number;
   fgBgMix?: number;
+  colorDynamics?: BrushColorDynamicsConfig;
   tiltSize?: number;
   wetEdges?: boolean;
+  wetEdgeStrength?: number;
+  wetEdgeWidth?: number;
+  wetEdgeDarkness?: number;
+  pigmentBlendMode?: PigmentBlendModel;
+  pigmentStrength?: number;
+  chargeDepletion?: number;
   dynamics?: BrushDynamicsConfig;
   sourceFormat?: 'abr' | 'sut' | 'procreate';
 }

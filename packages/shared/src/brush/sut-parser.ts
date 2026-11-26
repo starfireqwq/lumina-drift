@@ -7,15 +7,24 @@
 
 import type { ParsedBrushTip } from './abr-parser';
 import { MIN_BRUSH_SPACING } from './brush-spacing';
+import type { PigmentBlendModel } from '../color/pigment-blend';
+import { normalizeColorDynamics } from './brush-dynamics';
 import type {
   BrushDynamicChannel,
   BrushDynamicsConfig,
-  BrushMixMode,
   BrushTextureBlendMode,
+  BrushTipPlayMode,
+  DualBrushBlendMode,
+  DualTipShape,
 } from './brush-dynamics';
 import { isSqlite3Buffer, SqliteReader, type SqliteRow, type SqliteValue } from './sqlite-reader';
 
 const clamp01 = (v: number): number => (Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0);
+const percentOrRatio = (value: number): number => Math.abs(value) > 1 ? value / 100 : value;
+const dualBlendModes: readonly DualBrushBlendMode[] = ['multiply', 'darken', 'subtract', 'screen', 'overlay'];
+const dualTipShapes: readonly DualTipShape[] = ['same', 'round', 'soft', 'speckle', 'bristle', 'square', 'custom'];
+const tipPlayModes: readonly BrushTipPlayMode[] = ['single', 'sequential', 'sequential', 'random', 'randomNoRepeat'];
+const pigmentBlendModes: readonly PigmentBlendModel[] = ['rgb', 'oklab', 'subtractive'];
 
 interface EmbeddedImage {
   width: number;
@@ -130,24 +139,29 @@ export class SutParser {
     const variants = reader.readTable('Variant');
     const materials = reader.readTable('MaterialFile');
 
-    // Collect embedded images from MaterialFile rows first (preserving tip vs texture distinction)
+    // Classify MaterialFile images before falling back to a scan of the whole database.
     const tipImages: EmbeddedImage[] = [];
+    const dualTipImages: EmbeddedImage[] = [];
     const textureImages: EmbeddedImage[] = [];
     for (const mat of materials) {
-      const pathStr = String(this.pickColumn(mat, ['OriginalPath', 'CatalogPath', 'FilePath']) ?? '').toLowerCase();
+      const pathStr = ['OriginalPath', 'CatalogPath', 'FilePath']
+        .map((key) => this.pickString(mat, [key]) ?? '').join('/').toLowerCase();
+      const isDual = /dual|second|2nd|subtip|[雙双][筆笔]|[雙双]重|第二[筆笔]尖|副[筆笔]尖|デュアル|サブブラシ/.test(pathStr);
       const isTexture = /texture|paper|grain|紙|テクスチャ/.test(pathStr);
       const fileData = this.pickColumn(mat, ['FileData', 'Data', 'ImageData']);
       if (fileData instanceof Uint8Array && fileData.length > 16) {
         const imgs = this.scanEmbeddedImages(fileData, isTexture);
         for (const img of imgs) {
-          if (img.isTextureHint) textureImages.push(img);
+          if (isDual) dualTipImages.push(img);
+          else if (img.isTextureHint) textureImages.push(img);
           else tipImages.push(img);
         }
       }
     }
     // Fallback raw scan if MaterialFile stored images elsewhere in the SQLite file
     if (tipImages.length === 0) {
-      const rawImgs = this.scanEmbeddedImages(this.buffer, false);
+      const classifiedUrls = new Set([...dualTipImages, ...textureImages].map((img) => img.dataUrl));
+      const rawImgs = this.scanEmbeddedImages(this.buffer, false).filter((img) => !classifiedUrls.has(img.dataUrl));
       tipImages.push(...rawImgs);
     }
 
@@ -180,14 +194,30 @@ export class SutParser {
 
     const restored = primaryVariant ? this.mapVariantToProps(primaryVariant) : {};
     const textureDataUrl = textureImages[0]?.dataUrl ?? null;
+    const multiTipFlag = this.pickNumber(primaryVariant ?? undefined, ['BrushUseMultiTip', 'UseMultiTip', 'BrushMultiTip']);
+    const hasMultiTip = tipImages.length >= 2
+      && ((restored.tipPlayMode ?? 'single') !== 'single' || (multiTipFlag ?? 0) > 0);
+    if (hasMultiTip) {
+      restored.tipUrls = tipImages.map((img) => img.dataUrl);
+      restored.tipPlayMode ??= 'sequential';
+    }
+    const dualTip = dualTipImages[0] ?? (restored.dualBrush ? tipImages[1] : undefined);
+    if (dualTip) {
+      restored.dualTipDataUrl = dualTip.dataUrl;
+      if (restored.dualBrush !== false) {
+        restored.dualBrush = true;
+        restored.dualTipShape = 'custom';
+      }
+    }
 
     const results: ParsedBrushTip[] = [];
     if (tipImages.length > 0) {
-      for (let i = 0; i < tipImages.length; i++) {
+      const presetCount = hasMultiTip || restored.dualBrush ? 1 : tipImages.length;
+      for (let i = 0; i < presetCount; i++) {
         const img = tipImages[i];
         results.push({
           id: `sut_sqlite_tip_${i + 1}`,
-          name: tipImages.length === 1 ? toolName : `${toolName} #${i + 1}`,
+          name: presetCount === 1 ? toolName : `${toolName} #${i + 1}`,
           width: img.width,
           height: img.height,
           dataUrl: img.dataUrl,
@@ -273,6 +303,26 @@ export class SutParser {
     else if (rawAngleMode === 2 || rawAngleMode === 3) out.angleMode = 'pen';
     else if (rawAngleMode === 0) out.angleMode = 'fixed';
 
+    const useDual = this.pickNumber(row, ['BrushUseDualBrush', 'UseDualBrush', 'DualBrushEnable', 'BrushUse2ndBrush']);
+    if (useDual !== null) out.dualBrush = useDual > 0;
+    const dualBlend = this.pickNumber(row, ['BrushDualBrushBlendMode', 'DualBrushBlendMode', 'Brush2ndBlendMode']);
+    if (dualBlend !== null) out.dualBlendMode = dualBlendModes[dualBlend];
+    const dualSize = this.pickNumber(row, ['BrushDualSize', 'DualBrushSize', 'Brush2ndSize']);
+    if (dualSize !== null) {
+      const ratio = dualSize > 1 ? dualSize / (out.size ?? 32) : dualSize;
+      out.dualSize = Math.max(0.1, Math.min(1, ratio));
+    }
+    const dualSpacing = this.pickNumber(row, ['BrushDualInterval', 'BrushDualSpacing', 'Brush2ndInterval']);
+    if (dualSpacing !== null) out.dualSpacing = Math.max(0.05, Math.min(2, dualSpacing > 2 ? dualSpacing / 100 : dualSpacing));
+    const dualScatter = this.pickNumber(row, ['BrushDualScatter', 'BrushDualSprayDeviation', 'Brush2ndSprayDeviation']);
+    if (dualScatter !== null) out.dualScatter = Math.max(0, Math.min(2, dualScatter > 2 ? dualScatter / 100 : dualScatter));
+    const dualShape = this.pickColumn(row, ['BrushDualTipShape', 'DualBrushShape']);
+    if (typeof dualShape === 'number') out.dualTipShape = dualTipShapes[dualShape];
+    else if (typeof dualShape === 'string') out.dualTipShape = dualTipShapes.find((shape) => shape === dualShape.trim().toLowerCase());
+
+    const tipOrder = this.pickNumber(row, ['BrushPatternOrderType', 'BrushTipRepeatMethod', 'BrushStrokeOrder']);
+    if (tipOrder !== null) out.tipPlayMode = tipPlayModes[tipOrder];
+
     // Color Mixing / Amount of Paint / Color Stretch
     const mixFlag = this.pickNumber(row, ['BrushMixColor', 'BrushUseMixColor', 'BrushMixGroundColor']);
     const rawAmount = this.pickNumber(row, ['BrushAmountOfPaint']);
@@ -297,7 +347,23 @@ export class SutParser {
       } else {
         out.mixMode = 'blend';
       }
+      const pigmentMode = this.pickColumn(row, ['BrushPigmentMode', 'BrushMixColorMode']);
+      const pigmentModel = typeof pigmentMode === 'string' ? pigmentMode.trim().toLowerCase() : '';
+      out.pigmentBlendMode = (typeof pigmentMode === 'number'
+        ? pigmentBlendModes[pigmentMode]
+        : pigmentBlendModes.find((mode) => mode === pigmentModel)) ?? 'subtractive';
+      const pigmentStrength = this.pickNumber(row, ['BrushPigmentStrength', 'BrushPigmentMixStrength']);
+      out.pigmentStrength = pigmentStrength === null ? 0.85 : clamp01(percentOrRatio(pigmentStrength));
     }
+
+    const wetEdges = this.pickNumber(row, ['BrushWaterEdge', 'BrushUseWaterEdge', 'BrushWatercolorEdge']);
+    if (wetEdges !== null) out.wetEdges = wetEdges > 0;
+    const wetStrength = this.pickNumber(row, ['BrushWaterEdgeOpacity', 'BrushWaterEdgeStrength']);
+    if (wetStrength !== null) out.wetEdgeStrength = clamp01(percentOrRatio(wetStrength));
+    const wetWidth = this.pickNumber(row, ['BrushWaterEdgeRadius', 'BrushWaterEdgeWidth']);
+    if (wetWidth !== null) out.wetEdgeWidth = Math.max(0.05, Math.min(0.5, percentOrRatio(wetWidth)));
+    const wetDarkness = this.pickNumber(row, ['BrushWaterEdgeDarkness']);
+    if (wetDarkness !== null) out.wetEdgeDarkness = clamp01(percentOrRatio(wetDarkness));
 
     // Paper Texture
     const useTexture = this.pickNumber(row, ['BrushUseTexture', 'UseTexture']);
@@ -305,16 +371,22 @@ export class SutParser {
     const rawTexScale = this.pickNumber(row, ['BrushTextureScale', 'BrushTextureZoom', 'TextureScale']);
     const rawTexInvert = this.pickNumber(row, ['BrushTextureInvert', 'TextureInvert']);
     const rawTexMode = this.pickNumber(row, ['BrushTextureMode', 'TextureBlendMode']);
+    const texBrightness = this.pickNumber(row, ['BrushTextureBrightness']);
+    const texContrast = this.pickNumber(row, ['BrushTextureContrast']);
 
-    if ((useTexture !== null && useTexture > 0) || (rawTexDensity !== null && rawTexDensity > 0)) {
-      out.textureDensity = rawTexDensity !== null ? clamp01(rawTexDensity > 1 ? rawTexDensity / 100 : rawTexDensity) : 0.4;
+    if ((useTexture ?? 0) > 0 || (rawTexDensity ?? 0) > 0
+      || (useTexture === null && (texBrightness !== null || texContrast !== null))) {
+      const density = rawTexDensity === null ? 0.4 : clamp01(percentOrRatio(rawTexDensity));
+      const brightness = percentOrRatio(texBrightness ?? 0);
+      const contrast = percentOrRatio(texContrast ?? 0);
+      out.textureDensity = clamp01(density + (density - 0.5) * contrast + brightness);
       if (rawTexScale !== null && rawTexScale > 0) {
         out.textureScale = Math.max(0.5, Math.min(4, rawTexScale > 4 ? rawTexScale / 100 : rawTexScale));
       }
       if (rawTexInvert !== null) out.textureInvert = rawTexInvert !== 0;
-      const modeMap: Record<number, BrushTextureBlendMode> = { 0: 'multiply', 1: 'subtract', 2: 'overlay' };
-      if (rawTexMode !== null && modeMap[rawTexMode]) out.textureBlendMode = modeMap[rawTexMode];
     }
+    const textureModes: readonly BrushTextureBlendMode[] = ['multiply', 'subtract', 'overlay'];
+    if (rawTexMode !== null) out.textureBlendMode = textureModes[rawTexMode];
 
     // Spray / Scatter
     const useSpray = this.pickNumber(row, ['BrushSpray', 'BrushUseSpray', 'BrushUseScatter']);
@@ -336,6 +408,27 @@ export class SutParser {
       if (s !== null && s > 0) out.satJitter = clamp01(s > 1 ? s / 100 : s);
       if (v !== null && v > 0) out.valJitter = clamp01(v > 1 ? v / 100 : v);
       if (subMix !== null && subMix > 0) out.fgBgMix = clamp01(subMix > 1 ? subMix / 100 : subMix);
+
+      const colorUnit = this.pickNumber(row, ['BrushChangeColorUnit', 'BrushColorJitterUnit', 'BrushChangeColorPerStroke']);
+      const colorMod = (key: string) => {
+        const value = this.pickNumber(row, [key]);
+        return value === null ? undefined : percentOrRatio(value);
+      };
+      out.colorDynamics = normalizeColorDynamics({
+        scope: colorUnit === null ? undefined : colorUnit === 1 ? 'perStroke' : 'perDab',
+        hueJitter: out.hueJitter,
+        saturationJitter: out.satJitter,
+        lightnessJitter: out.valJitter,
+        fgBgMix: out.fgBgMix,
+        huePressure: colorMod('BrushHuePressure'),
+        saturationPressure: colorMod('BrushSaturationPressure'),
+        lightnessPressure: colorMod('BrushLuminancePressure'),
+        hueGradient: colorMod('BrushHueGradient'),
+        saturationGradient: colorMod('BrushSaturationGradient'),
+        lightnessGradient: colorMod('BrushLuminanceGradient'),
+        gradientLength: this.pickNumber(row, ['BrushColorGradientLength']) ?? undefined,
+      });
+      if (out.colorDynamics) out.colorDynamics.scope ??= 'perDab';
     }
 
     // Effector dynamic blobs
@@ -414,7 +507,7 @@ export class SutParser {
       ) {
         const pngStart = pos;
         let pngEnd = -1;
-        for (let i = pngStart + 8; i < len - 8; i++) {
+        for (let i = pngStart + 8; i <= len - 8; i++) {
           if (
             buf[i] === 0x49 &&
             buf[i + 1] === 0x45 &&
@@ -451,7 +544,7 @@ export class SutParser {
       if (buf[pos] === 0xff && buf[pos + 1] === 0xd8 && buf[pos + 2] === 0xff) {
         const jpgStart = pos;
         let jpgEnd = -1;
-        for (let j = jpgStart + 4; j < len - 2; j++) {
+        for (let j = jpgStart + 4; j <= len - 2; j++) {
           if (buf[j] === 0xff && buf[j + 1] === 0xd9) {
             jpgEnd = j + 2;
             break;

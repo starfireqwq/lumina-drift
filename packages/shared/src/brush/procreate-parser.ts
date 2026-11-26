@@ -4,7 +4,7 @@
  * Parses ZIP containers holding Procreate brush folders:
  * - brushset.plist (XML or binary plist with set name & ordered brush UUIDs)
  * - Brush.archive (Apple binary plist `bplist00` NSKeyedArchiver or XML plist)
- * - Shape.png (brush tip alpha/luminance image)
+ * - Shape.png, numbered shapes, and secondary shapes (brush tip alpha/luminance images)
  * - Grain.png (seamless paper/grain texture image)
  *
  * Works across Browser, Electron, and Node 18+ with zero external dependencies
@@ -13,7 +13,15 @@
 
 import { MIN_BRUSH_SPACING } from './brush-spacing';
 import type { ParsedBrushTip } from './abr-parser';
-import type { BrushDynamicsConfig } from './brush-dynamics';
+import {
+  normalizeColorDynamics,
+  type BrushDynamicsConfig,
+  type BrushTextureBlendMode,
+  type BrushTipPlayMode,
+  type DualBrushBlendMode,
+  type DualTipShape,
+} from './brush-dynamics';
+import type { PigmentBlendModel } from '../color/pigment-blend';
 
 export interface ParsedProcreateBrush extends ParsedBrushTip {
   setName?: string;
@@ -689,17 +697,57 @@ function str(obj: Record<string, unknown>, ...keys: string[]): string | undefine
   return undefined;
 }
 
+interface BrushFolderFiles {
+  archive?: Uint8Array;
+  shape?: Uint8Array;
+  grain?: Uint8Array;
+  dualShape?: Uint8Array;
+  extraShapes: Array<{ order: number; bytes: Uint8Array }>;
+}
+
+const dualShapeNames = new Set(['dualshape.png', 'secondaryshape.png', 'shape2.png']);
+const dualBlendModes: readonly DualBrushBlendMode[] = ['multiply', 'subtract', 'darken', 'screen', 'overlay'];
+const dualTipShapes: readonly DualTipShape[] = ['same', 'round', 'soft', 'speckle', 'bristle', 'square', 'custom'];
+const textureBlendModes: readonly BrushTextureBlendMode[] = ['multiply', 'subtract', 'overlay'];
+const pigmentBlendModes: readonly PigmentBlendModel[] = ['rgb', 'oklab', 'subtractive'];
+const shapePlayModes: readonly BrushTipPlayMode[] = ['single', 'sequential', 'random', 'randomNoRepeat'];
+
+function getEnumSetting<T extends string>(obj: Record<string, unknown>, values: readonly T[], ...keys: string[]): T | undefined {
+  for (const key of keys) {
+    const value = obj[key];
+    const label = typeof value === 'string' ? value.trim().toLowerCase() : undefined;
+    const match = typeof value === 'number' ? values[value] : values.find((option) => option.toLowerCase() === label);
+    if (match) return match;
+  }
+  return undefined;
+}
+
+function getShapePlayMode(obj: Record<string, unknown>): BrushTipPlayMode {
+  const mode = getEnumSetting(obj, shapePlayModes, 'shapePlayMode');
+  if (mode) return mode;
+  const random = bool(obj, 'shapeRandom');
+  if (random !== undefined) return random ? 'random' : 'sequential';
+  if (Array.isArray(obj.shapeOrder) || obj.shapeOrder === 0) return 'sequential';
+  return getEnumSetting(obj, shapePlayModes, 'shapeOrder') ?? 'random';
+}
+
+function boundedNumber(obj: Record<string, unknown>, min: number, max: number, ...keys: string[]): number | undefined {
+  const value = num(obj, ...keys);
+  return value === undefined ? undefined : clamp(value, min, max);
+}
+
 async function mapSilicaBrushToParsed(
   id: string,
   fallbackName: string,
-  archiveBytes: Uint8Array | undefined,
-  shapeBytes: Uint8Array | undefined,
-  grainBytes: Uint8Array | undefined,
+  files: BrushFolderFiles,
   setName?: string,
 ): Promise<ParsedProcreateBrush> {
+  const { archive, grain, dualShape } = files;
+  const extraShapes = [...files.extraShapes].sort((a, b) => a.order - b.order).map(({ bytes }) => bytes);
+  const shapeBytes = files.shape ?? extraShapes.shift();
   let rawObj: Record<string, unknown> = {};
-  if (archiveBytes) {
-    const plist = parsePlist(archiveBytes);
+  if (archive) {
+    const plist = parsePlist(archive);
     const unarchived = unarchiveNSKeyed(plist);
     if (unarchived && typeof unarchived === 'object' && !Array.isArray(unarchived)) {
       rawObj = unarchived as Record<string, unknown>;
@@ -746,7 +794,15 @@ async function mapSilicaBrushToParsed(
   // Color mixing / wet edges
   const colorMixing = clamp(num(rawObj, 'wetMix', 'dynamicsMix', 'smudge') ?? 0, 0, 1);
   const paintAmount = clamp(num(rawObj, 'dynamicsLoad', 'charge') ?? 0.75, 0.05, 1);
-  const wetEdges = bool(rawObj, 'wetEdges', 'dynamicsWetEdges') ?? false;
+  const wetEdges = bool(rawObj, 'wetEdges', 'dynamicsWetEdges', 'burntEdges') ?? false;
+  const wetEdgeStrength = boundedNumber(rawObj, 0, 1, 'wetEdgesStrength', 'wetMixDilution');
+  const wetEdgeWidth = boundedNumber(rawObj, 0.05, 0.5, 'wetEdgesWidth', 'burntEdges');
+  const wetEdgeDarkness = boundedNumber(rawObj, 0, 1, 'wetEdgesDarkness');
+  const pigmentBlendMode = colorMixing > 0
+    ? getEnumSetting(rawObj, pigmentBlendModes, 'pigmentBlendMode') ?? 'subtractive' : undefined;
+  const pigmentStrength = colorMixing > 0 ? boundedNumber(rawObj, 0, 1, 'pigmentStrength') ?? 0.85 : undefined;
+  const colorStretch = colorMixing > 0 ? boundedNumber(rawObj, 0, 1, 'dynamicsPull', 'colorStretch') : undefined;
+  const chargeDepletion = colorMixing > 0 ? boundedNumber(rawObj, 0, 1, 'dynamicsDepletion', 'chargeDepletion') : undefined;
 
   // Dynamics
   const pressureSizeAmt = num(rawObj, 'dynamicsPressureSize', 'pressureSize');
@@ -777,20 +833,59 @@ async function mapSilicaBrushToParsed(
     },
   };
 
-  // Color jitter
-  const hueJitter = clamp(Math.abs(num(rawObj, 'dynamicsJitterHue', 'hueJitter') ?? 0), 0, 1);
-  const satJitter = clamp(Math.abs(num(rawObj, 'dynamicsJitterSaturation', 'saturationJitter') ?? 0), 0, 1);
-  const valJitter = clamp(Math.abs(num(rawObj, 'dynamicsJitterLightness', 'dynamicsJitterDarkness', 'lightnessJitter') ?? 0), 0, 1);
+  const jitter = (...keys: string[]): number | undefined => {
+    const value = num(rawObj, ...keys);
+    return value === undefined ? undefined : clamp(Math.abs(value), 0, 1);
+  };
+  const stampHue = jitter('dynamicsJitterHue', 'hueJitter');
+  const stampSaturation = jitter('dynamicsJitterSaturation', 'saturationJitter');
+  const stampLightness = jitter('dynamicsJitterLightness', 'dynamicsJitterDarkness', 'lightnessJitter');
+  const strokeHue = jitter('dynamicsStrokeJitterHue', 'colorDynamicsStrokeHue');
+  const strokeSaturation = jitter('dynamicsStrokeJitterSaturation', 'colorDynamicsStrokeSaturation');
+  const strokeLightness = jitter('dynamicsStrokeJitterLightness', 'colorDynamicsStrokeBrightness');
+  const perStroke = !!(strokeHue || strokeSaturation || strokeLightness) && !(stampHue || stampSaturation || stampLightness);
+  const fgBgMix = boundedNumber(rawObj, 0, 1, 'dynamicsJitterSecondaryColor', 'colorDynamicsSecondaryColor');
+  const colorDynamics = normalizeColorDynamics({
+    hueJitter: perStroke ? strokeHue : stampHue,
+    saturationJitter: perStroke ? strokeSaturation : stampSaturation,
+    lightnessJitter: perStroke ? strokeLightness : stampLightness,
+    huePressure: num(rawObj, 'colorDynamicsPressureHue', 'dynamicsPressureHue'),
+    saturationPressure: num(rawObj, 'colorDynamicsPressureSaturation', 'dynamicsPressureSaturation'),
+    lightnessPressure: num(rawObj, 'colorDynamicsPressureBrightness', 'dynamicsPressureLightness'),
+    hueGradient: num(rawObj, 'colorDynamicsGradientHue'),
+    saturationGradient: num(rawObj, 'colorDynamicsGradientSaturation'),
+    lightnessGradient: num(rawObj, 'colorDynamicsGradientLightness'),
+    fgBgMix,
+  });
+  if (colorDynamics) colorDynamics.scope = perStroke ? 'perStroke' : 'perDab';
+
+  const dualBrushKeys = ['bundledBrush', 'secondaryBrush', 'dualBrush'];
+  const dualBrush = !!dualShape || dualBrushKeys.some((key) => {
+    const value = rawObj[key];
+    return bool(rawObj, key) === true || (value !== null && typeof value === 'object' && !Array.isArray(value));
+  });
+  const dualBlendMode = dualBrush
+    ? getEnumSetting(rawObj, dualBlendModes, 'bundledBrushCombineMode', 'combineMode', 'dualBlendMode') ?? 'multiply'
+    : undefined;
+  const dualTipShape = dualShape
+    ? 'custom'
+    : getEnumSetting(rawObj, dualTipShapes, 'dualTipShape') ?? (dualBrush ? 'same' : undefined);
+  const dualTipDataUrl = dualShape
+    ? await convertProcreateShapeToTipDataUrl(dualShape, bool(rawObj, 'dualShapeInverted', 'secondaryShapeInverted') ?? shapeInverted)
+    : undefined;
 
   // Grain / paper texture
   let textureDataUrl: string | null = null;
   let textureDensity: number | undefined;
   let textureScale: number | undefined;
   let textureInvert: boolean | undefined;
-  if (grainBytes) {
-    textureDataUrl = pngBytesToDataUrl(grainBytes);
+  if (grain) {
+    textureDataUrl = pngBytesToDataUrl(grain);
     const rawDepth = num(rawObj, 'textureDepth', 'grainDepth', 'textureBrightness');
-    textureDensity = rawDepth !== undefined ? clamp(Math.abs(rawDepth), 0.1, 1) : 0.45;
+    const density = rawDepth !== undefined ? clamp(Math.abs(rawDepth), 0.1, 1) : 0.45;
+    const grainContrast = boundedNumber(rawObj, -1, 1, 'grainContrast') ?? 0;
+    const grainBrightness = boundedNumber(rawObj, -1, 1, 'grainBrightness') ?? 0;
+    textureDensity = clamp(density + (density - 0.5) * grainContrast + grainBrightness, 0, 1);
     const rawScale = num(rawObj, 'textureScale', 'textureZoom');
     textureScale = rawScale !== undefined ? clamp(rawScale, 0.1, 4) : 1;
     textureInvert = bool(rawObj, 'textureInverted') ?? false;
@@ -810,6 +905,9 @@ async function mapSilicaBrushToParsed(
     height = dims.height;
     tipDataUrl = await convertProcreateShapeToTipDataUrl(shapeBytes, shapeInverted);
   }
+  const tipUrls = tipDataUrl && extraShapes.length > 0
+    ? [tipDataUrl, ...await Promise.all(extraShapes.map((shape) => convertProcreateShapeToTipDataUrl(shape, shapeInverted)))]
+    : undefined;
 
   return {
     id,
@@ -829,15 +927,34 @@ async function mapSilicaBrushToParsed(
     scatter,
     colorMixing,
     paintAmount,
+    colorStretch,
+    pigmentBlendMode,
+    pigmentStrength,
+    chargeDepletion,
     wetEdges,
+    wetEdgeStrength,
+    wetEdgeWidth,
+    wetEdgeDarkness,
     tiltSize,
-    hueJitter,
-    satJitter,
-    valJitter,
+    hueJitter: stampHue ?? 0,
+    satJitter: stampSaturation ?? 0,
+    valJitter: stampLightness ?? 0,
+    fgBgMix,
+    colorDynamics,
+    dualBrush: dualBrush || undefined,
+    dualBlendMode,
+    dualSize: boundedNumber(rawObj, 0.1, 1, 'dualSize', 'bundledBrushSize', 'secondaryScale'),
+    dualSpacing: boundedNumber(rawObj, 0.05, 2, 'dualSpacing', 'bundledBrushSpacing'),
+    dualScatter: boundedNumber(rawObj, 0, 2, 'dualScatter', 'bundledBrushScatter'),
+    dualTipShape,
+    dualTipDataUrl,
+    tipUrls,
+    tipPlayMode: tipUrls ? getShapePlayMode(rawObj) : undefined,
     textureDataUrl,
     textureDensity,
     textureScale,
     textureInvert,
+    textureBlendMode: getEnumSetting(rawObj, textureBlendModes, 'textureBlendMode', 'grainBlendMode'),
     dynamics,
     stabilizerLevel,
     shapeInverted,
@@ -866,8 +983,7 @@ export class ProcreateParser {
     }
 
     // Group entries by folder prefix ('' for root)
-    type FolderFiles = { archive?: Uint8Array; shape?: Uint8Array; grain?: Uint8Array };
-    const folders = new Map<string, FolderFiles>();
+    const folders = new Map<string, BrushFolderFiles>();
     let brushsetPlistBytes: Uint8Array | undefined;
 
     for (const [path, data] of entries.entries()) {
@@ -880,21 +996,29 @@ export class ProcreateParser {
         continue;
       }
 
-      if (base === 'brush.archive' || base === 'shape.png' || base === 'grain.png') {
+      const numberedShape = /^shape_(\d+)\.png$/.exec(base);
+      const secondaryShape = dualShapeNames.has(base);
+      if (base === 'brush.archive' || base === 'shape.png' || base === 'grain.png' || secondaryShape || numberedShape) {
         let folder = folders.get(dir);
         if (!folder) {
-          folder = {};
+          folder = { extraShapes: [] };
           folders.set(dir, folder);
         }
         if (base === 'brush.archive') folder.archive = data;
         else if (base === 'shape.png') folder.shape = data;
         else if (base === 'grain.png') folder.grain = data;
+        else if (secondaryShape) folder.dualShape ??= data;
+        else if (numberedShape) folder.extraShapes.push({ order: Number(numberedShape[1]), bytes: data });
       }
     }
 
     const baseFileName = this.fileName.replace(/\.(brushset|brush)$/i, '').trim() || 'Procreate Brush';
     let setName: string | undefined;
     let orderedFolders: string[] = [];
+    const brushFolders = [...folders.keys()].filter((key) => {
+      const files = folders.get(key)!;
+      return !!(files.archive || files.shape || files.extraShapes.length);
+    });
 
     if (brushsetPlistBytes) {
       const plist = parsePlist(brushsetPlistBytes);
@@ -908,16 +1032,16 @@ export class ProcreateParser {
       const list = Array.isArray(meta.brushes) ? meta.brushes.filter((x): x is string => typeof x === 'string') : [];
       for (const uuid of list) {
         // Match either `<uuid>` or `<wrapper>/<uuid>`
-        if (folders.has(uuid)) {
+        if (brushFolders.includes(uuid)) {
           orderedFolders.push(uuid);
         } else {
-          const matched = Array.from(folders.keys()).find((k) => k.endsWith(`/${uuid}`));
+          const matched = brushFolders.find((k) => k.endsWith(`/${uuid}`));
           if (matched) orderedFolders.push(matched);
         }
       }
       // Include any extra brush folders not referenced in brushset.plist
-      for (const key of folders.keys()) {
-        if (!orderedFolders.includes(key) && (folders.get(key)?.archive || folders.get(key)?.shape)) {
+      for (const key of brushFolders) {
+        if (!orderedFolders.includes(key)) {
           orderedFolders.push(key);
         }
       }
@@ -925,12 +1049,7 @@ export class ProcreateParser {
       if (/\.brushset$/i.test(this.fileName)) {
         setName = baseFileName;
       }
-      orderedFolders = Array.from(folders.keys())
-        .filter((k) => {
-          const f = folders.get(k);
-          return Boolean(f?.archive || f?.shape);
-        })
-        .sort();
+      orderedFolders = brushFolders.sort();
     }
 
     if (orderedFolders.length === 0) {
@@ -947,9 +1066,7 @@ export class ProcreateParser {
       const brush = await mapSilicaBrushToParsed(
         `procreate_${i}_${dir || 'root'}`,
         fallbackName,
-        files.archive,
-        files.shape,
-        files.grain,
+        files,
         setName,
       );
       brushes.push(brush);

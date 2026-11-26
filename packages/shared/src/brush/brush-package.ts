@@ -7,12 +7,16 @@ import { AbrParser, type ParsedBrushTip } from './abr-parser';
 import { SutParser } from './sut-parser';
 import { ProcreateParser } from './procreate-parser';
 import { MIN_BRUSH_SPACING } from './brush-spacing';
+import type { PigmentBlendModel } from '../color/pigment-blend';
 import type { PressureCurveConfig } from './pressure-curve';
 import type {
+  BrushColorDynamicsConfig,
   BrushDynamicsConfig,
   BrushMixMode,
   BrushTextureBlendMode,
+  BrushTipPlayMode,
   DualBrushBlendMode,
+  DualTipShape,
 } from './brush-dynamics';
 
 export interface AtelierBrushPreset {
@@ -47,21 +51,33 @@ export interface AtelierBrushPreset {
     customTextureUrl?: string | null;
     dualBrush?: boolean;
     dualSize?: number;
+    dualSpacing?: number;
     dualScatter?: number;
     dualTipUrl?: string | null;
     dualBlendMode?: DualBrushBlendMode;
+    dualTipShape?: DualTipShape;
+    tipUrls?: string[];
+    tipPlayMode?: BrushTipPlayMode;
     hueJitter?: number;
     satJitter?: number;
     valJitter?: number;
     fgBgMix?: number;
+    colorDynamics?: BrushColorDynamicsConfig;
     angleMode?: 'direction' | 'pen' | 'fixed';
     tipAngle?: number;
     roundness?: number;
     tiltSize?: number;
     wetEdges?: boolean;
+    wetEdgeStrength?: number;
+    wetEdgeWidth?: number;
+    wetEdgeDarkness?: number;
+    pigmentBlendMode?: PigmentBlendModel;
+    pigmentStrength?: number;
+    chargeDepletion?: number;
     dynamics?: BrushDynamicsConfig;
   };
   tipDataUrl?: string | null;
+  tipUrls?: string[];
   textureDataUrl?: string | null;
   dualTipDataUrl?: string | null;
   tags?: string[];
@@ -100,6 +116,8 @@ export const DEFAULT_COMMUNITY_PRESETS: AtelierBrushPreset[] = [
       colorMixing: 0.86,
       paintAmount: 0.25,
       colorStretch: 0.78,
+      pigmentBlendMode: 'subtractive',
+      pigmentStrength: 0.85,
       pressureCurve: 'linear',
     },
     tipDataUrl: null,
@@ -154,6 +172,10 @@ export const DEFAULT_COMMUNITY_PRESETS: AtelierBrushPreset[] = [
       brushType: 'brush',
       colorMixing: 0.5,
       paintAmount: 0.75,
+      wetEdgeStrength: 0.55,
+      wetEdgeWidth: 0.22,
+      wetEdgeDarkness: 0.35,
+      pigmentBlendMode: 'subtractive',
       pressureCurve: 'linear',
     },
     tipDataUrl: null,
@@ -348,18 +370,29 @@ export class BrushPackageManager {
         customTextureUrl: tip.textureDataUrl ?? null,
         dualBrush: tip.dualBrush ?? false,
         dualSize: tip.dualSize ?? 0.4,
+        dualSpacing: tip.dualSpacing,
         dualScatter: tip.dualScatter ?? 0.6,
         dualTipUrl: tip.dualTipDataUrl ?? null,
         dualBlendMode: tip.dualBlendMode,
+        dualTipShape: tip.dualTipShape,
+        tipUrls: tip.tipUrls,
+        tipPlayMode: tip.tipPlayMode,
         hueJitter: tip.hueJitter ?? 0,
         satJitter: tip.satJitter ?? 0,
         valJitter: tip.valJitter ?? 0,
         fgBgMix: tip.fgBgMix ?? 0,
+        colorDynamics: tip.colorDynamics,
         angleMode: tip.angleMode ?? 'direction',
         tipAngle: tip.angle ?? 0,
         roundness: tip.roundness ?? 1,
         tiltSize: tip.tiltSize ?? 0,
         wetEdges: tip.wetEdges ?? false,
+        wetEdgeStrength: tip.wetEdgeStrength,
+        wetEdgeWidth: tip.wetEdgeWidth,
+        wetEdgeDarkness: tip.wetEdgeDarkness,
+        pigmentBlendMode: tip.pigmentBlendMode,
+        pigmentStrength: tip.pigmentStrength,
+        chargeDepletion: tip.chargeDepletion,
         dynamics: tip.dynamics,
       };
     };
@@ -388,6 +421,7 @@ export class BrushPackageManager {
             paintAmount: 0.7,
           }),
           tipDataUrl: tip.dataUrl,
+          tipUrls: tip.tipUrls,
           textureDataUrl: tip.textureDataUrl ?? null,
           dualTipDataUrl: tip.dualTipDataUrl ?? null,
           tags: ['ABR', 'Imported'],
@@ -424,6 +458,7 @@ export class BrushPackageManager {
             paintAmount: 0.75,
           }),
           tipDataUrl: tip.dataUrl,
+          tipUrls: tip.tipUrls,
           textureDataUrl: tip.textureDataUrl ?? null,
           dualTipDataUrl: tip.dualTipDataUrl ?? null,
           tags: ['SUT', 'Imported'],
@@ -457,6 +492,7 @@ export class BrushPackageManager {
             paintAmount: tip.paintAmount ?? 0.75,
           }),
           tipDataUrl: tip.dataUrl,
+          tipUrls: tip.tipUrls,
           textureDataUrl: tip.textureDataUrl ?? null,
           dualTipDataUrl: tip.dualTipDataUrl ?? null,
           tags: ['Procreate', 'Imported'],

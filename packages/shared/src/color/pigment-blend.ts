@@ -16,6 +16,22 @@ export interface RgbColor {
   a?: number; // 0..1
 }
 
+export type PigmentBlendModel = 'rgb' | 'oklab' | 'subtractive';
+
+export interface PigmentReservoirStepOptions {
+  mixMode: 'blend' | 'smudge' | 'dilute';
+  pigmentBlendMode?: PigmentBlendModel;
+  pigmentStrength?: number;
+  colorMixing: number;
+  paintAmount: number;
+  colorStretch: number;
+  pressure: number;
+  sampledAlpha: number;
+  strokeDistancePx?: number;
+  chargeDepletion?: number;
+  hasSampledSmudge?: boolean;
+}
+
 export interface OklabColor {
   L: number; // Lightness: 0..1
   a: number; // Green-Red chromaticity: ~ -0.4 .. 0.4
@@ -211,6 +227,93 @@ export function mixOklab(c1: RgbColor, c2: RgbColor, t: number): RgbColor {
     g: rgb.g,
     b: rgb.b,
     a: (1.0 - clampT) * a1 + clampT * a2,
+  };
+}
+
+const clamp01 = (value: number): number => Number.isFinite(value) ? Math.max(0, Math.min(1, value)) : 0;
+
+function mixRgb(c1: RgbColor, c2: RgbColor, t: number): RgbColor {
+  const a1 = c1.a ?? 1;
+  const a2 = c2.a ?? 1;
+  return {
+    r: c1.r + (c2.r - c1.r) * t,
+    g: c1.g + (c2.g - c1.g) * t,
+    b: c1.b + (c2.b - c1.b) * t,
+    a: a1 + (a2 - a1) * t,
+  };
+}
+
+export function blendPigmentColors(
+  c1: RgbColor,
+  c2: RgbColor,
+  t: number,
+  model: PigmentBlendModel = 'subtractive',
+  pigmentStrength = 0.85,
+): RgbColor {
+  const ratio = clamp01(t);
+  if (model === 'rgb') return mixRgb(c1, c2, ratio);
+  if (model === 'oklab') return mixOklab(c1, c2, ratio);
+
+  const strength = clamp01(pigmentStrength);
+  if (strength >= 0.999) return mixPigmentSubtractive(c1, c2, ratio);
+  const perceptual = mixOklab(c1, c2, ratio);
+  if (strength === 0) return perceptual;
+  return mixRgb(perceptual, mixPigmentSubtractive(c1, c2, ratio), strength);
+}
+
+function sameColor(c1: RgbColor, c2: RgbColor): boolean {
+  return c1.r === c2.r && c1.g === c2.g && c1.b === c2.b && (c1.a ?? 1) === (c2.a ?? 1);
+}
+
+export function stepPigmentReservoir(
+  reservoir: RgbColor | null,
+  foreground: RgbColor,
+  sampledCanvas: RgbColor | null,
+  opts: PigmentReservoirStepOptions,
+): { nextReservoir: RgbColor; dabColor: RgbColor; alphaMultiplier: number; smudgeSampled: boolean; skipDab: boolean } {
+  const { mixMode, pigmentBlendMode, pigmentStrength } = opts;
+  const colorMixing = clamp01(opts.colorMixing);
+  const paintAmount = clamp01(opts.paintAmount);
+  const colorStretch = clamp01(opts.colorStretch);
+  const pressure = clamp01(opts.pressure);
+  const sampledAlpha = clamp01(opts.sampledAlpha);
+  let nextReservoir = reservoir ?? foreground;
+  let smudgeSampled = opts.hasSampledSmudge ?? false;
+
+  if (sampledCanvas && sampledAlpha > 0) {
+    if (mixMode === 'smudge' && !smudgeSampled) {
+      nextReservoir = sampledCanvas;
+      smudgeSampled = true;
+    } else {
+      const pressureBias = mixMode === 'smudge' ? 1 : 1 - pressure * 0.5;
+      const pickup = Math.min(0.95, colorMixing * sampledAlpha * (1 - colorStretch * 0.36)
+        * pressureBias * (mixMode === 'dilute' ? 0.9 : 0.75));
+      if (pickup > 0 && !sameColor(nextReservoir, sampledCanvas)) {
+        nextReservoir = blendPigmentColors(nextReservoir, sampledCanvas, pickup, pigmentBlendMode, pigmentStrength);
+      }
+    }
+  }
+  if (mixMode !== 'smudge') {
+    const reload = paintAmount * (mixMode === 'dilute' ? 0.3 : 1) * (0.05 + 0.25 * pressure) * (1 - colorStretch * 0.8);
+    if (reload > 0 && !sameColor(nextReservoir, foreground)) {
+      nextReservoir = blendPigmentColors(nextReservoir, foreground, reload, pigmentBlendMode, pigmentStrength);
+    }
+  }
+
+  const chargeDepletion = clamp01(opts.chargeDepletion ?? 0);
+  const strokeDistance = opts.strokeDistancePx ?? 0;
+  const distance = Number.isNaN(strokeDistance) ? 0 : Math.max(0, strokeDistance);
+  const modeAlpha = mixMode === 'dilute' ? 0.82 : 1;
+  const alphaMultiplier = chargeDepletion > 0
+    ? Math.max(0.12, modeAlpha * Math.exp(-distance * chargeDepletion / (200 + paintAmount * 1800)))
+    : modeAlpha;
+
+  return {
+    nextReservoir,
+    dabColor: nextReservoir,
+    alphaMultiplier,
+    smudgeSampled,
+    skipDab: mixMode === 'smudge' && !smudgeSampled,
   };
 }
 
