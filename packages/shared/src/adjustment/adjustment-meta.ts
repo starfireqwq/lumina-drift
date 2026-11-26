@@ -1,4 +1,5 @@
 import { normalizeHexColor, normalizeLayerColorMeta } from '../canvas/layer-color';
+import { normalizeLayerRulerMeta } from '../ruler/layer-ruler';
 import type { LayerMeta, LayerType } from '../types/models';
 import { DRAW_OP_TYPES } from '../types/protocol';
 import { normalizeAdjustment } from './adjustment-layer';
@@ -17,6 +18,16 @@ export function sanitizeLayerMetaForType(
   } else if (meta && Object.prototype.hasOwnProperty.call(meta, 'adjustment')) {
     const { adjustment: _, ...rest } = meta;
     sanitized = rest;
+  }
+
+  if (sanitized && Object.hasOwn(sanitized, 'ruler')) {
+    const { ruler, ...rest } = sanitized;
+    sanitized = rest;
+    if (ruler != null) {
+      const normalized = normalizeLayerRulerMeta(ruler);
+      if (!normalized) return { ok: false, error: '圖層尺規參數無效' };
+      if (layerType !== 'mask' && layerType !== 'adjustment') sanitized = { ...rest, ruler: normalized };
+    }
   }
 
   if (!sanitized || (!Object.hasOwn(sanitized, 'paletteColor') && !Object.hasOwn(sanitized, 'layerColor'))) {

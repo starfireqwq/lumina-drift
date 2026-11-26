@@ -46,6 +46,7 @@ export * from './capsule/capsule-format';
 
 // Advanced Professional Drawing Tools (Rulers & Guidelines)
 export * from './ruler/ruler-math';
+export * from './ruler/layer-ruler';
 
 // Phase 10: Vector Lineart Layer & Reshape Engine
 export * from './vector/vector-types';

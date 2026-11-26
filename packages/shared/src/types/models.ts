@@ -56,6 +56,7 @@ import type { AudioTrackMeta } from '../animation/audio';
 import type { CanvasUnit } from '../canvas/canvas-units';
 import type { LayerColorMeta } from '../canvas/layer-color';
 import type { LayerAdjustment } from '../adjustment/adjustment-layer';
+import type { LayerRulerMeta } from '../ruler/layer-ruler';
 
 export type CelMark = 'key' | 'inbetween';
 
@@ -69,6 +70,7 @@ export interface LayerMeta {
   originalAuthor?: string;
   paletteColor?: string | null;
   layerColor?: LayerColorMeta | null;
+  ruler?: LayerRulerMeta | null;
   /**
    * On a group: it is a CSP-style animation folder, each child layer one cel (bottom = first).
    * shared: other painters can see the track. Adding cels requires the owner's approval.
