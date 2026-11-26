@@ -17,7 +17,7 @@
 | **Phase 3** | 選取、向量、混色、漫畫工具組整合與矩形／橢圓／多邊形選框補齊 | `v1.4.0-alpha.2` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-26 / `4e90e4a` |
 | **Phase 4** | 子視圖面板（Sub View）、色彩歷史／混色盤與桌面右鍵快顯輪盤（Pop-up Palette） | `v1.4.0-beta.1` | `/teamwork` | `已完成` | 2026-11-26 / `0129f04` |
 | **Phase 5** | 快速形狀（QuickShape）、操控變形（Puppet Warp）與四方連續平鋪（Wrap-Around） | `v1.4.0` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-26 / `7b3351b` |
-| **Phase 6** | 非破壞性調整圖層（Adjustment / Correction Layers）完整管線 | `v1.5.0-alpha` | `/teamwork` 或 `/swarm` | `未開始` | — |
+| **Phase 6** | 非破壞性調整圖層（Adjustment / Correction Layers）完整管線 | `v1.5.0-alpha` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-26 / `4b402b8` |
 | **Phase 7** | 自動動作／巨集錄製（Auto Actions）與文字排版引擎深化 | `v1.5.0-beta` | `/teamwork` | `未開始` | — |
 | **Phase 8** | 商業印刷色彩管理（CMYK 軟校樣 / ICC）與雙向 `.kra` 匯出 | `v1.5.0` | 單聊天室 或 `/teamwork` | `未開始` | — |
 
@@ -191,7 +191,7 @@
 > **目標**：正式啟用 `LayerType = 'adjustment'`，提供如 PS / CSP / Krita 般的即時非破壞性調色工作流。
 
 #### 任務清單
-- [ ] **6.1 共享型別與前後端持久化支援**
+- [x] **6.1 共享型別與前後端持久化支援**
   - 擴充 `packages/shared/src/types/models.ts` 的 `LayerMeta.adjustment` 結構（種類與參數 DTO）：
     - `hsl`（色相／飽和度／明度）
     - `levels`（色階：輸入黑／灰／白、輸出上下限）
@@ -200,13 +200,13 @@
     - `gradient_map`（漸層對應色標）
     - `brightness_contrast`（亮度／對比）
   - 確認 `offlineStore.ts`、伺服端 SQLite `layers.meta`、`LuminaProjectEngine`（`.lumina` 存讀檔）皆完整保留與同步調整圖層參數。
-- [ ] **6.2 即時合成渲染管線（`LayerManager.ts` / `layerComposite.ts` / `ExportEngine.ts`）**
+- [x] **6.2 即時合成渲染管線（`LayerManager.ts` / `layerComposite.ts` / `ExportEngine.ts`）**
   - 在即時畫布合成與離線匯出合成中，對下層已合成結果套用調整圖層效果；完整支援：
     - 調整圖層本身的不透明度與混合模式
     - 搭配剪裁遮色片（`clipToBelow`，只影響正下方基底圖層）
     - 搭配圖層蒙版（局部遮罩控制調色範圍）
     - 群組內作用範圍隔離（避免影響群組外圖層）
-- [ ] **6.3 UI 與互動體驗**
+- [x] **6.3 UI 與互動體驗**
   - 在 `LayerPanel.tsx` 與上方選單新增「新增調整圖層」入口、專屬圖示與雙擊編輯參數視窗（即時預覽、不改動原像素、單步復原）。
   - 評估與 `.psd` 匯入／匯出的相容對應（至少針對常見調整層保留名稱與基本轉換或提示）。
 
@@ -215,9 +215,11 @@
 - 隔離式 Electron 實測：建立調整圖層後仍可自由修改下層線稿／底色並即時反映調色，雙擊調整圖層可隨時改參數，匯出 PNG／PSD 畫面與畫布所見完全一致，多人房間同步調整參數無誤。
 
 #### 交接紀錄
-- 狀態：`未開始`
-- 完成 Commit：`待填`
-- 備註：`—`
+- 狀態：`已完成`
+- 完成 Commit：`03cb9ea`（6.1 shared 調整圖層模型、正規化、6 種像素運算、作用範圍解析與 GLSL）、`599f843`（6.1 伺服端／離線／`.lumina`／時光膠囊持久化、驗證與像素寫入防護，伺服端第 18 階段測試）、`480a5d9`（6.2 CPU 匯出合成：根層／剪裁／群組範圍、蒙版與不透明度，分享預覽）、`56e1988`（6.3 `.psd` 調整圖層讀寫 `psdAdjustmentMapping.ts`）、`1284678`（6.2 `LayerManager` 即時合成 `AdjustmentFilter`、範圍紋理快取與預覽 API）、`0dbb1f8`（6.3 調整參數視窗、建立／單步復原流程與像素工具防護）、`f27ecbe`（6.3 圖層面板入口、種類圖示、上方「圖層」選單與說明中心）、`4b402b8`（Phase 6 隔離式單機／雙人 Electron 實測腳本）
+- 合成規則（實作與匯出一致）：調整圖層對其位置以下的已合成畫面生效，係數 = 有效不透明度 × 自身蒙版 × 群組蒙版；勾選「剪裁到下方」時只作用於剪裁群組（基底＋其間被剪裁圖層），位於群組內時只作用於同群組、位於其下的圖層（以範圍單獨合成後的差值加回，與 Photoshop 正常群組／剪裁群組在一般混合下一致）；未剪裁的調整圖層作為剪裁基底時視為「白色 × 自身蒙版」。即時畫面用 `blendRequired` 濾鏡（`blendMode = none`、`resolution = inherit`），剪裁／群組範圍用依相依指紋快取的畫布空間紋理（超過 16.7 MP 會降解析度）。
+- 備註：2026-11-26 完成全套驗證：`pnpm --filter @atelier/shared build`、`pnpm --filter @atelier/client build`、`pnpm --filter @atelier/client build:electron`、`pnpm --filter @atelier/server test`（18 階段全過，含新增第 18 階段調整圖層 REST／Socket／像素寫入防護）、`ui-logic.check.ts`（新增 7 個 Phase 6 區段：6 種像素運算與正規化、持久化、匯出合成、PSD 對應與 ag-psd 真實位元組往返、即時檢視快取、編輯流程、選單與說明）、`i18n-coverage.check.ts`（4 語系 2,037 鍵全對齊）；隔離式 Electron 實測 `apps/client/scripts/phase6-adjustment-electron-smoke.check.cjs` 全數通過（單機：HSL 即時預覽且底層位元組不變、調整圖層下方筆刷即時反映、雙擊改參數＋單步 `Ctrl+Z`／重做、剪裁曲線保留紙色、蒙版局部、群組隔離、匯出 PNG 與即時畫面最大差 0；`PORT=0` 雙人：畫友 B 即時收到建立、改參數與復原，全程 0 頁錯）。另以臨時 GPU 健全性腳本確認螢幕與合成讀回在根層／剪裁／50% 不透明度／群組範圍下皆與 CPU 公式一致。
+- 已知限制：分享預覽卡片略過群組範圍的調整圖層（近似效果）；剪裁與群組範圍在成員使用非一般混合模式時為近似；`.psd` 依色域分段的色相／飽和度、雜訊漸層、鉛筆曲線與其他 PS 調整類型只做提示或部分轉換；Codex 額度中途用盡時 6.2／PSD 由主代理接手實作。
 
 ---
 
