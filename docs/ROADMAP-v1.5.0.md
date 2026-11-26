@@ -13,7 +13,7 @@
 | 階段 | 優先級 | 主題 | 對應版本目標 | 建議執行模式 | 狀態 | 最後更新 / Commit |
 | :--- | :---: | :--- | :---: | :---: | :---: | :--- |
 | **Phase 1** | **P0-A** | CSP 圖層／資料夾面板標籤色、草稿染色與「用紙」底色系統（單機完整＋多人雙軌） | `v1.5.0-alpha.1` | 單聊天室 | `已完成` | 2026-11-27 / `4f91d70`, `336ad90` |
-| **Phase 2** | **P0-B** | 尺規系統 v2（集中線／放射狀尺規、曲線／貝茲特殊尺規、圖層綁定尺規與透視空間網格） | `v1.5.0-alpha.2` | 單聊天室 或 `/teamwork` | `待啟動` | — |
+| **Phase 2** | **P0-B** | 尺規系統 v2（集中線／放射狀尺規、曲線／貝茲特殊尺規、圖層綁定尺規與透視空間網格） | `v1.5.0-alpha.2` | 單聊天室 或 `/teamwork` | `已完成` | 2026-11-27 / `e5e0ce5`, `292f54d` |
 | **Phase 3** | **P0-C** | 筆刷引擎 v3（雙筆刷、色彩動態、濕邊／顏料混色、多筆尖輪播與 `.sut`/`.brushset` 深度還原） | `v1.5.0-beta.1` | `/teamwork` | `待啟動` | — |
 | **Phase 4** | **P1-A** | 非破壞性圖層樣式（Layer Effects：邊界／水彩邊界／陰影／發光）＋快速遮色片（Quick Mask）與進階色域選取 | `v1.5.0-beta.2` | `/teamwork` 或 `/swarm` | `待啟動` | — |
 | **Phase 5** | **P1-B** | 多人繪茶 2.0（跟隨繪師視角、分格認領／接龍格線、房間共用色票盤與參考圖同步） | `v1.5.0-rc.1` | `/teamwork` | `待啟動` | — |
@@ -91,10 +91,30 @@
 > **目標**：在既有 `RulerManager` 基礎上補齊漫畫與背景繪製必備的進階尺規能力（不含 3D 幾何／人偶）。
 
 #### 任務清單
-- [ ] **2.1 集中線／放射狀尺規（Radial Line）與特殊曲線／貝茲尺規**
-- [ ] **2.2 CSP 式圖層綁定尺規（Ruler-on-Layer）與顯示範圍（全圖層／同資料夾／僅指定圖層）**
-- [ ] **2.3 透視空間網格（XY / XZ / YZ 輔助網格與間距控制）**
-- [ ] **2.4 尺規互動控制點優化、四語系與測試驗證**
+- [x] **2.1 集中線／放射狀尺規（Radial Line）與特殊曲線／貝茲尺規**
+  - `@atelier/shared`：`packages/shared/src/ruler/ruler-math.ts` 新增 `radial_line` 與 `curve` 模式、`snapRadialLinePoint`（穿過焦點與落筆點之射線精準投影）、`createDefaultCurveRuler`／`evaluateCurveSegment`／`sampleCurveRulerPoints`／`snapCurveRulerPoint`（支援三次貝茲、二次曲線、Catmull-Rom 樣條與閉合路徑，精準細化吸附）。
+  - `@atelier/client`：`RulerOverlay.tsx` 提供集中線放射導引、中心留白參考圓與拖曳手柄，以及貝茲曲線錨點與切線控制柄畫布互動；`RulerControlsModal.tsx` 補齊射線數／留白半徑／曲線類型／閉合／增刪節點控制。
+- [x] **2.2 CSP 式圖層綁定尺規（Ruler-on-Layer）與顯示範圍（全圖層／同資料夾／僅指定圖層）**
+  - `@atelier/shared`：新增 `packages/shared/src/ruler/layer-ruler.ts`，擴充 `LayerMeta.ruler` 與 `sanitizeLayerMetaForType` 白名單驗證，提供 `normalizeLayerRulerMeta`、`isLayerRulerEffectiveForLayer` 與 `resolveActiveLayerRuler`（支援 `all_layers` / `same_folder` / `target_layer`、資料夾繼承與優先順序）。
+  - `@atelier/client`：`RulerManager.ts` 實作 `syncLayerContext`、`clearDetachedMode` 與 `commitBoundLayerRuler`（支援多人房間他人圖層唯讀吸附保護）；`LayerPanel.tsx` 新增 CSP 風格三角尺徽章（點擊快速啟停／雙擊開啟設定）與右鍵選單；`CanvasWorkspace.tsx` 串接單機與多人同步。
+- [x] **2.3 透視空間網格（XY / XZ / YZ 輔助網格與間距控制）**
+  - 嚴格排除任何 3D 基礎幾何或 3D 人偶，於 `ruler-math.ts` 實作純 2D 透視空間網格 `computePerspectiveGridLines`（1/2/3 點透視、`xy`/`xz`/`yz` 三平面獨立開關、畫布邊界裁剪、間距與不透明度控制），並於 `RulerOverlay.tsx` 提供可拖曳網格基準點（Grid Origin）與分色參考線渲染。
+- [x] **2.4 尺規互動控制點優化、四語系與測試驗證**
+  - 補齊 `zh-TW`、`zh-CN`、`en-US`、`ja-JP` 四語系共 64 個尺規 v2 鍵值，並完成後端 API／單元測試、前端 `ui-logic` 測試與隔離式 Electron 煙霧實測。
+
+#### 交接紀錄
+- **完成日期**：2026-11-27
+- **相關提交**：
+  - `e5e0ce5`：`feat(rulers): add radial line, curve snapping, 2D perspective grid, and layer ruler rules`
+  - `292f54d`：`feat(client): add Rulers v2 controls, 2D perspective grid overlay, and CSP layer-bound rulers`
+- **實際驗證結果**：
+  - `pnpm -r build`：通過（`@atelier/shared`、`@atelier/server`、`@atelier/client` 全數編譯成功）。
+  - `pnpm --filter @atelier/server test`：全數通過（含 `test-phase9-rulers-screentone-liquify-meshwarp.ts` 新增的集中線／曲線吸附、2D 透視空間網格、`layer-ruler` 規則與後端 `meta.ruler` 建立／更新／清除／非法 400 測試）。
+  - `i18n-coverage.check.ts`：通過（四語系各 2308 keys 100% 齊全）。
+  - `ui-logic.check.ts`：通過（含 `apps/client/scripts/v15-phase2-rulers.checks.ts` 引擎與圖層綁定／唯讀／轉綁斷言）。
+  - `pnpm --filter @atelier/client build:electron`：通過。
+  - 隔離式 Electron 煙霧測試 `node apps/client/scripts/v15-phase2-rulers-electron-smoke.check.cjs`：通過（`0 console errors, 0 page errors`；實測單機集中線／曲線增節點與吸附／2D 透視 XY·XZ·YZ 網格／CSP 圖層綁定與範圍切換＋徽章啟停，以及雙人房間圖層尺規即時 Socket.IO 同步）。
+- **下一階段接續點**：Phase 3（P0-C：筆刷引擎 v3——雙筆刷、色彩動態、濕邊／顏料混色與 `.sut`/`.brushset` 深度映射）；另使用者提出「懸浮視窗／群組收折為可伸縮橫／直式圖標小球（膠囊 Dock）」新構想，待使用者確認是否穿插於 Phase 3 之前實作。
 
 ---
 
