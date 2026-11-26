@@ -16,7 +16,7 @@
 | **Phase 2** | **P0-B** | 尺規系統 v2（集中線／放射狀尺規、曲線／貝茲特殊尺規、圖層綁定尺規與透視空間網格） | `v1.5.0-alpha.2` | 單聊天室 或 `/teamwork` | `已完成` | 2026-11-27 / `e5e0ce5`, `292f54d` |
 | **Phase 2.5** | **工作區增強** | 懸浮視窗可伸縮圖標小球／膠囊 Dock（單視窗縮球、多視窗自動拉長膠囊、橫直切換、點擊展開切換、拖出拆球與磁吸合併） | `v1.5.0-alpha.3` | 單聊天室 | `已完成` | 2026-11-27 / `1eb83fd`, `112e793` |
 | **Phase 3** | **P0-C** | 筆刷引擎 v3（雙筆刷、色彩動態、濕邊／顏料混色、多筆尖輪播與 `.sut`/`.brushset` 深度還原） | `v1.5.0-beta.1` | `/teamwork` | `已完成` | 2026-11-27 / `a1c2283`, `e140c1a` |
-| **Phase 4** | **P1-A** | 非破壞性圖層樣式（Layer Effects：邊界／水彩邊界／陰影／發光）＋快速遮色片（Quick Mask）與進階色域選取 | `v1.5.0-beta.2` | `/teamwork` 或 `/swarm` | `待啟動` | — |
+| **Phase 4** | **P1-A** | 非破壞性圖層樣式（Layer Effects：邊界／水彩邊界／陰影／發光）＋快速遮色片（Quick Mask）與進階色域選取 | `v1.5.0-beta.2` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-27 / `b128801`, `4767853`, `80b33bb` |
 | **Phase 5** | **P1-B** | 多人繪茶 2.0（跟隨繪師視角、分格認領／接龍格線、房間共用色票盤與參考圖同步） | `v1.5.0-rc.1` | `/teamwork` | `待啟動` | — |
 | **Phase 6** | **P2** | 專業製作與效能收尾（動畫時間軸音訊波形＋混音匯出、真 CMYK 4 通道分色匯出、大畫布 Tile LRU 效能優化） | `v1.5.0` | `/teamwork` 或 `/swarm` | `待啟動` | — |
 
@@ -188,10 +188,25 @@
 > **目標**：讓邊界描邊、水彩邊界、陰影／發光全面非破壞化，並強化精準選區工作流。
 
 #### 任務清單
-- [ ] **4.1 非破壞性圖層／資料夾樣式管線（邊界效果：外框／水彩邊界、外陰影、外發光、顏色覆蓋）**
-- [ ] **4.2 快速遮色片（Quick Mask）紅膜塗抹選取模式**
-- [ ] **4.3 進階色域選取對話框（即時遮罩預覽、吸管加減採樣、容差與羽化）**
-- [ ] **4.4 匯出合成支援、四語系與測試驗證**
+- [x] **4.1 非破壞性圖層／資料夾樣式管線（邊界效果：外框／水彩邊界、外陰影、外發光、顏色覆蓋）**
+- [x] **4.2 快速遮色片（Quick Mask）紅膜塗抹選取模式**
+- [x] **4.3 進階色域選取對話框（即時遮罩預覽、吸管加減採樣、容差與羽化）**
+- [x] **4.4 匯出合成支援、四語系與測試驗證**
+
+#### 交接紀錄
+- **完成日期**：2026-11-27
+- **相關提交**：
+  - `b128801`：`feat(shared): add non-destructive Layer Effects renderer and Color Range selection core`
+  - `4767853`：`feat(server): support Layer Effects persistence, realtime broadcast, share preview, and tests`
+  - `80b33bb`：`feat(client): add Layer Effects GPU/export pipeline, Quick Mask, Color Range dialog, WebP export, 4 locales, and tests`
+- **實際驗證結果**：
+  - `i18n-coverage.check.ts`：通過（四語系各 2447 keys 100% 齊全，涵蓋圖層樣式、快速遮色片、色域選取與 WebP 匯出）。
+  - `ui-logic.check.ts`：通過（含 `apps/client/scripts/v15-phase4-effects-selection.checks.ts` 的圖層／資料夾樣式驗證與 CPU 參考渲染、色域選取加減採樣／容差／羽化／反轉與快捷鍵 `KeyQ` 無衝突斷言）。
+  - `pnpm -r build`：通過（`@atelier/shared`、`@atelier/server`、`@atelier/client` 全數編譯成功）。
+  - `pnpm --filter @atelier/client build:electron`：通過。
+  - `pnpm --filter @atelier/server test`：18 項後端整合測試全數通過（含 `test-phase18-adjustment-layers.ts` 的圖層／資料夾 `meta.effects` 持久化、格式驗證、`layer_updated` 即時多人廣播與清除測試）。
+  - 隔離式 Electron 煙霧測試 `node apps/client/scripts/v15-phase4-effects-selection-electron-smoke.check.cjs`：通過（`0 console errors, 0 page errors`；實測圖層樣式外框即時渲染 `edgeBorderRedPx=5776`、水彩邊界／陰影／發光／顏色覆蓋切換、Quick Mask 紅膜塗抹 `quickMaskPx=3657` 不污染底層像素且支援橡皮擦減選／`Ctrl+Z` 復原／按 `Q` 轉回選區、色域選取對話框即時預覽與吸管採樣套用 `colorRangePx=7196`，以及實際匯出 PNG `pngRedPx=5824`、WebP `webpRedPx=5360`、PSD `80705` bytes `8BPS` 與 KRA `32259` bytes `PK`）。
+- **下一階段接續點**：Phase 5（P1-B：多人繪茶 2.0 — 跟隨特定繪師視角、畫布分格認領／接龍格線模式、房間共用色票盤與參考圖板同步）。
 
 ---
 
