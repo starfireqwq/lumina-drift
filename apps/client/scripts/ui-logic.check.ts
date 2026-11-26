@@ -6782,6 +6782,7 @@ import { runPhase8SoftProofRuntimeChecks } from './phase8-soft-proof-runtime.che
 import { runPhase8IccEmbedChecks } from './phase8-icc-embed.checks';
 import { runPhase8KraRoundTripChecks } from './phase8-kra-roundtrip.checks';
 import { runPhase8UiChecks } from './phase8-ui.checks';
+import { runV15Phase2RulerChecks } from './v15-phase2-rulers.checks';
 
 {
   assert.deepEqual(Object.keys(ADJUSTMENT_KIND_ICONS), ADJUSTMENT_KINDS);
@@ -6826,3 +6827,6 @@ await runPhase8KraRoundTripChecks();
 console.log('Phase 8 .kra encoder round-trip checks passed');
 await runPhase8UiChecks();
 console.log('Phase 8 export / proof UI and locale checks passed');
+
+await runV15Phase2RulerChecks();
+console.log('v1.5 Phase 2 ruler engine checks passed');

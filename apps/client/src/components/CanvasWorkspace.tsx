@@ -74,6 +74,7 @@ import {
   LayerMeta,
   LayerModel,
   type LayerColorMeta,
+  type LayerRulerMeta,
   type PaletteColorDisplayMode,
   LayerTextMeta,
   tileToRgba,
@@ -4562,6 +4563,26 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     return result && trackAutoActionEdit(result);
   };
 
+  const updateLayerRulerRef = useRef<(layerId: string, ruler: LayerRulerMeta | null) => void>(() => {});
+  const canEditLayerRulerRef = useRef<(layer: LayerModel) => boolean>(() => false);
+  canEditLayerRulerRef.current = (layer) => !isCanvasViewer && canManageLayer(layer);
+  updateLayerRulerRef.current = (layerId, ruler) => {
+    const target = layersRef.current.find((entry) => entry.id === layerId);
+    if (!target || !canEditLayerRulerRef.current(target)) return;
+    void updateLayerPropsFromPanel(layerId, { meta: { ...(target.meta ?? {}), ruler } });
+  };
+
+  const updateLayerRulerFromUi = (layerId: string, ruler: LayerRulerMeta | null) => {
+    updateLayerRulerRef.current(layerId, ruler);
+  };
+
+  useEffect(() => {
+    RulerManager.getInstance().syncLayerContext(activeLayer?.id ?? null, layers, {
+      canEditLayer: (layer) => canEditLayerRulerRef.current(layer),
+      onCommitLayerRuler: (layerId, ruler) => updateLayerRulerRef.current(layerId, ruler),
+    });
+  }, [activeLayer?.id, layers, isCanvasViewer, isAdmin, user?.id]);
+
   const recordLayerCreationRef = useRef(recordLayerCreation);
   recordLayerCreationRef.current = recordLayerCreation;
   useEffect(() => {
@@ -8002,6 +8023,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             ...prev, values: { ...prev.values, localLayerColors: updateColorOverrides(prev.values.localLayerColors, [id], config) },
           }))}
           onOpenAuth={onOpenAuth}
+          onOpenRulerModal={() => setIsRulerModalOpen(true)}
           onLoadLayerSelection={(id) => {
             if (autoActionBusyRef.current) return;
             const layer = layersRef.current.find((l) => l.id === id);
@@ -8972,6 +8994,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             onClose={() => setIsRulerModalOpen(false)}
             canvasWidth={canvas.width}
             canvasHeight={canvas.height}
+            activeLayer={activeLayer ?? null}
+            layers={layers}
+            canEditLayer={(layer) => !isCanvasViewer && canManageLayer(layer)}
+            onUpdateLayerRuler={updateLayerRulerFromUi}
           />
         </Suspense>
       )}

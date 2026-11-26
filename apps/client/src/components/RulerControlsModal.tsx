@@ -1,6 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { Compass, Lock, RotateCw, Trash2, Unlock, X } from 'lucide-react';
-import { RulerMode } from '@atelier/shared';
+import { Compass, Layers, Link2, Lock, Plus, RotateCw, Trash2, Unlink2, Unlock, X } from 'lucide-react';
+import type {
+  CurveRulerType,
+  LayerModel,
+  LayerRulerMeta,
+  LayerRulerScope,
+  PerspectiveGridPlane,
+  RulerMode,
+} from '@atelier/shared';
 import { RulerManager, RulerState } from '../engine/RulerManager';
 import { ToolWindow } from './workspace/ToolWindow';
 import { Segmented } from './workspace/ToolOptionsBar';
@@ -11,21 +18,36 @@ interface RulerControlsModalProps {
   onClose: () => void;
   canvasWidth?: number;
   canvasHeight?: number;
+  activeLayer?: LayerModel | null;
+  layers?: LayerModel[];
+  canEditLayer?: (layer: LayerModel) => boolean;
+  onUpdateLayerRuler?: (layerId: string, ruler: LayerRulerMeta | null) => void;
 }
 
-const MODES: Array<{ id: RulerMode; label: string }> = [
-  { id: 'off', label: '關閉' },
-  { id: 'symmetry', label: '對稱' },
-  { id: 'perspective', label: '透視' },
-  { id: 'parallel', label: '平行線' },
-  { id: 'concentric', label: '同心圓' },
-];
-
 /** Quick-pick chips (counts, angles) */
-const Chips = <T extends number>({ values, current, label, onPick }: { values: T[]; current: T; label: (v: T) => string; onPick: (v: T) => void }) => (
+const Chips = <T extends number>({
+  values,
+  current,
+  label,
+  disabled,
+  onPick,
+}: {
+  values: T[];
+  current: T;
+  label: (v: T) => string;
+  disabled?: boolean;
+  onPick: (v: T) => void;
+}) => (
   <div className="grid grid-cols-4 gap-1">
     {values.map((v) => (
-      <button key={v} type="button" aria-pressed={current === v} onClick={() => onPick(v)} className="atelier-btn !h-6 !px-1 font-mono text-[11px]">
+      <button
+        key={v}
+        type="button"
+        disabled={disabled}
+        aria-pressed={current === v}
+        onClick={() => onPick(v)}
+        className="atelier-btn !h-6 !px-1 font-mono text-[11px] disabled:opacity-45"
+      >
         {label(v)}
       </button>
     ))}
@@ -42,7 +64,6 @@ const Row: React.FC<{ label: string; value?: React.ReactNode; children: React.Re
   </div>
 );
 
-/** Short hint under each ruler: what to drag on the canvas */
 const Hint: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <p className="text-[11px] leading-relaxed text-neutral-500">{children}</p>
 );
@@ -52,10 +73,19 @@ export const RulerControlsModal: React.FC<RulerControlsModalProps> = ({
   onClose,
   canvasWidth = 2048,
   canvasHeight = 2048,
+  activeLayer = null,
+  layers = [],
+  canEditLayer,
+  onUpdateLayerRuler,
 }) => {
   const { t } = useI18n();
   const rulerMgr = RulerManager.getInstance();
   const [state, setState] = useState<RulerState>(rulerMgr.state);
+  const [pendingScope, setPendingScope] = useState<LayerRulerScope>('same_folder');
+
+  useEffect(() => rulerMgr.subscribe((newState) => setState({ ...newState })), [rulerMgr]);
+
+  if (!isOpen) return null;
 
   const modes: Array<{ id: RulerMode; label: string }> = [
     { id: 'off', label: t.rulers.off },
@@ -63,14 +93,37 @@ export const RulerControlsModal: React.FC<RulerControlsModalProps> = ({
     { id: 'perspective', label: t.rulers.perspective },
     { id: 'parallel', label: t.rulers.parallel },
     { id: 'concentric', label: t.rulers.concentricRuler },
+    { id: 'radial_line', label: t.rulers.radialLine },
+    { id: 'curve', label: t.rulers.curveRuler },
   ];
 
-  useEffect(() => rulerMgr.subscribe((newState) => setState({ ...newState })), [rulerMgr]);
+  const canEditActiveRuler = state.boundSource?.editable ?? true;
+  const commitIfBound = () => {
+    if (rulerMgr.state.boundSource?.editable) {
+      rulerMgr.commitBoundLayerRuler();
+    }
+  };
 
-  if (!isOpen) return null;
+  const activeLayerSupportsRuler = Boolean(
+    activeLayer && activeLayer.layerType !== 'mask' && activeLayer.layerType !== 'adjustment',
+  );
+  const canEditTargetLayer = Boolean(activeLayer && activeLayerSupportsRuler && (canEditLayer ? canEditLayer(activeLayer) : true));
+  const ownLayerRuler = activeLayer?.meta?.ruler ?? null;
+  const boundOwnerLayer = state.boundSource
+    ? layers.find((l) => l.id === state.boundSource?.ownerLayerId) ?? null
+    : null;
+  const managedLayer = boundOwnerLayer ?? (ownLayerRuler && activeLayer ? activeLayer : null);
+  const managedRuler = managedLayer?.meta?.ruler ?? null;
+  const canEditManagedLayer = Boolean(managedLayer && (canEditLayer ? canEditLayer(managedLayer) : true));
 
   const axes = state.symmetry.axesCount || 2;
   const guides = state.guides;
+  const grid = state.perspective.grid ?? {
+    enabled: false,
+    planes: { xy: false, xz: true, yz: false },
+    spacing: 80,
+    opacity: 0.35,
+  };
 
   const addQuickGuide = (axis: 'x' | 'y') => {
     const limit = axis === 'x' ? canvasWidth : canvasHeight;
@@ -90,84 +143,593 @@ export const RulerControlsModal: React.FC<RulerControlsModalProps> = ({
     rulerMgr.addGuide(axis, pos);
   };
 
+  const handleBindCurrentToActiveLayer = () => {
+    if (!activeLayer || !canEditTargetLayer || !onUpdateLayerRuler) return;
+    const exported = rulerMgr.exportCurrentAsLayerRuler(pendingScope, true);
+    if (!exported) return;
+    rulerMgr.clearDetachedMode();
+    onUpdateLayerRuler(activeLayer.id, exported);
+  };
+
+  const handleToggleManagedEnabled = (enabled: boolean) => {
+    if (!managedLayer || !managedRuler || !canEditManagedLayer || !onUpdateLayerRuler) return;
+    onUpdateLayerRuler(managedLayer.id, { ...managedRuler, enabled });
+  };
+
+  const handleChangeManagedScope = (scope: LayerRulerScope) => {
+    if (!managedLayer || !managedRuler || !canEditManagedLayer || !onUpdateLayerRuler) return;
+    onUpdateLayerRuler(managedLayer.id, { ...managedRuler, scope });
+  };
+
+  const handleRemoveManagedRuler = () => {
+    if (!managedLayer || !canEditManagedLayer || !onUpdateLayerRuler) return;
+    onUpdateLayerRuler(managedLayer.id, null);
+  };
+
+  const toggleGridPlane = (plane: PerspectiveGridPlane) => {
+    if (!canEditActiveRuler) return;
+    rulerMgr.updatePerspectiveGrid({
+      enabled: true,
+      planes: { ...grid.planes, [plane]: !grid.planes[plane] },
+    });
+    commitIfBound();
+  };
+
   return (
-    <ToolWindow id="rulers" title={t.rulers.title} icon={<Compass />} onClose={onClose}
-      initial={{ x: 84, y: 96, w: 312, h: 0 }} minW={280}
-      footer={state.mode !== 'off' ? (
+    <ToolWindow
+      id="rulers"
+      title={t.rulers.title}
+      icon={<Compass />}
+      onClose={onClose}
+      initial={{ x: 84, y: 84, w: 336, h: 0 }}
+      minW={304}
+      footer={state.mode !== 'off' && canEditActiveRuler ? (
         <>
-          <button type="button" onClick={() => rulerMgr.initDimensions(canvasWidth, canvasHeight)} className="atelier-btn atelier-btn--ghost mr-auto">
+          <button
+            type="button"
+            onClick={() => {
+              rulerMgr.initDimensions(canvasWidth, canvasHeight, { forceBound: true });
+              commitIfBound();
+            }}
+            className="atelier-btn atelier-btn--ghost mr-auto"
+          >
             <RotateCw />{t.common.center}
           </button>
-          <button type="button" onClick={() => rulerMgr.setMode('off')} className="atelier-btn atelier-btn--danger">
+          <button
+            type="button"
+            onClick={() => {
+              if (state.boundSource && onUpdateLayerRuler) {
+                onUpdateLayerRuler(state.boundSource.ownerLayerId, null);
+              } else {
+                rulerMgr.setMode('off');
+              }
+            }}
+            className="atelier-btn atelier-btn--danger"
+          >
             <Trash2 />{t.rulers.clearAllRulers}
           </button>
         </>
-      ) : undefined}>
+      ) : undefined}
+    >
       <div className="space-y-3">
-        <div role="radiogroup" aria-label={t.rulers.title} className="grid grid-cols-5 gap-0.5 rounded-lg border border-neutral-700 bg-neutral-950/60 p-0.5 text-[11px] font-medium">
+        {/* Mode Selector (7 modes, 4-col clean grid) */}
+        <div
+          role="radiogroup"
+          aria-label={t.rulers.title}
+          className="grid grid-cols-4 gap-0.5 rounded-lg border border-neutral-700 bg-neutral-950/60 p-0.5 text-[11px] font-medium"
+        >
           {modes.map((m) => (
-            <button key={m.id} type="button" role="radio" aria-checked={state.mode === m.id} onClick={() => rulerMgr.setMode(m.id)}
-              className={`truncate rounded-md py-1 transition ${state.mode === m.id ? 'bg-indigo-600 text-white shadow' : 'text-neutral-400 hover:bg-neutral-800 hover:text-white'}`}>
+            <button
+              key={m.id}
+              type="button"
+              role="radio"
+              data-testid={`ruler-mode-${m.id}`}
+              aria-checked={state.mode === m.id}
+              disabled={!canEditActiveRuler && state.mode !== m.id}
+              onClick={() => {
+                rulerMgr.setMode(m.id);
+                if (m.id === 'off') {
+                  if (state.boundSource && onUpdateLayerRuler) {
+                    onUpdateLayerRuler(state.boundSource.ownerLayerId, null);
+                  }
+                } else {
+                  commitIfBound();
+                }
+              }}
+              className={`truncate rounded-md px-1 py-1 transition disabled:opacity-45 ${
+                state.mode === m.id
+                  ? 'bg-indigo-600 text-white shadow'
+                  : 'text-neutral-400 hover:bg-neutral-800 hover:text-white'
+              }`}
+            >
               {m.label}
             </button>
           ))}
         </div>
 
-        {state.mode === 'off' && (
-          <div className="flex flex-col items-center gap-2 py-6 text-neutral-500">
-            <Compass className="h-8 w-8 opacity-40" />
-            <span>選一種尺規開始</span>
+        {/* CSP-Style Ruler-on-Layer Binding Card */}
+        {onUpdateLayerRuler && (
+          <div
+            data-testid="ruler-layer-binding-section"
+            className="space-y-2 rounded-lg border border-purple-500/25 bg-purple-950/20 p-2.5"
+          >
+            <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-purple-200">
+              <span className="flex items-center gap-1.5">
+                <Layers className="h-3.5 w-3.5 text-purple-400" />
+                {t.rulers.layerBindingTitle}
+              </span>
+            </div>
+
+            {managedLayer && managedRuler ? (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2 text-[11px]">
+                  <span className="truncate text-neutral-200" data-testid="ruler-bound-owner-label">
+                    {t.rulers.layerBindingBoundTo.replace('{name}', managedLayer.name)}
+                  </span>
+                  {canEditManagedLayer && (
+                    <button
+                      type="button"
+                      data-testid="ruler-unbind-layer-btn"
+                      onClick={handleRemoveManagedRuler}
+                      className="atelier-btn atelier-btn--ghost atelier-btn--danger !h-6 !px-1.5 text-[10px]"
+                    >
+                      <Unlink2 className="h-3 w-3" />
+                      {t.rulers.layerBindingUnbind}
+                    </button>
+                  )}
+                </div>
+
+                {!canEditManagedLayer ? (
+                  <p className="text-[11px] text-amber-300/90">{t.rulers.layerBindingReadonly}</p>
+                ) : (
+                  <>
+                    <label className="flex cursor-pointer items-center justify-between text-[11px] text-neutral-300">
+                      <span>{t.rulers.layerBindingEnabled}</span>
+                      <input
+                        type="checkbox"
+                        data-testid="ruler-bound-enabled-toggle"
+                        checked={managedRuler.enabled}
+                        onChange={(e) => handleToggleManagedEnabled(e.target.checked)}
+                      />
+                    </label>
+                    <div className="space-y-1">
+                      <span className="text-[10px] text-neutral-400">{t.rulers.layerBindingScope}</span>
+                      <div className="grid grid-cols-3 gap-1">
+                        {(['all_layers', 'same_folder', 'target_layer'] as LayerRulerScope[]).map((scope) => (
+                          <button
+                            key={scope}
+                            type="button"
+                            data-testid={`ruler-scope-${scope}`}
+                            aria-pressed={managedRuler.scope === scope}
+                            onClick={() => handleChangeManagedScope(scope)}
+                            className={`rounded px-1.5 py-1 text-[10px] font-medium transition ${
+                              managedRuler.scope === scope
+                                ? 'bg-purple-600 text-white'
+                                : 'bg-neutral-900/70 text-neutral-300 hover:bg-neutral-800'
+                            }`}
+                          >
+                            {scope === 'all_layers'
+                              ? t.rulers.scopeAllLayers
+                              : scope === 'same_folder'
+                                ? t.rulers.scopeSameFolder
+                                : t.rulers.scopeTargetLayer}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <p className="text-[11px] text-neutral-400">{t.rulers.layerBindingDetached}</p>
+                {state.mode !== 'off' && activeLayer && canEditTargetLayer && (
+                  <div className="space-y-1.5">
+                    <div className="grid grid-cols-3 gap-1">
+                      {(['all_layers', 'same_folder', 'target_layer'] as LayerRulerScope[]).map((scope) => (
+                        <button
+                          key={scope}
+                          type="button"
+                          aria-pressed={pendingScope === scope}
+                          onClick={() => setPendingScope(scope)}
+                          className={`rounded px-1.5 py-1 text-[10px] font-medium transition ${
+                            pendingScope === scope
+                              ? 'bg-purple-600/80 text-white'
+                              : 'bg-neutral-900/70 text-neutral-400 hover:bg-neutral-800'
+                          }`}
+                        >
+                          {scope === 'all_layers'
+                            ? t.rulers.scopeAllLayers
+                            : scope === 'same_folder'
+                              ? t.rulers.scopeSameFolder
+                              : t.rulers.scopeTargetLayer}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      type="button"
+                      data-testid="ruler-bind-current-layer-btn"
+                      onClick={handleBindCurrentToActiveLayer}
+                      className="atelier-btn w-full justify-center !h-7 bg-purple-600/85 text-[11px] text-white hover:bg-purple-500"
+                    >
+                      <Link2 className="h-3.5 w-3.5" />
+                      {t.rulers.layerBindingBindCurrent} ({activeLayer.name})
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
+        {state.mode === 'off' && (
+          <div className="flex flex-col items-center gap-2 py-5 text-neutral-500">
+            <Compass className="h-8 w-8 opacity-40" />
+            <span>{t.rulers.pickModeHint}</span>
+          </div>
+        )}
+
+        {/* Symmetry Controls */}
         {state.mode === 'symmetry' && (
           <>
-            <Segmented label={t.rulers.symmetryMode} value={state.symmetry.mode} onChange={(mode) => rulerMgr.updateSymmetry({ mode })}
-              options={[{ id: 'bilateral', label: t.rulers.symmetry }, { id: '2-axis', label: t.rulers.quadrants }, { id: 'radial', label: t.rulers.radial }]} />
-            <Row label="對稱線" value={`${axes} 條`}>
-              <Chips values={[2, 3, 4, 5, 6, 8, 12, 16]} current={axes} label={(n) => `${n}`}
-                onPick={(n) => rulerMgr.updateSymmetry({ axesCount: n, mode: n === 2 ? 'bilateral' : 'radial' })} />
-              <input type="range" min="2" max="24" step="1" value={axes} aria-label="對稱線數量" className="h-1.5 w-full cursor-pointer"
-                onChange={(e) => { const n = parseInt(e.target.value, 10); rulerMgr.updateSymmetry({ axesCount: n, mode: n === 2 ? 'bilateral' : 'radial' }); }} />
+            <Segmented
+              label={t.rulers.symmetryMode}
+              value={state.symmetry.mode}
+              onChange={(mode) => {
+                rulerMgr.updateSymmetry({ mode });
+                commitIfBound();
+              }}
+              options={[
+                { id: 'bilateral', label: t.rulers.symmetry },
+                { id: '2-axis', label: t.rulers.quadrants },
+                { id: 'radial', label: t.rulers.radial },
+              ]}
+            />
+            <Row label={t.rulers.symmetryLines} value={`${axes}`}>
+              <Chips
+                values={[2, 3, 4, 5, 6, 8, 12, 16]}
+                current={axes}
+                disabled={!canEditActiveRuler}
+                label={(n) => `${n}`}
+                onPick={(n) => {
+                  rulerMgr.updateSymmetry({ axesCount: n, mode: n === 2 ? 'bilateral' : 'radial' });
+                  commitIfBound();
+                }}
+              />
+              <input
+                type="range"
+                min="2"
+                max="24"
+                step="1"
+                disabled={!canEditActiveRuler}
+                value={axes}
+                aria-label={t.rulers.axesCount}
+                className="h-1.5 w-full cursor-pointer"
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  rulerMgr.updateSymmetry({ axesCount: n, mode: n === 2 ? 'bilateral' : 'radial' });
+                }}
+                onPointerUp={commitIfBound}
+              />
             </Row>
             {state.symmetry.mode === 'bilateral' && (
-              <Row label="鏡像軸" value={`${state.symmetry.angleDeg ?? 90}°`}>
-                <Chips values={[90, 0, 45, 135]} current={state.symmetry.angleDeg ?? 90}
-                  label={(d) => (d === 90 ? '左右' : d === 0 ? '上下' : `${d}°`)} onPick={(angleDeg) => rulerMgr.updateSymmetry({ angleDeg })} />
+              <Row label={t.rulers.mirrorAxis} value={`${state.symmetry.angleDeg ?? 90}°`}>
+                <Chips
+                  values={[90, 0, 45, 135]}
+                  current={state.symmetry.angleDeg ?? 90}
+                  disabled={!canEditActiveRuler}
+                  label={(d) => (d === 90 ? t.rulers.mirrorLeftRight : d === 0 ? t.rulers.mirrorUpDown : `${d}°`)}
+                  onPick={(angleDeg) => {
+                    rulerMgr.updateSymmetry({ angleDeg });
+                    commitIfBound();
+                  }}
+                />
               </Row>
             )}
             <label className="flex cursor-pointer items-center justify-between text-[11px] text-neutral-300">
-              萬花筒
-              <input type="checkbox" checked={Boolean(state.symmetry.kaleidoscope)} onChange={(e) => rulerMgr.updateSymmetry({ kaleidoscope: e.target.checked })} />
+              {t.rulers.kaleidoscope}
+              <input
+                type="checkbox"
+                disabled={!canEditActiveRuler}
+                checked={Boolean(state.symmetry.kaleidoscope)}
+                onChange={(e) => {
+                  rulerMgr.updateSymmetry({ kaleidoscope: e.target.checked });
+                  commitIfBound();
+                }}
+              />
             </label>
-            <Hint>拖曳畫布上的中心點可移動對稱軸。</Hint>
+            <Hint>{t.rulers.symmetryHint}</Hint>
           </>
         )}
 
+        {/* Perspective Controls + 2D Spatial Grid (XY / XZ / YZ) */}
         {state.mode === 'perspective' && (
           <>
-            <Segmented label="滅點" value={state.perspective.mode} onChange={(mode) => rulerMgr.updatePerspective({ mode })}
-              options={[{ id: '1-point', label: '1 點' }, { id: '2-point', label: '2 點' }, { id: '3-point', label: '3 點' }]} />
-            <Hint>筆劃會吸附到透視線。拖曳畫布上的滅點與地平線調整位置。</Hint>
+            <Segmented
+              label={t.rulers.vanishingPointLabel}
+              value={state.perspective.mode}
+              onChange={(mode) => {
+                rulerMgr.updatePerspective({ mode });
+                commitIfBound();
+              }}
+              options={[
+                { id: '1-point', label: t.rulers.point1 },
+                { id: '2-point', label: t.rulers.point2 },
+                { id: '3-point', label: t.rulers.point3 },
+              ]}
+            />
+
+            {/* 2.3 Perspective 2D Spatial Grid */}
+            <div className="space-y-2 rounded-lg border border-neutral-800 bg-neutral-950/45 p-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-medium text-neutral-200">{t.rulers.perspectiveGridTitle}</span>
+                <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-neutral-300">
+                  <input
+                    type="checkbox"
+                    data-testid="perspective-grid-toggle"
+                    disabled={!canEditActiveRuler}
+                    checked={grid.enabled}
+                    onChange={(e) => {
+                      rulerMgr.updatePerspectiveGrid({ enabled: e.target.checked });
+                      commitIfBound();
+                    }}
+                  />
+                  <span>{t.rulers.perspectiveGridShow}</span>
+                </label>
+              </div>
+
+              <div className="grid grid-cols-3 gap-1">
+                {(['xy', 'xz', 'yz'] as PerspectiveGridPlane[]).map((plane) => {
+                  const active = grid.enabled && grid.planes[plane];
+                  const activeCls =
+                    plane === 'xy'
+                      ? 'bg-sky-600/80 text-white'
+                      : plane === 'xz'
+                        ? 'bg-emerald-600/80 text-white'
+                        : 'bg-amber-600/80 text-white';
+                  return (
+                    <button
+                      key={plane}
+                      type="button"
+                      data-testid={`perspective-grid-plane-${plane}`}
+                      aria-pressed={active}
+                      disabled={!canEditActiveRuler}
+                      onClick={() => toggleGridPlane(plane)}
+                      className={`rounded px-1.5 py-1 text-[10px] font-medium transition disabled:opacity-45 ${
+                        active ? activeCls : 'bg-neutral-900 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100'
+                      }`}
+                    >
+                      {plane === 'xy'
+                        ? t.rulers.perspectiveGridXY
+                        : plane === 'xz'
+                          ? t.rulers.perspectiveGridXZ
+                          : t.rulers.perspectiveGridYZ}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {grid.enabled && (
+                <>
+                  <Row label={t.rulers.perspectiveGridSpacing} value={`${Math.round(grid.spacing)} px`}>
+                    <input
+                      type="range"
+                      data-testid="perspective-grid-spacing"
+                      min="20"
+                      max="300"
+                      step="5"
+                      disabled={!canEditActiveRuler}
+                      value={Math.round(grid.spacing)}
+                      aria-label={t.rulers.perspectiveGridSpacing}
+                      className="h-1.5 w-full cursor-pointer"
+                      onChange={(e) => rulerMgr.updatePerspectiveGrid({ spacing: parseInt(e.target.value, 10) })}
+                      onPointerUp={commitIfBound}
+                    />
+                    <Chips
+                      values={[40, 80, 120, 180]}
+                      current={Math.round(grid.spacing)}
+                      disabled={!canEditActiveRuler}
+                      label={(v) => `${v}`}
+                      onPick={(spacing) => {
+                        rulerMgr.updatePerspectiveGrid({ spacing });
+                        commitIfBound();
+                      }}
+                    />
+                  </Row>
+                  <Row label={t.rulers.perspectiveGridOpacity} value={`${Math.round((grid.opacity ?? 0.35) * 100)}%`}>
+                    <input
+                      type="range"
+                      min="10"
+                      max="90"
+                      step="5"
+                      disabled={!canEditActiveRuler}
+                      value={Math.round((grid.opacity ?? 0.35) * 100)}
+                      aria-label={t.rulers.perspectiveGridOpacity}
+                      className="h-1.5 w-full cursor-pointer"
+                      onChange={(e) => rulerMgr.updatePerspectiveGrid({ opacity: parseInt(e.target.value, 10) / 100 })}
+                      onPointerUp={commitIfBound}
+                    />
+                  </Row>
+                </>
+              )}
+            </div>
+
+            <Hint>{t.rulers.perspectiveHint}</Hint>
           </>
         )}
 
+        {/* Parallel Controls */}
         {state.mode === 'parallel' && (
+          <Row label={t.rulers.angle} value={`${state.parallel.angleDeg}°`}>
+            <input
+              type="range"
+              min="0"
+              max="359"
+              disabled={!canEditActiveRuler}
+              value={state.parallel.angleDeg}
+              aria-label={t.rulers.angle}
+              className="h-1.5 w-full cursor-pointer"
+              onChange={(e) => rulerMgr.updateParallel({ angleDeg: parseInt(e.target.value, 10) })}
+              onPointerUp={commitIfBound}
+            />
+            <Chips
+              values={[0, 30, 45, 60, 90, 120, 135, 180]}
+              current={state.parallel.angleDeg}
+              disabled={!canEditActiveRuler}
+              label={(d) => `${d}°`}
+              onPick={(angleDeg) => {
+                rulerMgr.updateParallel({ angleDeg });
+                commitIfBound();
+              }}
+            />
+          </Row>
+        )}
+
+        {/* Concentric Controls */}
+        {state.mode === 'concentric' && (
+          <Row label={t.rulers.concentricStep} value={`${state.concentric.stepRadius} px`}>
+            <input
+              type="range"
+              min="20"
+              max="150"
+              step="5"
+              disabled={!canEditActiveRuler}
+              value={state.concentric.stepRadius}
+              aria-label={t.rulers.concentricStep}
+              className="h-1.5 w-full cursor-pointer"
+              onChange={(e) => rulerMgr.updateConcentric({ stepRadius: parseInt(e.target.value, 10) })}
+              onPointerUp={commitIfBound}
+            />
+          </Row>
+        )}
+
+        {/* 2.1 Radial Line (集中線) Controls */}
+        {state.mode === 'radial_line' && (
           <>
-            <Row label="角度" value={`${state.parallel.angleDeg}°`}>
-              <input type="range" min="0" max="359" value={state.parallel.angleDeg} aria-label="平行線角度" className="h-1.5 w-full cursor-pointer"
-                onChange={(e) => rulerMgr.updateParallel({ angleDeg: parseInt(e.target.value, 10) })} />
-              <Chips values={[0, 30, 45, 60, 90, 120, 135, 180]} current={state.parallel.angleDeg} label={(d) => `${d}°`}
-                onPick={(angleDeg) => rulerMgr.updateParallel({ angleDeg })} />
+            <Row label={t.rulers.radialRayCount} value={`${state.radialLine.rayCount ?? 24}`}>
+              <Chips
+                values={[8, 12, 16, 24, 32, 36, 48, 60]}
+                current={state.radialLine.rayCount ?? 24}
+                disabled={!canEditActiveRuler}
+                label={(n) => `${n}`}
+                onPick={(rayCount) => {
+                  rulerMgr.updateRadialLine({ rayCount });
+                  commitIfBound();
+                }}
+              />
+              <input
+                type="range"
+                min="4"
+                max="72"
+                step="1"
+                disabled={!canEditActiveRuler}
+                value={state.radialLine.rayCount ?? 24}
+                aria-label={t.rulers.radialRayCount}
+                className="h-1.5 w-full cursor-pointer"
+                onChange={(e) => rulerMgr.updateRadialLine({ rayCount: parseInt(e.target.value, 10) })}
+                onPointerUp={commitIfBound}
+              />
             </Row>
+            <Row label={t.rulers.radialInnerRadius} value={`${Math.round(state.radialLine.innerRadius ?? 0)} px`}>
+              <input
+                type="range"
+                min="0"
+                max={Math.max(400, Math.round(Math.min(canvasWidth, canvasHeight) * 0.45))}
+                step="5"
+                disabled={!canEditActiveRuler}
+                value={Math.round(state.radialLine.innerRadius ?? 0)}
+                aria-label={t.rulers.radialInnerRadius}
+                className="h-1.5 w-full cursor-pointer"
+                onChange={(e) => rulerMgr.updateRadialLine({ innerRadius: parseInt(e.target.value, 10) })}
+                onPointerUp={commitIfBound}
+              />
+            </Row>
+            <Hint>{t.rulers.radialLineHint}</Hint>
           </>
         )}
 
-        {state.mode === 'concentric' && (
-          <Row label="間距" value={`${state.concentric.stepRadius} px`}>
-            <input type="range" min="20" max="150" step="5" value={state.concentric.stepRadius} aria-label="同心圓間距" className="h-1.5 w-full cursor-pointer"
-              onChange={(e) => rulerMgr.updateConcentric({ stepRadius: parseInt(e.target.value, 10) })} />
-          </Row>
+        {/* 2.1 Curve / Bezier Ruler Controls */}
+        {state.mode === 'curve' && (
+          <>
+            <Segmented
+              label={t.rulers.curveType}
+              value={state.curve.curveType}
+              onChange={(curveType) => {
+                if (!canEditActiveRuler) return;
+                rulerMgr.updateCurve({ curveType: curveType as CurveRulerType });
+                commitIfBound();
+              }}
+              options={[
+                { id: 'bezier', label: t.rulers.curveBezier },
+                { id: 'quadratic', label: t.rulers.curveQuadratic },
+                { id: 'spline', label: t.rulers.curveSpline },
+              ]}
+            />
+            <label className="flex cursor-pointer items-center justify-between text-[11px] text-neutral-300">
+              <span>{t.rulers.curveClosed}</span>
+              <input
+                type="checkbox"
+                data-testid="curve-closed-toggle"
+                disabled={!canEditActiveRuler}
+                checked={state.curve.closed}
+                onChange={(e) => {
+                  rulerMgr.updateCurve({ closed: e.target.checked });
+                  commitIfBound();
+                }}
+              />
+            </label>
+            <div className="flex items-center justify-between gap-1.5">
+              <span className="text-[11px] text-neutral-400">
+                {t.rulers.curveNodes}: <strong className="font-mono text-neutral-100">{state.curve.anchors.length}</strong>
+              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  data-testid="curve-add-node-btn"
+                  disabled={!canEditActiveRuler || state.curve.anchors.length >= 64}
+                  onClick={() => {
+                    rulerMgr.addCurveAnchor();
+                    commitIfBound();
+                  }}
+                  className="atelier-btn !h-6 !px-2 text-[11px] disabled:opacity-45"
+                >
+                  <Plus className="h-3 w-3" />
+                  {t.rulers.curveAddNode}
+                </button>
+                <button
+                  type="button"
+                  disabled={!canEditActiveRuler}
+                  onClick={() => {
+                    rulerMgr.resetCurveToCanvas(canvasWidth, canvasHeight);
+                    commitIfBound();
+                  }}
+                  className="atelier-btn atelier-btn--ghost !h-6 !px-2 text-[11px] disabled:opacity-45"
+                >
+                  {t.rulers.curveReset}
+                </button>
+              </div>
+            </div>
+            {state.curve.anchors.length > 2 && canEditActiveRuler && (
+              <div className="flex max-h-20 flex-wrap gap-1 overflow-y-auto rounded border border-neutral-800/80 bg-neutral-950/40 p-1.5">
+                {state.curve.anchors.map((a, idx) => (
+                  <button
+                    key={a.id}
+                    type="button"
+                    title={`${t.rulers.curveRemoveNode} #${idx + 1}`}
+                    onClick={() => {
+                      rulerMgr.removeCurveAnchor(a.id);
+                      commitIfBound();
+                    }}
+                    className="inline-flex items-center gap-1 rounded bg-neutral-800/90 px-1.5 py-0.5 font-mono text-[10px] text-neutral-200 hover:bg-rose-900/70 hover:text-rose-100"
+                  >
+                    #{idx + 1}
+                    <X className="h-2.5 w-2.5" />
+                  </button>
+                ))}
+              </div>
+            )}
+            <Hint>{t.rulers.curveHint}</Hint>
+          </>
         )}
 
         {/* Horizontal & vertical canvas guides for alignment / distribution */}

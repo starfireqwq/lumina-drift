@@ -7,13 +7,15 @@ import {
   LayerType,
   computeTidiedAscendingNonMaskIds,
   filterTopLevelSelectedLayers,
+  isLayerRulerEffectiveForLayer,
   orderLayersForReparenting,
   resolveEffectiveLayerColor,
   resolveEffectivePaletteColor,
   selectLayerRange,
   tidyLayerModels,
 } from '@atelier/shared';
-import type { AdjustmentKind, LayerColorMeta, PaletteColorDisplayMode } from '@atelier/shared';
+import type { AdjustmentKind, LayerColorMeta, LayerRulerMeta, PaletteColorDisplayMode } from '@atelier/shared';
+import { RulerManager } from '../engine/RulerManager';
 import { FolderAccessPanel } from './FolderAccessPanel';
 import type { FolderAccess } from './workspace/useFolderAccess';
 import { type DroppedImages, type ImageDropTarget, isImageDrag, readDroppedImages } from '../utils/imageImport';
@@ -240,6 +242,8 @@ interface LayerPanelProps {
   onChangeLocalLayerColor: (id: string, config: LayerColorMeta | null | undefined) => void;
   /** Opens sign-in modal when guest clicks login CTA in layer guidance */
   onOpenAuth?: () => void;
+  /** Opens the ruler controls modal from a layer ruler badge or context menu */
+  onOpenRulerModal?: () => void;
 }
 
 export interface BlendModeGroup {
@@ -490,6 +494,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   localLayerColors,
   onChangeLocalLayerColor,
   onOpenAuth,
+  onOpenRulerModal,
 }) => {
   const { t } = useI18n();
   const { isGuest, user } = useAuth();
@@ -1792,6 +1797,56 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                         {!layerMask.isVisible && <span className="absolute inset-0 flex items-center justify-center bg-black/50 text-xs font-bold text-rose-400">X</span>}
                       </button>
                     )}
+                    {layer.meta?.ruler && (() => {
+                      const layerRuler = layer.meta.ruler;
+                      const isEffective = isLayerRulerEffectiveForLayer(layer, activeLayerId, byId);
+                      const scopeText = layerRuler.scope === 'all_layers'
+                        ? t.rulers.scopeAllLayers
+                        : layerRuler.scope === 'same_folder'
+                          ? t.rulers.scopeSameFolder
+                          : t.rulers.scopeTargetLayer;
+                      const editableRuler = !readOnly && canManage(layer);
+                      return (
+                        <button
+                          type="button"
+                          data-testid={`layer-ruler-badge-${layer.id}`}
+                          data-ruler-enabled={layerRuler.enabled ? 'true' : 'false'}
+                          data-ruler-effective={isEffective ? 'true' : 'false'}
+                          data-ruler-scope={layerRuler.scope}
+                          aria-label={`${layer.name} ${t.rulers.layerRulerMenu}`}
+                          title={`${t.rulers.layerRulerMenu} (${scopeText})`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (e.shiftKey || !editableRuler) {
+                              onSelectLayer(layer.id);
+                              onOpenRulerModal?.();
+                              return;
+                            }
+                            const nextRuler: LayerRulerMeta = { ...layerRuler, enabled: !layerRuler.enabled };
+                            void onUpdateLayerProps?.(layer.id, { meta: { ...layer.meta, ruler: nextRuler } });
+                          }}
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                            onSelectLayer(layer.id);
+                            onOpenRulerModal?.();
+                          }}
+                          className={`relative ml-0.5 flex h-7 w-6 shrink-0 items-center justify-center rounded border transition ${
+                            !layerRuler.enabled
+                              ? 'border-neutral-700 bg-neutral-900/70 text-neutral-500'
+                              : isEffective
+                                ? 'border-purple-400 bg-purple-600/35 text-purple-200 ring-1 ring-purple-400/60'
+                                : 'border-purple-700/60 bg-purple-950/40 text-purple-300/75 hover:border-purple-400/80'
+                          }`}
+                        >
+                          <LayerRulerIcon />
+                          {!layerRuler.enabled && (
+                            <span aria-hidden className="pointer-events-none absolute inset-0 flex items-center justify-center text-xs font-bold text-rose-400">
+                              ×
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })()}
                   </div>
 
                   {/* Compact CSP metadata line + clear layer name */}
@@ -1917,6 +1972,56 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             {onOpenAlign && layer.layerType !== 'mask' && layer.layerType !== 'adjustment' && (
               <MenuItem label={t.align.menuItem} onClick={close(() => onOpenAlign(layer.id))} />
             )}
+            {layer.layerType !== 'mask' && layer.layerType !== 'adjustment' && (
+              layer.meta?.ruler ? (
+                <>
+                  <MenuItem
+                    label={t.rulers.layerRulerToggleEnable}
+                    disabledReason={!readOnly && canManage(layer) ? null : t.layers.notYourLayer}
+                    onClick={close(() => {
+                      const currentRuler = layer.meta?.ruler;
+                      if (!currentRuler) return;
+                      void onUpdateLayerProps?.(layer.id, {
+                        meta: { ...layer.meta, ruler: { ...currentRuler, enabled: !currentRuler.enabled } },
+                      });
+                    })}
+                  />
+                  {onOpenRulerModal && (
+                    <MenuItem
+                      label={t.rulers.layerRulerOpenSettings}
+                      onClick={close(() => {
+                        onSelectLayer(layer.id);
+                        onOpenRulerModal();
+                      })}
+                    />
+                  )}
+                  <MenuItem
+                    label={t.rulers.layerRulerRemove}
+                    danger
+                    disabledReason={!readOnly && canManage(layer) ? null : t.layers.notYourLayer}
+                    onClick={close(() => {
+                      void onUpdateLayerProps?.(layer.id, { meta: { ...layer.meta, ruler: null } });
+                    })}
+                  />
+                </>
+              ) : (
+                RulerManager.getInstance().state.mode !== 'off' && (
+                  <MenuItem
+                    label={t.rulers.layerRulerBindHere}
+                    disabledReason={!readOnly && canManage(layer) ? null : t.layers.notYourLayer}
+                    onClick={close(() => {
+                      const exported = RulerManager.getInstance().exportCurrentAsLayerRuler(
+                        layer.layerType === 'group' ? 'same_folder' : 'target_layer',
+                        true,
+                      );
+                      if (!exported) return;
+                      RulerManager.getInstance().clearDetachedMode();
+                      void onUpdateLayerProps?.(layer.id, { meta: { ...layer.meta, ruler: exported } });
+                    })}
+                  />
+                )
+              )
+            )}
             <MenuItem label={t.layers.renameLayer} hint="F2" disabledReason={canManage(layer) ? null : t.layers.notYourLayer} onClick={close(() => handleStartRename(layer))} />
             <div className="my-1 h-px bg-neutral-700/70" />
             <MenuItem label={t.layers.deleteLayer} danger disabledReason={canManage(layer) && layers.length > 1 ? null : t.layers.cannotDelete}
@@ -1984,5 +2089,13 @@ const PersonalEye: React.FC<{ on: boolean }> = ({ on }) => (
   <svg viewBox="0 0 16 12" className="h-3 w-4" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden>
     <path d="M1 6s2.5-4.5 7-4.5S15 6 15 6s-2.5 4.5-7 4.5S1 6 1 6Z" />
     {on ? <circle cx="8" cy="6" r="1.8" fill="currentColor" /> : <path d="M2 11 14 1" />}
+  </svg>
+);
+
+/** CSP-style set-square icon shown on layers or folders that carry a bound ruler. */
+const LayerRulerIcon: React.FC = () => (
+  <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinejoin="round" aria-hidden>
+    <path d="M2.5 13.5V2.5L13.5 13.5H2.5Z" />
+    <path d="M5 11V7.5L8.5 11H5Z" />
   </svg>
 );
