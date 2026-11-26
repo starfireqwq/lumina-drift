@@ -117,6 +117,7 @@ const getPanelTitle = (id: PanelId, t: Translations): string => {
   switch (id) {
     case 'color': return t.studio.colorWheel;
     case 'subView': return t.subView.title;
+    case 'autoActions': return t.autoActions.title;
     case 'toolProps': return t.studio.brushSettings;
     case 'brushToolset': return t.brushPreset.toolset;
     case 'layers': return t.layers.title;

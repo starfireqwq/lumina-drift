@@ -286,7 +286,7 @@ const PanelMenu: React.FC<{ id: PanelId; place: PanelPlace; onClose?: () => void
     .filter((g) => !(place === 'float' && g === myGroup))
     .map((g) => {
       const members = layout.order.filter((p) => layout.panels[p].place === 'float' && layout.panels[p].visible && layout.panels[p].group === g);
-      return { leader: members[0], label: members.map((m) => PANEL_TITLES[m]).join('・') };
+      return { leader: members[0], label: members.map((m) => m === 'autoActions' ? t.autoActions.title : PANEL_TITLES[m]).join('・') };
     }) : [];
   const groupSize = layout.order.filter((p) => layout.panels[p].place === 'float' && layout.panels[p].visible && layout.panels[p].group === myGroup).length;
   const ref = useRef<HTMLButtonElement>(null);

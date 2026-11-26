@@ -1539,6 +1539,105 @@ export interface Translations {
     emptyHint: string;
   };
 
+  autoActions: {
+    title: string;
+    record: string;
+    pause: string;
+    resume: string;
+    stop: string;
+    cancelRecording: string;
+    recordingStatus: string;
+    paused: string;
+    recordingFull: string;
+    nameDialogTitle: string;
+    namePlaceholder: string;
+    defaultName: string;
+    play: string;
+    playing: string;
+    done: string;
+    failed: string;
+    expand: string;
+    collapse: string;
+    builtinBadge: string;
+    duplicateToMine: string;
+    rename: string;
+    duplicate: string;
+    duplicateName: string;
+    delete: string;
+    deleteConfirm: string;
+    export: string;
+    exportAll: string;
+    import: string;
+    importResult: string;
+    importPartial: string;
+    importReadError: string;
+    importError: {
+      too_large: string;
+      not_json: string;
+      wrong_format: string;
+      unsupported_version: string;
+      empty: string;
+    };
+    saveError: string;
+    emptyMine: string;
+    emptySteps: string;
+    moveUp: string;
+    moveDown: string;
+    dragHandle: string;
+    enableStep: string;
+    editStep: string;
+    removeStep: string;
+    steps: {
+      'layer.new': string;
+      'layer.duplicate': string;
+      'layer.merge_down': string;
+      'layer.delete': string;
+      'layer.set_blend': string;
+      'layer.set_opacity': string;
+      'layer.set_clip': string;
+      'filter.apply': string;
+      'adjustment.create': string;
+      'selection.grow': string;
+      'selection.invert': string;
+      'selection.clear': string;
+    };
+    params: {
+      blend: string;
+      opacity: string;
+      pixels: string;
+      grow: string;
+      shrink: string;
+      clippingOn: string;
+      clippingOff: string;
+      on: string;
+      off: string;
+    };
+    errors: {
+      no_layer: string;
+      not_editable: string;
+      no_layer_below: string;
+      merge_blocked: string;
+      filter_unavailable: string;
+      filter_failed: string;
+      adjustment_blocked: string;
+      selection_unavailable: string;
+      read_only: string;
+      cancelled: string;
+      busy: string;
+      unknown: string;
+    };
+    presets: Record<'softGlow' | 'lineGlow' | 'shadowClip' | 'lightClip' | 'stickerOutline' | 'chromaticPost' | 'warmTone', { name: string; desc: string }>;
+    layerNames: Record<'shadow' | 'light' | 'glow' | 'outline', string>;
+    readOnlyReason: string;
+    help: {
+      summary: string;
+      record: string;
+      supported: string;
+      play: string;
+      files: string;
+    };
+  };
+
   reference: {
     title: string;
     openImage: string;

@@ -1104,7 +1104,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="grid grid-cols-2 gap-2">
                   {PANEL_IDS.map((id) => (
                     <label key={id} className="flex items-center justify-between gap-2 rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-xs text-neutral-200">
-                      <span>{id === 'subView' ? t.subView.title : PANEL_TITLES[id]}</span>
+                      <span>{id === 'subView' || id === 'autoActions' ? t[id].title : PANEL_TITLES[id]}</span>
                       <input type="checkbox" data-panel-toggle={id} checked={dockLayout.panels[id].visible} onChange={() => dockActions.toggle(id)} />
                     </label>
                   ))}

@@ -7,7 +7,7 @@ import { getUiScale, onUiRescale } from '../../theme/uiScale';
  * or floats as a resizable window. Shared by the top bar's 視窗 menu and the workspace.
  */
 export type ToolDockPanelId = 'filters' | 'align';
-export type PanelId = 'color' | 'subView' | 'brushToolset' | 'toolProps' | 'layers' | 'members' | 'oplog' | 'quickKeys' | ToolDockPanelId;
+export type PanelId = 'color' | 'subView' | 'autoActions' | 'brushToolset' | 'toolProps' | 'layers' | 'members' | 'oplog' | 'quickKeys' | ToolDockPanelId;
 export const isToolDockPanel = (id: PanelId): id is ToolDockPanelId => id === 'filters' || id === 'align';
 export type DockSide = 'left' | 'right' | 'bottom';
 export type PanelPlace = DockSide | 'float';
@@ -49,7 +49,7 @@ export const TOOL_RAIL_WIDTH_MAX = 220;
 
 const clampNum = (v: number, min: number, max: number) => Math.max(min, Math.min(max, Math.round(v)));
 
-export const PANEL_IDS: PanelId[] = ['color', 'subView', 'brushToolset', 'toolProps', 'layers', 'members', 'oplog', 'quickKeys'];
+export const PANEL_IDS: PanelId[] = ['color', 'subView', 'autoActions', 'brushToolset', 'toolProps', 'layers', 'members', 'oplog', 'quickKeys'];
 const LAYOUT_PANEL_IDS: PanelId[] = [...PANEL_IDS, 'filters', 'align'];
 
 const LAYOUT_VERSION = 4;
@@ -60,6 +60,7 @@ const defaultLayout = (): DockLayoutState => ({
   panels: {
     color: { visible: true, place: 'right', collapsed: false, weight: 1.28, float: { x: 120, y: 120, w: 280, h: 430 }, group: 'color' },
     subView: { visible: false, place: 'left', collapsed: false, weight: 1, float: { x: 100, y: 120, w: 300, h: 360 }, group: 'subView' },
+    autoActions: { visible: false, place: 'left', collapsed: false, weight: 1, float: { x: 120, y: 140, w: 300, h: 420 }, group: 'autoActions' },
     brushToolset: { visible: true, place: 'right', collapsed: false, weight: 1, float: { x: 160, y: 140, w: 280, h: 420 }, group: 'toolProps' },
     toolProps: { visible: true, place: 'right', collapsed: false, weight: 1, float: { x: 160, y: 140, w: 280, h: 420 }, group: 'toolProps' },
     layers: { visible: true, place: 'right', collapsed: false, weight: 1.05, float: { x: 200, y: 160, w: 300, h: 460 }, group: 'layers' },
@@ -79,9 +80,9 @@ const defaultLayout = (): DockLayoutState => ({
   toolRailWidth: 46,
 });
 
-const load = (): DockLayoutState => {
+export const loadDockLayout = (storage?: Pick<Storage, 'getItem'>): DockLayoutState => {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = (storage ?? localStorage).getItem(STORAGE_KEY);
     if (!raw) return scaledLayout(defaultLayout(), getUiScale());
     const parsed = JSON.parse(raw) as DockLayoutState;
     if (parsed.version !== LAYOUT_VERSION) return scaledLayout(defaultLayout(), getUiScale());
@@ -127,7 +128,7 @@ const load = (): DockLayoutState => {
   }
 };
 
-let state: DockLayoutState = typeof window === 'undefined' ? defaultLayout() : load();
+let state: DockLayoutState = typeof window === 'undefined' ? defaultLayout() : loadDockLayout();
 const listeners = new Set<() => void>();
 
 const commit = (next: DockLayoutState) => {
@@ -307,6 +308,7 @@ export const PANEL_TITLES: Record<PanelId, string> = {
   brushToolset: '筆刷工具集',
   color: '色彩',
   subView: '子視圖',
+  autoActions: '自動動作',
   toolProps: '工具屬性',
   layers: '圖層',
   members: '成員',

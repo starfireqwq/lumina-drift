@@ -47,6 +47,18 @@ export function getAdjustmentHelpTopic(t: Translations): HelpTopic {
   };
 }
 
+export function getAutoActionsHelpTopic(t: Translations): HelpTopic {
+  const { title, help, record, play, builtinBadge } = t.autoActions;
+  return {
+    id: 'auto-actions',
+    category: 'ui',
+    title,
+    summary: help.summary,
+    steps: [help.record, help.supported, help.play, help.files],
+    keywords: [title, record, play, builtinBadge, 'action', 'macro', 'Ctrl+Z', '.lumina-action'],
+  };
+}
+
 export const HELP_CATEGORIES: Array<{ id: HelpCategoryId; label: string }> = [
   { id: 'start', label: '快速上手' },
   { id: 'draw', label: '繪畫' },
@@ -721,7 +733,7 @@ export const queryTerms = (q: string) =>
 export function getHelpTopics(t: Translations): HelpTopic[] {
   return [
     ...HELP_TOPICS.map((topic) => topic.id === 'text' ? { ...topic, steps: t.textEditor.helpSteps } : topic),
-    getAdjustmentHelpTopic(t),
+    getAdjustmentHelpTopic(t), getAutoActionsHelpTopic(t),
   ];
 }
 

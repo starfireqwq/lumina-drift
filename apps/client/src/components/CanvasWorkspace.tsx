@@ -100,8 +100,11 @@ import {
   toneHistogram,
   type AdjustmentKind,
   type LayerAdjustment,
+  type LayerPropsSnapshot,
 } from '@atelier/shared';
 import { adjustmentParamsKey, buildAdjustmentEditUndo, nextAdjustmentLayerName } from './workspace/adjustmentEditing';
+import { createAutoActionHost, type AutoActionHostDeps } from './workspace/autoActionHost';
+import { autoActionRecorder, AutoActionStepError, BUILTIN_AUTO_ACTIONS, playAutoAction, type AutoAction, type AutoActionErrorCode, type AutoActionPlayResult } from '../engine/ActionRecorder';
 import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
 import { useI18n } from '../context/I18nContext';
@@ -133,6 +136,7 @@ import { OverlayPresence } from './OverlayPresence';
 import { CanvasStickersOverlay } from './CanvasStickersOverlay';
 import { ColorWheelStudio } from './ColorWheelStudio';
 import { SubViewPanel } from './SubViewPanel';
+import { AutoActionsPanel } from './AutoActionsPanel';
 import { UserListPanel } from './UserListPanel';
 import { ToolRail } from './workspace/ToolRail';
 import { BrushSideSliders, MobileBrushSliders } from './workspace/BrushSideSliders';
@@ -264,7 +268,7 @@ import { PluginFilterWorkerClient } from '../plugins/pluginFilterClient';
 import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../utils/filterMemoryGuard';
 import type { FilterTargetOptions } from './FilterTargetBar';
 import { AtelierModal, modalButton } from './AtelierModal';
-import { AlertCircle, AlignCenter, Eye, Grid2x2, Image as ImageIcon, ImagePlus, Keyboard, Layers, Minimize2, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
+import { AlertCircle, AlignCenter, Eye, Grid2x2, Image as ImageIcon, ImagePlus, Keyboard, Layers, ListVideo, Minimize2, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
 import { type DroppedImages, type ImageDropTarget, ImageImportError, imageEntries, isImageDrag, loadImageEntry, readDroppedImages } from '../utils/imageImport';
 
 /** Where a key types text (a text field), unlike a focused button, slider, checkbox or the page */
@@ -569,6 +573,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (dockLayout.panels.oplog.visible) dockActions.hide('oplog');
     if (id === 'subView') dockActions.show('subView');
     else if (dockLayout.panels.subView.visible) dockActions.hide('subView');
+    if (id === 'autoActions') dockActions.show('autoActions');
+    else if (dockLayout.panels.autoActions.visible) dockActions.hide('autoActions');
     setMobileSheet(id);
   };
   const openBrushToolset = () => {
@@ -578,6 +584,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const membersPanelVisible = dockLayout.panels.members.visible;
   const oplogPanelVisible = dockLayout.panels.oplog.visible;
   const subViewPanelVisible = dockLayout.panels.subView.visible;
+  const autoActionsPanelVisible = dockLayout.panels.autoActions.visible;
   useEffect(() => {
     if (!isTouchCanvasMode) return;
     if (membersPanelVisible) setMobileSheet('members');
@@ -593,6 +600,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (subViewPanelVisible) setMobileSheet('subView');
     else setMobileSheet((curr) => (curr === 'subView' ? null : curr));
   }, [isTouchCanvasMode, subViewPanelVisible]);
+  useEffect(() => {
+    if (!isTouchCanvasMode) return;
+    if (autoActionsPanelVisible) setMobileSheet('autoActions');
+    else setMobileSheet((curr) => (curr === 'autoActions' ? null : curr));
+  }, [isTouchCanvasMode, autoActionsPanelVisible]);
 
   const workspaceRef = useRef<HTMLDivElement>(null);
   const hasCanvas = Boolean(canvas);
@@ -1376,7 +1388,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   }, []);
   const shortcutActionsRef = useRef({
     createLayer: onCreateLayer,
-    deleteLayer: async (_layerId: string) => {},
+    deleteLayer: (_layerId: string) => {},
     selectTool: (_tool: ToolType) => {},
     selectSubTool: (_subToolId: SubToolId) => {},
     activateCategoryShortcut: (_categoryId: ToolCategoryId) => {},
@@ -1390,7 +1402,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     mergeDown: (_layerId: string) => {},
     groupLayers: async (_ids: string[]) => {},
     copyLayers: (_ids: string[]) => {},
-    pasteLayers: async () => {},
+    pasteLayers: () => {},
+    duplicateLayers: (_ids: string[]) => {},
+    clearSelection: () => {},
     animAddCel: async () => {},
     animAddBlank: async () => {},
     animJumpKeyframe: (_dir: -1 | 1) => {},
@@ -1416,6 +1430,18 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
 
   const scopedUndoRef = useRef(new ScopedUndoManager());
+  const autoActionBusyRef = useRef(false);
+  const autoActionContextRef = useRef<{ lm: LayerManager; undo: ScopedUndoManager; userId: string } | null>(null);
+  const autoActionPointersRef = useRef(new Set<number>());
+  const pendingAutoActionEditsRef = useRef(new Set<Promise<unknown>>());
+  const adjustmentRecordingIdsRef = useRef(new WeakMap<object, string>());
+
+  const trackAutoActionEdit = <T,>(work: Promise<T>): Promise<T> => {
+    const pending = pendingAutoActionEditsRef.current;
+    const tracked = work.finally(() => pending.delete(tracked));
+    pending.add(tracked);
+    return tracked;
+  };
 
   const updateUndoRedoState = () => {
     const effectiveUserId = userRef.current?.id || user?.id || 'guest';
@@ -1480,6 +1506,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const selection = useSelectionTools(toolCtx);
   const { wandTolerance, setWandTolerance, wandContiguous, setWandContiguous, hasSelectionState, setHasSelectionState, selectionMode, setSelectionMode, handleClearSelection, growSelection } = selection;
   const { selectionAntialias, setSelectionAntialias, selectionFeather, setSelectionFeather } = selection;
+  const editSelectionFromUser = (kind: 'selection.grow' | 'selection.invert' | 'selection.clear', px = 0) => {
+    const engine = selectionEngineRef.current;
+    if (autoActionBusyRef.current || !engine) return;
+    if (kind === 'selection.invert') selection.invertSelection();
+    else if (kind === 'selection.clear') handleClearSelection();
+    else growSelection(px);
+    autoActionRecorder.record({ kind, params: kind === 'selection.grow' ? { px } : undefined });
+  };
   useEffect(() => {
     if (!activePluginToolKey) return;
     selection.cancelPolygonLasso();
@@ -2060,6 +2094,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         app, viewport, layerManager, tileEngine, selectionEngine, vectorEngine, animationEngine: timeline,
         rulerManager: RulerManager.getInstance(),
         undo: scopedUndoRef.current, tileToRgba,
+        autoActions: autoActionsDebug,
         get filterWorker() { return filterWorkerRef.current; },
         get pluginFilterWorker() { return pluginFilterWorkerRef.current; },
       };
@@ -2173,6 +2208,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
       // Keyboard listeners for shortcuts
       handleKeyDown = (ev: KeyboardEvent) => {
+        if (autoActionBusyRef.current) return;
         // An open dialog owns the keyboard: B, Ctrl+Z, Space... must not edit the canvas behind it
         if (document.querySelector('[aria-modal="true"]')) return;
         // Space pans wherever the focus is, except while typing or inside a dialog / menu: the
@@ -2250,7 +2286,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         // Check clear selection
         if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_clear_selection'), ev)) {
           ev.preventDefault();
-          handleClearSelection();
+          shortcutActionsRef.current.clearSelection();
           return;
         }
 
@@ -2311,10 +2347,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           }
           if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_duplicate'), ev)) {
             ev.preventDefault();
-            if (activeLayerRef.current) {
-              shortcutActionsRef.current.copyLayers([activeLayerRef.current.id]);
-              void shortcutActionsRef.current.pasteLayers();
-            }
+            if (activeLayerRef.current) shortcutActionsRef.current.duplicateLayers([activeLayerRef.current.id]);
             return;
           }
           if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_merge_down'), ev)) {
@@ -2626,6 +2659,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       activeFlipKeyCode = null;
       animEngineRef.current?.endFlip();
       pointer.reset();
+      autoActionPointersRef.current.clear();
       brush.reset();
       container.style.cursor = '';
       if (pixiAppRef.current !== app) return;
@@ -2707,6 +2741,24 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       await new Promise((r) => setTimeout(r, 50));
     }
     return null;
+  };
+
+  const waitForLayerState = async (ready: () => boolean) => {
+    const lm = layerManagerRef.current;
+    for (let i = 0; i < 80 && layerManagerRef.current === lm; i++) {
+      if (ready()) return true;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return false;
+  };
+
+  const applyLayerProps = async (layerId: string, props: LayerPropsSnapshot) => {
+    if (!onUpdateLayerProps) return false;
+    await onUpdateLayerProps(layerId, props);
+    return waitForLayerState(() => {
+      const live = layersRef.current.find((layer) => layer.id === layerId);
+      return Boolean(live && Object.entries(props).every(([key, value]) => live[key as keyof LayerPropsSnapshot] === value));
+    });
   };
 
   // The active workspace supplies both the layer snapshot and its pending edits.
@@ -3351,7 +3403,102 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     onToggleBackground: handleToggleFilterIncludeBg,
   };
 
-  const runLayerFilter = async (filter: FilterJob | null, previewOnly: boolean): Promise<boolean> => {
+  const preserveFilteredAlpha = (source: Uint8Array, pixels: Uint8Array, mask: Uint8Array | null | undefined) => {
+    // Composite the selected part at the original alpha. The worker returns premultiplied RGBA.
+    for (let i = 0, p = 0; i < pixels.length; i += 4, p++) {
+      const alpha = source[i + 3];
+      const filteredAlpha = pixels[i + 3];
+      const coverage = filteredAlpha ? (mask ? mask[p] / 255 : 1) : 0;
+      for (let c = 0; c < 3; c++) {
+        const filtered = filteredAlpha ? pixels[i + c] * alpha / filteredAlpha : 0;
+        pixels[i + c] = Math.round(source[i + c] * (1 - coverage) + filtered * coverage);
+      }
+      pixels[i + 3] = alpha;
+    }
+  };
+
+  const computeLayerFilter = async (
+    filter: FilterJob, source: Uint8Array, width: number, height: number, mask: Uint8Array | null | undefined,
+    options: { draft: number; previewOnly: boolean; histogram: boolean },
+  ) => {
+    const def = getFilter(filter.id);
+    const values = { ...filter.values, currentColor: brushPropsRef.current?.color ?? brushProps.color };
+    if (def?.source === 'plugin') {
+      const client = pluginFilterWorkerRef.current ??= new PluginFilterWorkerClient();
+      const result = await client.run(def, new Uint8Array(source), width, height, values, mask, {
+        draft: options.draft, previewOnly: options.previewOnly, isTouch: coarsePointer(),
+      });
+      return result ? { output: result.output, histogram: undefined } : null;
+    }
+    const client = filterWorkerRef.current ??= new FilterWorkerClient();
+    return client.run(filter.id, new Uint8Array(source), width, height, values, mask, options);
+  };
+
+  const applyFilterToLayer = async (
+    layerId: string, filter: FilterJob, isCurrent = () => true,
+  ): Promise<'ok' | 'unchanged' | AutoActionErrorCode> => {
+    const layer = layersRef.current.find((entry) => entry.id === layerId);
+    if (!layer) return 'no_layer';
+    if (rejectAdjustmentPixels(layer) || isRedrawnLayer(layer) || !canEditPixels(layer)) return 'not_editable';
+    const def = getFilter(filter.id);
+    if (!def) return 'filter_unavailable';
+    const lm = layerManagerRef.current;
+    const engine = tileEngineRef.current;
+    const item = lm?.getLayerItem(layerId);
+    if (!lm || !engine || !item || !canvas || !isEngineReady || transformLayerIdRef.current) return 'not_editable';
+    const { width, height } = canvas;
+    const engineSelection = selectionEngineRef.current;
+    const mask = engineSelection?.getMaskArray();
+    const isStale = () => !isCurrent() || layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== item ||
+      engineSelection !== selectionEngineRef.current || mask !== engineSelection?.getMaskArray();
+    const rect = [{ x: 0, y: 0, w: width, h: height }];
+    const [source] = await lm.readAsync(layerId, rect);
+    if (isStale()) return 'filter_failed';
+    const result = await computeLayerFilter(filter, source, width, height, layer.alphaLocked ? undefined : mask, {
+      draft: 0, previewOnly: false, histogram: false,
+    });
+    if (!result || isStale()) return 'filter_failed';
+
+    const pixels = result.output;
+    if (layer.alphaLocked) preserveFilteredAlpha(source, pixels, mask);
+    const version = item.version;
+    const [latest] = await lm.readAsync(layerId, rect);
+    if (latest.some((value, index) => value !== source[index])) {
+      warn(t.filters.layerChanged, 3500);
+      return 'filter_failed';
+    }
+    if (isStale()) return 'filter_failed';
+    const bounds = engineSelection?.getSelection()?.bounds;
+    const coords = bounds && engineSelection?.hasSelection()
+      ? engine.getDirtyTilesForBounds(bounds.minX, bounds.minY, bounds.maxX + 1, bounds.maxY + 1)
+      : engine.getAllTileCoords();
+    if (!coords.length || !source.some((value, index) => value !== pixels[index])) return 'unchanged';
+    const [beforeTiles, afterTiles] = await Promise.all([
+      compressTiles(engine.extractMultipleTilesFromBuffer(source, coords, 'raw')),
+      compressTiles(engine.extractMultipleTilesFromBuffer(pixels, coords, 'raw')),
+    ]);
+    if (isStale()) return 'filter_failed';
+    const live = layersRef.current.find((entry) => entry.id === layerId);
+    if (!live || !canEditPixels(live) || isRedrawnLayer(live) || live.alphaLocked !== layer.alphaLocked) return 'not_editable';
+    if (item.version !== version) {
+      warn(t.filters.layerChanged, 3500);
+      return 'filter_failed';
+    }
+
+    const label = filterLabel(def, t, language);
+    lm.writeRegion(layerId, 0, 0, width, height, pixels);
+    scopedUndoRef.current.push({
+      opId: `op_filter_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      userId: userRef.current?.id || user?.id || 'guest',
+      layerId, opType: 'FILTER', beforeTiles, afterTiles, timestamp: Date.now(), desc: label,
+    });
+    updateUndoRedoState();
+    commitTilePatch(layerId, afterTiles, false, label);
+    return 'ok';
+  };
+
+  const computeLayerFilterDialog = async (filter: FilterJob | null, previewOnly: boolean): Promise<boolean> => {
+    if (autoActionBusyRef.current) return false;
     cancelFilterWork();
     if (!filter) { clearFilterPreview(); showFilterRefining(false); return true; }
     if (activeLayerRef.current?.layerType === 'adjustment') {
@@ -3378,6 +3525,17 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     try {
       const lm = layerManagerRef.current;
       if (!lm) return false;
+      if (!previewOnly && item) {
+        clearFilterPreview();
+        const result = await applyFilterToLayer(item.model.id, filter, () =>
+          request === filterRequestRef.current && !filterApplyNewLayerRef.current && getFilterLayer() === item);
+        if (result === 'ok' || result === 'unchanged') {
+          const values = { ...filter.values };
+          delete values.currentColor;
+          autoActionRecorder.record({ kind: 'filter.apply', params: { filterId: filter.id, values } });
+        }
+        return result === 'ok' || result === 'unchanged';
+      }
       const mask = selectionEngineRef.current?.getMaskArray();
       const cached = filterSourceRef.current;
       let sourceVersion: number | null = item ? item.version : null;
@@ -3399,30 +3557,22 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       }
       if (request !== filterRequestRef.current) return false;
       const def = getFilter(filter.id);
+      const alphaLocked = item?.model.alphaLocked ?? false;
       const isPluginFilter = def?.source === 'plugin';
       let wantHistogram = !isPluginFilter && previewOnly && Boolean(def?.histogram) && !filterHistogramRef.current;
-      // Line colour and gap filling can use the colour being painted with
-      const values = { ...filter.values, currentColor: brushProps.color };
       const stale = () => request !== filterRequestRef.current || tileEngineRef.current !== engine ||
         filterApplyNewLayerRef.current !== toNewLayer ||
         (toNewLayer ? filterIncludeBgRef.current !== includeBg : (activeLayerRef.current?.id !== item!.model.id || getFilterLayer() !== item));
       const compute = async (draft: number) => {
-        if (isPluginFilter && def) {
-          const pluginClient = pluginFilterWorkerRef.current ??= new PluginFilterWorkerClient();
-          const result = await pluginClient.run(def, new Uint8Array(source), width, height, values, mask, {
-            draft,
-            previewOnly,
-            isTouch: coarsePointer(),
-          });
-          return result?.output ?? null;
-        }
-        const client = filterWorkerRef.current ??= new FilterWorkerClient();
-        const result = await client.run(filter.id, new Uint8Array(source), width, height, values, mask, { histogram: wantHistogram, draft });
+        const result = await computeLayerFilter(filter, source, width, height, alphaLocked ? undefined : mask, {
+          histogram: wantHistogram, draft, previewOnly,
+        });
         if (result?.histogram && request === filterRequestRef.current) {
           wantHistogram = false;
           filterHistogramRef.current = result.histogram;
           setFilterHistogram(result.histogram);
         }
+        if (result && alphaLocked) preserveFilteredAlpha(source, result.output, mask);
         return result?.output ?? null;
       };
       const showPreview = (filtered: Uint8Array) => {
@@ -3480,58 +3630,19 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         : engine.getAllTileCoords();
       const label = def ? filterLabel(def, t, language) : filter.id;
 
-      if (toNewLayer) {
-        const nonEmptyCoords = filterNonEmptyTileCoords(pixels, width, height, engine.tileSize, coords);
-        const afterTiles = nonEmptyCoords.length
-          ? await compressTiles(engine.extractMultipleTilesFromBuffer(pixels, nonEmptyCoords, 'raw'))
-          : [];
-        if (request !== filterRequestRef.current || layerManagerRef.current !== lm ||
-          mask !== selectionEngineRef.current?.getMaskArray()) return false;
-        const placement = filterNewLayerPlacement(activeLayerRef.current, layersRef.current);
-        const baseName = activeLayerRef.current?.name;
-        const newName = baseName ? `${baseName} · ${label}` : label;
-        const created = await onCreateLayer!(newName, 'normal', 'raster', placement.afterLayerId, placement.parentId);
-        if (!created || !(await waitForLayerItem(created.id))) return false;
-        if (nonEmptyCoords.length) lm.writeRegion(created.id, 0, 0, width, height, pixels);
-        recordLayerCreation(created, afterTiles, { desc: `${label} (${t.filters.newLayerBadge})` });
-        if (afterTiles.length) commitTilePatch(created.id, afterTiles, false, label);
-        return true;
-      }
-
-      const version = item!.version;
-      const [latest] = await lm.readAsync(item!.model.id, [{ x: 0, y: 0, w: width, h: height }]);
-      if (latest.some((value, index) => value !== source[index])) {
-        setPermissionWarning(t.filters.layerChanged);
-        setTimeout(() => setPermissionWarning(null), 3500);
-        return false;
-      }
-      if (mask !== selectionEngineRef.current?.getMaskArray()) return false;
-      if (!coords.length || !source.some((value, index) => value !== pixels[index])) return true;
-      // Tiles cut from the buffers here, LZ4 in the workers (a whole 10000×8000 layer took seconds on this thread)
-      const [beforeTiles, afterTiles] = await Promise.all([
-        compressTiles(engine.extractMultipleTilesFromBuffer(source, coords, 'raw')),
-        compressTiles(engine.extractMultipleTilesFromBuffer(pixels, coords, 'raw')),
-      ]);
-      if (request !== filterRequestRef.current || layerManagerRef.current !== lm || getFilterLayer() !== item ||
-        mask !== selectionEngineRef.current?.getMaskArray()) return false;
-      if (item!.version !== version) {
-        setPermissionWarning(t.filters.layerChanged);
-        setTimeout(() => setPermissionWarning(null), 3500);
-        return false;
-      }
-      lm.writeRegion(item!.model.id, 0, 0, width, height, pixels);
-      scopedUndoRef.current.push({
-        opId: `op_filter_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-        userId: userRef.current?.id || user?.id || 'guest',
-        layerId: item!.model.id,
-        opType: 'FILTER',
-        beforeTiles,
-        afterTiles,
-        timestamp: Date.now(),
-        desc: label,
-      });
-      updateUndoRedoState();
-      commitTilePatch(item!.model.id, afterTiles, false, label);
+      const nonEmptyCoords = filterNonEmptyTileCoords(pixels, width, height, engine.tileSize, coords);
+      const afterTiles = nonEmptyCoords.length
+        ? await compressTiles(engine.extractMultipleTilesFromBuffer(pixels, nonEmptyCoords, 'raw'))
+        : [];
+      if (stale() || layerManagerRef.current !== lm || mask !== selectionEngineRef.current?.getMaskArray()) return false;
+      const placement = filterNewLayerPlacement(activeLayerRef.current, layersRef.current);
+      const baseName = activeLayerRef.current?.name;
+      const newName = baseName ? `${baseName} · ${label}` : label;
+      const created = await onCreateLayer!(newName, 'normal', 'raster', placement.afterLayerId, placement.parentId);
+      if (!created || !(await waitForLayerItem(created.id))) return false;
+      if (nonEmptyCoords.length) lm.writeRegion(created.id, 0, 0, width, height, pixels);
+      recordLayerCreation(created, afterTiles, { desc: `${label} (${t.filters.newLayerBadge})` });
+      if (afterTiles.length) commitTilePatch(created.id, afterTiles, false, label);
       return true;
     } catch (error) {
       if (request !== filterRequestRef.current) return false;
@@ -3545,6 +3656,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         else setFilterBusy(false);
       }
     }
+  };
+
+  const runLayerFilter = (filter: FilterJob | null, previewOnly: boolean) => {
+    const work = computeLayerFilterDialog(filter, previewOnly);
+    return previewOnly ? work : trackAutoActionEdit(work);
   };
 
   useEffect(() => () => {
@@ -3967,66 +4083,86 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   // undo / redo wait for it (otherwise they would undo the stroke before it)
   // Brush strokes and the other tools' edits commit off the main thread: undo waits for both
   const undoQueueRef = useRef(Promise.resolve());
-  const queueHistoryAction = (action: () => Promise<void>) => {
+  const queueHistoryAction = <T,>(action: () => Promise<T>) => {
     const lm = layerManagerRef.current;
-    undoQueueRef.current = undoQueueRef.current.then(() => brush.withHistory(async () => {
-      await new Promise<void>(whenToolCommitsDone);
-      if (layerManagerRef.current === lm) await action();
-    })).catch((error) => console.warn('[undo] Could not apply history action:', error));
-  };
-  const handleScopedUndo = () => queueHistoryAction(undoNow);
-  const handleScopedRedo = () => queueHistoryAction(redoNow);
-  const deleteLayerWithUndo = (layerId: string) =>
-    new Promise<void>((resolve) => {
-      queueHistoryAction(async () => {
-        try {
-          const target = layersRef.current.find((l) => l.id === layerId);
-          if (!target) return;
-          const isOwner = user?.id === target.ownerId;
-          /** Layers inside a deleted group that were not this painter's to delete stay, moved up out of it */
-          const tellLifted = (result: unknown) => {
-            const lifted = (result as DeletedLayers | undefined)?.lifted?.length ?? 0;
-            if (lifted) warn(`圖層組裡有 ${lifted} 個別人的（或鎖定的）圖層沒有刪除，已移到圖層組外面。`, 4000);
-          };
-          if (isGuest || (!isOwner && !isAdmin) || !layerManagerRef.current || !tileEngineRef.current) {
-            tellLifted(await onDeleteLayer?.(layerId));
-            return;
-          }
-          // Where it sat, and (a group) everything inside it: undo puts all of it back
-          const flat = layersRef.current.filter((l) => l.layerType !== 'mask').sort((a, b) => a.sortOrder - b.sortOrder);
-          const removed = await snapshotLayerTree(target);
-          if (!layersRef.current.some((l) => l.id === layerId)) return;
-          const result = await onDeleteLayer?.(layerId);
-          if (result === false) return;
-          tellLifted(result);
-          const gone = new Set(result && typeof result === 'object' ? result.deleted : [layerId]);
-          const onlyGone = (r: RemovedLayer): RemovedLayer => ({ ...r, children: r.children?.filter((c) => gone.has(c.model.id)).map(onlyGone) });
-          const at = flat.flatMap((l, i) => (gone.has(l.id) ? [i] : []));
-          const inside = gone.size - 1;
-          scopedUndoRef.current.push({
-            opId: `op_del_layer_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-            userId: userRef.current?.id || user?.id || 'guest',
-            layerId: target.id,
-            opType: 'LAYER_DELETE',
-            beforeTiles: [],
-            afterTiles: [],
-            timestamp: Date.now(),
-            desc: inside > 0 ? `刪除圖層組「${target.name}」（含 ${inside} 個圖層）` : `刪除圖層「${target.name}」`,
-            layerRemoved: {
-              ...onlyGone(removed),
-              below: at.length ? flat[at[0] - 1]?.id ?? null : null,
-              above: at.length ? flat[at[at.length - 1] + 1]?.id ?? null : null,
-            },
-          });
-          updateUndoRedoState();
-        } finally {
-          resolve();
-        }
+    const queued = undoQueueRef.current.then(async () => {
+      let result: T | undefined;
+      await brush.withHistory(async () => {
+        await new Promise<void>(whenToolCommitsDone);
+        if (layerManagerRef.current === lm) result = await action();
       });
+      return result;
     });
-  const undoNow = async () => {
+    undoQueueRef.current = queued.then(() => {}, (error) => console.warn('[undo] Could not apply history action:', error));
+    return queued;
+  };
+  const handleScopedUndo = () => { if (!autoActionBusyRef.current) void queueHistoryAction(undoNow); };
+  const handleScopedRedo = () => { if (!autoActionBusyRef.current) void queueHistoryAction(redoNow); };
+  const deleteLayerWithUndo = async (layerId: string): Promise<boolean> =>
+    (await queueHistoryAction(async () => {
+      const target = layersRef.current.find((l) => l.id === layerId);
+      if (!target || !onDeleteLayer) return false;
+      const isOwner = user?.id === target.ownerId;
+      /** Layers inside a deleted group that were not this painter's to delete stay, moved up out of it */
+      const tellLifted = (result: unknown) => {
+        const lifted = (result as DeletedLayers | undefined)?.lifted?.length ?? 0;
+        if (lifted) warn(`圖層組裡有 ${lifted} 個別人的（或鎖定的）圖層沒有刪除，已移到圖層組外面。`, 4000);
+      };
+      if (isGuest || (!isOwner && !isAdmin) || !layerManagerRef.current || !tileEngineRef.current) {
+        const result = await onDeleteLayer(layerId);
+        tellLifted(result);
+        return result !== false;
+      }
+      // Where it sat, and (a group) everything inside it: undo puts all of it back
+      const flat = layersRef.current.filter((l) => l.layerType !== 'mask').sort((a, b) => a.sortOrder - b.sortOrder);
+      const removed = await snapshotLayerTree(target);
+      if (!layersRef.current.some((l) => l.id === layerId)) return false;
+      const result = await onDeleteLayer(layerId);
+      if (result === false) return false;
+      tellLifted(result);
+      const gone = new Set(result && typeof result === 'object' ? result.deleted : [layerId]);
+      if (!gone.has(layerId)) return false;
+      const onlyGone = (r: RemovedLayer): RemovedLayer => ({ ...r, children: r.children?.filter((c) => gone.has(c.model.id)).map(onlyGone) });
+      const at = flat.flatMap((l, i) => (gone.has(l.id) ? [i] : []));
+      const inside = gone.size - 1;
+      scopedUndoRef.current.push({
+        opId: `op_del_layer_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        userId: userRef.current?.id || user?.id || 'guest',
+        layerId: target.id,
+        opType: 'LAYER_DELETE',
+        beforeTiles: [],
+        afterTiles: [],
+        timestamp: Date.now(),
+        desc: inside > 0 ? `刪除圖層組「${target.name}」（含 ${inside} 個圖層）` : `刪除圖層「${target.name}」`,
+        layerRemoved: {
+          ...onlyGone(removed),
+          below: at.length ? flat[at[0] - 1]?.id ?? null : null,
+          above: at.length ? flat[at[at.length - 1] + 1]?.id ?? null : null,
+        },
+      });
+      updateUndoRedoState();
+      return true;
+    })) ?? false;
+  const deleteLayerFromUser = (layerId: string) => {
+    if (autoActionBusyRef.current) return;
+    void trackAutoActionEdit(deleteLayerWithUndo(layerId)).then((deleted) => {
+      if (deleted) autoActionRecorder.record({ kind: 'layer.delete' });
+    }).catch(() => {});
+  };
+  const findRemovedLayerModel = (removed: RemovedLayer | undefined, layerId: string): LayerModel | undefined => {
+    if (removed?.model.id === layerId) return removed.model;
+    if (removed?.mask?.model.id === layerId) return removed.mask.model;
+    for (const child of removed?.children ?? []) {
+      const found = findRemovedLayerModel(child, layerId);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  const isPropsOnlyOp = (op: ScopedUndoOp) => !op.beforeTiles.length && !op.afterTiles.length &&
+    !op.layerCreated && !op.layerRemoved && op.metaBefore === undefined && op.metaAfter === undefined;
+  const undoNow = async (requiredGroupId?: string) => {
     const effectiveUserId = userRef.current?.id || user?.id || 'guest';
-    const ops = scopedUndoRef.current.undoGroup(effectiveUserId, (layerId, candidate) => {
+    const ops = scopedUndoRef.current.undoGroup(effectiveUserId, (layerId, candidate, group) => {
       if (
         candidate?.selectionBefore !== undefined &&
         !candidate.beforeTiles.length &&
@@ -4036,16 +4172,23 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       ) {
         return true;
       }
-      const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model ?? candidate?.layerCreated?.model;
+      const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model ?? candidate?.layerCreated?.model
+        ?? group.map((op) => findRemovedLayerModel(op.layerRemoved, layerId)).find(Boolean);
       if (candidate?.opType === 'ADJUSTMENT') return Boolean(target?.layerType === 'adjustment' && canManageLayer(target));
+      if (candidate?.opType === 'LAYER_PROPS') return Boolean(target && canManageLayer(target));
       return Boolean(target && (target.ownerId === effectiveUserId || (candidate?.layerCreated && isAdmin) || canEditPixels(target)));
-    });
+    }, requiredGroupId);
 
     let totalConflicts = 0;
     const undoSingleOp = async (op: ScopedUndoOp) => {
       if (op.selectionBefore !== undefined) {
         selectionEngineRef.current?.restoreSnapshot(op.selectionBefore);
         selection.refreshSelection();
+      }
+
+      if (op.propsBefore !== undefined && isPropsOnlyOp(op)) {
+        if (!await applyLayerProps(op.layerId, op.propsBefore)) throw new AutoActionStepError('not_editable');
+        return;
       }
 
       // Undo of a new layer (text / pasted / mask too): the layer goes away (redo makes it again).
@@ -4134,8 +4277,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       }
     };
 
-    for (const op of ops) {
-      await undoSingleOp(op);
+    for (const [index, op] of ops.entries()) {
+      try {
+        await undoSingleOp(op);
+      } catch (error) {
+        scopedUndoRef.current.rollbackGroup(ops.slice(index), true);
+        updateUndoRedoState();
+        throw error;
+      }
     }
     warnUndoConflicts(totalConflicts);
     updateUndoRedoState();
@@ -4157,6 +4306,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       }
       const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model ?? candidate?.layerCreated?.model;
       if (candidate?.opType === 'ADJUSTMENT') return Boolean(target?.layerType === 'adjustment' && canManageLayer(target));
+      if (candidate?.opType === 'LAYER_PROPS') return Boolean(target && canManageLayer(target));
       return Boolean(target && (target.ownerId === effectiveUserId || (candidate?.layerCreated && isAdmin) || canEditPixels(target)));
     });
 
@@ -4167,10 +4317,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         selection.refreshSelection();
       }
 
+      if (op.propsAfter !== undefined && isPropsOnlyOp(op)) {
+        if (!await applyLayerProps(op.layerId, op.propsAfter)) throw new AutoActionStepError('not_editable');
+        return;
+      }
+
       // Redo of a new text / pasted / mask layer: it is made again with its text and pixels
       if (op.layerCreated) {
         const oldId = op.layerId;
-        const created = await recreateLayer(op.layerCreated.model, op.afterTiles);
+        const created = await recreateLayer(op.layerCreated.model, op.afterTiles, undefined, undefined, op.vectorAddedStrokes);
         if (created) {
           undoneLayerIdsRef.current.delete(oldId);
           onSelectLayer?.(created.id);
@@ -4238,8 +4393,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       }
     };
 
-    for (const op of ops) {
-      await redoSingleOp(op);
+    for (const [index, op] of ops.entries()) {
+      try {
+        await redoSingleOp(op);
+      } catch (error) {
+        scopedUndoRef.current.rollbackGroup(ops.slice(index), false);
+        updateUndoRedoState();
+        throw error;
+      }
     }
     warnUndoConflicts(totalConflicts);
     updateUndoRedoState();
@@ -4264,7 +4425,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   // Ctrl+V of an image copied in another app (or in this one: same size = ours, keep its place)
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
-      if (isTypingTarget(e.target) || document.querySelector('[aria-modal="true"]')) return;
+      if (autoActionBusyRef.current || isTypingTarget(e.target) || document.querySelector('[aria-modal="true"]')) return;
       const file = Array.from(e.clipboardData?.items || []).find((i) => i.type.startsWith('image/'))?.getAsFile();
       if (!file || !canvas) return;
       e.preventDefault();
@@ -4272,6 +4433,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       const img = new Image();
       img.onload = () => {
         URL.revokeObjectURL(url);
+        if (autoActionBusyRef.current) return;
         const ours = selection.clipboardRef.current;
         if (ours && ours.source.width === img.naturalWidth && ours.source.height === img.naturalHeight) {
           void pasteImageRef.current(ours.source, ours.x, ours.y);
@@ -4294,7 +4456,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   }, [canvas?.id, canvas?.width, canvas?.height]);
 
   /** 新增圖層／圖層組 (buttons, shortcuts, 群組): Ctrl+Z takes it away again, redo brings it back */
-  const recordLayerCreation = (created: LayerModel, afterTiles: TileData[] = [], opts?: { groupId?: string; desc?: string }) => {
+  const recordLayerCreation = (created: LayerModel, afterTiles: TileData[] = [], opts?: { groupId?: string; desc?: string; strokes?: VectorStroke[] }) => {
     scopedUndoRef.current.push({
       opId: `op_new_layer_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       userId: userRef.current?.id || user?.id || 'guest',
@@ -4306,6 +4468,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       timestamp: Date.now(),
       desc: opts?.desc ?? `新增${created.layerType === 'group' ? '圖層組' : '圖層'}「${created.name}」`,
       layerCreated: { model: created },
+      ...(opts?.strokes?.length ? { vectorAddedStrokes: opts.strokes } : {}),
     });
     updateUndoRedoState();
   };
@@ -4315,6 +4478,33 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (!created) return null;
     recordLayerCreation(created);
     return created;
+  };
+
+  const createLayerFromUser = (...args: Parameters<NonNullable<typeof onCreateLayer>>) => {
+    if (autoActionBusyRef.current) return;
+    void trackAutoActionEdit(createLayerWithUndo(...args)).then((created) => {
+      if (created?.layerType === 'raster') {
+        autoActionRecorder.record({ kind: 'layer.new', params: { blendMode: created.blendMode, opacity: created.opacity } });
+      }
+    }).catch((error) => console.warn('[layers] Could not create layer:', error));
+  };
+
+  const updateLayerPropsFromPanel = (layerId: string, props: Partial<LayerModel>) => {
+    if (autoActionBusyRef.current || !onUpdateLayerProps) return;
+    const layer = layersRef.current.find((entry) => entry.id === layerId);
+    const result = onUpdateLayerProps(layerId, props);
+    if (layer && canManageLayer(layer)) {
+      if (props.blendMode !== undefined && props.blendMode !== layer.blendMode) {
+        autoActionRecorder.record({ kind: 'layer.set_blend', params: { blendMode: props.blendMode } });
+      }
+      if (props.opacity !== undefined) {
+        autoActionRecorder.record({ kind: 'layer.set_opacity', params: { opacity: props.opacity } }, { coalesceKey: `opacity:${layerId}` });
+      }
+      if (props.clipToBelow !== undefined && props.clipToBelow !== layer.clipToBelow) {
+        autoActionRecorder.record({ kind: 'layer.set_clip', params: { clipToBelow: props.clipToBelow } });
+      }
+    }
+    return result && trackAutoActionEdit(result);
   };
 
   const recordLayerCreationRef = useRef(recordLayerCreation);
@@ -4327,8 +4517,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   shortcutActionsRef.current = {
     ...shortcutActionsRef.current,
-    createLayer: createLayerWithUndo,
-    deleteLayer: deleteLayerWithUndo,
+    createLayer: createLayerFromUser,
+    deleteLayer: deleteLayerFromUser,
+    clearSelection: () => editSelectionFromUser('selection.clear'),
     selectTool: handleSelectTool,
     selectSubTool: handleSelectSubTool,
     activateCategoryShortcut: handleCategoryShortcut,
@@ -4345,7 +4536,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     selection: {
       has: () => Boolean(selectionEngineRef.current?.hasSelection()),
       canPaste: () => Boolean(selection.clipboardRef.current),
-      invert: selection.invertSelection,
+      invert: () => editSelectionFromUser('selection.invert'),
       copy: () => { selection.copySelection(); },
       cut: selection.cutSelection,
       clear: () => selection.deleteSelection(),
@@ -5666,20 +5857,33 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (layer) showAdjustmentDialog(layer);
   };
 
+  const createAdjustmentLayerWith = (adjustment: LayerAdjustment, anchor: LayerModel | null) => {
+    const name = nextAdjustmentLayerName(t.layers.adjustment.kinds[adjustment.kind], layersRef.current);
+    return createLayerWithUndo(name, 'normal', 'adjustment', anchor?.id ?? null, anchor?.parentId ?? null, {
+      meta: { adjustment },
+    });
+  };
+
+  const recordAdjustmentCreation = (layerId: string, adjustment: LayerAdjustment) => {
+    if (autoActionRecorder.record({ kind: 'adjustment.create', params: { adjustment } }, { coalesceKey: `adjustment:${layerId}` })) {
+      const step = autoActionRecorder.getSnapshot().steps.at(-1);
+      if (step) adjustmentRecordingIdsRef.current.set(step, layerId);
+    }
+  };
+
   const createAdjustmentLayer = async (kind: AdjustmentKind) => {
-    if (!canvas || !onCreateLayer || isGuest || isCanvasViewer || creatingAdjustmentRef.current) return;
+    if (autoActionBusyRef.current || !canvas || !onCreateLayer || isGuest || isCanvasViewer || creatingAdjustmentRef.current) return;
     const active = activeLayerRef.current;
     const anchor = active?.layerType === 'mask'
       ? layersRef.current.find((layer) => layer.id === active.parentId) ?? null
       : active;
-    const name = nextAdjustmentLayerName(t.layers.adjustment.kinds[kind], layersRef.current);
     creatingAdjustmentRef.current = true;
     try {
-      const created = await createLayerWithUndo(name, 'normal', 'adjustment', anchor?.id ?? null, anchor?.parentId ?? null, {
-        meta: { adjustment: createDefaultAdjustment(kind) },
-      });
+      const adjustment = createDefaultAdjustment(kind);
+      const created = await trackAutoActionEdit(createAdjustmentLayerWith(adjustment, anchor));
       if (created) {
         onSelectLayer?.(created.id);
+        recordAdjustmentCreation(created.id, adjustment);
         showAdjustmentDialog(created);
       }
     } finally {
@@ -5731,12 +5935,16 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   }, []);
 
   const commitAdjustmentDialog = (sequence: number, adjustment: LayerAdjustment) => {
-    if (adjustmentEditorRef.current?.sequence !== sequence) return;
+    if (autoActionBusyRef.current || adjustmentEditorRef.current?.sequence !== sequence) return;
     const layer = liveAdjustmentEditorLayer(sequence);
     if (!layer || !canManageLayer(layer) || !onUpdateLayerProps) return closeAdjustmentDialog();
     const op = buildAdjustmentEditUndo(layer, adjustment, userRef.current?.id ?? user?.id ?? 'guest',
       t.layers.adjustment.undo, `op_adjustment_${crypto.randomUUID()}`, Date.now());
     if (!op) return closeAdjustmentDialog();
+    const recordingStep = autoActionRecorder.getSnapshot().steps.at(-1);
+    if (recordingStep && adjustmentRecordingIdsRef.current.get(recordingStep) === layer.id) {
+      recordAdjustmentCreation(layer.id, adjustment);
+    }
     setAdjustmentPreview(layer.id, adjustment);
     scopedUndoRef.current.push(op);
     updateUndoRedoState();
@@ -5813,36 +6021,47 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     setLiveKeyframePreview(null);
   }, [activeLayer?.id, animFrame, keyframePanelOpen, isAnimationTimelineOpen, animPlaying]);
   /** 向下合併: the layer (with its opacity, blend mode and mask) is drawn into the one below, then removed */
-  const mergeDown = (layerId: string) => {
+  const getMergeBelow = (top: LayerModel) =>
+    layersRef.current.filter((layer) => layer.layerType !== 'mask' && (layer.parentId ?? null) === (top.parentId ?? null) && layer.sortOrder < top.sortOrder)
+      .sort((a, b) => b.sortOrder - a.sortOrder)[0];
+
+  const mergeDown = async (layerId: string): Promise<boolean> => {
     const ls = layersRef.current;
     const top = ls.find((l) => l.id === layerId);
     const lm = layerManagerRef.current;
     const te = tileEngineRef.current;
     const renderer = pixiAppRef.current?.renderer;
-    if (!top) return;
-    const siblings = ls.filter((l) => l.layerType !== 'mask' && (l.parentId ?? null) === (top.parentId ?? null)).sort((a, b) => a.sortOrder - b.sortOrder);
-    const below = siblings[siblings.indexOf(top) - 1];
-    if (rejectAdjustmentPixels(top) || rejectAdjustmentPixels(below) || !lm || !te || !renderer) return;
-    if (top.layerType === 'group' || top.layerType === 'mask') return warn('請選一般圖層再向下合併。');
-    if (!below || below.layerType === 'group') return warn('下面沒有可以合併的圖層。');
-    if (below.layerType === 'text' || below.layerType === 'vector') return warn('下面是文字／向量圖層，請先點陣化再合併。');
-    if (!canManageLayer(top) || !canManageLayer(below)) return warn('不能合併別人的圖層。');
+    if (!top || !onDeleteLayer) return false;
+    const below = getMergeBelow(top);
+    if (rejectAdjustmentPixels(top) || rejectAdjustmentPixels(below) || !lm || !te || !renderer) return false;
+    if (top.layerType === 'group' || top.layerType === 'mask') {
+      warn('請選一般圖層再向下合併。');
+      return false;
+    }
+    if (!below || below.layerType === 'group') {
+      warn('下面沒有可以合併的圖層。');
+      return false;
+    }
+    if (below.layerType === 'text' || below.layerType === 'vector') {
+      warn('下面是文字／向量圖層，請先點陣化再合併。');
+      return false;
+    }
+    if (!canManageLayer(top) || !canManageLayer(below)) {
+      warn('不能合併別人的圖層。');
+      return false;
+    }
     const topItem = lm.getLayerItem(top.id);
     const belowItem = lm.getLayerItem(below.id);
-    if (!topItem || !belowItem) return;
+    if (!topItem || !belowItem) return false;
     // The layer below changes only where the merged layer has tiles (all of them if that is unknown)
     const coords = lm.occupiedTiles(top.id) ?? te.getAllTileCoords();
     // Everything needed to bring the merged layer back on undo
     const topMask = ls.find((m) => m.layerType === 'mask' && m.parentId === top.id);
     const topMaskItem = topMask && lm.getLayerItem(topMask.id);
-    const removed = {
-      model: top,
-      tiles: tilesAsync(lm, top.id, coords),
-      mask: topMask && topMaskItem ? { model: topMask, tiles: tilesAsync(lm, topMask.id, te.getAllTileCoords()) } : undefined,
-    };
-    // Reads of everything involved are queued around the merge (none stalls the page); the undo entry and the
-    // patch go out in order once they are compressed
-    const diff = diffTilesAsync(lm, below.id, coords, () => {
+    const topVersion = topItem.version;
+    const belowVersion = belowItem.version;
+    const [beforeTiles, removed] = await Promise.all([tilesAsync(lm, below.id, coords), snapshotLayerContent(top)]);
+    if (layerManagerRef.current !== lm || topItem.version !== topVersion || belowItem.version !== belowVersion) return false;
     if (top.isVisible) {
       lm.syncPingPong(below.id); // clipping samples this copy, never the texture being drawn into
       const holder = new Container();
@@ -5872,9 +6091,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       holder.destroy({ children: true });
       requestRenderRef.current();
     }
-    });
     lm.syncPingPong(below.id); // queued after the reads: the next edit's baseline
-    commitInOrder(Promise.all([diff, removed.tiles, removed.mask?.tiles ?? Promise.resolve(null)]), ([{ beforeTiles, afterTiles }, removedTiles, removedMask]) => {
+    let deleted = false;
+    try {
+      const afterTiles = await tilesAsync(lm, below.id, coords);
+      if (layerManagerRef.current !== lm) return false;
+      const result = await onDeleteLayer(top.id);
+      if (result === false || (result && typeof result === 'object' && !result.deleted.includes(top.id))) return false;
+      deleted = true;
       scopedUndoRef.current.push({
         opId: `op_merge_${Date.now()}`,
         userId: userRef.current?.id || 'guest',
@@ -5884,13 +6108,25 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         afterTiles,
         timestamp: Date.now(),
         desc: '向下合併',
-        layerRemoved: { model: removed.model, tiles: removedTiles, mask: removed.mask && removedMask ? { model: removed.mask.model, tiles: removedMask } : undefined },
+        layerRemoved: removed,
       });
       updateUndoRedoState();
       commitTilePatch(below.id, afterTiles, false, '向下合併', true);
+      onSelectLayer?.(below.id);
+      return true;
+    } finally {
+      if (!deleted && top.isVisible && layerManagerRef.current === lm) {
+        lm.applyTiles(below.id, beforeTiles);
+        lm.syncPingPong(below.id);
+        requestRenderRef.current();
+      }
+    }
+  };
+  const mergeDownFromUser = (layerId: string) => {
+    if (autoActionBusyRef.current) return;
+    void queueHistoryAction(async () => {
+      if (await mergeDown(layerId)) autoActionRecorder.record({ kind: 'layer.merge_down' });
     });
-    onDeleteLayer?.(top.id);
-    onSelectLayer?.(below.id);
   };
   /** 群組: a new group (inside the layers' common group, so groups nest) holding these layers */
   const groupLayers = async (ids: string[]) => {
@@ -5918,11 +6154,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   // ---------- Layer copy / paste (kept for this browser tab, so it also pastes into another canvas) ----------
   /** 複製圖層: pixels, properties, mask, text / vector source, and a group's whole content */
-  const copyLayers = (ids: string[]) => {
+  const snapshotCopiedLayers = async (ids: string[]): Promise<LayerClipboard | null> => {
     const ls = layersRef.current;
     const lm = layerManagerRef.current;
     const te = tileEngineRef.current;
-    if (!lm || !te || !canvas) return;
+    if (!lm || !te || !canvas) return null;
     // Every layer's tiles are read without stalling (queued now: they hold the pixels as of this moment)
     const snap = async (l: LayerModel): Promise<CopiedLayer> => {
       const ls = layersRef.current;
@@ -5933,21 +6169,32 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const picked = ls.filter((l) => ids.includes(l.id) && l.layerType !== 'mask');
     // A picked group brings its children: do not copy them twice
     const roots = picked.filter((l) => !picked.some((p) => p.id === l.parentId)).sort((a, b) => a.sortOrder - b.sortOrder);
-    if (!roots.length) return;
-    const size = { width: canvas.width, height: canvas.height };
-    // 製作圖層副本 pastes right after copying: paste waits for this
-    pendingCopyRef.current = Promise.all(roots.map(snap)).then((items) => {
-    layerClipboard = { items, ...size };
-    const kept = keepsLayerClipboard() && saveLayerClipboard(layerClipboard);
-    warn(
-      keepsLayerClipboard() && !kept
-        ? `已複製 ${roots.length} 個圖層；內容太大，存不進瀏覽器（約 5MB 上限），重新整理後就沒了`
-        : `已複製 ${roots.length} 個圖層（Ctrl+Alt+V 貼上，可以貼到其他畫布${kept ? '，重新整理後也還在' : ''}）`,
-      kept || !keepsLayerClipboard() ? 2500 : 4500
-    );
-    }).catch((err) => warn(`複製圖層失敗：${String(err)}`)).finally(() => { pendingCopyRef.current = null; });
+    if (!roots.length) return null;
+    return { items: await Promise.all(roots.map(snap)), width: canvas.width, height: canvas.height };
   };
-  const pendingCopyRef = useRef<Promise<void> | null>(null);
+  const pendingCopyRef = useRef<Promise<LayerClipboard | null> | null>(null);
+  const copyLayers = (ids: string[]) => {
+    const work = snapshotCopiedLayers(ids).then((clip) => {
+      if (!clip) return null;
+      layerClipboard = clip;
+      const keep = keepsLayerClipboard();
+      const kept = keep && saveLayerClipboard(clip);
+      warn(
+        keep && !kept
+          ? `已複製 ${clip.items.length} 個圖層；內容太大，存不進瀏覽器（約 5MB 上限），重新整理後就沒了`
+          : `已複製 ${clip.items.length} 個圖層（Ctrl+Alt+V 貼上，可以貼到其他畫布${kept ? '，重新整理後也還在' : ''}）`,
+        kept || !keep ? 2500 : 4500
+      );
+      return clip;
+    }).catch((err) => {
+      warn(`複製圖層失敗：${String(err)}`);
+      return null;
+    }).finally(() => {
+      if (pendingCopyRef.current === work) pendingCopyRef.current = null;
+    });
+    pendingCopyRef.current = work;
+    return work;
+  };
   const [keepLayerClipboard, setKeepLayerClipboard] = useState(keepsLayerClipboard);
   const toggleKeepLayerClipboard = () => {
     const next = !keepLayerClipboard;
@@ -5961,24 +6208,24 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     else if (layerClipboard && !saveLayerClipboard(layerClipboard)) warn('目前複製的圖層太大，存不進瀏覽器（約 5MB 上限）。', 4000);
   };
   /** 貼上圖層: new layers of this painter, right above the active layer, in its group */
-  const pasteLayers = async () => {
+  const pasteCopiedLayers = async (clip: LayerClipboard | null, duplicateAnchor?: LayerModel): Promise<string | null> => {
     // The paste ends by selecting what it made, unless the painter picked another layer meanwhile
     const selectedAtStart = activeLayerRef.current?.id ?? null;
-    if (pendingCopyRef.current) await pendingCopyRef.current;
-    const clip = layerClipboard ?? (layerClipboard = loadLayerClipboard());
     const te = tileEngineRef.current;
-    if (!clip || !onCreateLayer || !te || !canvas) return warn('還沒有複製任何圖層。');
-    if (isGuest) return warn('訪客不能貼上圖層，請先登入。');
-    if (isCanvasViewer) return warn(t.collab.viewerReadOnlyWarn);
-    let anchor = activeLayerRef.current;
+    if (!clip || !onCreateLayer || !te || !canvas || isGuest || isCanvasViewer) {
+      if (!duplicateAnchor) warn(isGuest ? '訪客不能貼上圖層，請先登入。'
+        : isCanvasViewer ? t.collab.viewerReadOnlyWarn : '還沒有複製任何圖層。');
+      return null;
+    }
+    let anchor = duplicateAnchor ?? activeLayerRef.current;
     let insertionAbove: string | undefined;
-    if (anchor?.layerType === 'mask') anchor = layersRef.current.find((l) => l.id === anchor!.parentId) ?? null;
-    while (anchor) {
+    if (!duplicateAnchor && anchor?.layerType === 'mask') anchor = layersRef.current.find((l) => l.id === anchor!.parentId) ?? null;
+    while (!duplicateAnchor && anchor) {
       const cel = celOfLayer(layersRef.current, anchor.id);
       if (!cel) break;
       anchor = layersRef.current.find((l) => l.id === cel.folderId) ?? null;
     }
-    if (anchor && isAnimationFolder(anchor)) {
+    if (!duplicateAnchor && anchor && isAnimationFolder(anchor)) {
       const byId = new Map(layersRef.current.map((l) => [l.id, l]));
       const folder = anchor;
       const lastInFolder = layersRef.current.reduce((last, layer) => {
@@ -5995,11 +6242,24 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const fits = (tiles: TileData[]) => (resized ? tiles.filter((t) => t.col * 256 < canvas.width && t.row * 256 < canvas.height) : tiles);
     const paste = async (c: CopiedLayer, above: string | null, parentId: string | null): Promise<string | null> => {
       const m = c.model;
-      const created = await onCreateLayer(m.layerType === 'group' ? m.name : `${m.name} 複製`, m.blendMode, m.layerType, above, parentId, { meta: m.meta ?? null, select: false });
-      if (!created) return null;
-      const props: Partial<LayerModel> = {};
-      for (const k of ['opacity', 'isVisible', 'clipToBelow', 'alphaLocked'] as const) if (created[k] !== m[k]) (props as any)[k] = m[k];
-      if (Object.keys(props).length) onUpdateLayerProps?.(created.id, props);
+      const name = m.layerType === 'group' || m.layerType === 'mask' ? m.name : `${m.name} 複製`;
+      const created = await onCreateLayer(name, m.blendMode, m.layerType, above, parentId, { meta: m.meta ?? null, select: false });
+      if (!created) {
+        if (duplicateAnchor) throw new AutoActionStepError('not_editable');
+        return null;
+      }
+      const props: LayerPropsSnapshot = {};
+      for (const key of ['opacity', 'isVisible', 'clipToBelow', 'alphaLocked'] as const) {
+        if (created[key] !== m[key]) Object.assign(props, { [key]: m[key] });
+      }
+      const tiles = m.layerType === 'adjustment' || m.layerType === 'group' ? [] : fits(c.tiles);
+      const strokes = c.strokes?.map((s) => ({ ...s, id: crypto.randomUUID(), layerId: created.id }));
+      if (duplicateAnchor) recordLayerCreation({ ...created, ...props }, tiles, { strokes });
+      if (Object.keys(props).length) {
+        if (duplicateAnchor) {
+          if (!await applyLayerProps(created.id, props)) throw new AutoActionStepError('not_editable');
+        } else await onUpdateLayerProps?.(created.id, props);
+      }
       if (m.layerType === 'group') {
         let prev: string | null = null;
         for (const child of c.children) prev = (await paste(child, prev ?? created.id, created.id)) ?? prev;
@@ -6007,22 +6267,23 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         if (prev) {
           const asc = [...layersRef.current].sort((a, b) => a.sortOrder - b.sortOrder).map((l) => l.id).filter((id) => id !== created.id);
           asc.splice(asc.indexOf(prev) + 1, 0, created.id);
-          onReorderLayer?.(created.id, 0, asc);
+          await onReorderLayer?.(created.id, 0, asc);
         }
       } else {
         const item = m.layerType === 'adjustment' ? null : await waitForLayerItem(created.id);
-        const tiles = m.layerType === 'adjustment' ? [] : fits(c.tiles);
+        if (duplicateAnchor && !item && m.layerType !== 'adjustment') throw new AutoActionStepError('not_editable');
         if (item && tiles.length) {
-          te.applyTileBatch(item.renderTexture, tiles);
-          if (c.strokes?.length) {
-            const payload = { tiles, vectorRemovedIds: [], vectorAdded: c.strokes.map((s) => ({ ...s, id: crypto.randomUUID(), layerId: created.id })) };
+          if (duplicateAnchor) layerManagerRef.current?.applyTiles(created.id, tiles);
+          else te.applyTileBatch(item.renderTexture, tiles);
+          if (strokes?.length) {
+            const payload = { tiles, vectorRemovedIds: [], vectorAdded: strokes };
             applyVectorPayload(created.id, payload);
             commitOp(created.id, 'VECTOR_EDIT', payload);
           } else {
             commitTilePatch(created.id, tiles, false, '貼上圖層');
           }
         }
-        scopedUndoRef.current.push({
+        if (!duplicateAnchor) scopedUndoRef.current.push({
           opId: `op_paste_layer_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           userId: userRef.current?.id || user?.id || 'guest',
           layerId: created.id,
@@ -6035,7 +6296,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         });
         updateUndoRedoState();
       }
-      if (c.mask) {
+      if (c.mask && duplicateAnchor) {
+        await paste({ ...c.mask, children: [] }, created.id, created.id);
+      } else if (c.mask) {
         const mk = await onCreateLayer(c.mask.model.name, 'normal', 'mask', created.id, created.id, { meta: c.mask.model.meta ?? null, select: false });
         const mItem = mk && (await waitForLayerItem(mk.id));
         if (mk && mItem) {
@@ -6052,14 +6315,32 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       last = (await paste(c, above, anchor?.parentId ?? null)) ?? last;
       above = last ?? above;
     }
-    if (last && (activeLayerRef.current?.id ?? null) === selectedAtStart) onSelectLayer?.(last);
+    if (last && (duplicateAnchor || (activeLayerRef.current?.id ?? null) === selectedAtStart)) onSelectLayer?.(last);
     if (resized) warn('畫布尺寸不同：超出這張畫布的部分沒有貼上。', 3000);
+    return last;
   };
 
-  shortcutActionsRef.current.mergeDown = mergeDown;
+  const pasteLayers = () => {
+    if (autoActionBusyRef.current) return;
+    return trackAutoActionEdit((async () => {
+      if (pendingCopyRef.current) await pendingCopyRef.current;
+      await pasteCopiedLayers(layerClipboard ?? (layerClipboard = loadLayerClipboard()));
+    })());
+  };
+
+  const duplicateLayersFromUser = (ids: string[]) => {
+    if (autoActionBusyRef.current) return;
+    void trackAutoActionEdit((async () => {
+      const clip = await copyLayers(ids);
+      if (clip && await pasteCopiedLayers(clip)) autoActionRecorder.record({ kind: 'layer.duplicate' });
+    })()).catch((err) => console.warn('[layers] Could not duplicate layers:', err));
+  };
+
+  shortcutActionsRef.current.mergeDown = mergeDownFromUser;
   shortcutActionsRef.current.groupLayers = groupLayers;
   shortcutActionsRef.current.copyLayers = copyLayers;
   shortcutActionsRef.current.pasteLayers = pasteLayers;
+  shortcutActionsRef.current.duplicateLayers = duplicateLayersFromUser;
   shortcutActionsRef.current.animAddCel = addAnimationFrame;
   shortcutActionsRef.current.animAddBlank = addBlankAnimationFrame;
   shortcutActionsRef.current.animJumpKeyframe = jumpAdjacentKeyframe;
@@ -7099,24 +7380,169 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
 
   const handleTouchDuplicate = () => {
+    if (autoActionBusyRef.current) return;
     if (selectionEngineRef.current?.hasSelection()) {
       void selection.copySelection().then((ok) => {
         if (ok) pasteClipboard();
       });
       return;
     }
-    if (!activeLayerRef.current) return;
-    copyLayers([activeLayerRef.current.id]);
-    void pasteLayers();
+    if (activeLayerRef.current) duplicateLayersFromUser([activeLayerRef.current.id]);
   };
 
   const handleTouchPaste = () => {
+    if (autoActionBusyRef.current) return;
     if (selection.clipboardRef.current) {
       pasteClipboard();
       return;
     }
     void pasteLayers();
   };
+
+  const waitForSelectedLayer = (id: string) =>
+    waitForLayerState(() => activeLayerRef.current?.id === id && layersRef.current.some((layer) => layer.id === id));
+  const autoActionUserId = () => userRef.current?.id || user?.id || 'guest';
+  const canInsertNextTo = (anchor: LayerModel) => {
+    if (!anchor.parentId) return true;
+    const parent = layersRef.current.find((layer) => layer.id === anchor.parentId);
+    return Boolean(parent && folderAccess.canAdd(parent));
+  };
+  const autoActionDeps: AutoActionHostDeps = {
+    undo: scopedUndoRef.current,
+    undoNow: async (groupId) => {
+      const context = autoActionContextRef.current;
+      if (context && (context.lm !== layerManagerRef.current || context.userId !== autoActionUserId())) return;
+      closeAdjustmentDialog();
+      await queueHistoryAction(() => undoNow(groupId));
+    },
+    getUserId: () => autoActionContextRef.current?.userId ?? autoActionUserId(),
+    isReadOnly: () => {
+      const context = autoActionContextRef.current;
+      return !canvas || !isCanvasPresented || isGuest || isCanvasViewer ||
+        Boolean(context && (context.lm !== layerManagerRef.current || context.userId !== autoActionUserId()));
+    },
+    getActiveLayer: () => activeLayerRef.current,
+    canManageLayer,
+    canEditPixels,
+    resolveLayerName: (key) => t.autoActions.layerNames[key],
+    createLayer: async (anchor, { name, blendMode, opacity, clipToBelow }) => {
+      if (!canInsertNextTo(anchor)) return false;
+      const count = layersRef.current.filter((layer) => layer.layerType !== 'vector' && layer.layerType !== 'group').length + 1;
+      const created = await onCreateLayer?.(name ?? `${t.layers.rasterLayer} ${count}`, blendMode ?? 'normal', 'raster', anchor.id, anchor.parentId);
+      if (!created) return false;
+      const props = { opacity: opacity ?? created.opacity, clipToBelow: clipToBelow ?? created.clipToBelow };
+      recordLayerCreation({ ...created, ...props });
+      if ((opacity !== undefined || clipToBelow !== undefined) && !await applyLayerProps(created.id, props)) return false;
+      if (!await waitForLayerItem(created.id)) return false;
+      onSelectLayer?.(created.id);
+      return waitForSelectedLayer(created.id);
+    },
+    duplicateLayer: async (layer) => {
+      if (!canInsertNextTo(layer)) return false;
+      const clip = await snapshotCopiedLayers([layer.id]);
+      const id = clip && await pasteCopiedLayers(clip, layer);
+      return Boolean(id && await waitForSelectedLayer(id));
+    },
+    mergeDown: async (layer) => {
+      if (rejectAdjustmentPixels(layer) || isRedrawnLayer(layer) || layer.layerType === 'mask' ||
+        !canManageLayer(layer) || !canEditPixels(layer)) return false;
+      const below = getMergeBelow(layer);
+      if (!below) return 'no_layer_below';
+      if (below.isLocked) return false;
+      return await mergeDown(layer.id) && await waitForLayerState(() =>
+        activeLayerRef.current?.id === below.id && !layersRef.current.some((entry) => entry.id === layer.id));
+    },
+    deleteLayer: async (layer) => {
+      if (!await deleteLayerWithUndo(layer.id)) return false;
+      return waitForLayerState(() => !layersRef.current.some((entry) => entry.id === layer.id) && activeLayerRef.current?.id !== layer.id);
+    },
+    updateLayerProps: applyLayerProps,
+    applyFilter: async (layer, { filterId, values }) => {
+      try {
+        return await applyFilterToLayer(layer.id, { id: filterId, values }, () => !autoActionDepsRef.current.isReadOnly());
+      } catch (error) {
+        console.warn('[CanvasWorkspace] Layer filter failed:', error);
+        return 'filter_failed';
+      }
+    },
+    createAdjustmentLayer: async (anchor, adjustment) => {
+      if (!canInsertNextTo(anchor)) return false;
+      const layer = await createAdjustmentLayerWith(adjustment, anchor);
+      if (!layer) return false;
+      onSelectLayer?.(layer.id);
+      return waitForSelectedLayer(layer.id);
+    },
+    getSelection: () => {
+      const engine = selectionEngineRef.current;
+      return engine ? { hasSelection: () => engine.hasSelection(), grow: growSelection, invert: selection.invertSelection, clear: handleClearSelection } : null;
+    },
+  };
+  const autoActionDepsRef = useRef(autoActionDeps);
+  autoActionDepsRef.current = autoActionDeps;
+  const autoActionHost = useMemo(() => createAutoActionHost(new Proxy({} as AutoActionHostDeps, {
+    get: (_target, key: keyof AutoActionHostDeps) => key === 'undo'
+      ? autoActionContextRef.current?.undo ?? scopedUndoRef.current
+      : autoActionDepsRef.current[key],
+  })), []);
+
+  const runAutoAction = async (action: AutoAction, opts?: Parameters<typeof playAutoAction>[2]): Promise<AutoActionPlayResult> => {
+    const fail = (code: AutoActionErrorCode): AutoActionPlayResult => ({ ok: false, groupId: null, failedIndex: -1, code });
+    if (autoActionBusyRef.current || autoActionPointersRef.current.size || transformLayerIdRef.current || textEdit) return fail('busy');
+    const lm = layerManagerRef.current;
+    if (!lm || autoActionDepsRef.current.isReadOnly()) return fail('read_only');
+    autoActionBusyRef.current = true;
+    const context = { lm, undo: scopedUndoRef.current, userId: autoActionUserId() };
+    autoActionContextRef.current = context;
+    try {
+      await undoQueueRef.current;
+      await Promise.allSettled(pendingAutoActionEditsRef.current);
+      await Promise.allSettled([...adjustmentSavesRef.current.values()].map(({ write }) => write));
+      strokePipelineRef.current?.finishPendingRelease();
+      await brush.withHistory(() => new Promise<void>(whenToolCommitsDone));
+      if (lm !== layerManagerRef.current) return fail('cancelled');
+      if (autoActionDepsRef.current.isReadOnly()) return fail('read_only');
+      cancelFilterWork();
+      clearFilterPreview();
+      return await playAutoAction(action, autoActionHost, opts);
+    } catch (error) {
+      console.warn('[CanvasWorkspace] Auto action failed:', error);
+      return fail('unknown');
+    } finally {
+      autoActionContextRef.current = null;
+      autoActionBusyRef.current = false;
+      updateUndoRedoState();
+      requestRenderRef.current();
+    }
+  };
+  const runAutoActionRef = useRef(runAutoAction);
+  runAutoActionRef.current = runAutoAction;
+  const autoActionsDebug = useMemo(() => ({
+    recorder: autoActionRecorder,
+    host: autoActionHost,
+    play: async (actionOrBuiltinKey: AutoAction | string): Promise<AutoActionPlayResult> => {
+      const action = typeof actionOrBuiltinKey === 'string'
+        ? BUILTIN_AUTO_ACTIONS.find((entry) => entry.builtinKey === actionOrBuiltinKey)
+        : actionOrBuiltinKey;
+      return action ? runAutoActionRef.current(action) : { ok: false, groupId: null, failedIndex: -1, code: 'unknown' };
+    },
+  }), [autoActionHost]);
+
+  // Dock requests use atelier:run-auto-action { action, requestId }.
+  // Completion emits atelier:auto-action-result { requestId, result }.
+  useEffect(() => {
+    const handleRequest = async (event: Event) => {
+      const detail = (event as CustomEvent<{ action: AutoAction; requestId: string }>).detail;
+      if (!detail?.action) return;
+      const result = await runAutoActionRef.current(detail.action, {
+        onProgress: (index, total) => window.dispatchEvent(new CustomEvent('atelier:auto-action-progress', {
+          detail: { requestId: detail.requestId, index, total },
+        })),
+      });
+      window.dispatchEvent(new CustomEvent('atelier:auto-action-result', { detail: { requestId: detail.requestId, result } }));
+    };
+    window.addEventListener('atelier:run-auto-action', handleRequest);
+    return () => window.removeEventListener('atelier:run-auto-action', handleRequest);
+  }, []);
 
   // Pointer & touch input: layer checks, tool routing and navigation gestures (workspace/tools/useCanvasPointer)
   const pointer = useCanvasPointer(toolCtx, { brush, liquify, shapes, selection, fill, vector, transform }, {
@@ -7208,6 +7634,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     },
   });
   const { handlePointerDown, handlePointerMove, handlePointerUp } = pointer;
+  const finishCanvasPointer = (event: React.PointerEvent<HTMLDivElement>) => {
+    autoActionPointersRef.current.delete(event.pointerId);
+    if (!autoActionBusyRef.current) handlePointerUp(event);
+  };
+  const blockCanvasInputDuringAutoAction = (event: React.SyntheticEvent) => {
+    if (!autoActionBusyRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+  };
 
   // Errors propagate to ResizeCanvasModal, which shows them in the dialog
   const handleResizeCanvas = async (
@@ -7287,17 +7722,17 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   }
 
   const createLayerFromDock = (type: 'raster' | 'vector' | 'group') => {
-    if (!onCreateLayer) return;
+    if (!onCreateLayer || autoActionBusyRef.current) return;
     if (type === 'group') {
       // In an animation folder a new folder stays there (CSP): a folder cel, or a folder inside a cel
       const inAnimation = Boolean(activeLayer && (isAnimationFolder(activeLayer) || celOfLayer(layers, activeLayer.id)));
-      void createLayerWithUndo(nextGroupName(layers), 'normal', 'group', activeLayer?.id || null, inAnimation ? undefined : null);
+      createLayerFromUser(nextGroupName(layers), 'normal', 'group', activeLayer?.id || null, inAnimation ? undefined : null);
     } else if (type === 'vector') {
       const n = layers.filter((l) => l.layerType === 'vector').length + 1;
-      void createLayerWithUndo(`向量線稿 ${n}`, 'normal', 'vector', activeLayer?.id || null);
+      createLayerFromUser(`向量線稿 ${n}`, 'normal', 'vector', activeLayer?.id || null);
     } else {
       const n = layers.filter((l) => l.layerType !== 'vector' && l.layerType !== 'group').length + 1;
-      void createLayerWithUndo(`圖層 ${n}`, 'normal', 'raster', activeLayer?.id || null);
+      createLayerFromUser(`圖層 ${n}`, 'normal', 'raster', activeLayer?.id || null);
     }
   };
 
@@ -7342,6 +7777,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       }} />,
     },
     {
+      id: 'autoActions',
+      title: t.autoActions.title,
+      icon: <ListVideo />,
+      render: () => <AutoActionsPanel readOnly={isGuest || isCanvasViewer} />,
+    },
+    {
       id: 'brushToolset',
       title: subToolState.activeCategoryId === 'paint' || subToolState.activeCategoryId === 'eraser'
         ? t.brushPreset.toolset
@@ -7375,9 +7816,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             onChangeWandTolerance={(t) => setWandTolerance(t)}
             wandContiguous={wandContiguous}
             onToggleWandContiguous={() => setWandContiguous(!wandContiguous)}
-            onExpandSelection={() => growSelection(3)}
-            onContractSelection={() => growSelection(-3)}
-            onClearSelection={handleClearSelection}
+            onExpandSelection={() => editSelectionFromUser('selection.grow', 3)}
+            onContractSelection={() => editSelectionFromUser('selection.grow', -3)}
+            onClearSelection={() => editSelectionFromUser('selection.clear')}
             hasSelection={hasSelectionState}
             onUploadCustomBrush={handleUploadCustomBrush}
             onClearCustomBrush={handleClearCustomBrush}
@@ -7450,8 +7891,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           subscribeThumbnails={subscribeThumbnails}
           getThumbnailsSnapshot={getThumbnailsSnapshot}
           onRequestThumbnail={refreshLayerThumbnail}
-          onSelectLayer={onSelectLayer || (() => {})}
-          onCreateLayer={onCreateLayer ? createLayerWithUndo : (() => {})}
+          onSelectLayer={(id) => { if (!autoActionBusyRef.current) onSelectLayer?.(id); }}
+          onCreateLayer={onCreateLayer ? createLayerFromUser : (() => {})}
           onCreateRaster={() => createLayerFromDock('raster')}
           onCreateVector={() => createLayerFromDock('vector')}
           onCreateGroup={() => createLayerFromDock('group')}
@@ -7460,25 +7901,26 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           onRequestCreateMyLayer={onRequestCreateMyLayer}
           onToggleLock={onToggleLock || (() => {})}
           onToggleVisibility={onToggleVisibility || (() => {})}
-          onDeleteLayer={(id) => void deleteLayerWithUndo(id)}
+          onDeleteLayer={deleteLayerFromUser}
           onReleaseLayer={onReleaseLayer || (() => {})}
           roomMembers={roomMembers && roomMembers.length > 0 ? roomMembers : members}
           onTransferLayer={onTransferLayer}
           onClaimLayer={onClaimLayer || (() => {})}
           onReorderLayer={onReorderLayer || (() => {})}
-          onUpdateLayerProps={onUpdateLayerProps || (() => {})}
+          onUpdateLayerProps={updateLayerPropsFromPanel}
           onBakeScreentone={(layerId, params) => handleBakeScreentone(layerId, params)}
           localVisibility={localVisibility}
           onToggleLocalVisibility={toggleLocalVisibility}
-          onAddMask={(id) => void addLayerMask(id)}
-          onMergeDown={mergeDown}
+          onAddMask={(id) => { if (!autoActionBusyRef.current) void trackAutoActionEdit(addLayerMask(id)); }}
+          onMergeDown={mergeDownFromUser}
           onOpenAlign={openAlign}
           selectedLayerIds={selectedLayerIds}
           onSelectedLayerIdsChange={setSelectedLayerIds}
-          onGroupLayers={(ids) => void groupLayers(ids)}
+          onGroupLayers={(ids) => { if (!autoActionBusyRef.current) void trackAutoActionEdit(groupLayers(ids)); }}
           onCopyLayers={copyLayers}
           onPasteLayers={() => void pasteLayers()}
-          onImportImages={(dropped, target) => void importImages(dropped, { target })}
+          onDuplicateLayers={duplicateLayersFromUser}
+          onImportImages={(dropped, target) => { if (!autoActionBusyRef.current) void trackAutoActionEdit(importImages(dropped, { target })); }}
           keepLayerClipboard={keepLayerClipboard}
           onToggleKeepLayerClipboard={toggleKeepLayerClipboard}
           canManage={canManageLayer}
@@ -7488,6 +7930,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           isOfflineCanvas={OfflineSessionStore.isOfflineCanvas(canvas?.id)}
           onOpenAuth={onOpenAuth}
           onLoadLayerSelection={(id) => {
+            if (autoActionBusyRef.current) return;
             const layer = layersRef.current.find((l) => l.id === id);
             if (layer) selection.loadLayerSelection(layer);
           }}
@@ -7560,9 +8003,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         onEraserMode={(eraserMode) => handleBrushPropsChange({ eraserMode })}
         pasteToNewLayer={selection.pasteToNewLayer}
         onPasteToNewLayer={selection.setPasteToNewLayer}
-        onSelectionGrow={growSelection}
-        onClearSelection={handleClearSelection}
-        onSelectionInvert={selection.invertSelection}
+        onSelectionGrow={(px) => editSelectionFromUser('selection.grow', px)}
+        onClearSelection={() => editSelectionFromUser('selection.clear')}
+        onSelectionInvert={() => editSelectionFromUser('selection.invert')}
         onSelectionCopy={() => { selection.copySelection(); }}
         onSelectionCut={selection.cutSelection}
         onSelectionDelete={() => selection.deleteSelection()}
@@ -7695,7 +8138,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               if (!isImageDrag(e.dataTransfer)) return;
               e.preventDefault();
               setImageDragOver(false);
-              void importImages(readDroppedImages(e.dataTransfer), { at: { x: e.clientX, y: e.clientY } });
+              if (autoActionBusyRef.current) return;
+              void trackAutoActionEdit(importImages(readDroppedImages(e.dataTransfer), { at: { x: e.clientX, y: e.clientY } }));
             }}
           >
             {activeQuickShape && (
@@ -7718,7 +8162,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             )}
             <div
               ref={containerRef}
+              onPointerDownCapture={blockCanvasInputDuringAutoAction}
+              onClickCapture={blockCanvasInputDuringAutoAction}
               onPointerDown={(event) => {
+                if (autoActionBusyRef.current) return;
                 lastPointerPosRef.current = { x: event.clientX, y: event.clientY };
                 contextPointerRef.current = { type: event.pointerType, rightButton: event.button === 2 || (event.buttons & 2) !== 0 };
                 if (!isCanvasPresented) return;
@@ -7736,26 +8183,36 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                   openDesktopPopupAt({ x: event.clientX, y: event.clientY });
                   return;
                 }
+                autoActionPointersRef.current.add(event.pointerId);
                 handlePointerDown(event);
               }}
               onPointerMove={(event) => {
+                if (autoActionBusyRef.current) return;
                 lastPointerPosRef.current = { x: event.clientX, y: event.clientY };
                 handlePointerMove(event);
               }}
-              onPointerUp={handlePointerUp}
+              onPointerUp={finishCanvasPointer}
               onPointerLeave={(event) => {
                 hideBrushCursor();
                 setEraserHover(false);
-                if (!event.currentTarget.hasPointerCapture(event.pointerId)) handlePointerUp(event);
+                if (!event.currentTarget.hasPointerCapture(event.pointerId)) finishCanvasPointer(event);
               }}
-              onPointerCancel={handlePointerUp}
-              onLostPointerCapture={pointer.handleLostPointerCapture}
+              onPointerCancel={finishCanvasPointer}
+              onLostPointerCapture={(event) => {
+                autoActionPointersRef.current.delete(event.pointerId);
+                if (!autoActionBusyRef.current) pointer.handleLostPointerCapture(event);
+              }}
               onDoubleClick={(event) => {
+                if (autoActionBusyRef.current) return;
                 const local = viewportRef.current?.screenToCanvas(event.clientX, event.clientY);
                 const hit = local && textHitAt(local);
                 if (hit && !textEdit) editTextLayer(hit);
               }}
               onContextMenu={(event) => {
+                if (autoActionBusyRef.current) {
+                  event.preventDefault();
+                  return;
+                }
                 if (desktopPopupOpenRef.current) {
                   event.preventDefault();
                   return;
@@ -8389,13 +8846,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           { id: 'toolPicker', label: t.navbar.tools, icon: <Grid2x2 /> },
           { id: 'color', label: PANEL_TITLES.color, icon: <Palette /> },
           { id: 'subView', label: t.subView.title, icon: <ImageIcon /> },
+          { id: 'autoActions', label: t.autoActions.title, icon: <ListVideo /> },
           { id: 'brushToolset', label: t.brushPreset.toolset, icon: <Paintbrush /> },
           { id: 'layers', label: PANEL_TITLES.layers, icon: <Layers /> },
           { id: 'toolProps', label: t.toolOptions.title, icon: <Sliders /> },
         ]}
         onSelectTab={openMobileSheet}
         onClose={() => {
-          if (mobileSheet === 'members' || mobileSheet === 'oplog' || mobileSheet === 'subView') dockActions.hide(mobileSheet);
+          if (mobileSheet === 'members' || mobileSheet === 'oplog' || mobileSheet === 'subView' || mobileSheet === 'autoActions') dockActions.hide(mobileSheet);
           setMobileSheet(null);
         }}
       />
@@ -8492,7 +8950,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           onFlipCanvas={() => viewportRef.current?.toggleMirrorX()}
           onToggleRuler={() => setIsRulerModalOpen(true)}
           onToggleReference={() => setIsReferenceHUDOpen(true)}
-          onClearSelection={handleClearSelection}
+          onClearSelection={() => editSelectionFromUser('selection.clear')}
         />
       )}
 

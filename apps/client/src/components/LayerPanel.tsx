@@ -207,6 +207,7 @@ interface LayerPanelProps {
   /** 複製圖層 / 貼上圖層 (the copy works across canvases in this tab) */
   onCopyLayers?: (layerIds: string[]) => void;
   onPasteLayers?: () => void;
+  onDuplicateLayers?: (layerIds: string[]) => void;
   /** Image files dropped on the list: each becomes a new layer at that spot */
   onImportImages?: (dropped: DroppedImages, target: ImageDropTarget) => void;
   /** 「重新整理後保留圖層剪貼簿」: the copy is also kept in localStorage */
@@ -452,6 +453,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   onGroupLayers,
   onCopyLayers,
   onPasteLayers,
+  onDuplicateLayers,
   onImportImages,
   keepLayerClipboard,
   onToggleKeepLayerClipboard,
@@ -1804,7 +1806,10 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
               onClick={close(() => { onGroupLayers?.(ids); setSelectedLayerIds(new Set()); })} />
             {onCopyLayers && <MenuItem label={ids.length > 1 ? `${t.layers.copyLayers} (${ids.length})` : t.layers.copyLayers} hint="Ctrl+Alt+C" onClick={close(() => onCopyLayers(ids))} />}
             {onPasteLayers && <MenuItem label={t.layers.pasteLayers} hint="Ctrl+Alt+V" disabledReason={readOnly ? (isGuest ? t.layers.guestCannotPaste : t.collab.viewerReadOnlyWarn) : null} onClick={close(() => onPasteLayers())} />}
-            {onCopyLayers && onPasteLayers && <MenuItem label={t.layers.duplicate} hint="Ctrl+J" disabledReason={readOnly ? (isGuest ? t.layers.guestCannotPaste : t.collab.viewerReadOnlyWarn) : null} onClick={close(() => { onCopyLayers(ids); onPasteLayers(); })} />}
+            {(onDuplicateLayers || (onCopyLayers && onPasteLayers)) && <MenuItem label={t.layers.duplicate} hint="Ctrl+J" disabledReason={readOnly ? (isGuest ? t.layers.guestCannotPaste : t.collab.viewerReadOnlyWarn) : null} onClick={close(() => {
+              if (onDuplicateLayers) onDuplicateLayers(ids);
+              else { onCopyLayers?.(ids); onPasteLayers?.(); }
+            })} />}
             {onToggleKeepLayerClipboard && <MenuItem label={`${keepLayerClipboard ? '✓ ' : ''}${t.layers.keepClipboard}`} hint="~5MB" onClick={close(onToggleKeepLayerClipboard)} />}
             <div className="my-1 h-px bg-neutral-700/70" />
             <MenuItem label={t.layers.mergeDown} hint="Ctrl+E" disabledReason={ids.length > 1 ? t.layers.mergeOneAtATime : mergeBlocker(layer)} onClick={close(() => onMergeDown?.(layer.id))} />
