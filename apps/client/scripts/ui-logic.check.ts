@@ -110,6 +110,7 @@ import {
 } from '@atelier/shared';
 import { getBoxPivotCanvasPoint, type TransformBox } from '../src/utils/transformProjection';
 import { normalizeLuminaLayers } from '../src/engine/LuminaProjectEngine';
+import { combineMaskCoverages, isAdjustmentItem } from '../src/engine/layerComposite';
 import {
   applyKeyframeHandleDrag,
   buildKeyframeFromEval,
@@ -6515,4 +6516,31 @@ console.log('ui-logic checks passed');
     hierarchy[0], hierarchy[1], hierarchy[4],
   ]);
   console.log('Phase 6 adjustment layer persistence checks passed');
+}
+
+// Phase 6: adjustment layers (export compositing)
+{
+  // Own mask × group masks: masked-out pixels get no adjustment
+  assert.equal(combineMaskCoverages([], 4), null);
+  const own = Uint8ClampedArray.from([255, 0, 128, 255]);
+  const group = Uint8ClampedArray.from([255, 255, 255, 0]);
+  assert.deepStrictEqual(Array.from(combineMaskCoverages([own, group], 4)!), [255, 0, 128, 0]);
+  assert.deepStrictEqual(Array.from(combineMaskCoverages([own], 4)!), [255, 0, 128, 255]);
+
+  const model = (id: string, layerType: LayerModel['layerType'], sortOrder: number, extra: Partial<LayerModel> = {}) =>
+    ({ id, layerType, sortOrder, parentId: null, clipToBelow: false, createdAt: sortOrder, ...extra }) as LayerModel;
+  const item = (layer: LayerModel) => ({ layer, canvas: {} as HTMLCanvasElement });
+  assert.equal(isAdjustmentItem(item(model('a', 'adjustment', 1))), true);
+  assert.equal(isAdjustmentItem(item(model('r', 'raster', 1))), false);
+
+  // compositeLayers resolves scopes against every item incl. groups (a group scope needs the group row)
+  const stack = [
+    model('outside', 'raster', 10),
+    model('inner', 'raster', 20, { parentId: 'g' }),
+    model('adj', 'adjustment', 30, { parentId: 'g' }),
+    model('g', 'group', 40),
+  ];
+  assert.deepStrictEqual(resolveAdjustmentScope(stack, 'adj'), { kind: 'group', groupId: 'g', memberIds: ['inner'] });
+  assert.deepStrictEqual(resolveAdjustmentScope(stack.filter((l) => l.layerType !== 'group'), 'adj'), { kind: 'root' });
+  console.log('Phase 6 adjustment layer export compositing checks passed');
 }

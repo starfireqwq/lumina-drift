@@ -2,7 +2,7 @@ import { LayerModel, BlendMode } from '@atelier/shared';
 import JSZip from 'jszip';
 import { writePsd, Psd, Layer as PsdLayer } from 'ag-psd';
 
-import { LayerCanvasItem, LayerTree, compositeLayers, maskCoverage } from './layerComposite';
+import { LayerCanvasItem, LayerTree, compositeLayers, isAdjustmentItem, maskCoverage } from './layerComposite';
 import {
   binarizeLineArt,
   cropAndScaleCanvas,
@@ -786,6 +786,8 @@ export class ExportEngine {
 
     for (let i = 0; i < drawables.length; i++) {
       const { item, clipBase } = drawables[i];
+      // Adjustment layers own no pixels: their effect is in composite.png
+      if (isAdjustmentItem(item)) continue;
       const blob = await this.canvasToBlob(tree.flattened(item, clipBase), 'image/png');
       const safeName = item.layer.name.replace(/[\\/:*?"<>|]/g, '_');
       zip.file(`layer_${String(i).padStart(2, '0')}_${safeName}.png`, blob);
@@ -809,6 +811,7 @@ export class ExportEngine {
         blendMode: item.layer.blendMode,
         isVisible: tree.visible(item),
         isLocked: item.layer.isLocked,
+        ...(isAdjustmentItem(item) ? { type: 'adjustment', kind: item.layer.meta?.adjustment?.kind ?? null } : {}),
       })),
     };
     zip.file('layers_manifest.json', JSON.stringify(meta, null, 2));
@@ -859,6 +862,8 @@ export class ExportEngine {
           xml += `${indent}<stack ${common} isolation="auto">\n${await stackXml(item.layer.id, indent + '  ')}${indent}</stack>\n`;
           continue;
         }
+        // OpenRaster has no adjustment layers: their effect is in mergedimage.png only
+        if (isAdjustmentItem(item)) continue;
         // Group opacity / visibility live on the stacks; masks and clipping go into the pixels
         const pngPath = `data/layer_${fileIndex++}.png`;
         zip.file(pngPath, await this.canvasToBlob(tree.flattened(item, clipBaseOf.get(item.layer.id) ?? null), 'image/png'));
@@ -906,7 +911,7 @@ ${await stackXml(null, '    ')}  </stack>
           mask: { canvas: greyMaskCanvas(item.mask.canvas, item.mask.inverted), top: 0, left: 0, bottom: height, right: width, defaultColor: 0, disabled: !item.mask.enabled },
         } : {}),
       };
-      if (isGroup) return { ...layer, opened: true, children: tree.childrenOf(item.layer.id).map(toPsd) };
+      if (isGroup) return { ...layer, opened: true, children: tree.childrenOf(item.layer.id).filter((c) => !isAdjustmentItem(c)).map(toPsd) };
       return { ...layer, canvas: item.canvas, top: 0, left: 0, bottom: height, right: width };
     };
 
@@ -914,7 +919,7 @@ ${await stackXml(null, '    ')}  </stack>
       width,
       height,
       canvas: compositeCanvas,
-      children: tree.childrenOf(null).map(toPsd),
+      children: tree.childrenOf(null).filter((c) => !isAdjustmentItem(c)).map(toPsd),
     };
 
     const psdBuffer = writePsd(psdDoc);

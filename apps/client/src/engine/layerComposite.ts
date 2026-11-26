@@ -3,6 +3,10 @@ import {
   multiplyAffine,
   transformToAffineMatrix,
   evaluateTransformKeyframes,
+  applyAdjustmentStep,
+  compileAdjustment,
+  normalizeAdjustment,
+  resolveAdjustmentScope,
   type Affine2D,
   type BlendMode,
   type LayerModel,
@@ -34,6 +38,48 @@ export function maskCoverage(mask: HTMLCanvasElement, inverted = false): Uint8Cl
     out[i] = inverted ? 255 - v : v;
   }
   return out;
+}
+
+/** Adjustment layers own no pixels: they recolour what is below them (see compositeLayers) */
+export const isAdjustmentItem = (item: LayerCanvasItem) => item.layer.layerType === 'adjustment';
+
+/** Per-pixel product of several 0–255 coverages (null when there are none) */
+export function combineMaskCoverages(coverages: readonly Uint8ClampedArray[], pixelCount: number): Uint8ClampedArray | null {
+  if (coverages.length === 0) return null;
+  const out = new Uint8ClampedArray(pixelCount).fill(255);
+  for (const cov of coverages) {
+    for (let i = 0; i < pixelCount; i++) out[i] = (out[i] * (cov[i] ?? 0)) / 255;
+  }
+  return out;
+}
+
+/** A mask drawn onto a width × height canvas first when its own canvas has another size */
+function maskCoverageSized(mask: MaskSource, width: number, height: number): Uint8ClampedArray {
+  if (mask.canvas.width === width && mask.canvas.height === height) return maskCoverage(mask.canvas, mask.inverted);
+  const sized = document.createElement('canvas');
+  sized.width = width;
+  sized.height = height;
+  sized.getContext('2d')!.drawImage(mask.canvas, 0, 0);
+  const cov = maskCoverage(sized, mask.inverted);
+  sized.width = 0;
+  sized.height = 0;
+  return cov;
+}
+
+/** An adjustment layer as a clip base: opaque white where its own mask shows (everywhere without one) */
+function adjustmentBaseCanvas(item: LayerCanvasItem, width: number, height: number): HTMLCanvasElement {
+  const white = document.createElement('canvas');
+  white.width = width;
+  white.height = height;
+  const ctx = white.getContext('2d')!;
+  ctx.fillStyle = '#FFFFFF';
+  ctx.fillRect(0, 0, width, height);
+  if (!item.mask?.enabled) return white;
+  const img = ctx.getImageData(0, 0, width, height);
+  const cov = maskCoverageSized(item.mask, width, height);
+  for (let i = 0; i < cov.length; i++) img.data[i * 4 + 3] = cov[i];
+  ctx.putImageData(img, 0, 0);
+  return white;
 }
 
 /** The layer as it looks with its own mask and any extra (group) masks applied */
@@ -105,6 +151,11 @@ export class LayerTree {
     return acc;
   };
   groupMasks = (i: LayerCanvasItem): MaskSource[] => this.ancestors(i).flatMap((a) => (a.mask?.enabled ? [a.mask] : []));
+  /** Where an adjustment layer acts (0–255): its own mask × every enclosing group mask; null = everywhere */
+  adjustmentCoverage(item: LayerCanvasItem, width: number, height: number): Uint8ClampedArray | null {
+    const masks: MaskSource[] = [...(item.mask?.enabled ? [item.mask] : []), ...this.groupMasks(item)];
+    return combineMaskCoverages(masks.map((m) => maskCoverageSized(m, width, height)), width * height);
+  }
   /** Drawable layers bottom to top, each with the base it clips to (if any) */
   drawables(): Array<{ item: LayerCanvasItem; clipBase: LayerCanvasItem | null }> {
     const flat = this.items.filter((i) => !this.isGroup(i)).sort((a, b) => a.layer.sortOrder - b.layer.sortOrder);
@@ -116,6 +167,13 @@ export class LayerTree {
   }
   /** Final pixels of one layer: own and group masks, then clipping (for formats without masks / clipping) */
   flattened(item: LayerCanvasItem, clipBase: LayerCanvasItem | null): HTMLCanvasElement {
+    if (isAdjustmentItem(item)) {
+      // No pixels of its own (its effect is in the merged picture)
+      const empty = document.createElement('canvas');
+      empty.width = item.canvas.width;
+      empty.height = item.canvas.height;
+      return empty;
+    }
     const src = maskedLayerCanvas(item, this.groupMasks(item));
     if (!clipBase || clipBase === item) return src;
     const out = document.createElement('canvas');
@@ -124,7 +182,7 @@ export class LayerTree {
     const ctx = out.getContext('2d')!;
     ctx.drawImage(src, 0, 0);
     ctx.globalCompositeOperation = 'destination-in';
-    ctx.drawImage(maskedLayerCanvas(clipBase), 0, 0);
+    ctx.drawImage(isAdjustmentItem(clipBase) ? adjustmentBaseCanvas(clipBase, src.width, src.height) : maskedLayerCanvas(clipBase), 0, 0);
     if (!this.visible(clipBase)) ctx.clearRect(0, 0, out.width, out.height);
     return out;
   }
@@ -205,8 +263,29 @@ export function compositeLayers(
     ctx.clearRect(0, 0, width, height);
   }
   const tree = new LayerTree(layerItems);
-  for (const { item, clipBase } of tree.drawables()) {
+  const drawables = tree.drawables();
+  drawLayerList(ctx, tree, drawables, drawables, width, height);
+  ctx.restore();
+  return merged;
+}
+
+type DrawableEntry = { item: LayerCanvasItem; clipBase: LayerCanvasItem | null };
+
+/** Draws `list` (bottom to top) onto ctx; `all` is the whole stack, which adjustment scopes resolve against */
+function drawLayerList(
+  ctx: CanvasRenderingContext2D,
+  tree: LayerTree,
+  list: readonly DrawableEntry[],
+  all: readonly DrawableEntry[],
+  width: number,
+  height: number
+) {
+  for (const { item, clipBase } of list) {
     if (!tree.visible(item)) continue;
+    if (isAdjustmentItem(item)) {
+      applyAdjustmentItem(ctx, tree, item, all, width, height);
+      continue;
+    }
     ctx.save();
     ctx.globalAlpha = Math.max(0, Math.min(1, tree.opacity(item)));
     ctx.globalCompositeOperation = canvasCompositeOp(item.layer.blendMode);
@@ -215,6 +294,56 @@ export function compositeLayers(
     ctx.drawImage(tree.flattened(item, clipBase), 0, 0);
     ctx.restore();
   }
-  ctx.restore();
-  return merged;
+}
+
+/**
+ * An adjustment layer recolours what is already drawn: everything below it (root), only its
+ * clip stack (clip to below) or only its group's layers below it (group) — those scopes are
+ * composited alone first, and their change is added to the picture (shared applyAdjustmentStep).
+ */
+function applyAdjustmentItem(
+  ctx: CanvasRenderingContext2D,
+  tree: LayerTree,
+  item: LayerCanvasItem,
+  all: readonly DrawableEntry[],
+  width: number,
+  height: number
+) {
+  const adjustment = normalizeAdjustment(item.layer.meta?.adjustment);
+  if (!adjustment) return;
+  const compiled = compileAdjustment(adjustment);
+  const opacity = tree.opacity(item);
+  if (compiled.identity || !(opacity > 0) || width <= 0 || height <= 0) return;
+  // Groups are needed too: they decide the group scope
+  const scope = resolveAdjustmentScope(tree.items.map((i) => i.layer), item.layer.id);
+  if (scope.kind === 'none') return;
+
+  let scopePixels: Uint8ClampedArray | null = null;
+  if (scope.kind !== 'root') {
+    const members = new Set(scope.memberIds);
+    const subset = all.filter((entry) => members.has(entry.item.layer.id));
+    if (subset.length === 0) return;
+    const scratch = document.createElement('canvas');
+    scratch.width = width;
+    scratch.height = height;
+    const sctx = scratch.getContext('2d', { willReadFrequently: true });
+    if (!sctx) return;
+    drawLayerList(sctx, tree, subset, all, width, height);
+    scopePixels = sctx.getImageData(0, 0, width, height).data;
+    scratch.width = 0;
+    scratch.height = 0;
+  }
+
+  const image = ctx.getImageData(0, 0, width, height);
+  applyAdjustmentStep({
+    width,
+    height,
+    target: image.data,
+    scope: scopePixels,
+    coverage: tree.adjustmentCoverage(item, width, height),
+    opacity,
+    compiled,
+    blendMode: item.layer.blendMode,
+  });
+  ctx.putImageData(image, 0, 0);
 }

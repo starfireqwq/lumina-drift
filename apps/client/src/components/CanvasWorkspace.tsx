@@ -2705,10 +2705,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           const maskLayer = layers.find((m) => m.layerType === 'mask' && m.parentId === layer.id);
           const maskCanvas = maskLayer ? extract(maskLayer.id) : undefined;
           const mask = maskLayer && maskCanvas ? { id: maskLayer.id, canvas: maskCanvas, enabled: maskLayer.isVisible, inverted: Boolean(maskLayer.meta?.maskInverted) } : undefined;
-          let extractedCanvas: HTMLCanvasElement | null = extract(layer.id) ?? null;
+          // Adjustment layers own no pixels: a 1×1 placeholder (compositeLayers never draws it)
+          const isAdjustment = layer.layerType === 'adjustment';
+          let extractedCanvas: HTMLCanvasElement | null = isAdjustment ? null : extract(layer.id) ?? null;
           if (!extractedCanvas) {
             extractedCanvas = document.createElement('canvas');
-            if (layer.layerType !== 'group') {
+            if (isAdjustment) {
+              extractedCanvas.width = 1;
+              extractedCanvas.height = 1;
+            } else if (layer.layerType !== 'group') {
               extractedCanvas.width = canvas.width;
               extractedCanvas.height = canvas.height;
             }

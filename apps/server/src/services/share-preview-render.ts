@@ -1,6 +1,7 @@
 import { PNG } from 'pngjs';
 import {
-  blendComponent, DEFAULT_TILE_SIZE, decompressTileBuffer,
+  applyAdjustmentStep, blendComponent, compileAdjustment, DEFAULT_TILE_SIZE, decompressTileBuffer,
+  normalizeAdjustment, resolveAdjustmentScope,
   evaluateTransformKeyframes, IDENTITY_AFFINE, multiplyAffine, transformToAffineMatrix,
   type Affine2D, type CanvasModel, type LayerModel, type LayerTileSnapshot, type TileData,
 } from '@atelier/shared';
@@ -176,6 +177,40 @@ export function renderSharePreview(source: SharePreviewSource, snapshots: LayerT
         layerMasks.push({ data, inverted: Boolean(mask.meta?.maskInverted) });
       }
       current = byId.get(current.parentId ?? '');
+    }
+    if (layer.layerType === 'adjustment') {
+      // As a clip base an adjustment layer is opaque white where its own mask shows
+      const ownMask = masks.get(layer.id);
+      const ownData = ownMask ? sampledMasks.get(ownMask.id) : undefined;
+      if (!layer.clipToBelow) {
+        let base: Uint8ClampedArray | null = null;
+        if (opacity > 0) {
+          base = new Uint8ClampedArray(pixels.length);
+          for (let i = 0; i < base.length; i += 4) {
+            const v = ownData ? ownData[i] : 255;
+            base[i + 3] = ownMask?.meta?.maskInverted ? 255 - v : v;
+          }
+        }
+        clipBase = base;
+      }
+      const adjustment = opacity > 0 ? normalizeAdjustment(layer.meta?.adjustment) : null;
+      const compiled = adjustment ? compileAdjustment(adjustment) : null;
+      if (!compiled || compiled.identity) continue;
+      // The card is an approximation: group-scoped adjustments are left out, a clipped one acts where its base shows
+      const scope = resolveAdjustmentScope(layers, layer.id);
+      if (scope.kind === 'group' || scope.kind === 'none') continue;
+      const coverage = new Uint8ClampedArray(width * height);
+      for (let p = 0; p < coverage.length; p++) {
+        let value = 1;
+        for (const mask of layerMasks) {
+          const v = mask.data[p * 4] / 255;
+          value *= mask.inverted ? 1 - v : v;
+        }
+        if (scope.kind === 'clip') value *= (clipBase?.[p * 4 + 3] ?? 0) / 255;
+        coverage[p] = Math.round(value * 255);
+      }
+      applyAdjustmentStep({ width, height, target: pixels, scope: null, coverage, opacity, compiled, blendMode: layer.blendMode });
+      continue;
     }
     const snapshot = content.get(layer.id);
     let paint: Uint8ClampedArray | null = null;
