@@ -245,6 +245,36 @@ html[data-motion="on"] .atelier-menu-in { animation: atelierMenuIn .14s cubic-be
 .atelier-btn--primary .atelier-kbd { background: rgb(255 255 255 / .16); border-color: rgb(255 255 255 / .28); color: #fff; }
 
 /* Drag-and-drop docking: where the dragged panel would land */
+.atelier-float-pill,
+html[data-surface] .atelier-popover.atelier-float-pill {
+  border-radius: 9999px;
+  box-shadow: var(--surface-shadow), 0 6px 16px -10px rgb(var(--a-500) / .5);
+  transition: border-color .16s ease, box-shadow .16s ease;
+}
+:is(.atelier-float-pill, html[data-surface] .atelier-float-pill):focus-within {
+  border-color: rgb(var(--a-400) / .55);
+  box-shadow: var(--surface-shadow), 0 0 0 2px rgb(var(--a-500) / .15);
+}
+.atelier-pill-btn {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 9999px;
+  color: rgb(var(--n-300));
+  transition: background-color .16s ease, border-color .16s ease, color .16s ease;
+}
+.atelier-pill-btn[data-pill-panel] { color: rgb(var(--text-strong)); }
+.atelier-pill-btn:hover { background: rgb(var(--a-500) / .12); color: rgb(var(--text-strong)); }
+.atelier-pill-btn[data-pill-active="true"] {
+  border-color: rgb(var(--a-400) / .6);
+  background: rgb(var(--a-500) / .16);
+  box-shadow: inset 0 0 8px rgb(var(--a-400) / .12);
+}
+.atelier-pill-btn:focus-visible { outline: 2px solid rgb(var(--a-400)); outline-offset: -2px; }
+html[data-motion="off"] :is(.atelier-float-pill, .atelier-pill-btn) { transition: none; }
+
 @keyframes atelierDropIn { from { opacity: 0; transform: scale(.985); } to { opacity: 1; transform: none; } }
 .atelier-drop-zone {
   position: fixed; border-radius: 10px;
@@ -254,6 +284,10 @@ html[data-motion="on"] .atelier-menu-in { animation: atelierMenuIn .14s cubic-be
   animation: atelierDropIn .16s ease-out;
 }
 .atelier-drop-zone--float { border-style: dashed; background: rgb(var(--a-500) / .07); transition: none; }
+.atelier-drop-zone--pill {
+  border-radius: 9999px;
+  box-shadow: 0 0 0 4px rgb(var(--a-500) / .1), 0 0 18px rgb(var(--a-400) / .28);
+}
 .atelier-drop-line { position: fixed; border-radius: 2px; background: rgb(var(--a-400)); box-shadow: 0 0 10px rgb(var(--a-400) / .8); }
 .atelier-drag-chip {
   position: fixed; display: flex; align-items: center; gap: 6px; padding: 4px 9px;

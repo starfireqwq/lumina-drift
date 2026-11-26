@@ -146,6 +146,7 @@ import { BrushSideSliders, MobileBrushSliders } from './workspace/BrushSideSlide
 import { BezierMode, SelectionMode, ToolOptionsBar } from './workspace/ToolOptionsBar';
 import { DockColumn, DockRow, FloatingPanels, MobilePanelSheet, type MobilePanelDef, PanelDef, ToolDockSlot } from './workspace/DockSystem';
 import { dockActions, PanelId, PANEL_TITLES, useDockLayout, useFloatsAllowed, usePhoneLayout, useTouchTabletLayout } from './workspace/dockStore';
+import { getPanelDisplayTitle, renderPanelIcon } from './workspace/panelIcons';
 import { TouchSideIsland, TouchToolIsland } from './workspace/TouchCanvasChrome';
 import { ALL_SUB_TOOLS, ALL_TOOLS, TOOL_CATEGORIES, findSubTool, getLocalizedCategoryLabel, MAX_BRUSH_SIZE, nextSizeStep } from './workspace/toolCatalog';
 import type { SubToolDef, SubToolId, SubToolParams, ToolCategoryId } from './workspace/toolCatalog';
@@ -273,7 +274,7 @@ import { PluginFilterWorkerClient } from '../plugins/pluginFilterClient';
 import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../utils/filterMemoryGuard';
 import type { FilterTargetOptions } from './FilterTargetBar';
 import { AtelierModal, modalButton } from './AtelierModal';
-import { AlertCircle, AlignCenter, Eye, Grid2x2, Image as ImageIcon, ImagePlus, Keyboard, Layers, ListVideo, Minimize2, Paintbrush, Palette, Sliders, Terminal, Users } from 'lucide-react';
+import { AlertCircle, Eye, Grid2x2, Image as ImageIcon, ImagePlus, Layers, ListVideo, Minimize2, Paintbrush, Palette, Sliders } from 'lucide-react';
 import { type DroppedImages, type ImageDropTarget, ImageImportError, imageEntries, isImageDrag, loadImageEntry, readDroppedImages } from '../utils/imageImport';
 
 /** Where a key types text (a text field), unlike a focused button, slider, checkbox or the page */
@@ -7818,8 +7819,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const panelDefs: PanelDef[] = [
     {
       id: 'color',
-      title: PANEL_TITLES.color,
-      icon: <Palette />,
+      title: getPanelDisplayTitle('color', t),
+      icon: renderPanelIcon('color'),
       badge: (
         <span
           className="ml-1 h-3 w-3 shrink-0 rounded-sm border border-white/40"
@@ -7845,8 +7846,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     },
     {
       id: 'subView',
-      title: t.subView.title,
-      icon: <ImageIcon />,
+      title: getPanelDisplayTitle('subView', t),
+      icon: renderPanelIcon('subView'),
       render: () => <SubViewPanel embedded onPickColor={(hex) => {
         handleBrushPropsChange({ color: hex, isEraser: false });
         recordUsedColor(hex);
@@ -7854,16 +7855,16 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     },
     {
       id: 'autoActions',
-      title: t.autoActions.title,
-      icon: <ListVideo />,
+      title: getPanelDisplayTitle('autoActions', t),
+      icon: renderPanelIcon('autoActions'),
       render: () => <AutoActionsPanel readOnly={isGuest || isCanvasViewer} />,
     },
     {
       id: 'brushToolset',
       title: subToolState.activeCategoryId === 'paint' || subToolState.activeCategoryId === 'eraser'
-        ? t.brushPreset.toolset
+        ? getPanelDisplayTitle('brushToolset', t)
         : `${t.tools.subToolTitle} · ${getLocalizedCategoryLabel(subToolState.activeCategoryId, t)}`,
-      icon: <Paintbrush />,
+      icon: renderPanelIcon('brushToolset'),
       render: () => (
         <SubToolPanel activeCategoryId={subToolState.activeCategoryId} activeSubToolId={subToolState.activeSubToolId}
           onSelectSubTool={handleSelectSubTool} onResetSubTool={handleResetSubTool}
@@ -7872,8 +7873,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     },
     {
       id: 'toolProps',
-      title: isTouchCanvasMode ? t.toolOptions.title : PANEL_TITLES.toolProps,
-      icon: <Sliders />,
+      title: isTouchCanvasMode ? t.toolOptions.title : getPanelDisplayTitle('toolProps', t),
+      icon: renderPanelIcon('toolProps'),
       render: () => (
         <div className="min-w-0 p-2">
           {isTouchCanvasMode && (
@@ -7957,8 +7958,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     },
     {
       id: 'layers',
-      title: PANEL_TITLES.layers,
-      icon: <Layers />,
+      title: getPanelDisplayTitle('layers', t),
+      icon: renderPanelIcon('layers'),
       badge: activeLayer ? <span className="ml-1 truncate text-[10px] font-normal text-neutral-400">{activeLayer.name}</span> : undefined,
       render: () => (
         <LayerPanel
@@ -8034,20 +8035,20 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     },
     {
       id: 'members',
-      title: PANEL_TITLES.members,
-      icon: <Users />,
+      title: getPanelDisplayTitle('members', t),
+      icon: renderPanelIcon('members'),
       badge: <span className="ml-1 rounded-full bg-emerald-500/20 px-1.5 text-[10px] font-bold text-emerald-300">{roomMemberCards(members).length}</span>,
       render: () => <UserListPanel members={members} canvasId={canvas.id} canvasOwnerId={canvas.ownerId} />,
     },
-    { id: 'oplog', title: PANEL_TITLES.oplog, icon: <Terminal />, render: () => <OpLogPanel /> },
-    { id: 'quickKeys', title: PANEL_TITLES.quickKeys, icon: <Keyboard />, render: () => <QuickKeysPanel /> },
+    { id: 'oplog', title: getPanelDisplayTitle('oplog', t), icon: renderPanelIcon('oplog'), render: () => <OpLogPanel /> },
+    { id: 'quickKeys', title: getPanelDisplayTitle('quickKeys', t), icon: renderPanelIcon('quickKeys'), render: () => <QuickKeysPanel /> },
   ];
   if (alignDocked && alignOpen) panelDefs.push({
-    id: 'align', title: t.align.title, icon: <AlignCenter />, onClose: closeAlign,
+    id: 'align', title: getPanelDisplayTitle('align', t), icon: renderPanelIcon('align'), onClose: closeAlign,
     render: () => <ToolDockSlot host={toolDockHosts.align} />,
   });
   if (filterDocked && (filterMenuOpen || adjustmentEditor?.open)) panelDefs.push({
-    id: 'filters', title: adjustmentEditor?.open ? t.layers.adjustment.title : t.filters.title, icon: <Sliders />,
+    id: 'filters', title: adjustmentEditor?.open ? t.layers.adjustment.title : getPanelDisplayTitle('filters', t), icon: renderPanelIcon('filters'),
     onClose: adjustmentEditor?.open ? () => closeAdjustmentDialog() : closeFilters,
     render: () => <ToolDockSlot host={toolDockHosts.filters} />,
   });
