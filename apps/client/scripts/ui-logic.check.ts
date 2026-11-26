@@ -6707,6 +6707,11 @@ import { runPhase7AutoActionHostChecks } from './phase7-auto-action-host.checks'
 import { runPhase7AutoActionUiChecks } from './phase7-auto-actions-ui.checks';
 import { runPhase7TextLayoutChecks } from './phase7-text-layout.checks';
 import { runPhase7TextEditorChecks } from './phase7-text-editor.checks';
+import { runPhase8ColorProofChecks } from './phase8-color-proof.checks';
+import { runPhase8SoftProofRuntimeChecks } from './phase8-soft-proof-runtime.checks';
+import { runPhase8IccEmbedChecks } from './phase8-icc-embed.checks';
+import { runPhase8KraRoundTripChecks } from './phase8-kra-roundtrip.checks';
+import { runPhase8UiChecks } from './phase8-ui.checks';
 
 {
   assert.deepEqual(Object.keys(ADJUSTMENT_KIND_ICONS), ADJUSTMENT_KINDS);
@@ -6740,3 +6745,14 @@ await runPhase7TextLayoutChecks();
 console.log('Phase 7 text layout checks passed');
 await runPhase7TextEditorChecks();
 console.log('Phase 7 text editor checks passed');
+
+await runPhase8ColorProofChecks();
+console.log('Phase 8 ICC, CMYK model and soft proof LUT checks passed');
+await runPhase8SoftProofRuntimeChecks();
+console.log('Phase 8 soft proof store, atlas and controller checks passed');
+await runPhase8IccEmbedChecks();
+console.log('Phase 8 ICC embedding (PNG / JPEG / PSD) checks passed');
+await runPhase8KraRoundTripChecks();
+console.log('Phase 8 .kra encoder round-trip checks passed');
+await runPhase8UiChecks();
+console.log('Phase 8 export / proof UI and locale checks passed');
