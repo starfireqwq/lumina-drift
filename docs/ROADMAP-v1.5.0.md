@@ -15,7 +15,7 @@
 | **Phase 1** | **P0-A** | CSP 圖層／資料夾面板標籤色、草稿染色與「用紙」底色系統（單機完整＋多人雙軌） | `v1.5.0-alpha.1` | 單聊天室 | `已完成` | 2026-11-27 / `4f91d70`, `336ad90` |
 | **Phase 2** | **P0-B** | 尺規系統 v2（集中線／放射狀尺規、曲線／貝茲特殊尺規、圖層綁定尺規與透視空間網格） | `v1.5.0-alpha.2` | 單聊天室 或 `/teamwork` | `已完成` | 2026-11-27 / `e5e0ce5`, `292f54d` |
 | **Phase 2.5** | **工作區增強** | 懸浮視窗可伸縮圖標小球／膠囊 Dock（單視窗縮球、多視窗自動拉長膠囊、橫直切換、點擊展開切換、拖出拆球與磁吸合併） | `v1.5.0-alpha.3` | 單聊天室 | `已完成` | 2026-11-27 / `1eb83fd`, `112e793` |
-| **Phase 3** | **P0-C** | 筆刷引擎 v3（雙筆刷、色彩動態、濕邊／顏料混色、多筆尖輪播與 `.sut`/`.brushset` 深度還原） | `v1.5.0-beta.1` | `/teamwork` | `待啟動` | — |
+| **Phase 3** | **P0-C** | 筆刷引擎 v3（雙筆刷、色彩動態、濕邊／顏料混色、多筆尖輪播與 `.sut`/`.brushset` 深度還原） | `v1.5.0-beta.1` | `/teamwork` | `已完成` | 2026-11-27 / `a1c2283`, `e140c1a` |
 | **Phase 4** | **P1-A** | 非破壞性圖層樣式（Layer Effects：邊界／水彩邊界／陰影／發光）＋快速遮色片（Quick Mask）與進階色域選取 | `v1.5.0-beta.2` | `/teamwork` 或 `/swarm` | `待啟動` | — |
 | **Phase 5** | **P1-B** | 多人繪茶 2.0（跟隨繪師視角、分格認領／接龍格線、房間共用色票盤與參考圖同步） | `v1.5.0-rc.1` | `/teamwork` | `待啟動` | — |
 | **Phase 6** | **P2** | 專業製作與效能收尾（動畫時間軸音訊波形＋混音匯出、真 CMYK 4 通道分色匯出、大畫布 Tile LRU 效能優化） | `v1.5.0` | `/teamwork` 或 `/swarm` | `待啟動` | — |
@@ -155,10 +155,31 @@
 > **目標**：強化專業插畫與厚塗手感，提升 `.sut` / `.brushset` 匯入還原度。
 
 #### 任務清單
-- [ ] **3.1 雙筆刷（Dual Brush）與多筆尖隨機輪播**
-- [ ] **3.2 色彩動態（Color Dynamics：HSL 隨機／壓感／筆劃漸變抖動）**
-- [ ] **3.3 濕邊（Watercolor Edge）與進階顏料混色（Pigment Blending）**
-- [ ] **3.4 `.sut` / `.brushset` 雙筆刷與紙紋參數深度映射與回歸測試**
+- [x] **3.1 雙筆刷（Dual Brush）與多筆尖隨機輪播**
+  - `DualBrushBlendMode` 擴充至 5 種混合模式（`multiply` / `subtract` / `darken` / `screen` / `overlay`，`screen`/`overlay` 經 `dst-in` 裁切不滲出透明背景），新增 7 種副筆尖形狀（`same` / `round` / `soft` / `speckle` / `bristle` / `square` / `custom`）與 `dualSpacing` 間距距離累積控制。
+  - 新增 `tipUrls` 與 `tipPlayMode`（`single` / `sequential` / `random` / `randomNoRepeat`），搭配共享層 `selectBrushTipIndex` 與 `BrushRenderer` 多筆尖貼圖載入／回收管理及 UI 縮圖管理。
+- [x] **3.2 色彩動態（Color Dynamics：HSL 隨機／壓感／筆劃漸變抖動）**
+  - 新增 `BrushColorDynamicsConfig`、`rgbToHsl`/`hslToRgb`、`normalizeColorDynamics` 與 `evaluateColorDynamics`，明確區分 `perDab`（每印記）與 `perStroke`（每筆劃）範圍，支援 HSL 隨機抖動、筆壓偏移、筆劃距離漸變（`gradientLength`）與主副色筆劃漸變（`fgBgGradient`）。
+- [x] **3.3 濕邊（Watercolor Edge）與進階顏料混色（Pigment Blending）**
+  - 濕邊擴充為可調參數 `wetEdgeStrength`、`wetEdgeWidth`、`wetEdgeDarkness`，透過 `computeWetEdgeParams` 與獨立 `wetRimRT` 實現水彩中心稀釋與外緣毛細沉積暗邊渲染。
+  - 新增 `PigmentBlendModel`（`subtractive` / `oklab` / `rgb`）、`blendPigmentColors`、`stepPigmentReservoir` 與 `chargeDepletion` 枯筆衰減，即時接入 `BrushRenderer` 儲墨槽混色與主副色混合。
+- [x] **3.4 `.sut` / `.brushset` 雙筆刷與紙紋參數深度映射與回歸測試**
+  - `SutParser`、`ProcreateParser` 與 `BrushPackageManager` 完整支援雙筆刷設定與副筆尖貼圖、多筆尖輪播清單、每筆／每印記與壓感色彩動態、水彩濕邊、減色顏料混色與紙紋混合模式／對比還原，並透傳至預設儲存／套用與外掛介面。
+  - 補齊 `zh-TW` / `zh-CN` / `en-US` / `ja-JP` 四語系（各新增 37 個鍵值，總計 2395 keys 100% 齊全），並完成單元測試、後端測試與隔離式 Electron 煙霧測試。
+
+#### 交接紀錄
+- **完成日期**：2026-11-27
+- **相關提交**：
+  - `a1c2283`：`feat(shared): add Brush Engine v3 dynamics, subtractive pigment blending, and deep .sut/.brushset parsing`
+  - `e140c1a`：`feat(client): implement Brush Engine v3 rendering, UI controls, 4 locales, and regression tests`
+- **實際驗證結果**：
+  - `i18n-coverage.check.ts`：通過（四語系各 2395 keys 100% 齊全）。
+  - `ui-logic.check.ts`：通過（含 `apps/client/scripts/v15-phase3-brush-v3.checks.ts` 的多筆尖輪播、HSL 每筆／每印記／壓感／漸變色彩動態、濕邊與減色顏料混色、`.sut` SQLite 與 `.brushset` ZIP/plist 深度映射、預設與四語系斷言）。
+  - `pnpm -r build`：通過（`@atelier/shared`、`@atelier/server`、`@atelier/client` 全數編譯成功）。
+  - `pnpm --filter @atelier/client build:electron`：通過。
+  - `pnpm --filter @atelier/server test`：18 項後端整合測試全數通過（含 `test-phase6-voice-stickers-brushes.ts` 的 v3 `.asbrush` 匯出匯入往返驗證）。
+  - 隔離式 Electron 煙霧測試 `node apps/client/scripts/v15-phase3-brush-v3-electron-smoke.check.cjs`：通過（`0 console errors, 0 page errors`；實測 v3 全部 UI 切換與即時筆劃預覽、濕邊＋雙筆刷實際繪製 3540 非空像素、黃覆藍減色顏料混色 `avgExcessG = 17.69` 顯著高於 RGB `4.28`、每印記色彩動態 40 個 RGB 色彩桶，以及 `.brush` 檔案匯入後還原 `dualBrush`/`wetEdges`/`subtractive`/`perStroke`）。
+- **下一階段接續點**：Phase 4（P1-A：非破壞性圖層樣式 Layer Effects＋快速遮色片 Quick Mask 與進階色域選取）。
 
 ---
 
