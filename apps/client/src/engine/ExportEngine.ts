@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import { writePsd, Psd, Layer as PsdLayer } from 'ag-psd';
 
 import { LayerCanvasItem, LayerTree, compositeLayers, isAdjustmentItem, maskCoverage } from './layerComposite';
+import { encodeKraDocument, KRA_MIMETYPE, type KraNodeInput } from './kraEncoder';
 import { luminaToPsdAdjustment, psdIsolatedGroupIds } from './psdAdjustmentMapping';
 import {
   binarizeLineArt,
@@ -121,7 +122,7 @@ function greyMaskCanvas(mask: HTMLCanvasElement, inverted = false): HTMLCanvasEl
   return out;
 }
 
-export type ExportFormat = 'lumina' | 'merged_png' | 'transparent_png' | 'jpeg' | 'psd' | 'ora' | 'layers_zip';
+export type ExportFormat = 'lumina' | 'merged_png' | 'transparent_png' | 'jpeg' | 'psd' | 'ora' | 'kra' | 'layers_zip';
 
 export class ExportEngine {
   /**
@@ -883,6 +884,73 @@ ${await stackXml(null, '    ')}  </stack>
       type: 'blob',
       mimeType: 'image/openraster',
     });
+  }
+
+  public static async exportKrita(
+    layerItems: LayerCanvasItem[],
+    width: number,
+    height: number,
+    bgColor: string | null,
+    opts: { title: string; dpi: number }
+  ): Promise<Blob> {
+    const tree = new LayerTree(layerItems);
+    const readSized = <T>(source: HTMLCanvasElement, read: (canvas: HTMLCanvasElement) => T, scale: boolean): T => {
+      if (source.width === width && source.height === height) return read(source);
+      const sized = document.createElement('canvas');
+      sized.width = width;
+      sized.height = height;
+      try {
+        if (source.width && source.height) {
+          sized.getContext('2d')!.drawImage(source, 0, 0, scale ? width : source.width, scale ? height : source.height);
+        }
+        return read(sized);
+      } finally {
+        sized.width = 0;
+        sized.height = 0;
+      }
+    };
+    const nodesOf = (parentId: string | null): KraNodeInput[] =>
+      tree.childrenOf(parentId).flatMap((item): KraNodeInput[] => {
+        if (isAdjustmentItem(item)) return [];
+        const { layer, mask } = item;
+        const properties = {
+          name: layer.name,
+          opacity: layer.opacity,
+          visible: layer.isVisible,
+          locked: layer.isLocked,
+          blendMode: layer.blendMode,
+          mask: mask && {
+            coverage: readSized(mask.canvas, (source) => Uint8Array.from(maskCoverage(source, false)), true),
+            inverted: Boolean(mask.inverted),
+            enabled: mask.enabled,
+          },
+        };
+        if (tree.isGroup(item)) {
+          return [{ ...properties, kind: 'group', children: nodesOf(layer.id) }];
+        }
+        return [{
+          ...properties,
+          kind: 'paint',
+          alphaLocked: layer.alphaLocked,
+          clipToBelow: layer.clipToBelow,
+          rgba: readSized(item.canvas, (source) => source.getContext('2d')!.getImageData(0, 0, width, height).data, false),
+        }];
+      });
+
+    const merged = this.compositeLayers(layerItems, width, height, bgColor);
+    const thumb = document.createElement('canvas');
+    const scale = 256 / Math.max(width, height);
+    thumb.width = Math.max(1, Math.round(width * scale));
+    thumb.height = Math.max(1, Math.round(height * scale));
+    thumb.getContext('2d')!.drawImage(merged, 0, 0, thumb.width, thumb.height);
+    const [mergedBlob, previewBlob] = await Promise.all([this.canvasToBlob(merged), this.canvasToBlob(thumb)]);
+    const bytes = await encodeKraDocument({
+      width, height, bgColor, ...opts,
+      roots: nodesOf(null),
+      mergedPng: new Uint8Array(await mergedBlob.arrayBuffer()),
+      previewPng: new Uint8Array(await previewBlob.arrayBuffer()),
+    });
+    return new Blob([bytes.buffer as ArrayBuffer], { type: KRA_MIMETYPE });
   }
 
   /**

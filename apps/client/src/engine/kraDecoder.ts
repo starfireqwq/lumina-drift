@@ -24,6 +24,9 @@ export const MIN_IMPORT_CANVAS_DIM = 64;
 export const MAX_IMPORT_CANVAS_DIM = 16384;
 
 export function parseKraInheritAlpha(layer: Pick<Element, 'getAttribute'>): boolean {
+  // Krita stores "inherit alpha" as a disabled alpha channel (RGBA channel flags "1110")
+  const channelFlags = layer.getAttribute('channelflags') || '';
+  if (channelFlags.length >= 4 && channelFlags[3] === '0') return true;
   return (layer.getAttribute('inheritsalpha') ??
     layer.getAttribute('inheritalpha') ??
     layer.getAttribute('inheritAlpha')) === '1';
@@ -506,10 +509,12 @@ export function mapKraBlendMode(compositeOp: string | null | undefined): BlendMo
     case 'vivid_light':
       return 'vivid_light';
     case 'linear_light':
+    case 'linear light':
       return 'linear_light';
     case 'pin_light':
       return 'pin_light';
     case 'hard_mix':
+    case 'hard mix':
     case 'hard_mix_photoshop':
     case 'hard_mix_softer_photoshop':
       return 'hard_mix';
@@ -525,7 +530,6 @@ export function mapKraBlendMode(compositeOp: string | null | undefined): BlendMo
     case 'add':
     case 'addition':
     case 'linear_dodge':
-    case 'luminize':
       return 'add';
     case 'hue':
     case 'hue_hsv':
@@ -540,8 +544,10 @@ export function mapKraBlendMode(compositeOp: string | null | undefined): BlendMo
     case 'color_hsl':
       return 'color';
     case 'luminosity':
-    case 'luminosity_sai':
+    case 'luminize':
       return 'luminosity';
+    case 'luminosity_sai':
+      return 'glow';
     case 'normal':
     case 'alphadarken':
     case 'copy':

@@ -458,6 +458,22 @@ function directChildElementsByTag(parent: Element, tagName: string): Element[] {
   return out;
 }
 
+function readKraBackgroundColor(image: Element): string {
+  const encoded = directChildElementsByTag(image, 'ProjectionBackgroundColor')[0]?.getAttribute('ColorData');
+  if (encoded) {
+    try {
+      const bgra = atob(encoded);
+      if (bgra.length >= 4 && bgra.charCodeAt(3) === 255) {
+        const rgb = [2, 1, 0].map((channel) => bgra.charCodeAt(channel).toString(16).padStart(2, '0'));
+        return `#${rgb.join('').toUpperCase()}`;
+      }
+    } catch {
+      // Malformed background data falls back to the default.
+    }
+  }
+  return '#FFFFFF';
+}
+
 async function decodeKraImageBlobToDataUrl(blob: Blob, targetW: number, targetH: number): Promise<string | null> {
   const url = URL.createObjectURL(blob);
   try {
@@ -542,6 +558,7 @@ export async function unpackKraProject(
   let seq = 0;
   let sortCounter = 10;
   let decodedAnyRaster = false;
+  let hasLuminaLayers = false;
 
   const nextId = (prefix: string) => `${prefix}_${++seq}`;
 
@@ -550,7 +567,8 @@ export async function unpackKraProject(
     offsetX: number,
     offsetY: number,
     colorSpace: string,
-    isMask: boolean
+    isMask: boolean,
+    inverted = false
   ): Promise<HTMLCanvasElement | null> => {
     const entry = findKraZipEntry(zip, imageName, layerFileName);
     if (!entry) return null;
@@ -567,6 +585,7 @@ export async function unpackKraProject(
         }
       }
       if (defaultMaskByte === null) defaultMaskByte = 255;
+      if (inverted) defaultMaskByte = 255 - defaultMaskByte;
     }
 
     if (decoded.tiles.length === 0 && !isMask) return null;
@@ -597,6 +616,11 @@ export async function unpackKraProject(
 
     for (const tile of decoded.tiles) {
       const rgba = convertKraTileToRgba8(tile.raw, tilePixels, decoded.pixelSize, colorSpace, isMask);
+      if (inverted) {
+        for (let i = 0; i < rgba.length; i += 4) {
+          rgba[i] = rgba[i + 1] = rgba[i + 2] = 255 - rgba[i];
+        }
+      }
       const baseX = tile.left + offsetX;
       const baseY = tile.top + offsetY;
       const startY = Math.max(0, -baseY);
@@ -644,31 +668,36 @@ export async function unpackKraProject(
 
   const attachMasks = async (layerEl: Element, ownerId: string) => {
     const masksContainer = directChildElementsByTag(layerEl, 'masks')[0];
-    if (!masksContainer) return;
-    const maskEls = directChildElementsByTag(masksContainer, 'mask');
+    const maskEls = masksContainer ? directChildElementsByTag(masksContainer, 'mask') : [];
+    const nestedLayers = directChildElementsByTag(layerEl, 'layers')[0];
+    if (nestedLayers) maskEls.push(...directChildElementsByTag(nestedLayers, 'mask'));
     for (const maskEl of maskEls) {
       const nodeType = (maskEl.getAttribute('nodetype') || '').toLowerCase();
       if (nodeType !== 'transparencymask') continue;
       const maskFile = maskEl.getAttribute('filename') || '';
+      if (!maskFile) continue;
+      const selectionFile = `${maskFile}.pixelselection`;
+      const baseFile = findKraZipEntry(zip, imageName, selectionFile) ? selectionFile : maskFile;
       const mx = Number.parseInt(maskEl.getAttribute('x') || '0', 10) || 0;
       const my = Number.parseInt(maskEl.getAttribute('y') || '0', 10) || 0;
-      const maskCanvas = await renderTileLayerCanvas(maskFile, mx, my, 'ALPHA', true);
+      const inverted = maskEl.getAttribute('lumina-maskinverted') === '1';
+      const maskCanvas = await renderTileLayerCanvas(baseFile, mx, my, 'ALPHA', true, inverted);
       if (!maskCanvas) continue;
       const maskId = nextId('kra_mask');
-      layers.push(
-        makeLayerModel({
-          id: maskId,
-          canvasId,
-          parentId: ownerId,
-          name: maskEl.getAttribute('name') || '透明度蒙版',
-          layerType: 'mask',
-          blendMode: 'normal',
-          opacity: 1,
-          isVisible: maskEl.getAttribute('visible') !== '0',
-          sortOrder: sortCounter,
-          now,
-        })
-      );
+      const maskLayer = makeLayerModel({
+        id: maskId,
+        canvasId,
+        parentId: ownerId,
+        name: maskEl.getAttribute('name') || '透明度蒙版',
+        layerType: 'mask',
+        blendMode: 'normal',
+        opacity: 1,
+        isVisible: maskEl.getAttribute('visible') !== '0',
+        sortOrder: sortCounter,
+        now,
+      });
+      if (inverted) maskLayer.meta = { maskInverted: true };
+      layers.push(maskLayer);
       sortCounter += 10;
       canvasesById.set(maskId, maskCanvas);
       layerPngDataUrls[maskId] = maskCanvas.toDataURL('image/png');
@@ -683,7 +712,11 @@ export async function unpackKraProject(
       const nodeType = (layerEl.getAttribute('nodetype') || 'paintlayer').toLowerCase();
       const name = layerEl.getAttribute('name') || `圖層 ${seq + 1}`;
       const rawOpacity = Number.parseFloat(layerEl.getAttribute('opacity') ?? '255');
-      const opacity = Number.isFinite(rawOpacity) ? Math.max(0, Math.min(1, rawOpacity / 255)) : 1;
+      const luminaOpacity = layerEl.getAttribute('lumina-opacity')?.trim();
+      const preciseOpacity = luminaOpacity ? Number(luminaOpacity) : NaN;
+      const hasPreciseOpacity = Math.abs(preciseOpacity * 255 - rawOpacity) <= 0.5 + 1e-6;
+      const opacity = Math.max(0, Math.min(1, hasPreciseOpacity ? preciseOpacity : (Number.isFinite(rawOpacity) ? rawOpacity / 255 : 1)));
+      if (hasPreciseOpacity) hasLuminaLayers = true;
       const isVisible = layerEl.getAttribute('visible') !== '0';
       const isLocked = layerEl.getAttribute('locked') === '1';
       const channelLock = layerEl.getAttribute('channellockflags') || '';
@@ -766,9 +799,9 @@ export async function unpackKraProject(
     await walkLayersContainer(rootLayersEl, null);
   }
 
-  // Fallback to mergedimage.png if no raster layers could be decoded (e.g. vector-only KRA)
+  // Lumina exports may contain only empty layers. Native files still use the merged fallback.
   const mergedEntry = zip.file('mergedimage.png');
-  if (!decodedAnyRaster && mergedEntry) {
+  if (!decodedAnyRaster && !hasLuminaLayers && mergedEntry) {
     const mergedBlob = await mergedEntry.async('blob');
     const mergedUrl = await decodeKraImageBlobToDataUrl(mergedBlob, width, height);
     if (mergedUrl) {
@@ -831,7 +864,7 @@ export async function unpackKraProject(
         title,
         width,
         height,
-        bgColor: '#FFFFFF',
+        bgColor: readKraBackgroundColor(imageEl),
         dpi,
       },
       layerCount: tidied.length,
