@@ -2,6 +2,7 @@ import { LayerModel, BlendMode, normalizeAdjustment } from '@atelier/shared';
 import JSZip from 'jszip';
 import { writePsd, Psd, Layer as PsdLayer } from 'ag-psd';
 
+import { canEmbedIccInRgbImage, embedIccInJpeg, embedIccInPng, type IccEmbedChoice } from './color/iccEmbed';
 import { LayerCanvasItem, LayerTree, compositeLayers, isAdjustmentItem, maskCoverage } from './layerComposite';
 import { encodeKraDocument, KRA_MIMETYPE, type KraNodeInput } from './kraEncoder';
 import { luminaToPsdAdjustment, psdIsolatedGroupIds } from './psdAdjustmentMapping';
@@ -164,11 +165,16 @@ export class ExportEngine {
     width: number,
     height: number,
     bgColor: string | null,
-    filename: string = 'canvas.png'
+    filename: string = 'canvas.png',
+    options: { icc?: IccEmbedChoice | null } = {}
   ): Promise<Blob> {
+    const { icc } = options;
+    if (icc && !canEmbedIccInRgbImage(icc.bytes)) throw new Error('icc_not_rgb');
     const mergedCanvas = this.compositeLayers(layerItems, width, height, bgColor);
     const blob = await this.canvasToBlob(mergedCanvas, 'image/png');
-    return blob;
+    if (!icc) return blob;
+    const bytes = await embedIccInPng(new Uint8Array(await blob.arrayBuffer()), icc.bytes, icc.name);
+    return new Blob([bytes], { type: blob.type });
   }
 
   /**
@@ -179,10 +185,13 @@ export class ExportEngine {
     width: number,
     height: number,
     bgColor: string = '#FFFFFF',
-    quality: number = 0.92
+    quality: number = 0.92,
+    options: { icc?: IccEmbedChoice | null } = {}
   ): Promise<Blob> {
+    const { icc } = options;
+    if (icc && !canEmbedIccInRgbImage(icc.bytes)) throw new Error('icc_not_rgb');
     const mergedCanvas = this.compositeLayers(layerItems, width, height, bgColor || '#FFFFFF');
-    return new Promise<Blob>((resolve, reject) => {
+    const blob = await new Promise<Blob>((resolve, reject) => {
       mergedCanvas.toBlob(
         (blob) => {
           if (blob) resolve(blob);
@@ -192,6 +201,9 @@ export class ExportEngine {
         quality
       );
     });
+    if (!icc) return blob;
+    const bytes = embedIccInJpeg(new Uint8Array(await blob.arrayBuffer()), icc.bytes);
+    return new Blob([bytes], { type: blob.type });
   }
 
   /**
@@ -961,8 +973,11 @@ ${await stackXml(null, '    ')}  </stack>
     layerItems: LayerCanvasItem[],
     width: number,
     height: number,
-    bgColor: string = '#FFFFFF'
+    bgColor: string = '#FFFFFF',
+    options: { icc?: IccEmbedChoice | null } = {}
   ): Promise<Blob> {
+    const { icc } = options;
+    if (icc && !canEmbedIccInRgbImage(icc.bytes)) throw new Error('icc_not_rgb');
     const compositeCanvas = this.compositeLayers(layerItems, width, height, bgColor);
     const tree = new LayerTree(layerItems);
     const isolatedGroups = psdIsolatedGroupIds(layerItems.map((i) => i.layer));
@@ -998,6 +1013,7 @@ ${await stackXml(null, '    ')}  </stack>
       height,
       canvas: compositeCanvas,
       children: childrenOf(null),
+      ...(icc ? { imageResources: { iccProfile: icc.bytes } } : {}),
     };
 
     const psdBuffer = writePsd(psdDoc);
