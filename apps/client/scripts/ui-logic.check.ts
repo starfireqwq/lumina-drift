@@ -50,6 +50,21 @@ import { addRecentVisit, lastVisitOn, normalizeServer, parseRecentVisits, remove
 import { healUnderMask } from '../src/engine/VectorEngine';
 import { ScopedUndoManager } from '../src/engine/ScopedUndoManager';
 import {
+  ADJUSTMENT_BLEND_MODE_IDS,
+  ADJUSTMENT_GLSL,
+  ADJUSTMENT_KINDS,
+  adjustmentBlendModeId,
+  adjustmentClipBaseId,
+  applyAdjustmentStep,
+  applyCompiledAdjustmentRgb,
+  blendAdjustmentRgb,
+  compileAdjustment,
+  compiledAdjustmentUniforms,
+  createDefaultAdjustment,
+  isAdjustmentIdentity,
+  normalizeAdjustment,
+  resolveAdjustmentScope,
+  type LayerAdjustment,
   Affine2D,
   applyAffinePoint,
   BEZIER_PRESETS,
@@ -6231,3 +6246,239 @@ await (async () => {
 }
 
 console.log('ui-logic checks passed');
+
+// Phase 6: adjustment layers (shared math)
+{
+  type Rgb = [number, number, number];
+  const checkSamples = (adjustment: LayerAdjustment, samples: [Rgb, Rgb][]) => {
+    const compiled = compileAdjustment(adjustment);
+    assert.equal(compiled.identity, false);
+    for (const [input, expected] of samples) {
+      assert.deepStrictEqual(applyCompiledAdjustmentRgb(compiled, ...input), expected);
+    }
+  };
+
+  const programs = { hsl: 2, levels: 0, curves: 0, color_balance: 1, gradient_map: 3, brightness_contrast: 0 };
+  assert.deepStrictEqual(ADJUSTMENT_KINDS, Object.keys(programs));
+  for (const kind of ADJUSTMENT_KINDS) {
+    const defaults = createDefaultAdjustment(kind);
+    const compiled = compileAdjustment(defaults);
+    assert.equal(isAdjustmentIdentity(defaults), kind !== 'gradient_map');
+    assert.equal(compiled.identity, kind !== 'gradient_map');
+    assert.equal(compiled.lut.length, 256 * 4);
+    assert.equal(compiled.lut[255 * 4 + 3], 255);
+    if (compiled.identity) {
+      for (const rgb of [[255, 0, 0], [128, 128, 128], [23, 211, 63]] as const) {
+        assert.deepStrictEqual(applyCompiledAdjustmentRgb(compiled, ...rgb), rgb);
+      }
+    }
+    assert.deepStrictEqual(normalizeAdjustment({ kind }), defaults);
+    assert.deepStrictEqual(normalizeAdjustment(defaults), defaults);
+    assert.deepStrictEqual(normalizeAdjustment(JSON.parse(JSON.stringify(defaults))), defaults);
+    const uniforms = compiledAdjustmentUniforms(compiled, 'multiply');
+    assert.equal(uniforms.program, programs[kind]);
+    assert.equal(uniforms.blendId, ADJUSTMENT_BLEND_MODE_IDS.multiply);
+  }
+
+  checkSamples({ kind: 'hsl', params: { hue: 120, saturation: 0, lightness: 0, colorize: false } }, [
+    [[255, 0, 0], [0, 255, 0]], [[128, 128, 128], [128, 128, 128]], [[18, 200, 42], [42, 18, 200]],
+  ]);
+  checkSamples({ kind: 'hsl', params: { hue: 0, saturation: 100, lightness: 0, colorize: true } }, [
+    [[255, 0, 0], [152, 0, 0]], [[128, 128, 128], [255, 1, 1]], [[0, 0, 255], [58, 0, 0]],
+  ]);
+
+  const levels = createDefaultAdjustment('levels');
+  assert.ok(levels.kind === 'levels');
+  Object.assign(levels.params.master, { inBlack: 64, inWhite: 192 });
+  checkSamples(levels, [
+    [[128, 64, 192], [128, 0, 255]], [[96, 160, 0], [64, 191, 0]], [[240, 32, 128], [255, 0, 128]],
+  ]);
+  Object.assign(levels.params.master, { gamma: 2 });
+  checkSamples(levels, [
+    [[128, 64, 192], [180, 0, 255]], [[96, 160, 0], [128, 221, 0]], [[240, 32, 128], [255, 0, 180]],
+  ]);
+  Object.assign(levels.params.red, { outBlack: 16, outWhite: 144 });
+  checkSamples(levels, [
+    [[96, 64, 192], [80, 0, 255]], [[64, 160, 0], [16, 221, 0]], [[240, 32, 128], [144, 0, 180]],
+  ]);
+
+  const curves = createDefaultAdjustment('curves');
+  assert.ok(curves.kind === 'curves');
+  const inverted = [{ x: 0, y: 255 }, { x: 255, y: 0 }];
+  curves.params.master = inverted;
+  checkSamples(curves, [
+    [[255, 0, 0], [0, 255, 255]], [[128, 128, 128], [127, 127, 127]], [[18, 200, 42], [237, 55, 213]],
+  ]);
+  const invert = compileAdjustment(curves);
+  curves.params.red = inverted;
+  assert.deepStrictEqual(applyCompiledAdjustmentRgb(compileAdjustment(curves), 18, 200, 42), [18, 55, 213]);
+  curves.params.master = [{ x: 0, y: 0 }, { x: 255, y: 255 }];
+  checkSamples(curves, [
+    [[255, 0, 0], [0, 0, 0]], [[128, 128, 128], [127, 128, 128]], [[18, 200, 42], [237, 200, 42]],
+  ]);
+  curves.params.red = [{ x: 0, y: 0 }, { x: 1, y: 1 }];
+  checkSamples(curves, [
+    [[0, 3, 4], [0, 3, 4]], [[1, 3, 4], [1, 3, 4]], [[255, 3, 4], [1, 3, 4]],
+  ]);
+
+  const balance = createDefaultAdjustment('color_balance');
+  assert.ok(balance.kind === 'color_balance');
+  balance.params.shadows.cyanRed = 50;
+  balance.params.highlights.yellowBlue = -50;
+  balance.params.preserveLuminosity = false;
+  // Both outer tones are at full weight (0.7), which shifts their channels by 89.25 bytes.
+  checkSamples(balance, [
+    [[32, 32, 32], [121, 32, 32]], [[128, 128, 128], [128, 128, 128]], [[224, 224, 224], [224, 224, 135]],
+  ]);
+  balance.params.preserveLuminosity = true;
+  checkSamples(balance, [
+    [[32, 32, 32], [51, 13, 13]], [[128, 128, 128], [128, 128, 128]], [[224, 224, 224], [242, 242, 206]],
+  ]);
+  for (const lightness of [32, 128, 224]) {
+    const rgb = applyCompiledAdjustmentRgb(compileAdjustment(balance), lightness, lightness, lightness);
+    assert.ok(Math.abs((Math.min(...rgb) + Math.max(...rgb)) / 2 - lightness) <= 1);
+  }
+
+  const gradient = createDefaultAdjustment('gradient_map');
+  assert.ok(gradient.kind === 'gradient_map');
+  gradient.params.stops[1].color = '#ff0000';
+  checkSamples(gradient, [
+    [[0, 0, 0], [0, 0, 0]], [[255, 255, 255], [255, 0, 0]], [[255, 0, 0], [76, 0, 0]],
+  ]);
+  gradient.params.reverse = true;
+  checkSamples(gradient, [
+    [[0, 0, 0], [255, 0, 0]], [[255, 255, 255], [0, 0, 0]], [[255, 0, 0], [179, 0, 0]],
+  ]);
+
+  checkSamples({ kind: 'brightness_contrast', params: { brightness: 150, contrast: 0 } }, [
+    [[0, 128, 255], [128, 192, 255]], [[22, 64, 192], [139, 160, 224]], [[100, 151, 230], [178, 203, 243]],
+  ]);
+  checkSamples({ kind: 'brightness_contrast', params: { brightness: 0, contrast: 100 } }, [
+    [[0, 128, 255], [0, 129, 255]], [[22, 64, 192], [0, 0, 255]], [[100, 151, 230], [61, 184, 255]],
+  ]);
+  checkSamples({ kind: 'brightness_contrast', params: { brightness: -150, contrast: -50 } }, [
+    [[0, 128, 255], [42, 85, 128]], [[22, 64, 192], [50, 64, 106]], [[100, 151, 230], [76, 93, 119]],
+  ]);
+
+  assert.equal(normalizeAdjustment(null), null);
+  assert.equal(normalizeAdjustment('hsl'), null);
+  assert.equal(normalizeAdjustment({ kind: 'unknown' }), null);
+  const hslRaw = { kind: 'hsl', params: { hue: 450, saturation: -150, lightness: NaN, colorize: 'true' } };
+  assert.deepStrictEqual(normalizeAdjustment(hslRaw), {
+    kind: 'hsl', params: { hue: 180, saturation: -100, lightness: 0, colorize: false },
+  });
+  assert.deepStrictEqual(normalizeAdjustment({ ...hslRaw, params: { ...hslRaw.params, colorize: true } }), {
+    kind: 'hsl', params: { hue: 360, saturation: 0, lightness: 0, colorize: true },
+  });
+  const messyLevels = normalizeAdjustment({ kind: 'levels', params: {
+    master: { inBlack: 254, inWhite: 40, gamma: Infinity, outBlack: 250.7, outWhite: -4 },
+    red: { inBlack: 100, inWhite: 101, gamma: 2.116 },
+  } });
+  assert.ok(messyLevels?.kind === 'levels');
+  assert.deepStrictEqual(messyLevels.params.master, { inBlack: 253, inWhite: 255, gamma: 1, outBlack: 251, outWhite: 0 });
+  assert.deepStrictEqual(messyLevels.params.red, { inBlack: 100, inWhite: 102, gamma: 2.12, outBlack: 0, outWhite: 255 });
+  const manyPoints = Array.from({ length: 20 }, (_, x) => ({ x, y: x * 2 })).reverse();
+  const messyCurves = normalizeAdjustment({ kind: 'curves', params: {
+    master: [...manyPoints, { x: 2.2, y: 400 }], green: [{ x: 3, y: 4 }, { x: 3, y: 5 }],
+  } });
+  assert.ok(messyCurves?.kind === 'curves');
+  assert.deepStrictEqual(messyCurves.params.master, Array.from({ length: 16 }, (_, x) => ({ x, y: x === 2 ? 255 : x * 2 })));
+  assert.deepStrictEqual(messyCurves.params.green, [{ x: 0, y: 0 }, { x: 255, y: 255 }]);
+  const messyGradient = normalizeAdjustment({ kind: 'gradient_map', params: {
+    stops: [
+      { offset: 0.7384, color: '#09F' }, { offset: 2, color: 'invalid' },
+      { offset: -2, color: '#cde' }, { offset: 0, color: '#ABC' },
+      { offset: 0.73849, color: '#01aFc0' },
+    ],
+    reverse: 'true',
+  } });
+  assert.deepStrictEqual(messyGradient, { kind: 'gradient_map', params: {
+    stops: [{ offset: 0, color: '#aabbcc' }, { offset: 0.738, color: '#01afc0' }, { offset: 1, color: '#ffffff' }],
+    reverse: false,
+  } });
+  const manyStops = Array.from({ length: 20 }, (_, i) => ({ offset: i / 20, color: '#000000' }));
+  const limitedGradient = normalizeAdjustment({ kind: 'gradient_map', params: { stops: [...manyStops].reverse() } });
+  assert.ok(limitedGradient?.kind === 'gradient_map');
+  assert.deepStrictEqual(limitedGradient.params.stops, manyStops.slice(0, 16));
+  const messyBrightness = normalizeAdjustment({ kind: 'brightness_contrast', params: { brightness: -0.1, contrast: -51 } });
+  assert.deepStrictEqual(messyBrightness, { kind: 'brightness_contrast', params: { brightness: 0, contrast: -50 } });
+  for (const messy of [normalizeAdjustment(hslRaw), messyLevels, messyCurves, messyGradient, messyBrightness]) {
+    assert.ok(messy);
+    assert.deepStrictEqual(normalizeAdjustment(messy), messy);
+    assert.deepStrictEqual(normalizeAdjustment(JSON.parse(JSON.stringify(messy))), messy);
+  }
+
+  const src: Rgb = [0.25, 0.5, 0.75];
+  const dst: Rgb = [0.5, 0.75, 0.25];
+  assert.deepStrictEqual(blendAdjustmentRgb(src, dst, 'normal'), src);
+  assert.deepStrictEqual(blendAdjustmentRgb(src, dst, 'multiply'), [0.125, 0.375, 0.1875]);
+  assert.deepStrictEqual(blendAdjustmentRgb(src, dst, 'screen'), [0.625, 0.875, 0.8125]);
+  assert.deepStrictEqual(blendAdjustmentRgb(src, dst, 'darker_color'), src);
+  assert.deepStrictEqual(blendAdjustmentRgb(src, dst, 'lighter_color'), dst);
+  assert.equal(adjustmentBlendModeId('unknown'), 0);
+  assert.equal(adjustmentBlendModeId('constructor'), 0);
+  assert.equal(adjustmentBlendModeId('Linear-Dodge'), ADJUSTMENT_BLEND_MODE_IDS.add);
+  const lum = ([r, g, b]: Rgb) => 0.3 * r + 0.59 * g + 0.11 * b;
+  const luminosity = blendAdjustmentRgb(src, dst, 'luminosity');
+  const shift = lum(src) - lum(dst);
+  assert.ok(luminosity.every((value, i) => Math.abs(value - (dst[i] + shift)) < 1e-6));
+  assert.ok(Math.abs(lum(luminosity) - lum(src)) < 1e-6);
+  assert.ok(Math.abs(lum(blendAdjustmentRgb(src, dst, 'color')) - lum(dst)) < 1e-6);
+  assert.ok(Math.abs(lum(blendAdjustmentRgb([1, 0, 0], [0.9, 0.9, 0.9], 'color')) - 0.9) < 1e-6);
+
+  const step = { width: 1, height: 1, compiled: invert, blendMode: 'normal', coverage: null, opacity: 1, scope: null };
+  const straight = new Uint8ClampedArray([40, 100, 200, 128]);
+  applyAdjustmentStep({ ...step, target: straight });
+  assert.deepStrictEqual([...straight], [215, 155, 55, 128]);
+  applyAdjustmentStep({ ...step, target: straight, opacity: 0.5 });
+  assert.ok(straight.slice(0, 3).every((value) => Math.abs(value - 127.5) <= 1));
+  assert.equal(straight[3], 128);
+  const masked = new Uint8Array([40, 100, 200, 255, 50, 100, 150, 255, 0, 255, 51, 255]);
+  applyAdjustmentStep({ ...step, width: 3, target: masked, coverage: new Uint8Array([255, 0, 85]) });
+  assert.deepStrictEqual([...masked], [215, 155, 55, 255, 50, 100, 150, 255, 85, 170, 102, 255]);
+
+  const premultipliedRoot = new Uint8Array([128, 0, 0, 128]);
+  applyAdjustmentStep({ ...step, target: premultipliedRoot, premultiplied: true });
+  assert.deepStrictEqual([...premultipliedRoot], [0, 128, 128, 128]);
+  applyAdjustmentStep({ ...step, target: premultipliedRoot, premultiplied: true, opacity: 0.5 });
+  assert.deepStrictEqual([...premultipliedRoot], [64, 64, 64, 128]);
+
+  for (const premultiplied of [false, true]) {
+    const target = new Uint8Array([26, 75, 110, 255, 64, 128, 192, 255, 128, 0, 127, 255]);
+    const scope = new Uint8Array([0, 0, 0, 0, 64, 128, 192, 255, premultiplied ? 128 : 255, 0, 0, 128]);
+    applyAdjustmentStep({ ...step, width: 3, target, scope, premultiplied });
+    // Red (128/255 alpha) over blue: [128, 0, 127] + [0, 128, 128] - [128, 0, 0].
+    assert.deepStrictEqual([...target], [26, 75, 110, 255, 191, 127, 63, 255, 0, 128, 255, 255]);
+  }
+
+  const layer = (id: string, sortOrder: number, layerType: LayerModel['layerType'] = 'raster',
+    parentId: string | null = null, clipToBelow = false, createdAt = 0) =>
+    ({ id, sortOrder, layerType, parentId, clipToBelow, createdAt });
+  const layers = [
+    layer('above', 8, 'raster', 'group'), layer('group', 9, 'group'), layer('nested', 4, 'group', 'group'),
+    layer('root', 10, 'adjustment'), layer('base', 1, 'adjustment', 'nested'), layer('outside', 0),
+    layer('clipped-y', 2, 'raster', 'nested', true, 4), layer('clipped-z', 2, 'adjustment', 'nested', true, 3),
+    layer('clipped-a', 2, 'raster', 'nested', true, 4), layer('mask', 2, 'mask', 'base'),
+    layer('clip-adjust', 3, 'adjustment', 'nested', true), layer('group-adjust', 5, 'adjustment', 'group'),
+    layer('own', 4, 'raster', 'group'),
+  ];
+  assert.deepStrictEqual(resolveAdjustmentScope(layers, 'root'), { kind: 'root' });
+  assert.deepStrictEqual(resolveAdjustmentScope(layers, 'clip-adjust'), {
+    kind: 'clip', baseId: 'base', memberIds: ['base', 'clipped-z', 'clipped-a', 'clipped-y'],
+  });
+  assert.equal(adjustmentClipBaseId(layers, 'clipped-y'), 'base');
+  assert.deepStrictEqual(resolveAdjustmentScope(layers, 'group-adjust'), {
+    kind: 'group', groupId: 'group', memberIds: ['base', 'clipped-z', 'clipped-a', 'clipped-y', 'clip-adjust', 'own'],
+  });
+  const baseline = [layer('mask', 0, 'mask'), layer('first-clip', 1, 'raster', null, true)];
+  assert.deepStrictEqual(resolveAdjustmentScope([...baseline, layer('bottom', 2, 'adjustment', null, true)], 'bottom'), { kind: 'root' });
+  assert.deepStrictEqual(resolveAdjustmentScope([
+    ...baseline, layer('empty-below', 2, 'adjustment', 'group', true), layer('group', 3, 'group'),
+  ], 'empty-below'), { kind: 'group', groupId: 'group', memberIds: [] });
+  assert.deepStrictEqual(resolveAdjustmentScope(layers, 'own'), { kind: 'none' });
+  assert.deepStrictEqual(resolveAdjustmentScope(layers, 'missing'), { kind: 'none' });
+
+  assert.ok(ADJUSTMENT_GLSL.includes('lumAdjApply('));
+  assert.ok(ADJUSTMENT_GLSL.includes('lumAdjBlend('));
+  console.log('Phase 6 adjustment layer checks passed');
+}

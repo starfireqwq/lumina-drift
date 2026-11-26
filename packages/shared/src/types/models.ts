@@ -33,6 +33,7 @@ import type { TransformKeyframe } from '../animation/keyframes';
 import type { CameraFrameMeta } from '../animation/camera';
 import type { AudioTrackMeta } from '../animation/audio';
 import type { CanvasUnit } from '../canvas/canvas-units';
+import type { LayerAdjustment } from '../adjustment/adjustment-layer';
 
 export type CelMark = 'key' | 'inbetween';
 
@@ -64,6 +65,8 @@ export interface LayerMeta {
   audio?: AudioTrackMeta;
   /** On a mask layer: white hides and black shows */
   maskInverted?: boolean;
+  /** Non-destructive color adjustment applied at this layer's position. */
+  adjustment?: LayerAdjustment;
   text?: LayerTextMeta;
 }
 export type LayerACLMode = 'owner_only' | 'shared_all' | 'custom';

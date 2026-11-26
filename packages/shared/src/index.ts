@@ -34,6 +34,10 @@ export * from './filters/blur-distort-filters';
 export * from './filters/render-filters';
 export * from './filters/resample';
 
+export * from './adjustment/adjustment-layer';
+export * from './adjustment/adjustment-scope';
+export * from './adjustment/adjustment-glsl';
+
 // Phase 7: AI Smart Fill, Gamification Painter Level & Time Capsule
 export * from './selection/smart-fill';
 export * from './gamification/painter-level';
