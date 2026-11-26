@@ -73,6 +73,8 @@ import {
   hitTestVectorStroke,
   LayerMeta,
   LayerModel,
+  type LayerColorMeta,
+  type PaletteColorDisplayMode,
   LayerTextMeta,
   tileToRgba,
   type TransformKeyframe,
@@ -201,6 +203,7 @@ import { BlurSmudgeEngine } from '../engine/BlurSmudgeEngine';
 import { ApiService } from '../services/api';
 import type { LayerCanvasItem } from '../engine/layerComposite';
 import { LayerPanel } from './LayerPanel';
+import { getEffectivePaperColor, readLayerColorPreferences, updateColorOverrides } from '../utils/layerColorDisplay';
 import { getUserColor } from '../utils/userColors';
 import {
   AnimationEngine, AnimationTrack, animationDisplay, BLANK_CEL_NAME, celEntriesOf, celInsertAt, celLayerOf, celOfLayer, entryIndexAt, entryStart, exportSegments, findAdjacentKeyframe, isAnimationFolder, MAX_HOLD, MAX_TIMELINE_FRAMES, movedByKeyframes,
@@ -436,6 +439,7 @@ interface CanvasWorkspaceProps {
   layers: LayerModel[];
   layersLoaded: boolean;
   onCanvasResized?: (width: number, height: number, dpi?: number, unit?: CanvasUnit) => void;
+  onUpdateCanvasBgColor?: (bgColor: string) => void | Promise<void>;
   /** Small composite preview of the canvas, for the canvas switcher */
   onCanvasThumbnail?: (canvasId: string, dataUrl: string) => void;
   /** Bumped by the parent to request "open the canvas resize dialog" (menu item) */
@@ -483,6 +487,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   layers,
   layersLoaded,
   onCanvasResized,
+  onUpdateCanvasBgColor,
   onCanvasThumbnail,
   resizeRequest = 0,
   importImagesRequest = null,
@@ -548,6 +553,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
   const currentCanvasRole = resolveCurrentCanvasRole();
   const isCanvasViewer = !isGuest && user?.serverRole !== 'admin' && currentCanvasRole === 'viewer';
+  const isOffline = OfflineSessionStore.isOfflineCanvas(canvas?.id);
   const isAdmin =
     user?.serverRole === 'admin' ||
     currentCanvasRole === 'owner' ||
@@ -704,6 +710,37 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
   const localVisibilityRef = useRef(localVisibility);
   localVisibilityRef.current = localVisibility;
+
+  const colorPreferencesKey = canvas ? `atelier_layer_colors_${canvas.id}` : '';
+  const loadColorPreferences = () => {
+    let saved: string | null = null;
+    try { if (colorPreferencesKey) saved = localStorage.getItem(colorPreferencesKey); } catch { /* Storage unavailable. */ }
+    return { key: colorPreferencesKey, values: readLayerColorPreferences(isOffline, saved) };
+  };
+  const [colorPreferences, setColorPreferences] = useState(loadColorPreferences);
+  if (colorPreferences.key !== colorPreferencesKey) setColorPreferences(loadColorPreferences());
+  useEffect(() => {
+    if (!colorPreferencesKey || colorPreferences.key !== colorPreferencesKey) return;
+    try { localStorage.setItem(colorPreferencesKey, JSON.stringify(colorPreferences.values)); } catch { /* Keep the session values. */ }
+  }, [colorPreferencesKey, colorPreferences]);
+  const { paletteColorMode, localPaletteColors, localLayerColors, localPaperColor, paperVisible } = colorPreferences.values;
+  const setPaletteColorMode = (mode: PaletteColorDisplayMode) => setColorPreferences((prev) => ({
+    ...prev, values: { ...prev.values, paletteColorMode: mode },
+  }));
+  const setLocalPaperColor = (color: string | null) => setColorPreferences((prev) => ({
+    ...prev, values: { ...prev.values, localPaperColor: color },
+  }));
+  const changePaperColor = (color: string | null, scope: 'local' | 'synced') => {
+    if (!isOffline && scope === 'local') {
+      setLocalPaperColor(color);
+    } else if (color !== null && onUpdateCanvasBgColor && (isOffline || isAdmin)) {
+      setLocalPaperColor(null);
+      void onUpdateCanvasBgColor(color);
+    }
+  };
+  const effectivePaperColor = getEffectivePaperColor(canvas?.bgColor, localPaperColor, isOffline);
+  const colorPreviewRef = useRef({ effectivePaperColor, paperVisible, localLayerColors });
+  colorPreviewRef.current = { effectivePaperColor, paperVisible, localLayerColors };
   // The animation folder the timeline plays and its player (set in the animation section below)
   const animFolderIdRef = useRef<string | null>(null);
   const animEngineRef = useRef<AnimationEngine | null>(null);
@@ -1972,14 +2009,17 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       viewport.centerInView(viewWidth, viewHeight, true);
 
       // 2. Layer Manager
+      const { effectivePaperColor, paperVisible, localLayerColors } = colorPreviewRef.current;
       const layerManager = new LayerManager(
         app.renderer,
         canvas.width,
         canvas.height,
-        canvas.bgColor,
-        OfflineSessionStore.isOfflineCanvas(canvas.id)
+        effectivePaperColor,
+        isOffline
       );
       layerManagerRef.current = layerManager;
+      layerManager.setPaperVisible(paperVisible);
+      layerManager.setLocalLayerColors(isOffline ? {} : localLayerColors);
       layerManager.setWrapAround(wrapAroundRef.current);
       prepareLayerView = () => {
         const deviceScale = viewport.getState().zoom * app.renderer.resolution;
@@ -2732,6 +2772,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   useEffect(() => {
     if (isEngineReady && layersLoaded && layers.length === 0 && !isReplayingRef.current) presentCanvas();
   }, [isEngineReady, layersLoaded, layers.length, presentCanvas]);
+
+  useEffect(() => {
+    if (isEngineReady) layerManagerRef.current?.updateBackground(effectivePaperColor, paperVisible);
+  }, [isEngineReady, effectivePaperColor, paperVisible]);
+
+  useEffect(() => {
+    if (isEngineReady) layerManagerRef.current?.setLocalLayerColors(isOffline ? {} : localLayerColors);
+  }, [isEngineReady, isOffline, localLayerColors]);
 
   // A personal-eye click (or opening / closing the timeline: onion skin) only changes what this viewer renders
   useEffect(() => {
@@ -7893,6 +7941,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       badge: activeLayer ? <span className="ml-1 truncate text-[10px] font-normal text-neutral-400">{activeLayer.name}</span> : undefined,
       render: () => (
         <LayerPanel
+          key={canvas.id}
           layers={layers}
           activeLayerId={activeLayer?.id || null}
           subscribeThumbnails={subscribeThumbnails}
@@ -7934,7 +7983,24 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           folderAccess={folderAccess}
           isRoomAdmin={isAdmin}
           isReadOnly={isCanvasViewer}
-          isOfflineCanvas={OfflineSessionStore.isOfflineCanvas(canvas?.id)}
+          isOfflineCanvas={isOffline}
+          canvasBgColor={canvas.bgColor || '#FFFFFF'}
+          paperVisible={paperVisible}
+          onTogglePaperVisible={() => setColorPreferences((prev) => ({
+            ...prev, values: { ...prev.values, paperVisible: !prev.values.paperVisible },
+          }))}
+          localPaperColor={localPaperColor}
+          onChangePaperColor={changePaperColor}
+          paletteColorMode={isOffline ? 'shared' : paletteColorMode}
+          onChangePaletteColorMode={setPaletteColorMode}
+          localPaletteColors={localPaletteColors}
+          onChangeLocalPaletteColor={(ids: string[], color: string | null | undefined) => setColorPreferences((prev) => ({
+            ...prev, values: { ...prev.values, localPaletteColors: updateColorOverrides(prev.values.localPaletteColors, ids, color) },
+          }))}
+          localLayerColors={localLayerColors}
+          onChangeLocalLayerColor={(id: string, config: LayerColorMeta | null | undefined) => setColorPreferences((prev) => ({
+            ...prev, values: { ...prev.values, localLayerColors: updateColorOverrides(prev.values.localLayerColors, [id], config) },
+          }))}
           onOpenAuth={onOpenAuth}
           onLoadLayerSelection={(id) => {
             if (autoActionBusyRef.current) return;

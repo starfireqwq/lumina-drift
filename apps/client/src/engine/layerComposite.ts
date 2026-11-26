@@ -4,11 +4,14 @@ import {
   transformToAffineMatrix,
   evaluateTransformKeyframes,
   applyAdjustmentStep,
+  applyLayerColorToImageData,
   compileAdjustment,
   normalizeAdjustment,
   resolveAdjustmentScope,
+  resolveEffectiveLayerColor,
   type Affine2D,
   type BlendMode,
+  type LayerColorMeta,
   type LayerModel,
   type VectorStroke,
 } from '@atelier/shared';
@@ -82,17 +85,18 @@ function adjustmentBaseCanvas(item: LayerCanvasItem, width: number, height: numb
   return white;
 }
 
-/** The layer as it looks with its own mask and any extra (group) masks applied */
-export function maskedLayerCanvas(item: LayerCanvasItem, extra: MaskSource[] = []): HTMLCanvasElement {
+/** Applies the display colour, then the layer's own mask and any extra (group) masks */
+export function maskedLayerCanvas(item: LayerCanvasItem, extra: MaskSource[] = [], color?: LayerColorMeta | null): HTMLCanvasElement {
   const masks: MaskSource[] = [...(item.mask?.enabled ? [item.mask] : []), ...extra];
-  if (masks.length === 0) return item.canvas;
   const { width, height } = item.canvas;
+  if ((!color?.enabled && masks.length === 0) || width === 0 || height === 0) return item.canvas;
   const out = document.createElement('canvas');
   out.width = width;
   out.height = height;
   const ctx = out.getContext('2d')!;
   ctx.drawImage(item.canvas, 0, 0);
   const img = ctx.getImageData(0, 0, width, height);
+  if (color?.enabled) applyLayerColorToImageData(img.data, color.mainColor, color.subColor);
   for (const m of masks) {
     const cov = maskCoverage(m.canvas, m.inverted);
     for (let i = 0; i < cov.length; i++) img.data[i * 4 + 3] = (img.data[i * 4 + 3] * cov[i]) / 255;
@@ -104,8 +108,10 @@ export function maskedLayerCanvas(item: LayerCanvasItem, extra: MaskSource[] = [
 /** The layer tree as the editor shows it */
 export class LayerTree {
   readonly byId: Map<string, LayerCanvasItem>;
+  private readonly layersById: ReadonlyMap<string, LayerModel>;
   constructor(readonly items: LayerCanvasItem[]) {
     this.byId = new Map(items.map((i) => [i.layer.id, i]));
+    this.layersById = new Map(items.map(({ layer }) => [layer.id, layer]));
   }
   isGroup = (i: LayerCanvasItem) => i.layer.layerType === 'group';
   /** Children bottom first; the roots when parentId is null */
@@ -165,7 +171,7 @@ export class LayerTree {
       return { item, clipBase: item.layer.clipToBelow ? base : null };
     });
   }
-  /** Final pixels of one layer: own and group masks, then clipping (for formats without masks / clipping) */
+  /** Final pixels of one layer: display colour, own and group masks, then clipping */
   flattened(item: LayerCanvasItem, clipBase: LayerCanvasItem | null): HTMLCanvasElement {
     if (isAdjustmentItem(item)) {
       // No pixels of its own (its effect is in the merged picture)
@@ -174,7 +180,8 @@ export class LayerTree {
       empty.height = item.canvas.height;
       return empty;
     }
-    const src = maskedLayerCanvas(item, this.groupMasks(item));
+    const { config } = resolveEffectiveLayerColor(item.layer.id, this.layersById);
+    const src = maskedLayerCanvas(item, this.groupMasks(item), config);
     if (!clipBase || clipBase === item) return src;
     const out = document.createElement('canvas');
     out.width = src.width;

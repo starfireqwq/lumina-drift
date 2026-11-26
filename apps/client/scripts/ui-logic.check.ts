@@ -45,6 +45,7 @@ import {
 } from '../src/utils/layerAlign';
 import { RulerManager } from '../src/engine/RulerManager';
 import { shiftVectorStroke } from '../src/services/offlineStore';
+import { getEffectivePaperColor, getPaletteContrastColor, readLayerColorPreferences, updateColorOverrides } from '../src/utils/layerColorDisplay';
 import { applyColorOutline } from '../src/engine/colorOutline';
 import { addRecentVisit, lastVisitOn, normalizeServer, parseRecentVisits, removeRecentVisit, RECENT_VISITS_LIMIT, type RecentVisit } from '../src/utils/recentVisits';
 import { healUnderMask } from '../src/engine/VectorEngine';
@@ -57,6 +58,7 @@ import {
   adjustmentClipBaseId,
   applyAdjustmentStep,
   applyCompiledAdjustmentRgb,
+  applyLayerColorToImageData,
   blendAdjustmentRgb,
   compileAdjustment,
   compiledAdjustmentUniforms,
@@ -64,6 +66,8 @@ import {
   isAdjustmentIdentity,
   normalizeAdjustment,
   resolveAdjustmentScope,
+  resolveEffectiveLayerColor,
+  resolveEffectivePaletteColor,
   sanitizeLayerMetaForType,
   type LayerAdjustment,
   Affine2D,
@@ -6518,6 +6522,72 @@ console.log('ui-logic checks passed');
     hierarchy[0], hierarchy[1], hierarchy[4],
   ]);
   console.log('Phase 6 adjustment layer persistence checks passed');
+}
+
+// v1.5.0: palette inheritance and non-destructive layer colour
+{
+  const config = { enabled: true, mainColor: '#123456' };
+  const layers = new Map([
+    ['root', { id: 'root', parentId: null, ownerId: 'alice', layerType: 'group', meta: { paletteColor: '#abc', layerColor: config } }],
+    ['group', { id: 'group', parentId: 'root', ownerId: 'alice', layerType: 'group', meta: { layerColor: { ...config, mainColor: '#000' } } }],
+    ['raster', { id: 'raster', parentId: 'group', ownerId: 'bob', layerType: 'raster', meta: { paletteColor: '#def' } }],
+    ['mask', { id: 'mask', parentId: 'group', ownerId: 'bob', layerType: 'mask' }],
+    ['adjustment', { id: 'adjustment', parentId: 'group', ownerId: 'bob', layerType: 'adjustment' }],
+    ['untagged', { id: 'untagged', parentId: 'group', ownerId: 'bob', layerType: 'raster' }],
+  ] as const);
+  assert.deepEqual(resolveEffectivePaletteColor('raster', layers, { displayMode: 'personal' }),
+    { color: '#DDEEFF', inherited: false, source: 'shared' });
+  assert.deepEqual(resolveEffectivePaletteColor('raster', layers, { displayMode: 'personal', localOverrides: { group: '#456' } }),
+    { color: '#445566', inherited: true, source: 'personal' });
+  assert.deepEqual(resolveEffectivePaletteColor('raster', layers, { displayMode: 'personal', localOverrides: { group: null } }),
+    { color: null, inherited: false, source: 'none' });
+  assert.deepEqual(resolveEffectivePaletteColor('raster', layers, { displayMode: 'owner', ownerColorOf: (layer) => layer.ownerId === 'bob' ? '#000000' : null }),
+    { color: '#000000', inherited: false, source: 'owner' });
+  assert.deepEqual(resolveEffectivePaletteColor('untagged', layers, { displayMode: 'shared', localOverrides: { root: null } }),
+    { color: '#AABBCC', inherited: true, source: 'shared' });
+  const cleared = updateColorOverrides({ group: '#456' }, ['raster', 'untagged'], null);
+  assert.deepEqual(cleared, { group: '#456', raster: null, untagged: null });
+  assert.equal(resolveEffectivePaletteColor('raster', layers, { displayMode: 'personal', localOverrides: cleared }).color, null);
+  const reset = updateColorOverrides(cleared, ['raster', 'untagged'], undefined);
+  assert.deepEqual(reset, { group: '#456' });
+  assert.equal(resolveEffectivePaletteColor('raster', layers, { displayMode: 'personal', localOverrides: reset }).color, '#445566');
+
+  const disabled = { ...config, enabled: false };
+  const none = { config: null, inherited: false, source: 'none' };
+  assert.deepEqual(resolveEffectiveLayerColor('raster', layers, { group: disabled }), { config, inherited: true, source: 'shared' });
+  assert.deepEqual(resolveEffectiveLayerColor('raster', layers, { raster: disabled }), none);
+  assert.deepEqual(resolveEffectiveLayerColor('mask', layers, { mask: config }), none);
+  assert.deepEqual(resolveEffectiveLayerColor('adjustment', layers, { adjustment: config }), none);
+  assert.deepEqual(resolveEffectiveLayerColor('missing', layers), none);
+  assert.deepEqual(resolveEffectiveLayerColor('raster', layers, { group: config }), { config, inherited: true, source: 'local' });
+  const resetTint = updateColorOverrides({ raster: disabled }, ['raster'], undefined);
+  assert.deepEqual(resolveEffectiveLayerColor('raster', layers, resetTint),
+    { config: { ...config, mainColor: '#000000' }, inherited: true, source: 'shared' });
+  assert.deepEqual(resolveEffectiveLayerColor('raster', layers, { group: null }), resolveEffectiveLayerColor('raster', layers));
+
+  for (const hex of ['#F472B6', '#BEF264', '#fff', '#787878']) assert.equal(getPaletteContrastColor(hex), '#171717');
+  for (const hex of ['#3B0764', '#000', '#777777']) assert.equal(getPaletteContrastColor(hex), '#F5F5F5');
+  const solo = readLayerColorPreferences(true, '{bad json');
+  assert.equal(solo.paletteColorMode, 'shared');
+  assert.equal(solo.paperVisible, true);
+  assert.equal(readLayerColorPreferences(false).paletteColorMode, 'personal');
+  const restored = readLayerColorPreferences(false, JSON.stringify({
+    paletteColorMode: 'owner', paperVisible: false, localPaperColor: '#abc',
+    localPaletteColors: { root: '#def', group: null, bad: 'red' },
+    localLayerColors: { root: disabled, group: null, bad: { enabled: true } },
+  }));
+  assert.deepEqual(restored, {
+    paletteColorMode: 'owner', paperVisible: false, localPaperColor: '#AABBCC',
+    localPaletteColors: { root: '#DDEEFF', group: null }, localLayerColors: { root: disabled, group: null },
+  });
+  assert.equal(getEffectivePaperColor('#FAF6EE', restored.localPaperColor, true), '#FAF6EE');
+  assert.equal(getEffectivePaperColor('#FAF6EE', restored.localPaperColor, false), '#AABBCC');
+  assert.equal(getEffectivePaperColor('#FAF6EE', null, false), '#FAF6EE');
+  assert.equal(getEffectivePaperColor(undefined, null, false), '#FFFFFF');
+
+  const rgba = Uint8ClampedArray.of(0, 0, 0, 255, 255, 255, 255, 128, 255, 0, 0, 64, 3, 5, 7, 0);
+  applyLayerColorToImageData(rgba, '#0000FF');
+  assert.deepEqual([...rgba], [0, 0, 255, 255, 255, 255, 255, 128, 76, 76, 255, 64, 3, 5, 7, 0]);
 }
 
 // Phase 6: adjustment layers (export compositing)

@@ -131,6 +131,7 @@ interface SocketContextType {
   layersSyncEvent: { canvasId: string; layers: LayerModel[] } | null;
   /** Someone in the room resized the canvas: the workspace rebuilds at this size */
   canvasResizedEvent: { canvasId: string; width: number; height: number; shifted?: boolean } | null;
+  canvasUpdatedEvent: { canvasId: string; title: string; bgColor: string; accessMode: string; updatedAt: number; byUser: string } | null;
   addSticker: (sticker: Omit<CanvasSticker, 'id' | 'createdAt'>) => void;
   updateSticker: (stickerId: string, updates: Partial<CanvasSticker>) => void;
   removeSticker: (stickerId: string) => void;
@@ -337,6 +338,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const [layerUpdateEvent, setLayerUpdateEvent] = useState<{ layer: LayerModel; action: string; byUser: string } | null>(null);
   const [layersSyncEvent, setLayersSyncEvent] = useState<{ canvasId: string; layers: LayerModel[] } | null>(null);
   const [canvasResizedEvent, setCanvasResizedEvent] = useState<SocketContextType['canvasResizedEvent']>(null);
+  const [canvasUpdatedEvent, setCanvasUpdatedEvent] = useState<SocketContextType['canvasUpdatedEvent']>(null);
 
   // Phase 6: Stickers & Voice state
   const [stickers, setStickers] = useState<CanvasSticker[]>([]);
@@ -764,6 +766,8 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       addLog('LAYER', `[畫布] 尺寸已調整為 ${data.width}×${data.height}`, '#10B981');
     });
 
+    socket.on('canvas_updated', setCanvasUpdatedEvent);
+
     socket.on('op_rejected', (rej: OpRejectedPacket) => {
       addLog('ERROR', `操作遭拒絕: ${rej.reason}`, '#EF4444');
     });
@@ -783,6 +787,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     });
 
     return () => {
+      socket.off('canvas_updated', setCanvasUpdatedEvent);
       socket.disconnect();
       if (socketRef.current === socket) {
         socketRef.current = null;
@@ -1264,6 +1269,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           reorderLayersList,
           layersSyncEvent,
           canvasResizedEvent,
+          canvasUpdatedEvent,
           addSticker,
           updateSticker,
           removeSticker,

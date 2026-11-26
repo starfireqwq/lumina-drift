@@ -8,10 +8,12 @@ import {
   computeTidiedAscendingNonMaskIds,
   filterTopLevelSelectedLayers,
   orderLayersForReparenting,
+  resolveEffectiveLayerColor,
+  resolveEffectivePaletteColor,
   selectLayerRange,
   tidyLayerModels,
 } from '@atelier/shared';
-import type { AdjustmentKind } from '@atelier/shared';
+import type { AdjustmentKind, LayerColorMeta, PaletteColorDisplayMode } from '@atelier/shared';
 import { FolderAccessPanel } from './FolderAccessPanel';
 import type { FolderAccess } from './workspace/useFolderAccess';
 import { type DroppedImages, type ImageDropTarget, isImageDrag, readDroppedImages } from '../utils/imageImport';
@@ -69,9 +71,12 @@ import { nextGroupName } from '../utils/canvasName';
 import { useAnchoredPopover } from '../utils/popoverPosition';
 import { useWheelStep } from '../hooks/useWheelStep';
 import { ADJUSTMENT_KIND_ICONS, mergeIncludesAdjustment } from './adjustmentLayerMenu';
+import { LayerPaletteColorControl, LayerPaperRow, LayerTintControls, LayerTintSwatch, type ColorScope } from './LayerColorControls';
+import { getPaletteContrastColor } from '../utils/layerColorDisplay';
 
 /** Public / ownerless layers: neutral, so they never look like one painter's (every user colour is saturated) */
 const PUBLIC_COLOR = '#9CA3AF';
+const ownerColor = (ownerId: LayerModel['ownerId'], isPublic: boolean) => isPublic || !ownerId ? PUBLIC_COLOR : getUserColor(ownerId).hex;
 
 const LayerOpacityRange: React.FC<{
   disabled: boolean;
@@ -222,6 +227,17 @@ interface LayerPanelProps {
   isReadOnly?: boolean;
   /** True when viewing a local offline solo canvas */
   isOfflineCanvas?: boolean;
+  canvasBgColor: string;
+  paperVisible: boolean;
+  onTogglePaperVisible: () => void;
+  localPaperColor: string | null;
+  onChangePaperColor: (color: string | null, scope: ColorScope) => void;
+  paletteColorMode: PaletteColorDisplayMode;
+  onChangePaletteColorMode: (mode: PaletteColorDisplayMode) => void;
+  localPaletteColors: Record<string, string | null>;
+  onChangeLocalPaletteColor: (ids: string[], color: string | null | undefined) => void;
+  localLayerColors: Record<string, LayerColorMeta | null>;
+  onChangeLocalLayerColor: (id: string, config: LayerColorMeta | null | undefined) => void;
   /** Opens sign-in modal when guest clicks login CTA in layer guidance */
   onOpenAuth?: () => void;
 }
@@ -462,6 +478,17 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   isRoomAdmin,
   isReadOnly,
   isOfflineCanvas = false,
+  canvasBgColor,
+  paperVisible,
+  onTogglePaperVisible,
+  localPaperColor,
+  onChangePaperColor,
+  paletteColorMode,
+  onChangePaletteColorMode,
+  localPaletteColors,
+  onChangeLocalPaletteColor,
+  localLayerColors,
+  onChangeLocalLayerColor,
   onOpenAuth,
 }) => {
   const { t } = useI18n();
@@ -474,6 +501,13 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   const canManage = (l: LayerModel) => (canManageProp ? canManageProp(l) : Boolean(user && l.ownerId === user.id));
   // Groups nest: a row's depth and whether a collapsed group above hides it
   const byId = new Map(layers.map((l) => [l.id, l]));
+  const displayMode = isOfflineCanvas ? 'shared' : paletteColorMode;
+  const paletteColorOf = (id: string, mode = displayMode) => resolveEffectivePaletteColor(id, byId, {
+    displayMode: mode,
+    localOverrides: isOfflineCanvas ? undefined : localPaletteColors,
+    ownerColorOf: (layer) => ownerColor(layer.ownerId, Boolean(byId.get(layer.id)?.isPublic)),
+  }).color;
+  const tintOf = (id: string) => resolveEffectiveLayerColor(id, byId, isOfflineCanvas ? undefined : localLayerColors);
   const ancestorsOf = (l: LayerModel) => {
     const out: LayerModel[] = [];
     for (let p = l.parentId ? byId.get(l.parentId) : undefined; p && out.length < 16; p = p.parentId ? byId.get(p.parentId) : undefined) out.push(p);
@@ -1030,6 +1064,18 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   const activeLayerMask = active ? maskOf.get(active.id) : undefined;
   const activeIsOwner = Boolean(active && user?.id === active.ownerId);
   const canEditActive = Boolean(!readOnly && active && activeIsOwner);
+  const paletteTargets = selectedLayerIds.size > 1
+    ? Array.from(selectedLayerIds).map((id) => byId.get(id)).filter((layer): layer is LayerModel => Boolean(layer))
+    : active ? [active] : [];
+  const canSyncPalette = Boolean(onUpdateLayerProps && !readOnly && paletteTargets.length
+    && paletteTargets.every((layer) => user?.id === layer.ownerId));
+  const changePaletteColor = (color: string | null | undefined, scope: ColorScope) => {
+    if (scope === 'local') {
+      onChangeLocalPaletteColor(paletteTargets.map((layer) => layer.id), color);
+    } else if (canSyncPalette && color !== undefined) {
+      for (const layer of paletteTargets) void onUpdateLayerProps?.(layer.id, { meta: { ...layer.meta, paletteColor: color } });
+    }
+  };
   const activeIsGroup = active?.layerType === 'group';
   const activeIsAdjustment = active?.layerType === 'adjustment';
   const descending = getSortedDescending();
@@ -1088,6 +1134,19 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
       <div className="shrink-0 space-y-1 border-b border-atelier-border px-2 py-1.5" aria-label={t.layers.title}>
         {/* Row 1: Blend mode + CSP checkered opacity bar + % */}
         <div className="flex items-center gap-1.5">
+          <LayerPaletteColorControl
+            key={active?.id}
+            labels={t.layers.colors}
+            color={active ? paletteColorOf(active.id) : null}
+            personalColor={active && !isOfflineCanvas ? paletteColorOf(active.id, 'personal') : null}
+            sharedColor={active ? paletteColorOf(active.id, 'shared') : null}
+            disabled={!paletteTargets.length || (isOfflineCanvas && !canSyncPalette)}
+            isOffline={isOfflineCanvas}
+            mode={displayMode}
+            canSync={canSyncPalette}
+            onChangeMode={onChangePaletteColorMode}
+            onChangeColor={changePaletteColor}
+          />
           <label className="sr-only" htmlFor="layer-blend">{t.layers.blendMode}</label>
           <select
             id="layer-blend"
@@ -1116,6 +1175,17 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
 
         {/* Row 2: Compact icon-only layer attribute, mask & ownership toggles */}
         <div className="flex flex-wrap items-center gap-0.5">
+          <LayerTintControls
+            key={activeLayerId}
+            labels={t.layers.colors}
+            layer={activeMask ? null : active}
+            isOffline={isOfflineCanvas}
+            canSync={canEditActive && Boolean(onUpdateLayerProps)}
+            localConfig={active ? localLayerColors[active.id] : undefined}
+            effective={tintOf(active?.id ?? '')}
+            onChangeLocal={onChangeLocalLayerColor}
+            onChangeShared={(id, props) => onUpdateLayerProps?.(id, props)}
+          />
           <button type="button" disabled={!canEditActive} aria-pressed={Boolean(active?.clipToBelow)}
             onClick={() => active && onUpdateLayerProps?.(active.id, { clipToBelow: !active.clipToBelow })}
             title={t.layers.clippingMaskTooltip} aria-label={t.layers.clippingMask} className={iconBtn(Boolean(active?.clipToBelow))}>
@@ -1498,7 +1568,6 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             const isClipped = Boolean(layer.clipToBelow);
             const isClippingBase = baseClippingIds.has(layer.id);
             const isBatchSelected = selectedLayerIds.has(layer.id);
-            const ownerTheme = getUserColor(layer.ownerId);
             const ownerDisplay = resolveLayerOwnerDisplay(layer, {
               currentUserId: user?.id ?? null,
               roomMembers,
@@ -1509,8 +1578,12 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                 painterPrefix: t.layers.painterPrefix,
               },
             });
-            const ownerHex = ownerDisplay.isPublicUnclaimed ? PUBLIC_COLOR : ownerTheme.hex;
+            const ownerHex = ownerColor(layer.ownerId, ownerDisplay.isPublicUnclaimed);
             const ownerDisplayName = ownerDisplay.label;
+            const paletteColor = paletteColorOf(layer.id);
+            const gutterStyle = paletteColor ? { backgroundColor: paletteColor, color: getPaletteContrastColor(paletteColor) } : undefined;
+            const tint = tintOf(layer.id);
+            const tintLabel = tint.source === 'local' ? t.layers.colors.localTint : t.layers.colors.sharedTint;
             const safeOriginalAuthor =
               layer.meta?.originalAuthor && (isOfflineCanvas || !isBlockedOnlineGuestName(layer.meta.originalAuthor))
                 ? layer.meta.originalAuthor
@@ -1627,27 +1700,30 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                   style={isOwner || layer.isPublic || !layer.ownerId ? undefined : { backgroundImage: `linear-gradient(90deg, ${ownerHex}22, ${ownerHex}08 50%, transparent)` }}
                 >
                   {/* Owner stripe */}
-                  <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-0 z-10 w-[3px]"
-                    style={{ backgroundColor: ownerHex }} />
+                  {!paletteColor && <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-0 z-10 w-[3px]"
+                    style={{ backgroundColor: ownerHex }} />}
                   {/* Dual eye gutter: synced eye + personal eye side-by-side in CSP density */}
-                  <div className="flex w-9 shrink-0 items-center justify-center gap-0.5 border-r border-neutral-800/60 pl-1" onClick={(e) => e.stopPropagation()}>
+                  <div className={`flex w-9 shrink-0 items-center justify-center gap-0.5 pl-1 ${paletteColor ? '' : 'border-r border-neutral-800/60'}`}
+                    style={gutterStyle} onClick={(e) => e.stopPropagation()}>
                     <button type="button" disabled={!canToggleVis} onClick={() => onToggleVisibility(layer)}
                       aria-label={layer.isVisible ? t.layers.hide : t.layers.show}
                       title={layer.isVisible ? t.layers.hide : t.layers.show}
-                      className="flex h-6 w-4 items-center justify-center rounded text-neutral-300 hover:bg-neutral-700/60 disabled:opacity-40">
-                      {layer.isVisible ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5 text-neutral-600" />}
+                      className={`flex h-6 w-4 items-center justify-center rounded ${paletteColor ? 'enabled:hover:bg-current/10' : 'text-neutral-300 enabled:hover:bg-neutral-700/60 disabled:opacity-40'}`}>
+                      {layer.isVisible ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className={`h-3.5 w-3.5 ${paletteColor ? '' : 'text-neutral-600'}`} />}
                     </button>
                     <button type="button" onClick={() => onToggleLocalVisibility?.(layer.id)}
                       aria-label={seenByMe ? t.layers.localHidden : t.layers.localVisible}
                       title={seenByMe ? t.layers.localHidden : t.layers.localVisible}
-                      className={`flex h-6 w-3.5 items-center justify-center rounded hover:bg-neutral-700/60 ${localOverride !== undefined ? 'text-amber-400' : 'text-neutral-500 opacity-65 hover:opacity-100'}`}>
+                      className={`flex h-6 w-3.5 items-center justify-center rounded ${paletteColor
+                        ? `hover:bg-current/10 ${localOverride !== undefined ? 'ring-1 ring-inset ring-current/50' : ''}`
+                        : `hover:bg-neutral-700/60 ${localOverride !== undefined ? 'text-amber-400' : 'text-neutral-500 opacity-65 hover:opacity-100'}`}`}>
                       {seenByMe ? <PersonalEye on /> : <PersonalEye on={false} />}
                     </button>
                   </div>
 
                   {isBatchMode && (
-                    <div className="flex w-5 shrink-0 items-center justify-center text-amber-400">
-                      {isBatchSelected ? <CheckSquare className="h-3.5 w-3.5" /> : <Square className="h-3.5 w-3.5 text-neutral-500" />}
+                    <div className={`flex w-5 shrink-0 items-center justify-center ${paletteColor ? '' : 'text-amber-400'}`} style={gutterStyle}>
+                      {isBatchSelected ? <CheckSquare className="h-3.5 w-3.5" /> : <Square className={`h-3.5 w-3.5 ${paletteColor ? '' : 'text-neutral-500'}`} />}
                     </div>
                   )}
 
@@ -1723,6 +1799,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                     <span className="flex min-w-0 items-center gap-1 truncate text-[10px] text-neutral-400">
                       <span className="shrink-0 tabular-nums">{pctText}</span>
                       <span className="shrink-0">{blendLabel(layer.blendMode)}</span>
+                      {tint.config && <LayerTintSwatch config={tint.config} label={tint.inherited ? t.layers.colors.inheritedTint.replace('{source}', tintLabel) : tintLabel} />}
                       <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: ownerHex }} />
                       <span className="truncate" title={safeOriginalAuthor ? t.layers.originalAuthor.replace('{author}', safeOriginalAuthor) : ownerDisplayName}>
                         {ownerDisplayName}
@@ -1779,6 +1856,17 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
         })()}
         {fileDropAtEnd && <div className="mx-2 h-0.5 rounded bg-indigo-400" />}
       </div>
+
+      <LayerPaperRow
+        labels={t.layers.colors}
+        canvasColor={canvasBgColor}
+        localColor={localPaperColor}
+        visible={paperVisible}
+        isOffline={isOfflineCanvas}
+        canSync={isAdmin && !readOnly}
+        onToggleVisible={onTogglePaperVisible}
+        onChangeColor={onChangePaperColor}
+      />
 
       {menu && (() => {
         const layer = layers.find((l) => l.id === menu.layerId);

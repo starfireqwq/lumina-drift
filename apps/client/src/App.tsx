@@ -162,6 +162,7 @@ export const App: React.FC = () => {
     layerUpdateEvent,
     layersSyncEvent,
     canvasResizedEvent,
+    canvasUpdatedEvent,
     reconnectServer,
     flushCanvasWrites,
     roomAccessError,
@@ -786,6 +787,16 @@ export const App: React.FC = () => {
     if (ev) setCanvases((prev) => prev.map((c) => (c.id === ev.canvasId ? { ...c, width: ev.width, height: ev.height } : c)));
   }, [canvasResizedEvent]);
 
+  useEffect(() => {
+    if (!canvasUpdatedEvent) return;
+    const { canvasId, title, bgColor, accessMode, updatedAt } = canvasUpdatedEvent;
+    setCanvases((prev) => prev.map((canvas) => {
+      if (canvas.id !== canvasId || canvas.updatedAt > updatedAt) return canvas;
+      const validMode = accessMode === 'invite' || accessMode === 'password' || accessMode === 'whitelist';
+      return { ...canvas, title, bgColor, accessMode: validMode ? accessMode : canvas.accessMode, updatedAt };
+    }));
+  }, [canvasUpdatedEvent]);
+
   // Real-time synchronization of Layer updates from Socket
   useEffect(() => {
     if (layersSyncEvent && layersSyncEvent.layers && layersSyncEvent.canvasId === activeCanvasId) {
@@ -828,6 +839,17 @@ export const App: React.FC = () => {
       setCanvases((prev) => prev.map((c) => (c.id === canvasId ? updated : c)));
     } catch (err: any) {
       alert(err.message || '無法重命名畫布');
+    }
+  };
+
+  const handleUpdateCanvasBgColor = async (canvasId: string, bgColor: string) => {
+    try {
+      const { title, bgColor: savedColor, accessMode, updatedAt } = await ApiService.updateCanvas(canvasId, { bgColor });
+      setCanvases((prev) => prev.map((canvas) => canvas.id === canvasId && canvas.updatedAt <= updatedAt
+        ? { ...canvas, title, bgColor: savedColor, accessMode, updatedAt }
+        : canvas));
+    } catch (error) {
+      console.warn('[canvas] Could not update paper color:', error);
     }
   };
 
@@ -1646,6 +1668,7 @@ export const App: React.FC = () => {
             <CanvasWorkspace
               folderAccess={folderAccess}
               canvas={currentCanvas}
+              onUpdateCanvasBgColor={currentCanvas ? (bgColor) => handleUpdateCanvasBgColor(currentCanvas.id, bgColor) : undefined}
               wrapAroundEnabled={wrapAroundEnabled}
               onToggleWrapAround={toggleWrapAround}
               activeLayer={activeLayer}

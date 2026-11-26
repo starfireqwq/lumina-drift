@@ -15,6 +15,7 @@ import {
   RenderTexture,
   Sprite,
   Texture,
+  TilingSprite,
   type TextureSource,
 } from 'pixi.js';
 // Overlay, soft light, colour dodge… are filter-based in Pixi 8 and fall back to normal without this
@@ -33,7 +34,9 @@ import {
 } from 'pixi.js';
 import { compressTileBuffer, decompressTileBuffer, DEFAULT_TILE_SIZE, type Affine2D, type BlendMode, type LayerModel, type TileCoord, type TileData } from '@atelier/shared';
 import { compileAdjustment, normalizeAdjustment, resolveAdjustmentScope, type LayerAdjustment } from '@atelier/shared';
+import { DEFAULT_LAYER_SUB_COLOR, resolveEffectiveLayerColor, type LayerColorMeta } from '@atelier/shared';
 import { AdjustmentFilter } from './adjustmentFilter';
+import { LayerColorFilter } from './layerColorFilter';
 import {
   adjustmentScopeIsFresh,
   adjustmentScopeKey,
@@ -262,6 +265,8 @@ class LayerItem implements PixiLayerItem {
   destroyed = false;
   thumb: { version: number; url: string } | null = null;
   screentoneFilter?: Filter | null;
+  layerColorFilter?: LayerColorFilter | null;
+  layerColorKey?: string;
   onionFilter?: Filter | null;
   maskFilters?: Map<string, MaskFilter>;
   /** On a layer with filters, the filter that does its blend mode (see syncLayers) */
@@ -311,6 +316,9 @@ export class LayerManager {
   private cols: number;
   private rows: number;
   private lastBgColor: string = '#FFFFFF';
+  private paperVisible = true;
+  private paperCheckerGraphic: TilingSprite | null = null;
+  private localLayerColors: Record<string, LayerColorMeta | null> = {};
   private layersMap = new Map<string, LayerItem>();
   private emptyContainer = new Container();
   private atlas: TileAtlas;
@@ -390,10 +398,10 @@ export class LayerManager {
 
     this.rootContainer = new Container();
 
-    // 1. Background checkerboard / color
+    // 1. Paper (the checkerboard is inserted below it when paper is hidden)
     this.backgroundGraphic = new Graphics();
-    this.updateBackground(this.lastBgColor);
     this.rootContainer.addChild(this.backgroundGraphic);
+    this.updateBackground(this.lastBgColor);
 
     // 2. Layers Container
     this.layersContainer = new Container();
@@ -438,16 +446,59 @@ export class LayerManager {
     if (this.pendingReadCount > 0) this.onFlushReads?.();
   }
 
-  public updateBackground(bgColor?: string) {
+  public setPaperVisible(visible: boolean): void {
+    if (visible !== this.paperVisible) this.updateBackground(undefined, visible);
+  }
+
+  public isPaperVisible(): boolean {
+    return this.paperVisible;
+  }
+
+  public updateBackground(bgColor?: string, visible = this.paperVisible) {
     const color = bgColor && bgColor.trim() !== '' ? bgColor : this.lastBgColor;
     this.lastBgColor = color;
+    this.paperVisible = visible;
+    this.backgroundGraphic.visible = visible;
     this.backgroundGraphic.clear();
 
     // Crisp edge-free paper rectangle (no dark border rim or stroke around canvas perimeter)
     this.backgroundGraphic
       .rect(0, 0, this.canvasWidth, this.canvasHeight)
       .fill({ color });
+
+    if (!visible && !this.paperCheckerGraphic) {
+      const size = 16;
+      const pixels = new Uint8Array(size * size * 4);
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const shade = (x < size / 2) === (y < size / 2) ? 224 : 192;
+          pixels.set([shade, shade, shade, 255], (y * size + x) * 4);
+        }
+      }
+      const source = new BufferImageSource({
+        resource: pixels, width: size, height: size, format: 'rgba8unorm', addressMode: 'repeat', scaleMode: 'nearest',
+      });
+      const checker = new TilingSprite({ texture: new Texture({ source }), width: this.canvasWidth, height: this.canvasHeight });
+      checker.eventMode = 'none';
+      this.paperCheckerGraphic = this.rootContainer.addChildAt(checker, this.rootContainer.getChildIndex(this.backgroundGraphic));
+    }
+    if (this.paperCheckerGraphic) {
+      this.paperCheckerGraphic.width = this.canvasWidth;
+      this.paperCheckerGraphic.height = this.canvasHeight;
+      this.paperCheckerGraphic.visible = !visible;
+    }
     this.onStageChange?.();
+  }
+
+  public setLocalLayerColors(overrides: Record<string, LayerColorMeta | null>): void {
+    const entries = Object.entries(overrides);
+    if (entries.length === Object.keys(this.localLayerColors).length && entries.every(([id, config]) => {
+      if (!Object.hasOwn(this.localLayerColors, id)) return false;
+      const prev = this.localLayerColors[id];
+      return prev?.enabled === config?.enabled && prev?.mainColor === config?.mainColor && prev?.subColor === config?.subColor;
+    })) return;
+    this.localLayerColors = Object.fromEntries(entries.map(([id, config]) => [id, config && { ...config }]));
+    if (this.lastSyncedLayers) this.syncLayers(this.lastSyncedLayers);
   }
 
   public syncLayers(layers: LayerModel[]) {
@@ -479,6 +530,19 @@ export class LayerManager {
         this.layersContainer.addChild(item.display);
       } else {
         item.model = model;
+      }
+
+      const { config } = resolveEffectiveLayerColor(model.id, byId, this.localLayerColors);
+      if (config) {
+        const { mainColor, subColor = DEFAULT_LAYER_SUB_COLOR } = config;
+        const key = `${mainColor}|${subColor}`;
+        if (!item.layerColorFilter) item.layerColorFilter = new LayerColorFilter(mainColor, subColor);
+        else if (item.layerColorKey !== key) item.layerColorFilter.setColors(mainColor, subColor);
+        item.layerColorKey = key;
+      } else if (item.layerColorFilter) {
+        item.layerColorFilter.destroy();
+        item.layerColorFilter = null;
+        item.layerColorKey = undefined;
       }
 
       // Groups can nest: every enclosing group's eye and opacity apply
@@ -721,11 +785,12 @@ export class LayerManager {
         item.screentoneFilter = null;
       }
 
-      // Screentone shapes the pixels, masks and clipping cut them, onion skin recolours what is left
-      const hasAnyFilter = Boolean(item.screentoneFilter || clip.length || masks.length || item.onionFilter);
+      // Colour follows screentone and precedes the clip, masks and onion skin.
+      const hasAnyFilter = Boolean(item.screentoneFilter || item.layerColorFilter || clip.length || masks.length || item.onionFilter);
       const activeFilters: Filter[] = hasAnyFilter
         ? [
             ...(item.screentoneFilter ? [item.screentoneFilter] : []),
+            ...(item.layerColorFilter ? [item.layerColorFilter] : []),
             ...clip,
             ...(masks.length ? maskFiltersOf() : []),
             ...(item.onionFilter ? [item.onionFilter] : []),
@@ -862,6 +927,7 @@ export class LayerManager {
         dep.model.meta?.maskInverted ? 'inv' : '',
         (dep.model as LayerModel & { onionTint?: number }).onionTint ?? '',
         dep.model.screentoneEnabled ? `st${dep.model.screentoneLpi},${dep.model.screentoneAngle},${dep.model.screentoneDotScale}` : '',
+        dep.layerColorKey ?? '',
         // A resident layer drawn on as a whole texture does not bump its version per dab
         drawing && id === this.activeId ? performance.now() : '',
       ].join(';');
@@ -1320,15 +1386,19 @@ export class LayerManager {
     }
     const repeats = this.wrapAroundContainer;
     const shapeOverlay = this.wrapShapeOverlay;
+    const checker = this.paperCheckerGraphic;
     const repeatsVisible = repeats?.visible ?? false;
     const shapeVisible = shapeOverlay?.visible ?? false;
+    const checkerVisible = checker?.visible ?? false;
     if (repeats) repeats.visible = false;
     if (shapeOverlay) shapeOverlay.visible = false;
+    if (checker) checker.visible = false;
     try {
       return fn();
     } finally {
       if (repeats) repeats.visible = repeatsVisible;
       if (shapeOverlay) shapeOverlay.visible = shapeVisible;
+      if (checker) checker.visible = checkerVisible;
       for (let i = tempCold.length - 1; i >= 0; i--) {
         const { item, key, cpu } = tempCold[i];
         const t = item.gpu?.get(key);
@@ -3135,6 +3205,7 @@ export class LayerManager {
       if (!item.shown && item.model.layerType !== 'mask') continue;
       acc += `|${item.model.id}:${item.version}:${item.model.sortOrder}:${item.display.alpha}:${item.model.blendMode}`;
       if (item.adjust) acc += `:${item.adjust.paramsKey}`;
+      if (item.layerColorKey) acc += `:${item.layerColorKey}`;
     }
     return acc;
   }
@@ -3882,6 +3953,7 @@ export class LayerManager {
     item.cleanCache.clear();
     this.layersContainer.removeChild(item.display);
     item.maskFilters?.forEach((f) => f.destroy());
+    item.layerColorFilter?.destroy();
     item.blendFilter?.filter.destroy();
     if (item.adjust) {
       item.display.filters = null;
@@ -3942,6 +4014,8 @@ export class LayerManager {
     this.pendingReadCount = 0;
     this.mips.destroy();
     this.atlas.destroy();
+    this.paperCheckerGraphic?.destroy({ texture: true, textureSource: true });
+    this.paperCheckerGraphic = null;
     this.rootContainer.destroy({ children: true });
   }
 
