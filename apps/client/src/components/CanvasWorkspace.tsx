@@ -261,6 +261,7 @@ import {
 } from '@atelier/shared';
 import { VectorOverlay } from './VectorOverlay';
 import { VectorEngine } from '../engine/VectorEngine';
+import { SoftProofController } from '../engine/color/SoftProofController';
 import { filterDraftFactor, filterFitsLayer, filterLabel, filterPointParam, getFilter, type FilterJob } from '../utils/filterRegistry';
 import { filterPoint } from '../utils/filterPoint';
 import { FilterWorkerClient } from '../engine/filterWorkerClient';
@@ -1834,6 +1835,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     let syncDisplayResolution: ((nextWidth?: number, nextHeight?: number) => void) | null = null;
     let unbindDprWatcher: (() => void) | null = null;
     let themeObserver: MutationObserver | null = null;
+    let softProof: SoftProofController | null = null;
     let renderRaf = 0;
     let handleKeyDown: ((ev: KeyboardEvent) => void) | null = null;
     let handleKeyUp: ((ev: KeyboardEvent) => void) | null = null;
@@ -2089,9 +2091,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
       const vectorEngine = new VectorEngine(tileEngine, canvas.width, canvas.height);
       vectorEngineRef.current = vectorEngine;
+      // Soft proofing (view only): recolours this screen, never the layers, exports or other painters
+      softProof = new SoftProofController({ target: viewport.rootContainer, requestRender: scheduleRender });
       // Test hooks: the undo history (ops carry their foreign-pixel masks) lets browser checks explain an undo
       (window as any).__debugPixi = {
         app, viewport, layerManager, tileEngine, selectionEngine, vectorEngine, animationEngine: timeline,
+        softProof,
         rulerManager: RulerManager.getInstance(),
         undo: scopedUndoRef.current, tileToRgba,
         autoActions: autoActionsDebug,
@@ -2680,6 +2685,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       liquifyEngineRef.current = null;
       blurSmudgeEngineRef.current = null;
       shapeGraphicRef.current = null;
+      softProof?.dispose();
+      softProof = null;
       if ((window as any).__debugPixi?.app === app) delete (window as any).__debugPixi;
       pipeline?.destroy();
       selection?.destroy();
