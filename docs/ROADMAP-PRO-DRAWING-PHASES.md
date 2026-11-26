@@ -18,7 +18,7 @@
 | **Phase 4** | 子視圖面板（Sub View）、色彩歷史／混色盤與桌面右鍵快顯輪盤（Pop-up Palette） | `v1.4.0-beta.1` | `/teamwork` | `已完成` | 2026-11-26 / `0129f04` |
 | **Phase 5** | 快速形狀（QuickShape）、操控變形（Puppet Warp）與四方連續平鋪（Wrap-Around） | `v1.4.0` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-26 / `7b3351b` |
 | **Phase 6** | 非破壞性調整圖層（Adjustment / Correction Layers）完整管線 | `v1.5.0-alpha` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-26 / `4b402b8` |
-| **Phase 7** | 自動動作／巨集錄製（Auto Actions）與文字排版引擎深化 | `v1.5.0-beta` | `/teamwork` | `未開始` | — |
+| **Phase 7** | 自動動作／巨集錄製（Auto Actions）與文字排版引擎深化 | `v1.5.0-beta` | `/teamwork` | `已完成` | 2026-11-26 / `4296304` |
 | **Phase 8** | 商業印刷色彩管理（CMYK 軟校樣 / ICC）與雙向 `.kra` 匯出 | `v1.5.0` | 單聊天室 或 `/teamwork` | `未開始` | — |
 
 ---
@@ -228,12 +228,12 @@
 > **目標**：為高產插畫／漫畫創作者提供批次自動化流程（CSP / PS Auto Actions），同時將文字工具升級至可應付商業嵌字與封面排版的水準（對齊 Krita 5.3 / CSP）。
 
 #### 任務清單
-- [ ] **7.1 自動動作／巨集系統（Auto Actions）**
+- [x] **7.1 自動動作／巨集系統（Auto Actions）**
   - 建立 `ActionRecorder.ts` 與 `AutoActionsPanel.tsx`（可停靠於 Dock）。
   - 支援錄製、暫停、編輯步驟清單、重新排序、單步停用與一鍵播放：涵蓋新增／複製／合併／刪除圖層、切換混合模式與不透明度、套用濾鏡、建立調整圖層、選區擴張／反轉／清除、線稿抽色等高頻指令。
   - 整個動作播放包裹於單一 `groupId` 交易中（一次 Ctrl+Z 完整撤銷）；支援匯入／匯出 `.lumina-action` JSON 分享給社群。
   - 內建 5～8 個實用預設動作（如「線稿自動發光氛圍」、「一鍵建立陰影剪裁層」、「角色貼紙白邊外框」、「色差濾鏡後製」）。
-- [ ] **7.2 文字排版引擎深化**
+- [x] **7.2 文字排版引擎深化**
   - 擴充 `LayerTextMeta`（向後相容既有純字串欄位）支援：
     - 富文本區段（局部文字改色、字級、粗體／斜體）
     - 字距（Tracking / Letter-spacing）與行距精調
@@ -247,9 +247,11 @@
 - 隔離式 Electron 實測：實際錄製「複製層 → 高斯模糊 → 濾色 40%」動作並對另一圖層重播且可一次 Ctrl+Z 復原；文字層支援局部改色、描邊置後與存檔重開可再編輯。
 
 #### 交接紀錄
-- 狀態：`未開始`
-- 完成 Commit：`待填`
-- 備註：`—`
+- 狀態：`已完成`
+- 完成 Commit：`ad9bf0f`（7.1 `ActionRecorder.ts`：12 種步驟、錄製／暫停／合併連續滑桿、步驟編輯、`.lumina-action` 匯入匯出防護、7 個內建動作、單一 `groupId` 播放與失敗回滾；`ScopedUndoManager` 群組擷取；shared `ScopedUndoOp.propsBefore/propsAfter`）、`c58c880`（7.2 shared `LayerTextMeta` 富文本欄位與 `text-meta.ts`、`textLayer.ts` 純版面計算／方塊換行／避頭尾／直排括號旋轉與小寫假名、描邊置後／置前與陰影渲染）、`7710ebf`（7.2 `TextCanvasEditor.tsx` 局部樣式、字距行距、對齊、可拖曳換行方塊、描邊順序與陰影、版面一致的游標與選取、說明中心）、`9ab54da`（7.1 `autoActionHost.ts` 畫布整合、錄製掛鉤、`LAYER_PROPS` 屬性復原、播放期間鎖輸入、`AutoActionsPanel.tsx` Dock／手機 sheet、四語系與說明主題）、`4296304`（Phase 7 自檢接入 `ui-logic.check.ts` 與隔離式 Electron 實測腳本）
+- 設計重點：播放時 `ScopedUndoManager.beginGroup` 讓期間推入的所有 op（建立／刪除圖層、濾鏡 tile、屬性、選區）共用同一個 `groupId`，一次 Ctrl+Z／Ctrl+Y 撤銷或重做整段；任一步失敗即撤銷該群組並從 redo 移除。複製步驟不覆蓋使用者的圖層剪貼簿。錄製只掛在使用者入口（Ctrl+J／選單複製、新增點陣圖層、合併、刪除、混合模式／不透明度／剪裁、就地套用濾鏡、建立與修改調整圖層、選區反轉／擴張收縮／取消），播放時自動抑制錄製。文字新欄位全為選填，舊資料與舊房間照舊顯示；伺服端 meta 仍為 JSON 直通（32KB 上限），不需改伺服端。
+- 備註：2026-11-26 完成全套驗證：`pnpm --filter @atelier/shared build`、`pnpm --filter @atelier/client build`、`pnpm --filter @atelier/client build:electron`、`pnpm --filter @atelier/server test`（18 階段全過）、`ui-logic.check.ts`（新增 5 個 Phase 7 區段：動作錄製與 `.lumina-action` 序列化還原、36 步以上長動作單步復原交易包裹、host 錯誤代碼與屬性復原、面板標籤與 Dock 遷移、富文本與直排換行邊界、舊版 `LayerTextMeta` 相容、編輯器狀態）、`i18n-coverage.check.ts`（4 語系 2,164 鍵全對齊）；隔離式 Electron 實測 `apps/client/scripts/phase7-actions-text-electron-smoke.check.cjs` 第一輪即全數通過（單機：從實際 UI 錄製「複製層 → 高斯模糊 10 → 濾色 40%」恰為 4 步、對另一圖層重播產生正上方 Screen 40% 光暈層且來源像素不變、一次 Ctrl+Z／重做／Ctrl+Z 整段往返、內建陰影剪裁層一次復原、匯入含未知步驟的 `.lumina-action` 略過 1 步、文字局部改紅＋白色描邊、描邊置前紅色像素減少且復原誤差 ≤2%、同一 user-data-dir 重開後文字樣式可再編輯；`PORT=0` 雙人：畫友 B 收到重播的 Screen 40% 圖層、一次復原與相同文字樣式段，全程 0 頁錯）。另以內建瀏覽器檢視日文介面 1440×900 與 375×812：面板與文字工具列（含「更多」popover）皆無裁切。
+- 已知限制：使用者在圖層面板手動改屬性仍不進復原堆疊（維持原習慣，只有動作播放會記錄）；濾鏡「套用到新圖層」與一般貼上不錄製；插件濾鏡步驟依賴該插件已安裝；同行混合字級的基線為近似值（下移 (最大字級 − 字級) × 0.8）；字型下拉的名稱（黑體／明體等）沿用既有中文標籤；Codex 沙箱無 pnpm 且需暫時 preload 處理 `uv_os_get_passwd`，所有驗證均由主代理以 pnpm／tsx 重跑。
 
 ---
 
