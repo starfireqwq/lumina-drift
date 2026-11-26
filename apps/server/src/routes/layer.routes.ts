@@ -188,7 +188,9 @@ export const layerRoutes: FastifyPluginAsync = async (fastify) => {
 
         try {
           const updated = updateLayer(layerId, props);
-          if (updated.layerType === 'adjustment') fastify.roomManager.broadcastLayerUpdated(updated, 'update', user.displayName);
+          if (updated.layerType === 'adjustment' || (props.meta != null && Object.hasOwn(props.meta, 'effects'))) {
+            fastify.roomManager.broadcastLayerUpdated(updated, 'update', user.displayName);
+          }
           return reply.send({ layer: updated });
         } catch (err: any) {
           return reply.code(400).send({ error: err.message });

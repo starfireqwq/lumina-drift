@@ -1,9 +1,9 @@
 import { PNG } from 'pngjs';
 import {
-  applyAdjustmentStep, blendComponent, compileAdjustment, DEFAULT_TILE_SIZE, decompressTileBuffer,
-  normalizeAdjustment, resolveAdjustmentScope,
+  applyAdjustmentStep, applyLayerEffectsToRgba, blendComponent, compileAdjustment, DEFAULT_TILE_SIZE, decompressTileBuffer,
+  hasActiveLayerEffects, normalizeAdjustment, resolveAdjustmentScope,
   evaluateTransformKeyframes, IDENTITY_AFFINE, multiplyAffine, transformToAffineMatrix,
-  type Affine2D, type CanvasModel, type LayerModel, type LayerTileSnapshot, type TileData,
+  type Affine2D, type CanvasModel, type LayerEffectsMeta, type LayerModel, type LayerTileSnapshot, type TileData,
 } from '@atelier/shared';
 import { sampleVectors } from './share-preview-vector';
 
@@ -221,6 +221,23 @@ export function renderSharePreview(source: SharePreviewSource, snapshots: LayerT
     }
     if (!layer.clipToBelow) clipBase = paint;
     if (!paint) continue;
+    if (hasActiveLayerEffects(layer.meta?.effects)) {
+      const fx = layer.meta!.effects as LayerEffectsMeta;
+      const scaled: LayerEffectsMeta = {
+        enabled: fx.enabled,
+        border: fx.border ? { ...fx.border, width: Math.max(1, fx.border.width * scale), watercolorBlur: (fx.border.watercolorBlur ?? 3) * scale } : null,
+        dropShadow: fx.dropShadow ? {
+          ...fx.dropShadow,
+          offsetX: Math.round(fx.dropShadow.offsetX * scale),
+          offsetY: Math.round(fx.dropShadow.offsetY * scale),
+          blur: fx.dropShadow.blur * scale,
+          spread: (fx.dropShadow.spread ?? 0) * scale,
+        } : null,
+        outerGlow: fx.outerGlow ? { ...fx.outerGlow, radius: fx.outerGlow.radius * scale, spread: (fx.outerGlow.spread ?? 0) * scale } : null,
+        colorOverlay: fx.colorOverlay ? { ...fx.colorOverlay } : null,
+      };
+      paint = applyLayerEffectsToRgba(paint, width, height, scaled);
+    }
     const angle = ((layer.screentoneAngle ?? 45) * Math.PI) / 180;
     const cos = Math.cos(angle);
     const sin = Math.sin(angle);

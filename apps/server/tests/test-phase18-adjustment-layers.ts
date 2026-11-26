@@ -158,6 +158,53 @@ async function runTest() {
     assert.equal(cleared.status, 200);
     assert.deepEqual(cleared.data.layer.meta, {});
 
+    // v1.5 Phase 4: Layer & Folder Effects persistence, normalization, validation, and realtime sync
+    const effectsPayload = {
+      enabled: true,
+      border: { enabled: true, mode: 'watercolor', width: 6, color: ' #123 ', opacity: 0.9, antiAlias: true, watercolorDarkness: 0.6, watercolorBlur: 4 },
+      dropShadow: { enabled: true, color: '#000', opacity: 0.5, offsetX: 8, offsetY: 10, blur: 12, spread: 2 },
+      outerGlow: { enabled: true, color: '#0af', opacity: 0.7, radius: 10, spread: 1 },
+      colorOverlay: { enabled: true, color: '#f0a', opacity: 0.4, blendMode: 'multiply' },
+    };
+    const expectedEffects = {
+      enabled: true,
+      border: { enabled: true, mode: 'watercolor', width: 6, color: '#112233', opacity: 0.9, antiAlias: true, watercolorDarkness: 0.6, watercolorBlur: 4 },
+      dropShadow: { enabled: true, color: '#000000', opacity: 0.5, offsetX: 8, offsetY: 10, blur: 12, spread: 2 },
+      outerGlow: { enabled: true, color: '#00AAFF', opacity: 0.7, radius: 10, spread: 1 },
+      colorOverlay: { enabled: true, color: '#FF00AA', opacity: 0.4, blendMode: 'multiply' },
+    };
+    const [fxPatch, fxBroadcast] = await Promise.all([
+      api(alice, 'PATCH', rasterUrl, { meta: { effects: effectsPayload } }),
+      nextEvent<{ canvasId: string; layer: { id: string; meta?: { effects?: unknown } } }>(sb, 'layer_updated'),
+    ]);
+    assert.equal(fxPatch.status, 200);
+    assert.deepEqual(fxPatch.data.layer.meta, { effects: expectedEffects });
+    assert.equal(fxBroadcast.layer.id, raster.data.layer.id);
+    assert.deepEqual(fxBroadcast.layer.meta, { effects: expectedEffects });
+
+    const groupWithEffects = await api(alice, 'POST', url, {
+      name: 'Styled Folder',
+      layerType: 'group',
+      meta: { effects: { enabled: true, border: { enabled: true, mode: 'edge', width: 3, color: '#fff', opacity: 1 } } },
+    });
+    assert.equal(groupWithEffects.status, 201);
+    assert.equal(groupWithEffects.data.layer.meta.effects.border.color, '#FFFFFF');
+
+    for (const badEffects of [
+      { effects: { enabled: 'yes' } },
+      { effects: { enabled: true, border: { enabled: true, mode: 'invalid', width: 3, color: '#fff', opacity: 1 } } },
+      { effects: { enabled: true, dropShadow: { enabled: true, color: '#zzzzzz', opacity: 0.5, offsetX: 2, offsetY: 2, blur: 4 } } },
+      { effects: { enabled: true, colorOverlay: { enabled: true, color: '#112233', opacity: 0.5, blendMode: 'bad' } } },
+    ]) {
+      const badRes = await api(alice, 'PATCH', rasterUrl, { meta: badEffects });
+      assert.equal(badRes.status, 400);
+      assert.deepEqual(badRes.data, { error: '圖層樣式參數無效' });
+    }
+    const fxCleared = await api(alice, 'PATCH', rasterUrl, { meta: { effects: null } });
+    assert.equal(fxCleared.status, 200);
+    assert.deepEqual(fxCleared.data.layer.meta, {});
+    assert.equal((await api(alice, 'DELETE', `${url}/${groupWithEffects.data.layer.id}`)).status, 200);
+
     const canvasUrl = `/api/canvases/${canvasId}`;
     const [canvasPatch, canvasEvent] = await Promise.all([
       api(alice, 'PATCH', canvasUrl, { bgColor: ' #a3d ' }),
