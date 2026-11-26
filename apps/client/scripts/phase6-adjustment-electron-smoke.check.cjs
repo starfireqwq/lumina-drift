@@ -430,7 +430,7 @@ async function compareExportPng(page, dims) {
   });
   try {
     await page.getByTitle('File', { exact: true }).filter({ visible: true }).click();
-    await page.getByRole('menuitem', { name: /Export \(PNG\/PSD\/ORA\)/ }).click();
+    await page.getByRole('menuitem', { name: /Export \(PNG\/PSD\/ORA/ }).click();
     const dialog = page.getByRole('dialog', { name: 'Multi-Layer Artwork Export', exact: true });
     await dialog.getByRole('radio', { name: /^Flattened PNG \(with background\)/ }).click();
     await dialog.getByRole('button', { name: 'Download Now', exact: true }).click();
