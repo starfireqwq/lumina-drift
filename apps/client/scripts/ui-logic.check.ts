@@ -112,6 +112,7 @@ import { getBoxPivotCanvasPoint, type TransformBox } from '../src/utils/transfor
 import { normalizeLuminaLayers } from '../src/engine/LuminaProjectEngine';
 import { combineMaskCoverages, isAdjustmentItem } from '../src/engine/layerComposite';
 import { luminaToPsdAdjustment, psdIsolatedGroupIds, psdToLuminaAdjustment } from '../src/engine/psdAdjustmentMapping';
+import { adjustmentScopeIsFresh, adjustmentScopeKey, adjustmentScopeRenderResolution, MAX_SCOPE_PIXELS } from '../src/engine/adjustmentView';
 import {
   applyKeyframeHandleDrag,
   buildKeyframeFromEval,
@@ -6628,4 +6629,27 @@ console.log('ui-logic checks passed');
   ];
   assert.deepStrictEqual([...psdIsolatedGroupIds(stack)], ['g1']);
   console.log('Phase 6 adjustment layer PSD compatibility checks passed');
+}
+
+// Phase 6: adjustment layers (live view bookkeeping)
+{
+  assert.equal(adjustmentScopeRenderResolution(4000, 3000), 1);
+  const big = adjustmentScopeRenderResolution(10000, 8000);
+  assert.ok(big < 1 && Math.abs(10000 * 8000 * big * big - MAX_SCOPE_PIXELS) < 1);
+  // A composite for the whole canvas also serves the view; a view composite only that same view
+  assert.equal(adjustmentScopeIsFresh('k', 'full', 'k', 'view:1'), true);
+  assert.equal(adjustmentScopeIsFresh('k', 'view:1', 'k', 'view:1'), true);
+  assert.equal(adjustmentScopeIsFresh('k', 'view:1', 'k', 'view:2'), false);
+  assert.equal(adjustmentScopeIsFresh('k', 'view:1', 'k', 'full'), false);
+  assert.equal(adjustmentScopeIsFresh('k', 'full', 'k2', 'full'), false);
+  assert.equal(adjustmentScopeIsFresh('', 'full', '', 'full'), false);
+  const dep = { id: 'a', version: 3, visible: true, renderable: true, alpha: 1, blendMode: 'normal', clipToBelow: false, sortOrder: 10, updatedAt: 5, transform: [0, 0, 1, 1, 0, 0, 0] };
+  const base = adjustmentScopeKey('group', [dep]);
+  assert.equal(adjustmentScopeKey('group', [dep]), base);
+  // Any pixel, visibility, opacity, blend, order, transform or nested change makes a new key
+  for (const change of [{ version: 4 }, { visible: false }, { alpha: 0.5 }, { blendMode: 'multiply' }, { sortOrder: 20 }, { transform: [1, 0, 1, 1, 0, 0, 0] }, { extra: 'x' }, { updatedAt: 6 }]) {
+    assert.notEqual(adjustmentScopeKey('group', [{ ...dep, ...change }]), base, JSON.stringify(change));
+  }
+  assert.notEqual(adjustmentScopeKey('clip', [dep]), base);
+  console.log('Phase 6 adjustment layer live view bookkeeping checks passed');
 }

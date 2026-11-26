@@ -32,6 +32,15 @@ import {
   SubtractBlend,
 } from 'pixi.js';
 import { compressTileBuffer, decompressTileBuffer, DEFAULT_TILE_SIZE, type Affine2D, type BlendMode, type LayerModel, type TileCoord, type TileData } from '@atelier/shared';
+import { compileAdjustment, normalizeAdjustment, resolveAdjustmentScope, type LayerAdjustment } from '@atelier/shared';
+import { AdjustmentFilter } from './adjustmentFilter';
+import {
+  adjustmentScopeIsFresh,
+  adjustmentScopeKey,
+  adjustmentScopeRenderResolution,
+  type AdjustmentView,
+  type ScopeDependencyState,
+} from './adjustmentView';
 import { normalizeTileBytes } from './TileEngine';
 import { applyMagFilter, ATLAS_MIP_LEVELS, GUTTER, PITCH, TileAtlas, type MagFilter, type Slot } from './TileAtlas';
 import { fullMipLevels, MipmapView } from './MipmapView';
@@ -257,6 +266,8 @@ class LayerItem implements PixiLayerItem {
   maskFilters?: Map<string, MaskFilter>;
   /** On a layer with filters, the filter that does its blend mode (see syncLayers) */
   blendFilter: { mode: string; filter: Filter } | null = null;
+  /** On an adjustment layer (no pixels): the quad its filter recolours through, and its scope texture */
+  adjust: AdjustmentView | null = null;
 
   constructor(public model: LayerModel, private host: LayerManager) {}
 
@@ -440,6 +451,7 @@ export class LayerManager {
   }
 
   public syncLayers(layers: LayerModel[]) {
+    this.lastSyncedLayers = layers;
     const existingIds = new Set(this.layersMap.keys());
     const sorted = Array.from(new Map(layers.map((layer) => [layer.id, layer])).values())
       .sort((a, b) => a.sortOrder - b.sortOrder);
@@ -491,7 +503,9 @@ export class LayerManager {
       item.display.alpha = effectiveAlpha;
       item.display.zIndex = model.sortOrder;
       item.sprite.visible = true;
-      const rt = (model as LayerModel & { renderTransform?: Affine2D }).renderTransform;
+      if (model.layerType === 'adjustment' && !item.adjust) this.createAdjustmentView(item);
+      // An adjustment layer acts on the canvas as it is: it never moves
+      const rt = model.layerType === 'adjustment' ? undefined : (model as LayerModel & { renderTransform?: Affine2D }).renderTransform;
       if (rt && !rt.isIdentity) {
         item.display.setFromMatrix(new Matrix(rt.a, rt.b, rt.c, rt.d, rt.tx, rt.ty));
         item.hasAnimatedTransform = true;
@@ -548,6 +562,27 @@ export class LayerManager {
       while (baseIndex > 0 && (drawable[baseIndex].clipToBelow || drawable[baseIndex].layerType === 'mask')) baseIndex--;
       return drawable[baseIndex];
     };
+    const drawableIndex = new Map(drawable.map((m, i) => [m.id, i]));
+    /** A scope composite is drawn from its members, their masks, and the clip bases (with masks) they use */
+    const adjustmentDependencies = (memberIds: readonly string[]): string[] => {
+      const ids = new Set<string>();
+      for (const id of memberIds) {
+        const member = byId.get(id);
+        const i = drawableIndex.get(id);
+        if (!member || i === undefined) continue;
+        ids.add(id);
+        for (const m of masksFor(member)) ids.add(m.id);
+        if (member.clipToBelow && i > 0) {
+          const base = clipBaseOf(i);
+          ids.add(base.id);
+          const own = maskOf.get(base.id);
+          if (own) ids.add(own.id);
+        }
+      }
+      return [...ids];
+    };
+    this.adjustmentOrder = drawable.filter((m) => m.layerType === 'adjustment').map((m) => m.id);
+    for (const id of [...this.adjustmentPreviews.keys()]) if (!byId.has(id)) this.adjustmentPreviews.delete(id);
 
     // Filters sample masks and clipping bases as whole textures, and screentone works in canvas
     // pixels: those stay resident. On-screen layers (and the one being edited) get their tiles on the GPU.
@@ -557,8 +592,9 @@ export class LayerManager {
       const model = drawable[i];
       const item = this.layersMap.get(model.id)!;
       if (model.layerType === 'mask') this.structuralPins.add(model.id);
-      if (item.shown && model.screentoneEnabled) this.structuralPins.add(model.id);
-      if (item.shown && model.clipToBelow && i > 0) this.structuralPins.add(clipBaseOf(i).id);
+      if (item.shown && model.screentoneEnabled && !item.adjust) this.structuralPins.add(model.id);
+      // An adjustment base is clipped to through its mask only (it has no pixels to keep resident)
+      if (item.shown && model.clipToBelow && i > 0 && clipBaseOf(i).layerType !== 'adjustment') this.structuralPins.add(clipBaseOf(i).id);
     }
     let needsReheat = false;
     for (const item of this.layersMap.values()) {
@@ -601,12 +637,65 @@ export class LayerManager {
           return s ? [maskFilter(`mask:${m.id}`, s, { inverse: Boolean(m.meta?.maskInverted) })] : [];
         });
 
+      // Adjustment layer: its quad through its own / group masks (the coverage), then the adjustment
+      if (item.adjust) {
+        const view = item.adjust;
+        const adjustment = normalizeAdjustment(this.adjustmentPreviews.get(model.id) ?? model.meta?.adjustment);
+        const compiled = adjustment ? compileAdjustment(adjustment) : null;
+        const scope = resolveAdjustmentScope(sorted, model.id);
+        const active = Boolean(compiled && !compiled.identity && scope.kind !== 'none');
+        view.scope = scope;
+        view.dependencyIds = active && (scope.kind === 'clip' || scope.kind === 'group') ? adjustmentDependencies(scope.memberIds) : [];
+        if (active) {
+          const key = `${JSON.stringify(adjustment)}|${model.blendMode}|${scope.kind}`;
+          if (key !== view.paramsKey) {
+            view.filter.setAdjustment(compiled!, model.blendMode, scope.kind !== 'root');
+            view.paramsKey = key;
+          }
+          view.filter.scopeSprite = scope.kind === 'root' ? null : view.scopeSprite;
+        } else {
+          view.paramsKey = '';
+        }
+        if (!active || scope.kind === 'root') this.releaseAdjustmentScope(view);
+        const maskList = active ? maskFiltersOf() : [];
+        // Everything below is redrawn through this layer: masks at screen resolution, cut to the view
+        for (const f of maskList) {
+          f.resolution = 'inherit';
+          f.clipToViewport = true;
+        }
+        if (item.maskFilters?.size) {
+          for (const [key, f] of item.maskFilters) if (!used?.has(key)) f.destroy();
+        }
+        item.maskFilters = used;
+        item.screentoneFilter = null;
+        if (item.blendFilter) {
+          item.blendFilter.filter.destroy();
+          item.blendFilter = null;
+        }
+        if (item.display.blendMode !== 'normal') item.display.blendMode = 'normal';
+        // Never draw the white quad without its filter
+        item.display.renderable = active;
+        const filters: Filter[] = active ? [...maskList, view.filter] : [];
+        const prev = item.display.filters;
+        if (!filters.length) {
+          if (prev !== null) item.display.filters = null;
+        } else if (!(prev && prev.length === filters.length && filters.every((f, idx) => prev[idx] === f))) {
+          item.display.filters = filters;
+        }
+        continue;
+      }
+
       // Clipping (不會塗出去): only where the base below shows, after the base's own mask
       const clip: Filter[] = [];
       if (hasClip) {
         const base = clipBaseOf(i);
         const baseItem = this.layersMap.get(base.id);
-        if (baseItem?.rt && base.layerType !== 'mask') {
+        if (baseItem?.adjust) {
+          // Clipped onto an adjustment layer: it is opaque white where its own mask shows
+          const own = maskOf.get(base.id);
+          const ownSprite = own && this.layersMap.get(own.id)?.sprite;
+          if (own && ownSprite) clip.push(maskFilter(`clipmask:${own.id}`, ownSprite, { inverse: Boolean(own.meta?.maskInverted) }));
+        } else if (baseItem?.rt && base.layerType !== 'mask') {
           clip.push(maskFilter(`clip:${base.id}`, baseItem.sprite, { alpha: true }));
           const own = maskOf.get(base.id);
           const ownSprite = own && this.layersMap.get(own.id)?.sprite;
@@ -693,6 +782,165 @@ export class LayerManager {
     return filter;
   }
 
+  /* ---------- Adjustment layers (調整圖層) ---------- */
+
+  /** Edit-dialog previews: parameters shown instead of the layer's own, on this screen only */
+  private adjustmentPreviews = new Map<string, LayerAdjustment>();
+  /** Adjustment layers bottom to top (their scope composites are refreshed in this order) */
+  private adjustmentOrder: string[] = [];
+  private lastSyncedLayers: LayerModel[] | null = null;
+
+  private createAdjustmentView(item: LayerItem) {
+    const quad = new Sprite(Texture.WHITE);
+    quad.label = 'adjustment-quad';
+    quad.width = this.canvasWidth;
+    quad.height = this.canvasHeight;
+    item.display.addChild(quad);
+    item.adjust = {
+      quad,
+      filter: new AdjustmentFilter(),
+      paramsKey: '',
+      scope: { kind: 'root' },
+      dependencyIds: [],
+      scopeRT: null,
+      scopeSprite: null,
+      scopeKey: '',
+      scopeMode: '',
+    };
+  }
+
+  private releaseAdjustmentScope(view: AdjustmentView) {
+    // Unbound first: a texture destroyed while bound to the shader warns (and may be sampled once more)
+    view.filter.clearScope();
+    if (view.scopeSprite) {
+      view.scopeSprite.parent?.removeChild(view.scopeSprite);
+      view.scopeSprite.destroy();
+    }
+    view.scopeRT?.destroy(true);
+    view.scopeRT = null;
+    view.scopeSprite = null;
+    view.scopeKey = '';
+    view.scopeMode = '';
+  }
+
+  /**
+   * Shows `adjustment` instead of the layer's own parameters (the edit dialog's live preview, on
+   * this screen only — nothing is saved or sent); null goes back to the layer's parameters.
+   */
+  public setAdjustmentPreview(layerId: string, adjustment: LayerAdjustment | null) {
+    const normalized = adjustment ? normalizeAdjustment(adjustment) : null;
+    if (normalized) this.adjustmentPreviews.set(layerId, normalized);
+    else if (!this.adjustmentPreviews.delete(layerId)) return;
+    const item = this.layersMap.get(layerId);
+    if (!item?.adjust || !this.lastSyncedLayers) return;
+    // Same scope, new parameters: only the filter changes (a slider drag stays cheap)
+    const view = item.adjust;
+    const shown = normalizeAdjustment(normalized ?? item.model.meta?.adjustment);
+    const compiled = shown ? compileAdjustment(shown) : null;
+    const active = Boolean(compiled && !compiled.identity && view.scope.kind !== 'none');
+    if (active && view.paramsKey) {
+      const key = `${JSON.stringify(shown)}|${item.model.blendMode}|${view.scope.kind}`;
+      if (key !== view.paramsKey) {
+        view.filter.setAdjustment(compiled!, item.model.blendMode, view.scope.kind !== 'root');
+        view.paramsKey = key;
+      }
+      this.onStageChange?.();
+      return;
+    }
+    this.syncLayers(this.lastSyncedLayers);
+  }
+
+  /** What a scope composite is drawn from, as one string (see adjustmentScopeIsFresh) */
+  private adjustmentScopeFingerprint(view: AdjustmentView, drawing: boolean): string {
+    const deps: ScopeDependencyState[] = [];
+    for (const id of view.dependencyIds) {
+      const dep = this.layersMap.get(id);
+      if (!dep) continue;
+      const d = dep.display;
+      const extra = [
+        dep.adjust ? `${dep.adjust.paramsKey}#${dep.adjust.scopeKey}` : '',
+        dep.model.meta?.maskInverted ? 'inv' : '',
+        (dep.model as LayerModel & { onionTint?: number }).onionTint ?? '',
+        dep.model.screentoneEnabled ? `st${dep.model.screentoneLpi},${dep.model.screentoneAngle},${dep.model.screentoneDotScale}` : '',
+        // A resident layer drawn on as a whole texture does not bump its version per dab
+        drawing && id === this.activeId ? performance.now() : '',
+      ].join(';');
+      deps.push({
+        id,
+        version: dep.version,
+        visible: d.visible,
+        renderable: d.renderable,
+        alpha: d.alpha,
+        blendMode: dep.model.blendMode,
+        clipToBelow: dep.model.clipToBelow,
+        sortOrder: dep.model.sortOrder,
+        updatedAt: dep.model.updatedAt,
+        transform: [d.x, d.y, d.scale.x, d.scale.y, d.rotation, d.skew.x, d.skew.y],
+        extra,
+      });
+    }
+    return adjustmentScopeKey(view.scope.kind, deps);
+  }
+
+  /**
+   * Renders the clip / group scope composites that are out of date, bottom to top (a nested
+   * adjustment's own scope first). `full` = for a whole-canvas composite (readbacks, exports):
+   * every tile, cold ones too; otherwise what the current view needs.
+   */
+  public updateAdjustmentScopes(full = false): boolean {
+    if (this.adjustmentOrder.length === 0) return false;
+    const mode = full ? 'full' : `view:${this.lastViewGridKey}`;
+    const drawing = this.isActivelyDrawing();
+    let rendered = false;
+    for (const id of this.adjustmentOrder) {
+      const item = this.layersMap.get(id);
+      const view = item?.adjust;
+      if (!item || !view || !view.paramsKey || (view.scope.kind !== 'clip' && view.scope.kind !== 'group')) continue;
+      if (!item.display.visible || !item.display.renderable) continue;
+      const key = this.adjustmentScopeFingerprint(view, drawing);
+      if (adjustmentScopeIsFresh(view.scopeKey, view.scopeMode, key, mode)) continue;
+      this.renderAdjustmentScope(item, view, view.scope.memberIds, full);
+      view.scopeKey = key;
+      view.scopeMode = mode;
+      rendered = true;
+    }
+    return rendered;
+  }
+
+  /** The scope's layers alone, on transparent, in canvas space (everything else is left out) */
+  private renderAdjustmentScope(item: LayerItem, view: AdjustmentView, memberIds: readonly string[], full: boolean) {
+    const resolution = adjustmentScopeRenderResolution(this.canvasWidth, this.canvasHeight);
+    if (!view.scopeRT || view.scopeRT.source.resolution !== resolution) {
+      this.releaseAdjustmentScope(view);
+      view.scopeRT = RenderTexture.create({ width: this.canvasWidth, height: this.canvasHeight, resolution });
+      const sprite = new Sprite(view.scopeRT);
+      sprite.label = 'adjustment-scope';
+      sprite.renderable = false; // only sampled by the filter
+      item.display.addChild(sprite);
+      view.scopeSprite = sprite;
+    }
+    view.filter.scopeSprite = view.scopeSprite;
+    const members = new Set(memberIds);
+    const left: Container[] = [];
+    for (const other of this.layersMap.values()) {
+      // Masks stay: their (unrendered) sprites are sampled by the members' mask filters
+      if (other.model.layerType === 'mask' || members.has(other.model.id) || !other.display.renderable) continue;
+      other.display.renderable = false;
+      left.push(other.display);
+    }
+    const overlay = this.filterOverlaySprite;
+    const overlayRenderable = overlay?.renderable ?? false;
+    if (overlay) overlay.renderable = false;
+    try {
+      const draw = () => this.renderer.render({ container: this.layersContainer, target: view.scopeRT!, clear: true, clearColor: [0, 0, 0, 0] });
+      if (full) this.withAllTilesVisible(draw, true);
+      else draw();
+    } finally {
+      for (const d of left) d.renderable = true;
+      if (overlay) overlay.renderable = overlayRenderable;
+    }
+  }
+
   /* ---------- Residency ---------- */
 
   /**
@@ -725,6 +973,7 @@ export class LayerManager {
    * levels; they are rebuilt after writes and freed a while after zooming back in.
    */
   public prepareView(scale: number) {
+    this.updateAdjustmentScopes(false);
     if (!this.mips.supported) return;
     // Bilinear already covers all texels cleanly near 100%; enabling trilinear mip level 1 between
     // 85% and 99% needlessly blurs crisp lineart, so only activate mipmaps below 85%.
@@ -766,7 +1015,7 @@ export class LayerManager {
   public pin(reason: string, layerId: string | null) {
     this.pins.set(reason, layerId);
     const item = layerId ? this.layersMap.get(layerId) : undefined;
-    if (item) this.makeResident(item);
+    if (item && !item.adjust) this.makeResident(item);
   }
 
   private isPinned(item: LayerItem) {
@@ -776,7 +1025,8 @@ export class LayerManager {
   }
 
   private keepWarm(item: LayerItem) {
-    return item.model.id === this.activeId;
+    // An adjustment layer is an empty warm layer for good: nothing to freeze, never resident
+    return item.model.id === this.activeId || item.adjust !== null;
   }
 
   /** @internal Every outside read of a layer's texture: resident from now, possibly written */
@@ -1321,7 +1571,8 @@ export class LayerManager {
    */
   public drawTarget(layerId: string, opts?: { whole?: boolean; ink?: StrokeInk }): BrushTarget | null {
     const item = this.layersMap.get(layerId);
-    if (!item) return null;
+    // Adjustment layers have no pixels to draw on (their mask layer does)
+    if (!item || item.adjust) return null;
     this.lastLocalDrawAt = performance.now();
     const ink = opts?.ink;
     if (item.rt || opts?.whole) {
@@ -1589,7 +1840,7 @@ export class LayerManager {
   /** Replaces a rectangle of a layer with premultiplied RGBA (no blending), whichever form it is in */
   public writeRegion(layerId: string, x: number, y: number, w: number, h: number, px: Uint8Array) {
     const item = this.layersMap.get(layerId);
-    if (item) this.writeInto(item, x, y, w, h, px);
+    if (item && !item.adjust) this.writeInto(item, x, y, w, h, px);
   }
 
   private writeInto(item: LayerItem, x: number, y: number, w: number, h: number, px: Uint8Array | null) {
@@ -1903,7 +2154,7 @@ export class LayerManager {
     predecoded?: WeakMap<TileData, Uint8Array | null>
   ) {
     const item = this.layersMap.get(layerId);
-    if (!item || !tiles?.length) return;
+    if (!item || item.adjust || !tiles?.length) return;
     item.version++;
     const valid = tiles.filter((t) => t && t.width > 0 && t.height > 0);
     const baseTiles = concurrency?.baseTiles;
@@ -2883,6 +3134,7 @@ export class LayerManager {
     for (const item of this.layersMap.values()) {
       if (!item.shown && item.model.layerType !== 'mask') continue;
       acc += `|${item.model.id}:${item.version}:${item.model.sortOrder}:${item.display.alpha}:${item.model.blendMode}`;
+      if (item.adjust) acc += `:${item.adjust.paramsKey}`;
     }
     return acc;
   }
@@ -2907,6 +3159,7 @@ export class LayerManager {
    * creating redundant full-size 2D canvas copies when WebGL PBO readback is available.
    */
   public async readVisibleCompositeAsync(includeBackground = false, releaseCompositeAfter = false): Promise<Uint8Array> {
+    this.updateAdjustmentScopes(true); // whole-canvas scope composites for adjustment layers
     const w = this.canvasWidth;
     const h = this.canvasHeight;
     let totalCold = 0;
@@ -3003,6 +3256,7 @@ export class LayerManager {
    * (freed when idle). Live previews are not part of it.
    */
   public getCompositeTexture(includeBackground = false): RenderTexture {
+    this.updateAdjustmentScopes(true); // whole-canvas scope composites for adjustment layers
     const target = this.ensureComposite();
     const previewVisible = this.previewContainer.visible;
     const overlayVisible = this.filterOverlaySprite?.visible ?? false;
@@ -3036,7 +3290,8 @@ export class LayerManager {
    */
   public getLayerThumbnail(layerId: string, thumbWidth = 48, thumbHeight = 48, fromRemote = false): string | null {
     const item = this.layersMap.get(layerId);
-    if (!item) return null;
+    // Adjustment layers have no pixels: the layer panel shows their kind's icon
+    if (!item || item.adjust) return null;
     if (item.thumb?.version === item.version) return item.thumb.url;
     if (!item.rt && !item.gpu && !item.cpu?.size && !item.coldTiles.size) {
       item.thumb = { version: item.version, url: '' };
@@ -3349,7 +3604,7 @@ export class LayerManager {
    */
   public layerToCanvas(layerId: string): HTMLCanvasElement | null {
     const item = this.layersMap.get(layerId);
-    if (!item) return null;
+    if (!item || item.adjust) return null;
     const canvas = document.createElement('canvas');
     canvas.width = this.canvasWidth;
     canvas.height = this.canvasHeight;
@@ -3415,6 +3670,7 @@ export class LayerManager {
    * GPU to finish all queued work: a long frame a second after each stroke on a big canvas)
    */
   public getCanvasThumbnailAsync(maxSide = 220): Promise<string | null> {
+    this.updateAdjustmentScopes(true); // whole-canvas scope composites for adjustment layers
     const reader = this.reader;
     if (!reader || typeof document === 'undefined') return Promise.resolve(this.getCanvasThumbnail(maxSide));
     const previewVisible = this.previewContainer.visible;
@@ -3467,6 +3723,7 @@ export class LayerManager {
 
   /** Small JPEG of the whole canvas (background + visible layers) for the canvas switcher. */
   public getCanvasThumbnail(maxSide = 220): string | null {
+    this.updateAdjustmentScopes(true); // whole-canvas scope composites for adjustment layers
     const previewVisible = this.previewContainer.visible;
     try {
       const w = this.canvasWidth;
@@ -3503,6 +3760,7 @@ export class LayerManager {
     includeBackground = false,
     maxSide = 96,
   ): Promise<{ pixels: Uint8Array; width: number; height: number; origWidth: number; origHeight: number } | null> {
+    this.updateAdjustmentScopes(true);
     const w = this.canvasWidth;
     const h = this.canvasHeight;
     if (w <= 0 || h <= 0) return null;
@@ -3569,6 +3827,7 @@ export class LayerManager {
 
   /** Full-size picture as shown (background, masks, current animation frames), for GIF / video / sequence / cel export */
   public renderCompositeCanvas(options?: { transparent?: boolean }): HTMLCanvasElement {
+    this.updateAdjustmentScopes(true); // whole-canvas scope composites for adjustment layers
     const w = this.canvasWidth;
     const h = this.canvasHeight;
     let totalCold = 0;
@@ -3624,6 +3883,12 @@ export class LayerManager {
     this.layersContainer.removeChild(item.display);
     item.maskFilters?.forEach((f) => f.destroy());
     item.blendFilter?.filter.destroy();
+    if (item.adjust) {
+      item.display.filters = null;
+      this.releaseAdjustmentScope(item.adjust);
+      item.adjust.filter.destroy();
+      item.adjust = null;
+    }
     item.rt?.destroy(true);
     item.pp?.destroy(true);
     item.rt = null;
