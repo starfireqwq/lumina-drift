@@ -110,3 +110,18 @@
 | 日文／英文多解析度介面防裁切（`1440×900`／`1024×768`／`375×812`） | **PASS**（說明中心、色彩校樣設定、匯出視窗與調整圖層視窗動畫定位後皆無超出視窗邊界與按鈕裁切） |
 | 手機單機大畫布效能抽測（`375×812`，`2400×2400` 離線畫布） | **PASS**（畫布建立 970 ms、JS Heap 35.6 MB；45 步連續筆劃 RAF avg 17.16 ms / p95 16.8 ms；60 幀平移 avg 16.68 ms / p95 17.0 ms / max 17.0 ms；0 頁錯） |
 
+---
+
+## 六、v1.4.0 全平台發佈產物（GitHub Release）
+
+GitHub Release [`v1.4.0`](https://github.com/starfireqwq/lumina-drift/releases/tag/v1.4.0)（commit `233965a`）共包含 6 份全平台產物，均已完成上傳與驗證。
+
+| 平台 | 檔名 | 檔案大小 |
+| :--- | :--- | :--- |
+| Windows（安裝版） | `Lumina-Drift-Paint-Setup-1.4.0.exe` | `132.85 MB` |
+| Windows（免安裝版） | `Lumina-Drift-Paint-Portable-1.4.0.exe` | `121.47 MB` |
+| macOS（Apple Silicon） | `Lumina-Drift-Paint-Mac-1.4.0-arm64.pkg` | `140.36 MB` |
+| macOS（Intel） | `Lumina-Drift-Paint-Mac-1.4.0-x64.pkg` | `148.13 MB` |
+| Android | `Lumina-Drift-Paint-Android-1.4.0.apk` | `2.33 MB` |
+| Web 靜態包 | `Lumina-Drift-Paint-Web-1.4.0.zip` | `4.75 MB` |
+
