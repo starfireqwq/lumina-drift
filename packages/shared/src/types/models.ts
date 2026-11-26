@@ -14,9 +14,18 @@ export interface FolderAccessRequest {
 export const LAYER_TYPES = ['raster', 'folder', 'group', 'adjustment', 'vector', 'mask', 'text'] as const;
 export type LayerType = typeof LAYER_TYPES[number];
 
+export interface TextStyleRun {
+  start: number;
+  end: number;
+  color?: string;
+  fontSize?: number;
+  bold?: boolean;
+  italic?: boolean;
+}
+
 export interface LayerTextMeta {
   content: string;
-  /** Top-left of the text block (top-right for vertical text), canvas pixels */
+  /** Top-left of the text block in canvas pixels */
   x: number;
   y: number;
   vertical: boolean;
@@ -27,6 +36,17 @@ export interface LayerTextMeta {
   strokeWidth: number;
   /** Multiple of fontSize */
   lineHeight: number;
+  /** Style overrides at UTF-16 offsets [start, end). */
+  runs?: TextStyleRun[];
+  bold?: boolean;
+  italic?: boolean;
+  /** Thousandths of an em. */
+  letterSpacing?: number;
+  align?: 'start' | 'center' | 'end';
+  box?: { width: number; height: number } | null;
+  paintOrder?: 'stroke-behind' | 'stroke-front';
+  shadow?: { color: string; offsetX: number; offsetY: number; blur: number; opacity: number } | null;
+  kinsoku?: boolean;
 }
 
 /** Free-form per-layer data the server stores as JSON */
