@@ -1,9 +1,15 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import fs from 'node:fs';
 import path from 'node:path';
+
+const clientPkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, './package.json'), 'utf8')) as { version: string };
 
 export default defineConfig({
   base: './',
+  define: {
+    __APP_VERSION__: JSON.stringify(clientPkg.version),
+  },
   plugins: [react()],
   worker: {
     // Keep the plugin runtime self-contained for the desktop file origin and Android's embedded page.

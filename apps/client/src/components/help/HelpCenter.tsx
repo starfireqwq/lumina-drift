@@ -26,6 +26,7 @@ const SHORTCUT_GROUPS: Array<{ id: ShortcutCategory; label: string }> = [
 const shortName = (name: string) => name.replace(/\s*[（(][^()（）]*[)）]\s*$/, '').trim() || name;
 
 const CAT_KEY = 'atelier_help_cat';
+const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '1.4.0';
 
 /** Wraps every match of the search terms in <mark> */
 const Highlight: React.FC<{ text: string; terms: string[] }> = ({ text, terms }) => {
@@ -199,7 +200,14 @@ export const HelpCenter: React.FC<{ onClose: () => void; onOpenShortcutSettings?
         <div className="flex shrink-0 items-center gap-3 border-b border-neutral-800 px-4 py-3">
           <div className="flex shrink-0 items-center gap-2 text-sm font-semibold text-white">
             <BookOpen className="h-4 w-4 text-indigo-400" />
-            <span className="hidden sm:inline">說明</span>
+            <span className="hidden sm:inline">{t.help.centerTitle}</span>
+            <span
+              data-testid="app-version-badge"
+              title={`${t.help.about} · ${t.help.version} v${APP_VERSION}`}
+              className="rounded-md border border-neutral-800 bg-neutral-900/80 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-neutral-400"
+            >
+              v{APP_VERSION}
+            </span>
           </div>
           <label className="relative min-w-0 flex-1">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
@@ -228,7 +236,10 @@ export const HelpCenter: React.FC<{ onClose: () => void; onOpenShortcutSettings?
                 </button>
               );
             })}
-            <div className="mt-auto hidden px-2.5 pt-3 text-[10px] text-neutral-600 sm:block">隨時按 <kbd className="atelier-kbd">F1</kbd> 開啟</div>
+            <div className="mt-auto hidden space-y-1 px-2.5 pt-3 text-[10px] text-neutral-500 sm:block">
+              <div>{t.help.version} <span className="font-mono text-neutral-300">v{APP_VERSION}</span></div>
+              <div className="text-neutral-600">隨時按 <kbd className="atelier-kbd">F1</kbd> 開啟</div>
+            </div>
           </nav>
 
           <div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 sm:p-5">

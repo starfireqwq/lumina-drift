@@ -1,6 +1,6 @@
 {
   "name": "@atelier/shared",
-  "version": "1.3.2",
+  "version": "1.4.0",
   "license": "MIT",
   "description": "Shared TypeScript types, layer ACL permissions, and MessagePack protocol for AtelierSync",
   "main": "./dist/index.js",
