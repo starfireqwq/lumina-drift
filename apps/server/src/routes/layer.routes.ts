@@ -1,6 +1,7 @@
 import { FastifyPluginAsync } from 'fastify';
 import { sqlite } from '../db';
 import {
+  ADJUSTMENT_PIXEL_WRITE_ERROR,
   canUserCreateLayer,
   canUserPerformLayerAction,
   CreateLayerDto,
@@ -134,6 +135,7 @@ export const layerRoutes: FastifyPluginAsync = async (fastify) => {
       }
       try {
         const layer = createLayer(id, user.id, request.body || ({} as CreateLayerDto));
+        if (layer.layerType === 'adjustment') fastify.roomManager.broadcastLayerUpdated(layer, 'create', user.displayName);
         return reply.code(201).send({ layer });
       } catch (err: any) {
         return reply.code(400).send({ error: err.message });
@@ -186,6 +188,7 @@ export const layerRoutes: FastifyPluginAsync = async (fastify) => {
 
         try {
           const updated = updateLayer(layerId, props);
+          if (updated.layerType === 'adjustment') fastify.roomManager.broadcastLayerUpdated(updated, 'update', user.displayName);
           return reply.send({ layer: updated });
         } catch (err: any) {
           return reply.code(400).send({ error: err.message });
@@ -205,11 +208,14 @@ export const layerRoutes: FastifyPluginAsync = async (fastify) => {
         const user = request.user as UserPayload;
         const input = request.body?.tiles;
         const vectors = request.body?.vectorAdded;
+        const layer = getLayerById(layerId);
+        if (layer?.canvasId === id && layer.layerType === 'adjustment') {
+          return reply.code(400).send({ error: ADJUSTMENT_PIXEL_WRITE_ERROR });
+        }
         if (vectors !== undefined) {
           if (input !== undefined || !Array.isArray(vectors) || !vectors.length || vectors.length > 48 || !vectors.every(validVectorStroke)) {
             return reply.code(400).send({ error: '向量線條格式不正確' });
           }
-          const layer = getLayerById(layerId);
           if (!layer || layer.canvasId !== id) return reply.code(404).send({ error: '目標圖層不存在或與當前畫布不匹配。' });
           if (layer.layerType !== 'vector') return reply.code(400).send({ error: '只能將向量線條寫入向量圖層' });
         }

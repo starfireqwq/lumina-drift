@@ -3,6 +3,7 @@ import * as socketParser from 'socket.io-parser';
 import { FastifyInstance } from 'fastify';
 import { and, eq } from 'drizzle-orm';
 import {
+  ADJUSTMENT_PIXEL_WRITE_ERROR,
   tileSocketParser,
   AtelierPacket,
   calculatePainterLevel,
@@ -14,7 +15,9 @@ import {
   DRAW_OP_TYPES,
   DRAW_TIME_MAX_GAP_MS,
   encodePacket,
+  isPixelOrVectorOp,
   LayerAction,
+  LayerModel,
   MemberPresence,
   OpBroadcastPacket,
   OpCommitPacket,
@@ -958,6 +961,15 @@ export class RealtimeRoomManager {
       });
       return null;
     }
+    if (layer.layerType === 'adjustment' && isPixelOrVectorOp(data.opType, data.payload)) {
+      origin.reject({
+        type: 'OP_REJECTED',
+        canvasId: data.canvasId,
+        clientSeq: data.clientSeq,
+        reason: ADJUSTMENT_PIXEL_WRITE_ERROR,
+      });
+      return null;
+    }
 
     // 3. Map opType to action
     let action: LayerAction = 'draw';
@@ -1406,6 +1418,10 @@ export class RealtimeRoomManager {
       canvasId,
       layers: getLayersByCanvasId(canvasId),
     });
+  }
+
+  public broadcastLayerUpdated(layer: LayerModel, action: 'create' | 'update', byUser: string) {
+    this.io.to(`canvas_${layer.canvasId}`).emit('layer_updated', { canvasId: layer.canvasId, layer, action, byUser });
   }
 
   /** Tells everyone in the room (the resizer's other tabs too) to rebuild the canvas at its new size */

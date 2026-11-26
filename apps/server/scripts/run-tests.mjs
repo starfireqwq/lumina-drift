@@ -10,6 +10,7 @@ const tests = [
   'test-phase11-profile-and-canvas-delete', 'test-phase12-avatar-crop', 'test-phase13-layer-groups-rename-shortcuts',
   'test-phase14-animation-mask-text-undo', 'test-phase15-timeline-groupmask-worker', 'test-phase16-parent-permissions',
   'test-phase17-timelapse-replay',
+  'test-phase18-adjustment-layers',
 ];
 
 for (const test of tests) {

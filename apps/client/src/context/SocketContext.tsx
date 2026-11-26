@@ -737,6 +737,7 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     socket.on('layer_updated', (data: { canvasId: string; layer: LayerModel; action: string; byUser: string }) => {
       if (data.canvasId === activeCanvasIdRef.current) {
         setLayerUpdateEvent(data);
+        if (data.action === 'create' || data.action === 'update') return;
         const actionText =
           data.action === 'release'
             ? '已釋放圖層為所有人皆可拿取'

@@ -1,4 +1,5 @@
 import {
+  ADJUSTMENT_PIXEL_WRITE_ERROR,
   CanvasDetailResponse,
   CanvasModel,
   CanvasUnit,
@@ -6,6 +7,7 @@ import {
   CreateLayerDto,
   DEFAULT_TILE_SIZE,
   clampDpi,
+  LAYER_TYPES,
   LayerModel,
   LayerTileSnapshot,
   TileData,
@@ -16,7 +18,9 @@ import {
   compressTileBuffer,
   decompressTileBuffer,
   getTileBounds,
+  isPixelOrVectorOp,
   parseTileKey,
+  sanitizeLayerMetaForType,
   tidyLayerModels,
   tileKey,
 } from '@atelier/shared';
@@ -961,6 +965,7 @@ class OfflineSessionStoreImpl {
     const sameDimensions = width === rec.canvas.width && height === rec.canvas.height && offsetX === 0 && offsetY === 0;
     if (!sameDimensions) {
       for (const layer of rec.layers) {
+        if (layer.layerType === 'adjustment') continue;
         const tileMap = rec.tilesByLayer[layer.id] || {};
         const existingTiles = Object.values(tileMap);
         const existingVectors = rec.vectorsByLayer[layer.id] || [];
@@ -1019,12 +1024,16 @@ class OfflineSessionStoreImpl {
   public async createLayer(canvasId: string, dto: CreateLayerDto): Promise<LayerModel> {
     await this.ensureInitialized();
     const rec = this.ensureRecord(canvasId);
+    const layerType = dto.layerType === undefined ? 'raster' : dto.layerType;
+    if (!LAYER_TYPES.includes(layerType)) throw new Error('圖層類型無效');
+    const sanitized = sanitizeLayerMetaForType(layerType, dto.meta, { requireAdjustment: layerType === 'adjustment' });
+    if (!sanitized.ok) throw new Error(sanitized.error);
     const now = Date.now();
     const sorted = [...rec.layers].sort((a, b) => a.sortOrder - b.sortOrder);
 
     let sortOrder = dto.sortOrder ?? (sorted.length > 0 ? sorted[sorted.length - 1].sortOrder + 10 : 10);
 
-    if (dto.layerType === 'mask' && dto.parentId) {
+    if (layerType === 'mask' && dto.parentId) {
       const parent = sorted.find((l) => l.id === dto.parentId);
       if (parent) sortOrder = parent.sortOrder + 5;
     } else if (dto.aboveLayerId) {
@@ -1062,7 +1071,7 @@ class OfflineSessionStoreImpl {
       ownerId: LOCAL_ARTIST_ID,
       ownerDisplayName: '本機畫師',
       name: dto.name || '新圖層',
-      layerType: dto.layerType || 'raster',
+      layerType,
       blendMode: dto.blendMode || 'normal',
       opacity: dto.opacity ?? 1,
       isVisible: true,
@@ -1076,7 +1085,7 @@ class OfflineSessionStoreImpl {
       screentoneLpi: dto.screentoneLpi ?? 45,
       screentoneAngle: dto.screentoneAngle ?? 45,
       screentoneDotScale: dto.screentoneDotScale ?? 1,
-      meta: dto.meta ?? null,
+      meta: sanitized.meta ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -1094,6 +1103,9 @@ class OfflineSessionStoreImpl {
     const rec = this.ensureRecord(canvasId);
     const target = rec.layers.find((l) => l.id === layerId);
     if (!target) throw new Error('找不到該圖層');
+    const sanitized = dto.meta === undefined ? undefined : sanitizeLayerMetaForType(target.layerType, dto.meta);
+    if (sanitized && !sanitized.ok) throw new Error(sanitized.error);
+    const rasterize = dto.layerType === 'raster' && target.layerType === 'text';
     Object.assign(target, {
       ...(dto.name !== undefined ? { name: dto.name } : {}),
       ...(dto.blendMode !== undefined ? { blendMode: dto.blendMode } : {}),
@@ -1110,8 +1122,7 @@ class OfflineSessionStoreImpl {
       ...(dto.screentoneLpi !== undefined ? { screentoneLpi: dto.screentoneLpi } : {}),
       ...(dto.screentoneAngle !== undefined ? { screentoneAngle: dto.screentoneAngle } : {}),
       ...(dto.screentoneDotScale !== undefined ? { screentoneDotScale: dto.screentoneDotScale } : {}),
-      ...(dto.meta !== undefined ? { meta: dto.meta } : {}),
-      ...(dto.layerType !== undefined ? { layerType: dto.layerType } : {}),
+      ...(rasterize ? { layerType: 'raster', meta: null } : sanitized ? { meta: sanitized.meta } : {}),
       updatedAt: Date.now(),
     });
     if (dto.parentId !== undefined || dto.sortOrder !== undefined) {
@@ -1209,6 +1220,7 @@ class OfflineSessionStoreImpl {
   public async writeLayerTiles(canvasId: string, layerId: string, tiles: TileData[]): Promise<number> {
     await this.ensureInitialized();
     const rec = this.ensureRecord(canvasId);
+    if (rec.layers.find((l) => l.id === layerId)?.layerType === 'adjustment') throw new Error(ADJUSTMENT_PIXEL_WRITE_ERROR);
     const map = rec.tilesByLayer[layerId] || (rec.tilesByLayer[layerId] = {});
     for (const t of tiles) {
       if (!t) continue;
@@ -1228,6 +1240,7 @@ class OfflineSessionStoreImpl {
   public async writeLayerVectors(canvasId: string, layerId: string, vectorAdded: VectorStroke[]): Promise<void> {
     await this.ensureInitialized();
     const rec = this.ensureRecord(canvasId);
+    if (rec.layers.find((l) => l.id === layerId)?.layerType === 'adjustment') throw new Error(ADJUSTMENT_PIXEL_WRITE_ERROR);
     const list = rec.vectorsByLayer[layerId] || (rec.vectorsByLayer[layerId] = []);
     for (const s of vectorAdded) {
       const idx = list.findIndex((x) => x.id === s.id);
@@ -1333,7 +1346,11 @@ class OfflineSessionStoreImpl {
   public commitLocalOp(canvasId: string, layerId: string, opType: string, payload: any): number {
     if (!isLocalOfflineCanvasId(canvasId)) return 0;
     const rec = this.ensureRecord(canvasId);
-    if (payload && typeof payload === 'object') {
+    const layerType = rec.layers.find((l) => l.id === layerId)?.layerType;
+    if (layerType === 'adjustment' && isPixelOrVectorOp(opType || 'STROKE', payload)) {
+      throw new Error(ADJUSTMENT_PIXEL_WRITE_ERROR);
+    }
+    if (layerType !== 'adjustment' && payload && typeof payload === 'object') {
       if (Array.isArray(payload.tiles)) {
         const map = rec.tilesByLayer[layerId] || (rec.tilesByLayer[layerId] = {});
         for (const t of payload.tiles as TileData[]) {
@@ -1368,9 +1385,8 @@ class OfflineSessionStoreImpl {
     rec.seq += 1;
     rec.canvas.latestSeq = rec.seq;
     rec.updatedAt = now;
-    const isMask = rec.layers.find((l) => l.id === layerId)?.layerType === 'mask';
     const storedPayload =
-      isMask && payload && typeof payload === 'object' && !Array.isArray(payload)
+      layerType === 'mask' && payload && typeof payload === 'object' && !Array.isArray(payload)
         ? { ...(payload as Record<string, unknown>), layerType: 'mask' }
         : payload;
     this.recordOfflineOp(canvasId, rec.seq, layerId, opType || 'STROKE', storedPayload, now);
@@ -1388,6 +1404,8 @@ class OfflineSessionStoreImpl {
   ): number {
     if (!isLocalOfflineCanvasId(canvasId)) return 0;
     const rec = this.ensureRecord(canvasId);
+    const targetType = rec.layers.find((l) => l.id === layerId)?.layerType;
+    if (targetType === 'adjustment') throw new Error(ADJUSTMENT_PIXEL_WRITE_ERROR);
     const map = rec.tilesByLayer[layerId] || (rec.tilesByLayer[layerId] = {});
     for (const t of tiles) {
       if (!t) continue;
@@ -1401,7 +1419,7 @@ class OfflineSessionStoreImpl {
     rec.seq += 1;
     rec.canvas.latestSeq = rec.seq;
     rec.updatedAt = now;
-    const isMask = layerType === 'mask' || rec.layers.find((l) => l.id === layerId)?.layerType === 'mask';
+    const isMask = layerType === 'mask' || targetType === 'mask';
     this.recordOfflineOp(
       canvasId,
       rec.seq,

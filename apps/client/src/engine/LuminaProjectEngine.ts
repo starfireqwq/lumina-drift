@@ -6,6 +6,7 @@ import {
   TileData,
   VectorStroke,
   computeTidiedAscendingNonMaskIds,
+  sanitizeLayerMetaForType,
 } from '@atelier/shared';
 import { ApiService } from '../services/api';
 import { OfflineSessionStore } from '../services/offlineStore';
@@ -14,6 +15,7 @@ import { compressTiles } from './commitWorkers';
 import { compositeLayers, type LayerCanvasItem } from './layerComposite';
 
 export const LUMINA_MIMETYPE = 'application/x-lumina-drift-project';
+// Adjustment metadata fits schema 1. Older apps will see an unknown layer type.
 export const LUMINA_SCHEMA_VERSION = 1;
 export const LUMINA_APP_VERSION = '1.0.0';
 
@@ -159,6 +161,21 @@ export function migrateLuminaProject(raw: any): LuminaProjectMeta {
   };
 }
 
+export function normalizeLuminaLayers(layers: LayerModel[]): LayerModel[] {
+  const dropped = new Set<string>();
+  const normalized = layers.flatMap((layer) => {
+    const result = sanitizeLayerMetaForType(layer.layerType, layer.meta);
+    if (!result.ok) {
+      dropped.add(layer.id);
+      return [];
+    }
+    return [result.meta === layer.meta ? layer : { ...layer, meta: result.meta }];
+  });
+  return normalized.filter((layer) =>
+    layer.layerType !== 'mask' || !layer.parentId || !dropped.has(layer.parentId)
+  );
+}
+
 export class LuminaProjectEngine {
   /**
    * Packages the current canvas, layer hierarchy, layer pixels, masks, vectors, animation metadata,
@@ -184,9 +201,9 @@ export class LuminaProjectEngine {
     const vectorStrokes: Record<string, VectorStroke[]> = {};
     const layersFolder = zip.folder('layers')!;
 
-    // 2. Save each non-group layer's lossless PNG & mask PNG
+    // 2. Save lossless PNGs for pixel layers and their masks
     for (const item of layerCanvases) {
-      if (item.layer.layerType !== 'group') {
+      if (item.layer.layerType !== 'group' && item.layer.layerType !== 'adjustment') {
         const pngBlob = await canvasToBlob(item.canvas, 'image/png');
         layersFolder.file(`layer_${item.layer.id}.png`, pngBlob, { compression: 'DEFLATE' });
       }
@@ -293,7 +310,7 @@ export class LuminaProjectEngine {
     if (!hierarchyFile) {
       throw new Error('此 .lumina 專案檔缺少 layers/hierarchy.json 圖層結構資料。');
     }
-    const layers: LayerModel[] = JSON.parse(await hierarchyFile.async('string'));
+    const layers = normalizeLuminaLayers(JSON.parse(await hierarchyFile.async('string')));
 
     let vectorStrokes: Record<string, VectorStroke[]> = {};
     const vectorsFile = zip.file('vectors.json');
@@ -307,6 +324,7 @@ export class LuminaProjectEngine {
 
     const layerPngDataUrls: Record<string, string> = {};
     for (const layer of layers) {
+      if (layer.layerType === 'adjustment') continue;
       const pngEntry = zip.file(`layers/layer_${layer.id}.png`);
       if (pngEntry) {
         const pngBlob = await pngEntry.async('blob');
@@ -345,7 +363,8 @@ export class LuminaProjectEngine {
     onProgress?: (done: number, total: number) => void,
     { shareEditableLayers = false, groupId }: { shareEditableLayers?: boolean; groupId?: string } = {},
   ): Promise<CanvasModel> {
-    const { meta, layers, layerPngDataUrls, vectorStrokes, filePath } = unpacked;
+    const { meta, layerPngDataUrls, vectorStrokes, filePath } = unpacked;
+    const layers = normalizeLuminaLayers(unpacked.layers);
     const src = meta.canvas;
     const offline = OfflineSessionStore.isOfflineMode();
     const serverUrl = ApiService.getServerUrl();
@@ -369,7 +388,10 @@ export class LuminaProjectEngine {
 
       const ordered = [...layers].sort((a, b) => depth(a) - depth(b) || a.sortOrder - b.sortOrder);
       const idMap = new Map<string, string>();
-      const snapshots = Object.entries(layerPngDataUrls).filter(([id]) => byId.has(id));
+      const snapshots = Object.entries(layerPngDataUrls).filter(([id]) => {
+        const layer = byId.get(id);
+        return layer && layer.layerType !== 'adjustment';
+      });
       const vectors = ordered.filter(
         (layer) => layer.layerType === 'vector' && vectorStrokes?.[layer.id]?.length
       );

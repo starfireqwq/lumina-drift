@@ -11,7 +11,8 @@ export interface FolderAccessRequest {
 }
 // 'mask': a layer mask, attached to the layer named by its parentId (white shows, black/empty hides)
 // 'text': pixels are rendered from meta.text, so the text stays editable
-export type LayerType = 'raster' | 'folder' | 'group' | 'adjustment' | 'vector' | 'mask' | 'text';
+export const LAYER_TYPES = ['raster', 'folder', 'group', 'adjustment', 'vector', 'mask', 'text'] as const;
+export type LayerType = typeof LAYER_TYPES[number];
 
 export interface LayerTextMeta {
   content: string;

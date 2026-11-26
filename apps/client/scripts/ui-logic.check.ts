@@ -64,6 +64,7 @@ import {
   isAdjustmentIdentity,
   normalizeAdjustment,
   resolveAdjustmentScope,
+  sanitizeLayerMetaForType,
   type LayerAdjustment,
   Affine2D,
   applyAffinePoint,
@@ -108,6 +109,7 @@ import {
   unitToPixels,
 } from '@atelier/shared';
 import { getBoxPivotCanvasPoint, type TransformBox } from '../src/utils/transformProjection';
+import { normalizeLuminaLayers } from '../src/engine/LuminaProjectEngine';
 import {
   applyKeyframeHandleDrag,
   buildKeyframeFromEval,
@@ -6481,4 +6483,36 @@ console.log('ui-logic checks passed');
   assert.ok(ADJUSTMENT_GLSL.includes('lumAdjApply('));
   assert.ok(ADJUSTMENT_GLSL.includes('lumAdjBlend('));
   console.log('Phase 6 adjustment layer checks passed');
+}
+
+// Phase 6: adjustment layers (persistence)
+{
+  const adjustment: LayerAdjustment = {
+    kind: 'hsl',
+    params: { hue: 400, saturation: -140, lightness: 0, colorize: false },
+  };
+  const meta = { adjustment, keyframes: [], originalAuthor: 'Artist' };
+  const normalized = { ...meta, adjustment: { ...adjustment, params: { ...adjustment.params, hue: 180, saturation: -100 } } };
+  const error = { ok: false, error: '調整圖層參數無效' };
+  assert.deepStrictEqual(sanitizeLayerMetaForType('adjustment', meta, { requireAdjustment: true }), { ok: true, meta: normalized });
+  assert.deepStrictEqual(sanitizeLayerMetaForType('adjustment', undefined, { requireAdjustment: true }), error);
+  assert.deepStrictEqual(sanitizeLayerMetaForType('adjustment', { keyframes: [] }), error);
+  assert.deepStrictEqual(sanitizeLayerMetaForType('adjustment', null), error);
+  assert.deepStrictEqual(sanitizeLayerMetaForType('adjustment', { adjustment: { kind: 'unknown' } } as unknown as typeof meta), error);
+  assert.deepStrictEqual(sanitizeLayerMetaForType('raster', meta), { ok: true, meta: { keyframes: [], originalAuthor: 'Artist' } });
+  assert.deepStrictEqual(sanitizeLayerMetaForType(undefined, undefined), { ok: true, meta: undefined });
+  assert.deepStrictEqual(sanitizeLayerMetaForType('raster', null), { ok: true, meta: null });
+  assert.strictEqual(meta.adjustment.params.hue, 400);
+
+  const hierarchy = [
+    { id: 'adjustment', layerType: 'adjustment', meta: normalized },
+    { id: 'mask', parentId: 'adjustment', layerType: 'mask', meta: { maskInverted: true } },
+    { id: 'invalid-mask', parentId: 'invalid', layerType: 'mask' },
+    { id: 'invalid', layerType: 'adjustment', meta: { adjustment: { kind: 'unknown' } } },
+    { id: 'raster', layerType: 'raster' },
+  ];
+  assert.deepStrictEqual(normalizeLuminaLayers(JSON.parse(JSON.stringify(hierarchy))), [
+    hierarchy[0], hierarchy[1], hierarchy[4],
+  ]);
+  console.log('Phase 6 adjustment layer persistence checks passed');
 }

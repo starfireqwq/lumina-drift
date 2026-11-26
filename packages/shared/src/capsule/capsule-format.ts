@@ -19,6 +19,7 @@ export interface CapsuleManifest {
   version: '1.0';
   createdAt: number;
   canvas: CanvasModel;
+  // Adjustment layers are stored entirely in the manifest.
   layers: LayerModel[];
   vectorStrokes?: Record<string, VectorStroke[]>;
   totalOps: number;

@@ -118,7 +118,9 @@ export class TimeCapsuleEngine {
     const layerSnapshots: Record<string, string> = {};
     const vectorStrokes: NonNullable<CapsuleContent['manifest']['vectorStrokes']> = {};
     for (const item of layerCanvases) {
-      if (item.layer.layerType !== 'group') layerSnapshots[item.layer.id] = item.canvas.toDataURL('image/png');
+      if (item.layer.layerType !== 'group' && item.layer.layerType !== 'adjustment') {
+        layerSnapshots[item.layer.id] = item.canvas.toDataURL('image/png');
+      }
       if (item.layer.layerType === 'vector') vectorStrokes[item.layer.id] = item.vectorStrokes ?? [];
       // Masks are not items of their own: their pixels are saved under the mask layer's id
       if (item.mask?.id) layerSnapshots[item.mask.id] = item.mask.canvas.toDataURL('image/png');
@@ -301,8 +303,8 @@ export class TimeCapsuleEngine {
    */
   /**
    * Rebuilds a capsule as a new canvas (yours): the manifest's layers with their names, types,
-   * blend modes, opacity, meta (animation, cels, text, inverted masks), masks, groups and nesting
-   * and order, then every layer's pixels. Eyes, locks, α-lock and clipping come last (a locked
+   * blend modes, opacity, meta (adjustments, animation, cels, text, inverted masks), masks, groups
+   * and order, then raster snapshots. Eyes, locks, α-lock and clipping come last (a locked
    * layer takes no pixels). The new canvas's default background layer is removed.
    */
   public static async restoreToNewCanvas(
@@ -321,7 +323,10 @@ export class TimeCapsuleEngine {
     // Parents before children (a mask's parent is the layer it masks), each level bottom to top
     const ordered = [...layers].sort((a, b) => depth(a) - depth(b) || a.sortOrder - b.sortOrder);
     const idMap = new Map<string, string>();
-    const snapshots = Object.entries(content.layerSnapshots ?? {}).filter(([id]) => byId.has(id));
+    const snapshots = Object.entries(content.layerSnapshots ?? {}).filter(([id]) => {
+      const layer = byId.get(id);
+      return layer && layer.layerType !== 'adjustment';
+    });
     const vectors = ordered.filter((layer) => layer.layerType === 'vector' && vectorStrokes?.[layer.id]?.length);
     const total = ordered.length + snapshots.length + vectors.length;
     let done = 0;

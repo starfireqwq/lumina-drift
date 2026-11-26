@@ -5,11 +5,13 @@ import { layers, layerPermissions, users } from '../db/schema';
 import { getCanvasById } from './canvas.service';
 import {
   CreateLayerDto,
+  LAYER_TYPES,
   LayerMeta,
   LayerModel,
   LayerPermissionModel,
   SetLayerPermissionDto,
   UpdateLayerDto,
+  sanitizeLayerMetaForType,
 } from '@atelier/shared';
 
 function clampOpacity(value: unknown): number {
@@ -153,12 +155,16 @@ export function createLayer(
   userId: string,
   dto: CreateLayerDto
 ): LayerModel {
+  const layerType = dto.layerType === undefined ? 'raster' : dto.layerType;
+  if (!LAYER_TYPES.includes(layerType)) throw new Error('圖層類型無效');
+  const sanitized = sanitizeLayerMetaForType(layerType, dto.meta, { requireAdjustment: layerType === 'adjustment' });
+  if (!sanitized.ok) throw new Error(sanitized.error);
+  const meta = serializeMeta(sanitized.meta ?? null);
   ensureUserExists(userId);
   const id = crypto.randomUUID();
   const now = Date.now();
-  const meta = dto.meta === undefined ? null : serializeMeta(dto.meta);
 
-  if (dto.layerType === 'mask') {
+  if (layerType === 'mask') {
     const target = dto.parentId ? getLayerById(dto.parentId) : null;
     // Layers and groups (a group mask hides everything inside it) take a mask; masks do not
     if (!target || target.canvasId !== canvasId || target.layerType === 'mask') {
@@ -210,7 +216,7 @@ export function createLayer(
     parentId: dto.parentId || null,
     ownerId: userId,
     name: (typeof dto.name === 'string' && dto.name.trim()) || `圖層 ${existingLayers.length + 1}`,
-    layerType: dto.layerType || 'raster',
+    layerType,
     blendMode: dto.blendMode || 'normal',
     opacity: dto.opacity !== undefined ? clampOpacity(dto.opacity) : 1.0,
     isVisible: 1,
@@ -269,7 +275,11 @@ export function updateLayer(layerId: string, dto: UpdateLayerDto): LayerModel {
   if (dto.parentId !== undefined) updates.parentId = dto.parentId;
   if (dto.aclMode !== undefined) updates.aclMode = dto.aclMode;
   if (dto.isPublic !== undefined) updates.isPublic = dto.isPublic ? 1 : 0;
-  if (dto.meta !== undefined) updates.meta = serializeMeta(dto.meta);
+  if (dto.meta !== undefined) {
+    const sanitized = sanitizeLayerMetaForType(existing.layerType, dto.meta);
+    if (!sanitized.ok) throw new Error(sanitized.error);
+    updates.meta = serializeMeta(sanitized.meta);
+  }
   // Rasterize: a text layer becomes plain pixels and drops its editable source
   if (dto.layerType === 'raster' && existing.layerType === 'text') {
     updates.layerType = 'raster';

@@ -35,6 +35,7 @@ export * from './filters/render-filters';
 export * from './filters/resample';
 
 export * from './adjustment/adjustment-layer';
+export * from './adjustment/adjustment-meta';
 export * from './adjustment/adjustment-scope';
 export * from './adjustment/adjustment-glsl';
 
