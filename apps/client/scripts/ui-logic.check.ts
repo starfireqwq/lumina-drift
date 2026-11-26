@@ -6653,3 +6653,48 @@ console.log('ui-logic checks passed');
   assert.notEqual(adjustmentScopeKey('clip', [dep]), base);
   console.log('Phase 6 adjustment layer live view bookkeeping checks passed');
 }
+
+// Phase 6: adjustment layers (workspace editing)
+import {
+  adjustmentParamsKey, buildAdjustmentEditUndo, editCurvePoint, editGradientStop, nextAdjustmentLayerName,
+} from '../src/components/workspace/adjustmentEditing';
+
+{
+  assert.equal(nextAdjustmentLayerName('色相／飽和度', []), '色相／飽和度 1');
+  assert.equal(nextAdjustmentLayerName('色相／飽和度', [
+    { name: '色相／飽和度 2' }, { name: '色相／飽和度 5' }, { name: '色相／飽和度 5 複製' }, { name: '色階 9' },
+  ]), '色相／飽和度 6');
+
+  const start = [{ x: 0, y: 0 }, { x: 255, y: 255 }];
+  const extra = editCurvePoint(start, -1, { x: 90.3, y: 160.6 });
+  assert.deepEqual(extra, [start[0], { x: 90, y: 161 }, start[1]]);
+  assert.equal(editCurvePoint(extra, -1, { x: 90, y: 50 }), extra);
+  assert.deepEqual(editCurvePoint(extra, 0, { x: 99, y: 33 })[0], { x: 0, y: 33 });
+  assert.deepEqual(editCurvePoint(extra, 1, { x: 255, y: 300 })[1], { x: 254, y: 255 });
+  assert.deepEqual(editCurvePoint(extra, 1, null), start);
+  assert.equal(editCurvePoint(extra, 0, null), extra);
+  const fullCurve = Array.from({ length: 16 }, (_, x) => ({ x, y: x }));
+  assert.equal(editCurvePoint(fullCurve, -1, { x: 100, y: 100 }), fullCurve);
+
+  const stops = [{ offset: 0, color: '#000000' }, { offset: 1, color: '#ffffff' }];
+  const withMidpoint = editGradientStop(stops, -1, 0.5001);
+  assert.deepEqual(withMidpoint[1], { offset: 0.5, color: '#808080' });
+  assert.deepEqual(editGradientStop(withMidpoint, 1, 1)[1], { offset: 0.999, color: '#808080' });
+  assert.deepEqual(editGradientStop(withMidpoint, 1, null), stops);
+  assert.equal(editGradientStop(stops, 0, null), stops);
+  assert.equal(editGradientStop(withMidpoint, -1, 0.4999), withMidpoint);
+  const fullGradient = Array.from({ length: 16 }, (_, i) => ({ offset: i / 16, color: '#000000' }));
+  assert.equal(editGradientStop(fullGradient, -1, 1), fullGradient);
+
+  const before = createDefaultAdjustment('brightness_contrast');
+  const after = { kind: 'brightness_contrast', params: { brightness: 40, contrast: 5 } } as const;
+  const layer = { id: 'edit-adj', meta: { adjustment: before, maskInverted: true } };
+  assert.notEqual(adjustmentParamsKey(before), adjustmentParamsKey(after));
+  assert.equal(buildAdjustmentEditUndo(layer, before, 'owner', 'param edit', 'op', 10), null);
+  assert.deepEqual(buildAdjustmentEditUndo(layer, after, 'owner', 'param edit', 'op', 10), {
+    opId: 'op', timestamp: 10, userId: 'owner', layerId: layer.id, opType: 'ADJUSTMENT', desc: 'param edit',
+    beforeTiles: [], afterTiles: [], metaBefore: layer.meta, metaAfter: { ...layer.meta, adjustment: after },
+  });
+  assert.equal(buildAdjustmentEditUndo({ id: layer.id }, after, 'owner', 'param edit', 'op', 10)?.metaBefore, null);
+  console.log('Phase 6 adjustment layer workspace editing checks passed');
+}

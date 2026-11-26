@@ -491,6 +491,20 @@ export interface Translations {
     addVector: string;
     addGroup: string;
     addMask: string;
+    adjustment: {
+      title: string;
+      undo: string;
+      pixelWarning: string;
+      readOnly: string;
+      kinds: {
+        hsl: string;
+        levels: string;
+        curves: string;
+        color_balance: string;
+        gradient_map: string;
+        brightness_contrast: string;
+      };
+    };
     duplicate: string;
     mergeDown: string;
     copyLayers: string;
@@ -821,6 +835,35 @@ export interface Translations {
     loadCustomBrush: string;
     colorCurvesTitle: string;
     gradientMapTitle: string;
+    adjustment: {
+      hue: string;
+      saturation: string;
+      lightness: string;
+      colorize: string;
+      channel: string;
+      inBlack: string;
+      inWhite: string;
+      gamma: string;
+      outBlack: string;
+      outWhite: string;
+      histogram: string;
+      invert: string;
+      removePoint: string;
+      tone: string;
+      shadows: string;
+      midtones: string;
+      highlights: string;
+      cyanRed: string;
+      magentaGreen: string;
+      yellowBlue: string;
+      preserveLuminosity: string;
+      reverse: string;
+      stopPosition: string;
+      stopColor: string;
+      removeStop: string;
+      brightness: string;
+      contrast: string;
+    };
     channelRgb: string;
     channelRed: string;
     channelGreen: string;

@@ -54,6 +54,7 @@ export interface ToolContext {
   commitTilePatch: (layerId: string, tiles: TileData[], isUndo?: boolean, actionDesc?: string, alreadySynced?: boolean) => void;
   refreshLayerThumbnail: (layerId: string) => void;
   canEditPixels: (layer: LayerModel) => boolean;
+  rejectAdjustmentPixels: (layer: LayerModel | null | undefined) => boolean;
   /** Short notice over the canvas (permission problems, results) */
   warn: (message: string, ms?: number) => void;
   selectTool: (tool: ToolType) => void;

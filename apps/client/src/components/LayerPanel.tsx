@@ -10,6 +10,7 @@ import {
   selectLayerRange,
   tidyLayerModels,
 } from '@atelier/shared';
+import type { AdjustmentKind } from '@atelier/shared';
 import { FolderAccessPanel } from './FolderAccessPanel';
 import type { FolderAccess } from './workspace/useFolderAccess';
 import { type DroppedImages, type ImageDropTarget, isImageDrag, readDroppedImages } from '../utils/imageImport';
@@ -174,6 +175,8 @@ interface LayerPanelProps {
   onCreateRaster?: () => void;
   onCreateVector?: () => void;
   onCreateGroup?: () => void;
+  onCreateAdjustmentLayer?: (kind: AdjustmentKind) => void;
+  onEditAdjustmentLayer?: (layerId: string) => void;
   onRequestCreateMyLayer?: () => void;
   onToggleLock: (layer: LayerModel) => void;
   onToggleVisibility: (layer: LayerModel) => void;

@@ -109,6 +109,7 @@ export function useSelectionTools(ctx: ToolContext) {
     const engine = selectionEngineRef.current;
     const te = tileEngineRef.current;
     const layer = ctx.activeLayerRef.current;
+    if (ctx.rejectAdjustmentPixels(layer)) return null;
     const item = layer ? layerManagerRef.current?.getLayerItem(layer.id) : null;
     const mask = engine?.getMaskData();
     if (!engine?.hasSelection() || !mask || !te || !layer || !item || !canvas) {
@@ -229,6 +230,7 @@ export function useSelectionTools(ctx: ToolContext) {
   const deleteSelection = (desc = '刪除選取內容', override?: ReturnType<typeof selectedRegion>) => {
     const r = override ?? selectedRegion();
     if (!r || !canvas) return;
+    if (override && ctx.rejectAdjustmentPixels(r.layer)) return;
     if (!ctx.canEditPixels(r.layer)) {
       ctx.warn('請先選取自己可編輯、未鎖定的圖層。');
       return;
@@ -292,7 +294,8 @@ export function useSelectionTools(ctx: ToolContext) {
   /** 剪下: copy, then clear the selected pixels */
   const cutSelection = () => {
     const r = selectedRegion();
-    void copySelection().then((ok) => { if (ok && r) deleteSelection('剪下', r); });
+    if (!r) return;
+    void copySelection().then((ok) => { if (ok) deleteSelection('剪下', r); });
   };
 
   const handleClearSelection = () => {

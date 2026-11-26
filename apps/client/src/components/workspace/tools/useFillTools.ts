@@ -136,6 +136,7 @@ export function useFillTools(ctx: ToolContext) {
     const pts = sel.getCurrentPoints();
     sel.clearDraft();
     if (pts.length < 3) return;
+    if (ctx.rejectAdjustmentPixels(layer)) return;
     if (!canEditPixels(layer)) {
       warn('請先選取自己可編輯、未鎖定的圖層，再使用套索填充。', 3000);
       return;
@@ -252,6 +253,7 @@ export function useFillTools(ctx: ToolContext) {
   };
 
   const startPaintUnfilled = (local: Point, targetLayer: LayerModel): boolean => {
+    if (ctx.rejectAdjustmentPixels(targetLayer)) return false;
     if (!canEditPixels(targetLayer)) {
       warn('請先選取自己可編輯、未鎖定的圖層，再使用間隙填充筆。', 3000);
       return false;
@@ -382,6 +384,7 @@ export function useFillTools(ctx: ToolContext) {
 
     if (pts.length < 3) return;
 
+    if (ctx.rejectAdjustmentPixels(activeLayer)) return;
     if (activeLayer.isLocked) {
       warn('⚠️ 此圖層目前已被鎖定，無法進行智能填色！', 3000);
       return;
@@ -473,6 +476,7 @@ export function useFillTools(ctx: ToolContext) {
 
   // Paint Bucket (Flood Fill) Tool
   const handleBucketFill = (screenX: number, screenY: number, targetLayer: LayerModel) => {
+    if (ctx.rejectAdjustmentPixels(targetLayer)) return;
     if (!canvas || resolveFullFill.current || !layerManagerRef.current || !viewportRef.current || !tileEngineRef.current || !pixiAppRef.current) return;
     const activeItem = layerManagerRef.current.getLayerItem(targetLayer.id);
     if (!activeItem) return;

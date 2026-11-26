@@ -168,6 +168,7 @@ export function useTransformTool(ctx: ToolContext) {
   };
 
   const startTransformMode = async (mode: DistortMode | 'transform' = 'transform', layer = activeLayerRef.current) => {
+    if (ctx.rejectAdjustmentPixels(layer)) return;
     if (transformLayerIdRef.current) {
       if (mode === 'puppet') setDistortMode(mode);
       return;
@@ -209,6 +210,7 @@ export function useTransformTool(ctx: ToolContext) {
    * lifted, so cancelling leaves the layer as it was.
    */
   const startFloatingPaste = (source: HTMLCanvasElement, x: number, y: number, layer = activeLayerRef.current) => {
+    if (ctx.rejectAdjustmentPixels(layer)) return;
     if (transformLayerIdRef.current) return;
     if (!layer || !canEditPixels(layer)) {
       warn('請先選取自己可編輯、未鎖定的圖層，再貼上。', 3000);

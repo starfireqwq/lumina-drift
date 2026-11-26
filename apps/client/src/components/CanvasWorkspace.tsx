@@ -93,7 +93,14 @@ import {
   findTopAnchorForParent,
   orderLayersForReparenting,
   tidyLayerModels,
+  ADJUSTMENT_KINDS,
+  createDefaultAdjustment,
+  normalizeAdjustment,
+  toneHistogram,
+  type AdjustmentKind,
+  type LayerAdjustment,
 } from '@atelier/shared';
+import { adjustmentParamsKey, buildAdjustmentEditUndo, nextAdjustmentLayerName } from './workspace/adjustmentEditing';
 import { useAuth } from '../context/AuthContext';
 import { useSocket } from '../context/SocketContext';
 import { useI18n } from '../context/I18nContext';
@@ -318,6 +325,7 @@ const LightTableWindow = lazy(() => import('./LightTableWindow').then((m) => ({ 
 const LightTableOverlay = lazy(() => import('./LightTableOverlay').then((m) => ({ default: m.LightTableOverlay })));
 const AudioTrackWindow = lazy(() => import('./AudioTrackWindow').then((m) => ({ default: m.AudioTrackWindow })));
 const LayerFilterDialog = lazy(() => import('./LayerFilterDialog').then((m) => ({ default: m.LayerFilterDialog })));
+const AdjustmentLayerDialog = lazy(() => import('./AdjustmentLayerDialog').then((m) => ({ default: m.AdjustmentLayerDialog })));
 const LayerAlignWindow = lazy(() => import('./LayerAlignWindow'));
 const ColorCurvesModal = lazy(() => import('./ColorCurvesModal').then((m) => ({ default: m.ColorCurvesModal })));
 const GradientMapModal = lazy(() => import('./GradientMapModal').then((m) => ({ default: m.GradientMapModal })));
@@ -632,6 +640,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const [selectedLayerIds, setSelectedLayerIds] = useState<Set<string>>(new Set());
   const selectedLayerIdsRef = useRef(selectedLayerIds);
   selectedLayerIdsRef.current = selectedLayerIds;
+  const [adjustmentEditor, setAdjustmentEditor] = useState<{
+    layer: LayerModel; sequence: number; open: boolean;
+  } | null>(null);
+  const adjustmentEditorRef = useRef(adjustmentEditor);
+  const creatingAdjustmentRef = useRef(false);
+  const adjustmentSavesRef = useRef(new Map<string, {
+    canvasId: string; paramsKey: string; timer: number; write: Promise<void>;
+  }>());
   useEffect(() => {
     setSelectedLayerIds((prev) => (prev.size === 0 ? prev : new Set()));
   }, [canvas?.id]);
@@ -1406,14 +1422,19 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     setCanRedoState(scopedUndoRef.current.canRedo(effectiveUserId));
   };
 
-  const canEditPixels = (raw: LayerModel) => {
-    const layer = (raw.layerType === 'mask' && layersRef.current.find((l) => l.id === raw.parentId)) || raw;
-    // A group's mask is painted by whoever may edit the group (the group itself has no pixels)
-    return canEditOwnPixels(layer !== raw && layer.layerType === 'group' ? { ...layer, layerType: 'raster' } : layer);
+  const rejectAdjustmentPixels = (layer: LayerModel | null | undefined) => {
+    if (layer?.layerType !== 'adjustment') return false;
+    warn(t.layers.adjustment.pixelWarning);
+    return true;
   };
-  const canEditOwnPixels = (layer: LayerModel) => !isGuest && !isCanvasViewer && !layer.isLocked && layer.layerType !== 'group' && Boolean(
-    layer.ownerId === user?.id || (!layer.isPublic && layer.ownerId && layer.aclMode === 'shared_all')
-  );
+  const canEditPixels = (raw: LayerModel) => {
+    if (raw.layerType === 'group' || raw.layerType === 'adjustment') return false;
+    // Masks use their owner's permissions, including owners that have no pixels.
+    const owner = (raw.layerType === 'mask' && layersRef.current.find((l) => l.id === raw.parentId)) || raw;
+    return !isGuest && !isCanvasViewer && !owner.isLocked && Boolean(
+      owner.ownerId === user?.id || (!owner.isPublic && owner.ownerId && owner.aclMode === 'shared_all')
+    );
+  };
 
   // Canvas tools (components/workspace/tools) share the engines and the commit plumbing through this
   const toolCtx: ToolContext = {
@@ -1447,6 +1468,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     commitTilePatch,
     refreshLayerThumbnail,
     canEditPixels,
+    rejectAdjustmentPixels,
     warn,
     selectTool: (tool) => handleSelectTool(tool),
     requestRender: () => requestRenderRef.current(),
@@ -2379,6 +2401,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           }
           if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_filter_screentone'), ev)) {
             ev.preventDefault();
+            if (rejectAdjustmentPixels(activeLayerRef.current)) return;
             if (activeLayerRef.current) {
               onUpdateLayerProps?.(activeLayerRef.current.id, {
                 screentoneEnabled: !activeLayerRef.current.screentoneEnabled,
@@ -3045,6 +3068,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     layerId: string,
     params: { density: number; angleRad: number; dotScale: number }
   ) => {
+    if (rejectAdjustmentPixels(layersRef.current.find((layer) => layer.id === layerId))) return;
     if (!layerManagerRef.current || !webglFilterEngineRef.current || !activeLayer || !tileEngineRef.current) return;
     const item = layerManagerRef.current.getLayerItem(layerId);
     if (!item) return;
@@ -3081,6 +3105,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   // Comic Panels & Speech Balloons Stamping onto Layer
   const handleBakeComicToLayer = (comicCanvas: HTMLCanvasElement) => {
+    if (rejectAdjustmentPixels(activeLayerRef.current)) return false;
     if (!activeLayer || !canEditPixels(activeLayer) || !layerManagerRef.current || !tileEngineRef.current || !pixiAppRef.current) {
       setPermissionWarning('請選取可編輯的圖層，再套用分鏡或對話氣泡。');
       setTimeout(() => setPermissionWarning(null), 3000);
@@ -3186,6 +3211,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
 
   const chooseFilter = (id: string | null) => {
+    if (id && rejectAdjustmentPixels(activeLayerRef.current)) return;
     const def = getFilter(id);
     if (def?.tool) {
       // Liquify and mesh warp are tools of their own: the menu only opens them
@@ -3252,6 +3278,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   );
 
   const openFilterUI = (id?: 'curves' | 'gradient') => {
+    closeAdjustmentDialog();
     if (id) chooseFilter(id);
     else if (!filterMenuOpen) {
       setLayerFilterId(null);
@@ -3261,6 +3288,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   const openFilterRef = useRef<(id?: 'curves' | 'gradient') => void>(() => {});
   openFilterRef.current = (id) => {
+    if (rejectAdjustmentPixels(activeLayerRef.current)) return;
     if (getFilterLayer()) {
       setFilterApplyNewLayer(false);
       openFilterUI(id);
@@ -3325,6 +3353,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const runLayerFilter = async (filter: FilterJob | null, previewOnly: boolean): Promise<boolean> => {
     cancelFilterWork();
     if (!filter) { clearFilterPreview(); showFilterRefining(false); return true; }
+    if (activeLayerRef.current?.layerType === 'adjustment') {
+      if (!previewOnly) rejectAdjustmentPixels(activeLayerRef.current);
+      return false;
+    }
     const request = filterRequestRef.current;
     const toNewLayer = filterApplyNewLayerRef.current;
     const includeBg = filterIncludeBgRef.current;
@@ -3791,7 +3823,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const item = lm.getLayerItem(l.id);
     const mask = ls.find((m) => m.layerType === 'mask' && m.parentId === l.id);
     const maskItem = mask && lm.getLayerItem(mask.id);
-    const tiles = item ? tilesAsync(lm, l.id, lm.occupiedTiles(l.id) ?? coords) : Promise.resolve([]);
+    const tiles = item && l.layerType !== 'adjustment' ? tilesAsync(lm, l.id, lm.occupiedTiles(l.id) ?? coords) : Promise.resolve([]);
     const maskTiles = mask && maskItem ? tilesAsync(lm, mask.id, lm.occupiedTiles(mask.id) ?? coords) : null;
     const strokes = l.layerType === 'vector' ? vectorEngineRef.current?.getStrokes(l.id).map((s) => ({ ...s })) : undefined;
     return {
@@ -3831,7 +3863,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       ...(place?.under ? { belowLayerId: place.under } : {}),
     });
     if (!created || !te) return null;
-    const item = await waitForLayerItem(created.id);
+    const item = model.layerType === 'adjustment' ? null : await waitForLayerItem(created.id);
     if (aboveSibling && layersRef.current.some((l) => l.id === aboveSibling.id)) {
       const asc = [...layersRef.current].sort((a, b) => a.sortOrder - b.sortOrder).map((l) => l.id).filter((id) => id !== created.id);
       const idx = asc.indexOf(aboveSibling.id);
@@ -4004,6 +4036,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         return true;
       }
       const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model ?? candidate?.layerCreated?.model;
+      if (candidate?.opType === 'ADJUSTMENT') return Boolean(target?.layerType === 'adjustment' && canManageLayer(target));
       return Boolean(target && (target.ownerId === effectiveUserId || (candidate?.layerCreated && isAdmin) || canEditPixels(target)));
     });
 
@@ -4044,7 +4077,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         !op.vectorRemovedStrokes &&
         !op.vectorAddedStrokes
       ) {
-        onUpdateLayerProps?.(op.layerId, { meta: op.metaBefore });
+        if (op.opType === 'ADJUSTMENT') {
+          await adjustmentSavesRef.current.get(op.layerId)?.write;
+          await onUpdateLayerProps?.(op.layerId, { meta: op.metaBefore });
+        } else onUpdateLayerProps?.(op.layerId, { meta: op.metaBefore });
         return;
       }
 
@@ -4119,6 +4155,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         return true;
       }
       const target = layersRef.current.find((l) => l.id === layerId) ?? candidate?.layerRemoved?.model ?? candidate?.layerCreated?.model;
+      if (candidate?.opType === 'ADJUSTMENT') return Boolean(target?.layerType === 'adjustment' && canManageLayer(target));
       return Boolean(target && (target.ownerId === effectiveUserId || (candidate?.layerCreated && isAdmin) || canEditPixels(target)));
     });
 
@@ -4156,7 +4193,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         !op.vectorRemovedStrokes &&
         !op.vectorAddedStrokes
       ) {
-        onUpdateLayerProps?.(op.layerId, { meta: op.metaAfter });
+        if (op.opType === 'ADJUSTMENT') {
+          await onUpdateLayerProps?.(op.layerId, { meta: op.metaAfter });
+        } else onUpdateLayerProps?.(op.layerId, { meta: op.metaAfter });
         return;
       }
 
@@ -5595,6 +5634,145 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   // ---------- Layer structure: merge down, group ----------
   const canManageLayer = (l: LayerModel) => !isGuest && !isCanvasViewer && l.ownerId === user?.id;
 
+  const setAdjustmentPreview = (id: string, adjustment: LayerAdjustment | null) => {
+    layerManagerRef.current?.setAdjustmentPreview(id, adjustment);
+    requestRenderRef.current();
+  };
+
+  const closeAdjustmentDialog = (keepPreview = false) => {
+    const editor = adjustmentEditorRef.current;
+    if (!editor?.open) return;
+    const next = { ...editor, open: false };
+    adjustmentEditorRef.current = next;
+    setAdjustmentEditor(next);
+    const focus = document.activeElement;
+    if (focus instanceof HTMLElement && focus.closest('[data-tool-window="adjustment-layer"]')) focus.blur();
+    if (!keepPreview) setAdjustmentPreview(editor.layer.id, null);
+  };
+
+  const showAdjustmentDialog = (layer: LayerModel) => {
+    if (layer.layerType !== 'adjustment' || !normalizeAdjustment(layer.meta?.adjustment)) return;
+    if (adjustmentSavesRef.current.has(layer.id)) return;
+    closeFilters();
+    closeAdjustmentDialog();
+    const next = { layer, sequence: (adjustmentEditorRef.current?.sequence ?? 0) + 1, open: true };
+    adjustmentEditorRef.current = next;
+    setAdjustmentEditor(next);
+  };
+
+  const openAdjustmentDialog = (layerId: string) => {
+    const layer = layersRef.current.find((entry) => entry.id === layerId);
+    if (layer) showAdjustmentDialog(layer);
+  };
+
+  const createAdjustmentLayer = async (kind: AdjustmentKind) => {
+    if (!canvas || !onCreateLayer || isGuest || isCanvasViewer || creatingAdjustmentRef.current) return;
+    const active = activeLayerRef.current;
+    const anchor = active?.layerType === 'mask'
+      ? layersRef.current.find((layer) => layer.id === active.parentId) ?? null
+      : active;
+    const name = nextAdjustmentLayerName(t.layers.adjustment.kinds[kind], layersRef.current);
+    creatingAdjustmentRef.current = true;
+    try {
+      const created = await createLayerWithUndo(name, 'normal', 'adjustment', anchor?.id ?? null, anchor?.parentId ?? null, {
+        meta: { adjustment: createDefaultAdjustment(kind) },
+      });
+      if (created) {
+        onSelectLayer?.(created.id);
+        showAdjustmentDialog(created);
+      }
+    } finally {
+      creatingAdjustmentRef.current = false;
+    }
+  };
+
+  const createAdjustmentLayerRef = useRef(createAdjustmentLayer);
+  createAdjustmentLayerRef.current = createAdjustmentLayer;
+  useEffect(() => {
+    const onCreate = (event: Event) => {
+      const kind = (event as CustomEvent<{ kind?: AdjustmentKind }>).detail?.kind;
+      if (kind && ADJUSTMENT_KINDS.includes(kind)) void createAdjustmentLayerRef.current(kind);
+    };
+    window.addEventListener('atelier:create-adjustment-layer', onCreate);
+    return () => window.removeEventListener('atelier:create-adjustment-layer', onCreate);
+  }, []);
+
+  const liveAdjustmentEditorLayer = (sequence?: number) => {
+    const editor = adjustmentEditorRef.current;
+    if (!editor?.open || editor.layer.canvasId !== canvas?.id || (sequence !== undefined && sequence !== editor.sequence)) return null;
+    const live = layersRef.current.find((layer) => layer.id === editor.layer.id);
+    return live?.layerType === 'adjustment' && live.ownerId === editor.layer.ownerId
+      && adjustmentParamsKey(live.meta?.adjustment) === adjustmentParamsKey(editor.layer.meta?.adjustment) ? live : null;
+  };
+
+  const clearAdjustmentSave = (layerId: string) => {
+    const saves = adjustmentSavesRef.current;
+    const pending = saves.get(layerId);
+    if (!pending) return;
+    window.clearTimeout(pending.timer);
+    saves.delete(layerId);
+    setAdjustmentPreview(layerId, null);
+  };
+
+  useEffect(() => {
+    if (adjustmentEditorRef.current?.open && !liveAdjustmentEditorLayer()) closeAdjustmentDialog();
+    // The earlier layer sync effect has already applied this model to the renderer.
+    for (const [id, pending] of adjustmentSavesRef.current) {
+      const layer = layers.find((entry) => entry.id === id);
+      if (pending.canvasId !== canvas?.id || !layer || layer.layerType !== 'adjustment'
+        || pending.paramsKey === adjustmentParamsKey(layer.meta?.adjustment)) clearAdjustmentSave(id);
+    }
+  }, [adjustmentEditor, layers, canvas?.id]);
+
+  useEffect(() => () => {
+    for (const pending of adjustmentSavesRef.current.values()) window.clearTimeout(pending.timer);
+    adjustmentSavesRef.current.clear();
+  }, []);
+
+  const commitAdjustmentDialog = (sequence: number, adjustment: LayerAdjustment) => {
+    if (adjustmentEditorRef.current?.sequence !== sequence) return;
+    const layer = liveAdjustmentEditorLayer(sequence);
+    if (!layer || !canManageLayer(layer) || !onUpdateLayerProps) return closeAdjustmentDialog();
+    const op = buildAdjustmentEditUndo(layer, adjustment, userRef.current?.id ?? user?.id ?? 'guest',
+      t.layers.adjustment.undo, `op_adjustment_${crypto.randomUUID()}`, Date.now());
+    if (!op) return closeAdjustmentDialog();
+    setAdjustmentPreview(layer.id, adjustment);
+    scopedUndoRef.current.push(op);
+    updateUndoRedoState();
+    const saves = adjustmentSavesRef.current;
+    const write = Promise.resolve().then(() => onUpdateLayerProps(layer.id, { meta: op.metaAfter })).catch(() => {
+      if (saves.get(layer.id)?.write === write) clearAdjustmentSave(layer.id);
+    });
+    const timer = window.setTimeout(() => {
+      if (saves.get(layer.id)?.write !== write) return;
+      setAdjustmentPreview(layer.id, null);
+      // Undo still waits for a slow write even after the preview times out.
+      void write.then(() => {
+        if (saves.get(layer.id)?.write === write) saves.delete(layer.id);
+      });
+    }, 5000);
+    saves.set(layer.id, { canvasId: layer.canvasId, paramsKey: adjustmentParamsKey(adjustment), timer, write });
+    closeAdjustmentDialog(true);
+  };
+
+  const readAdjustmentHistogram = async (sequence: number) => {
+    const layer = liveAdjustmentEditorLayer(sequence);
+    const lm = layerManagerRef.current;
+    if (!layer || !lm) return null;
+    const displayed = displayLayersRef.current;
+    let sample: ReturnType<LayerManager['readFilterThumbnailPixels']>;
+    try {
+      lm.syncLayers(displayed.map((entry) => entry.layerType !== 'group' && entry.layerType !== 'mask' && entry.sortOrder >= layer.sortOrder
+        ? { ...entry, isVisible: false } : entry));
+      sample = lm.readFilterThumbnailPixels(null, true, 256);
+    } finally {
+      lm.syncLayers(displayed);
+      requestRenderRef.current();
+    }
+    const data = await sample;
+    return data ? toneHistogram(data.pixels, data.width, data.height) : null;
+  };
+
   const updateLayerKeyframes = (layerId: string, keyframes: TransformKeyframe[]) => {
     const target = layersRef.current.find((l) => l.id === layerId);
     if (!target || !canManageLayer(target)) return;
@@ -5640,9 +5818,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const lm = layerManagerRef.current;
     const te = tileEngineRef.current;
     const renderer = pixiAppRef.current?.renderer;
-    if (!top || !lm || !te || !renderer) return;
+    if (!top) return;
     const siblings = ls.filter((l) => l.layerType !== 'mask' && (l.parentId ?? null) === (top.parentId ?? null)).sort((a, b) => a.sortOrder - b.sortOrder);
     const below = siblings[siblings.indexOf(top) - 1];
+    if (rejectAdjustmentPixels(top) || rejectAdjustmentPixels(below) || !lm || !te || !renderer) return;
     if (top.layerType === 'group' || top.layerType === 'mask') return warn('請選一般圖層再向下合併。');
     if (!below || below.layerType === 'group') return warn('下面沒有可以合併的圖層。');
     if (below.layerType === 'text' || below.layerType === 'vector') return warn('下面是文字／向量圖層，請先點陣化再合併。');
@@ -5830,8 +6009,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           onReorderLayer?.(created.id, 0, asc);
         }
       } else {
-        const item = await waitForLayerItem(created.id);
-        const tiles = fits(c.tiles);
+        const item = m.layerType === 'adjustment' ? null : await waitForLayerItem(created.id);
+        const tiles = m.layerType === 'adjustment' ? [] : fits(c.tiles);
         if (item && tiles.length) {
           te.applyTileBatch(item.renderTexture, tiles);
           if (c.strokes?.length) {
@@ -6446,7 +6625,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       return;
     }
     // A group has no pixels of its own: its owner (or an admin) may mask it
-    if (target.layerType === 'group' ? !canManageLayer(target) : !canEditPixels(target)) {
+    if (target.layerType === 'group' || target.layerType === 'adjustment' ? !canManageLayer(target) : !canEditPixels(target)) {
       warn('只能替自己可編輯的圖層加蒙版。');
       return;
     }
@@ -6762,6 +6941,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const liveAlignTargets = () => {
     const list = layersRef.current;
     const targets = resolveAlignTargets(list, activeLayerRef.current?.id ?? null, selectedLayerIdsRef.current);
+    if (targets.some(({ members }) => members.some(rejectAdjustmentPixels))) return null;
     // The window may be a render behind: re-check against live layers and busy refs
     const blocked = alignTargetsBlocker(targets, {
       busy: Boolean(transformLayerIdRef.current || filterModalOpenRef.current),
@@ -6820,7 +7000,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     });
   };
   const openAlign = (layerId?: string) => {
-    if (layerId && !selectedLayerIdsRef.current.has(layerId)) {
+    const useSingleLayer = layerId && !selectedLayerIdsRef.current.has(layerId);
+    const targets = resolveAlignTargets(layersRef.current, layerId ?? activeLayerRef.current?.id ?? null,
+      useSingleLayer ? undefined : selectedLayerIdsRef.current);
+    if (targets.some(({ members }) => members.some(rejectAdjustmentPixels))) return;
+    if (useSingleLayer) {
       setSelectedLayerIds(new Set());
       if (layerId !== activeLayerRef.current?.id) onSelectLayer?.(layerId);
     }
@@ -6845,11 +7029,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   });
 
   const clearActiveLayerWithUndo = () => {
+    const layer = activeLayerRef.current;
+    if (rejectAdjustmentPixels(layer)) return;
     if (selectionEngineRef.current?.hasSelection()) {
       selection.deleteSelection('清除選取內容');
       return;
     }
-    const layer = activeLayerRef.current;
     const lm = layerManagerRef.current;
     const te = tileEngineRef.current;
     if (!layer || !lm || !te || !canvas) return;
@@ -6884,6 +7069,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
 
   const handleTouchCut = () => {
+    if (rejectAdjustmentPixels(activeLayerRef.current)) return;
     if (selectionEngineRef.current?.hasSelection()) {
       selection.cutSelection();
       return;
@@ -7266,6 +7452,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           onCreateRaster={() => createLayerFromDock('raster')}
           onCreateVector={() => createLayerFromDock('vector')}
           onCreateGroup={() => createLayerFromDock('group')}
+          onCreateAdjustmentLayer={onCreateLayer ? createAdjustmentLayer : undefined}
+          onEditAdjustmentLayer={openAdjustmentDialog}
           onRequestCreateMyLayer={onRequestCreateMyLayer}
           onToggleLock={onToggleLock || (() => {})}
           onToggleVisibility={onToggleVisibility || (() => {})}
@@ -7317,8 +7505,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     id: 'align', title: t.align.title, icon: <AlignCenter />, onClose: closeAlign,
     render: () => <ToolDockSlot host={toolDockHosts.align} />,
   });
-  if (filterDocked && filterMenuOpen) panelDefs.push({
-    id: 'filters', title: t.filters.title, icon: <Sliders />, onClose: closeFilters,
+  if (filterDocked && (filterMenuOpen || adjustmentEditor?.open)) panelDefs.push({
+    id: 'filters', title: adjustmentEditor?.open ? t.layers.adjustment.title : t.filters.title, icon: <Sliders />,
+    onClose: adjustmentEditor?.open ? () => closeAdjustmentDialog() : closeFilters,
     render: () => <ToolDockSlot host={toolDockHosts.filters} />,
   });
   const mobilePanel: MobilePanelDef | null = mobileSheet === 'toolPicker' ? {
@@ -8271,7 +8460,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       {isClipboardMenuOpen && (
         <TouchClipboardMenu
           isOpen
-          canEdit={Boolean(activeLayer && canEditPixels(activeLayer) && !isCanvasViewer)}
+          canEdit={Boolean(activeLayer && (activeLayer.layerType === 'adjustment' || canEditPixels(activeLayer)) && !isCanvasViewer)}
           canPaste={Boolean(selection.hasClipboard || layerClipboard || loadLayerClipboard())}
           hasSelection={hasSelectionState}
           onClose={() => setIsClipboardMenuOpen(false)}
@@ -8347,6 +8536,18 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           onPreview={filterCallbacks.parameters} onPreviewJob={filterCallbacks.libraryPreview}
           onApply={(values) => layerFilterId ? runLayerFilter({ id: layerFilterId, values }, false) : Promise.resolve(false)}
           onApplyJob={(job) => runLayerFilter(job, false)} /></Suspense>
+      </OverlayPresence>, toolDockHosts.filters)}
+      {createPortal(<OverlayPresence open={Boolean(adjustmentEditor?.open)} kind="popover">
+        {adjustmentEditor && <Suspense fallback={null}><AdjustmentLayerDialog key={adjustmentEditor.sequence}
+          layer={layers.find((entry) => entry.id === adjustmentEditor.layer.id) ?? adjustmentEditor.layer}
+          open={adjustmentEditor.open} embedded={filterDocked} readOnly={!canManageLayer(adjustmentEditor.layer)}
+          onCancel={() => closeAdjustmentDialog()}
+          onCommit={(adjustment) => commitAdjustmentDialog(adjustmentEditor.sequence, adjustment)}
+          getHistogram={() => readAdjustmentHistogram(adjustmentEditor.sequence)}
+          onPreview={(adjustment) => {
+            const layer = liveAdjustmentEditorLayer(adjustmentEditor.sequence);
+            if (layer && canManageLayer(layer)) setAdjustmentPreview(layer.id, adjustment);
+          }} /></Suspense>}
       </OverlayPresence>, toolDockHosts.filters)}
       {isColorCurvesOpen && <Suspense fallback={null}><ColorCurvesModal
         isOpen={isColorCurvesOpen}

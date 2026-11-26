@@ -491,13 +491,15 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       return;
     }
     // Check & Auto-select Active Layer (Always allow seamless painting on reconnect)
+    const isReadOnlyTool = ['eyedropper', 'lasso', 'magic_wand', 'select_rect', 'select_ellipse', 'select_polygon'].includes(currentTool);
     let targetLayer = activeLayer;
+    if (!isReadOnlyTool && ctx.rejectAdjustmentPixels(targetLayer)) return;
     if (targetLayer?.layerType === 'group') {
       warn('圖層組是資料夾。請選取組內的圖層再作畫。', 3000);
       return;
     }
     if (!targetLayer && layers.length > 0) {
-      targetLayer = layers.find((l) => l.layerType !== 'group' && !l.isLocked) ?? null;
+      targetLayer = layers.find((l) => l.layerType !== 'group' && l.layerType !== 'adjustment' && !l.isLocked) ?? null;
       if (targetLayer && onSelectLayer) {
         onSelectLayer(targetLayer.id);
       }
@@ -516,7 +518,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
 
     // Check Layer Lock: if locked, smoothly auto-switch to any available unlocked layer
     if (targetLayer.isLocked && currentTool !== 'eyedropper') {
-      const unlocked = layers.find((l) => l.layerType !== 'group' && !l.isLocked);
+      const unlocked = layers.find((l) => l.layerType !== 'group' && l.layerType !== 'adjustment' && !l.isLocked);
       if (unlocked) {
         targetLayer = unlocked;
         activeLayerRef.current = unlocked;
@@ -529,7 +531,6 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       }
     }
 
-    const isReadOnlyTool = ['eyedropper', 'lasso', 'magic_wand', 'select_rect', 'select_ellipse', 'select_polygon'].includes(currentTool);
     if (!isReadOnlyTool && !canEditPixels(targetLayer)) {
       warn(
         ctx.isCanvasViewer

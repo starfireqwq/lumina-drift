@@ -27,6 +27,8 @@ interface ToolWindowProps {
   bodyClassName?: string;
   dockPanel?: ToolDockPanelId;
   embedded?: boolean;
+  fitViewport?: boolean;
+  dataAttributes?: Record<`data-${string}`, string>;
 }
 
 const KEY = (id: string) => `atelier_toolwin_${id}`;
@@ -57,7 +59,7 @@ const loadRect = (id: string, initial: Rect): Rect => {
   return { x, y: Math.round(initial.y * ui), w, h };
 };
 
-const clampTo = (r: Rect, minW: number, minH: number, keepInside = false): Rect => {
+const clampTo = (r: Rect, minW: number, minH: number, keepInside = false, fitViewport = false): Rect => {
   const ui = getUiScale();
   const vw = window.innerWidth;
   const vh = window.innerHeight;
@@ -66,9 +68,10 @@ const clampTo = (r: Rect, minW: number, minH: number, keepInside = false): Rect 
   const minHScaled = Math.min(Math.round(minH * ui), Math.max(80, vh - topBar - 8));
   const w = Math.max(minWScaled, Math.min(r.w, vw - 16));
   const h = r.h ? Math.max(minHScaled, Math.min(r.h, vh - topBar - 8)) : 0;
-  const minX = keepInside ? 8 : 8 - w + 96;
-  const maxX = keepInside ? Math.max(8, vw - w - 8) : vw - 96;
-  return { x: Math.max(minX, Math.min(maxX, r.x)), y: Math.max(topBar, Math.min(vh - 44, r.y)), w, h };
+  const minX = keepInside || fitViewport ? 8 : 8 - w + 96;
+  const maxX = keepInside || fitViewport ? Math.max(8, vw - w - 8) : vw - 96;
+  const maxY = fitViewport ? vh - (h || minHScaled) - 8 : vh - 44;
+  return { x: Math.max(minX, Math.min(maxX, r.x)), y: Math.max(topBar, Math.min(maxY, r.y)), w, h };
 };
 
 /**
@@ -78,13 +81,13 @@ const clampTo = (r: Rect, minW: number, minH: number, keepInside = false): Rect 
  */
 export const ToolWindow: React.FC<ToolWindowProps> = ({
   id, title, icon, onClose, children, footer, actions, initial, minW = 260, minH = 160, closeOnEsc = true, bodyClassName = 'p-3',
-  dockPanel, embedded = false,
+  dockPanel, embedded = false, fitViewport = false, dataAttributes,
 }) => {
   const phone = usePhoneLayout();
   const { t } = useI18n();
   const titleId = useId();
   const [zIndex, setZIndex] = useState<number>(() => claimTopZ());
-  const [rect, setRect] = useState<Rect>(() => clampTo(loadRect(id, initial), minW, minH, true));
+  const [rect, setRect] = useState<Rect>(() => clampTo(loadRect(id, initial), minW, minH, true, fitViewport));
   const bringToFront = () => setZIndex(claimTopZ());
   const rectRef = useRef(rect);
   rectRef.current = rect;
@@ -108,10 +111,10 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
   }, [closeOnEsc]);
 
   useEffect(() => {
-    const onResize = () => setRect((r) => clampTo(r, minW, minH, true));
+    const onResize = () => setRect((r) => clampTo(r, minW, minH, true, fitViewport));
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
-  }, [minW, minH]);
+  }, [minW, minH, fitViewport]);
 
   useEffect(() => {
     const unsub = onUiRescale((factor) => {
@@ -119,10 +122,10 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
         ...r,
         w: Math.round(r.w * factor),
         h: r.h ? Math.round(r.h * factor) : 0,
-      }, minW, minH, true));
+      }, minW, minH, true, fitViewport));
     });
     return () => { unsub(); };
-  }, [minW, minH]);
+  }, [minW, minH, fitViewport]);
 
   const save = () => {
     try { localStorage.setItem(KEY(id), JSON.stringify({ ...rectRef.current, uiScale: getUiScale() })); } catch { /* ignore */ }
@@ -134,7 +137,7 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
     let movingDock = false;
     const label = dockPanel === 'align' ? t.align.title : t.filters.title;
     startDrag(e, (dx, dy, ev) => {
-      setRect(clampTo({ ...start, x: start.x + dx, y: start.y + dy }, minW, minH));
+      setRect(clampTo({ ...start, x: start.x + dx, y: start.y + dy }, minW, minH, false, fitViewport));
       if (dockPanel && (movingDock || Math.hypot(dx, dy) >= 6)) {
         movingDock = true;
         dragDockableTool(dockPanel, label, ev, boxRef.current, false);
@@ -150,12 +153,12 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
     const start = { ...rectRef.current, h: rectRef.current.h || boxRef.current?.offsetHeight || Math.round(minH * getUiScale()) };
     startDrag(e, (dx, dy) => {
       const next = resizeRect(start, edge, dx, dy);
-      setRect(clampTo(next, minW, minH));
+      setRect(clampTo(next, minW, minH, false, fitViewport));
     }, save);
   };
 
   const header = (
-    <div onPointerDown={move} onDoubleClick={() => { if (!phone && !embedded) { setRect((r) => clampTo(loadRect('__none__', initial), minW, minH)); try { localStorage.removeItem(KEY(id)); } catch { /* ignore */ } } }}
+    <div onPointerDown={move} onDoubleClick={() => { if (!phone && !embedded) { setRect(clampTo(loadRect('__none__', initial), minW, minH, false, fitViewport)); try { localStorage.removeItem(KEY(id)); } catch { /* ignore */ } } }}
       style={{ touchAction: 'none' }}
       className={`flex h-9 shrink-0 items-center gap-2 border-b border-neutral-700/70 bg-neutral-800/60 pl-3 pr-1 ${phone || embedded ? '' : 'cursor-grab active:cursor-grabbing'}`}>
       {icon && <span className="shrink-0 text-indigo-400 [&>svg]:h-4 [&>svg]:w-4">{icon}</span>}
@@ -185,7 +188,8 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
 
   if (embedded) {
     return (
-      <section aria-labelledby={titleId} data-tool-window={id} className="flex min-w-0 flex-col">
+      <section aria-labelledby={titleId} data-tool-window={id} {...dataAttributes}
+        className={`flex min-w-0 flex-col ${fitViewport ? 'max-h-full overflow-hidden' : ''}`}>
         {body}
       </section>
     );
@@ -193,7 +197,7 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
 
   if (phone) {
     return (
-      <section role="dialog" aria-labelledby={titleId} data-tool-window={id}
+      <section role="dialog" aria-labelledby={titleId} data-tool-window={id} {...dataAttributes}
         onPointerDown={bringToFront}
         style={{ zIndex }}
         className="atelier-popover atelier-menu-in fixed inset-x-0 bottom-0 flex max-h-[72dvh] flex-col overflow-hidden rounded-b-none pb-[env(safe-area-inset-bottom)]">
@@ -208,8 +212,10 @@ export const ToolWindow: React.FC<ToolWindowProps> = ({
       role="dialog"
       aria-labelledby={titleId}
       data-tool-window={id}
+      {...dataAttributes}
       onPointerDown={bringToFront}
-      style={{ zIndex, left: rect.x, top: rect.y, width: rect.w, height: rect.h || undefined, maxHeight: rect.h ? undefined : `max(12rem, calc(100dvh - ${rect.y + 12}px))` }}
+      style={{ zIndex, left: rect.x, top: rect.y, width: rect.w, height: rect.h || undefined,
+        maxHeight: fitViewport ? `calc(100dvh - ${rect.y + 8}px)` : rect.h ? undefined : `max(12rem, calc(100dvh - ${rect.y + 12}px))` }}
       className="atelier-popover atelier-window atelier-menu-in fixed flex select-none flex-col"
     >
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[inherit]">{body}</div>
