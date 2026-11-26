@@ -239,6 +239,9 @@ export interface Translations {
     outlineColor: string;
     colorRange: string;
     colorRangeTooltip: string;
+    quickMask: string;
+    quickMaskTooltip: string;
+    quickMaskHint: string;
     eraserMode: string;
     eraserHard: string;
     eraserSoft: string;
@@ -357,6 +360,29 @@ export interface Translations {
     startTransform: string;
   };
 
+  colorRange: {
+    title: string;
+    sourceLayer: string;
+    sourceMerged: string;
+    pickerLabel: string;
+    pickerReplace: string;
+    pickerAdd: string;
+    pickerSubtract: string;
+    previewHint: string;
+    previewMask: string;
+    previewRed: string;
+    previewSelection: string;
+    loading: string;
+    samples: string;
+    excluded: string;
+    fuzziness: string;
+    feather: string;
+    invert: string;
+    combineMode: string;
+    coverage: string;
+    apply: string;
+    cancel: string;
+  };
   puppetWarp: {
     title: string;
     mode: string;
@@ -526,6 +552,34 @@ export interface Translations {
       paperLocalHint: string;
       localPreview: string;
       resetPaper: string;
+    };
+    effects: {
+      title: string;
+      tooltip: string;
+      enabled: string;
+      reset: string;
+      folderScope: string;
+      border: string;
+      borderEdge: string;
+      borderWatercolor: string;
+      width: string;
+      opacity: string;
+      color: string;
+      antiAlias: string;
+      watercolorDarkness: string;
+      watercolorBlur: string;
+      dropShadow: string;
+      offsetX: string;
+      offsetY: string;
+      blur: string;
+      spread: string;
+      outerGlow: string;
+      radius: string;
+      colorOverlay: string;
+      blendNormal: string;
+      blendMultiply: string;
+      blendScreen: string;
+      blendOverlay: string;
     };
     adjustment: {
       title: string;
@@ -1882,6 +1936,8 @@ export interface Translations {
     oraDesc: string;
     jpeg: string;
     jpegDesc: string;
+    webp: string;
+    webpDesc: string;
     exporting: string;
     download: string;
     scale: string;

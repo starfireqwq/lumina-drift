@@ -478,6 +478,22 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       if (at) pluginTool.onDown(e, at);
       return;
     }
+    // Quick Mask (快速遮色片): brush/pencil/eraser paint the ruby red selection mask directly
+    if (selection.isQuickMaskActive() && (
+      eraserTail ||
+      currentTool === 'brush' ||
+      currentTool === 'pencil' ||
+      currentTool === 'eraser' ||
+      currentTool === 'select_brush' ||
+      currentTool === 'select_eraser'
+    )) {
+      const at = viewportRef.current?.screenToCanvas(e.clientX, e.clientY);
+      if (at) {
+        const isEraser = eraserTail || currentTool === 'eraser' || currentTool === 'select_eraser';
+        selection.startQuickMaskStroke(at, isEraser);
+      }
+      return;
+    }
     // The text tool makes or edits a text layer of its own, whatever layer is active
     if (currentTool === 'text') {
       const at = viewportRef.current?.screenToCanvas(e.clientX, e.clientY);
@@ -841,6 +857,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       if (vector.moveDrag(e.nativeEvent, local)) return;
 
       // Tiles the stroke crosses (undo restores all of them); no GPU read here
+      if (selection.moveQuickMaskStroke(local)) return;
       if (selection.moveSelectBrush(local)) return;
       if (currentTool !== 'lasso' && currentTool !== 'magic_wand') brush.trackTiles(e, local);
 
@@ -1033,6 +1050,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       selection.finishLasso();
       return;
     }
+    if (selection.finishQuickMaskStroke()) return;
     if (selection.finishSelectBrush()) return;
     if (isLassoErase()) {
       selection.eraseLasso();

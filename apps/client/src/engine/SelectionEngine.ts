@@ -13,6 +13,7 @@ import {
 import {
   applyMaskRectPatch,
   applySelectionPostProcess,
+  computeMaskBoundsAndCount,
   computeMarqueeRect,
   featherMaskBuffer,
   rasterizeEllipseMask,
@@ -40,6 +41,14 @@ export class SelectionEngine {
 
   private activeSelection: SelectionArea | null = null;
   private activeMaskData: SelectionMaskData | null = null;
+  private quickMaskMode = false;
+  private quickMaskBuf: Uint8Array | null = null;
+  private quickMaskBefore: SelectionSnapshot | null = null;
+  private quickMaskLast: { x: number; y: number } | null = null;
+  private quickMaskRadius = 10;
+  private quickMaskAdds = true;
+  private quickMaskHardness = 0.85;
+  private quickMaskOpacity = 1;
 
   private isSelecting: boolean = false;
   private currentPoints: Array<{ x: number; y: number }> = [];
@@ -733,6 +742,108 @@ export class SelectionEngine {
     if (!this.hasSelection()) this.renderActiveSelection();
   }
 
+  // 快速遮色片 (Quick Mask): ruby-red translucent overlay painted directly with brush & eraser
+  public isQuickMaskMode(): boolean {
+    return this.quickMaskMode;
+  }
+
+  public setQuickMaskMode(enabled: boolean): void {
+    if (this.quickMaskMode === enabled) return;
+    if (!enabled && this.quickMaskBuf) {
+      this.finishQuickMaskBrush();
+    }
+    this.quickMaskMode = enabled;
+    this.renderActiveSelection();
+  }
+
+  public isQuickMaskBrushing(): boolean {
+    return this.quickMaskBuf !== null;
+  }
+
+  public startQuickMaskBrush(
+    x: number,
+    y: number,
+    radius: number,
+    adds: boolean,
+    hardness = 0.85,
+    opacity = 1,
+  ): void {
+    this.quickMaskBefore = this.exportSnapshot();
+    const total = this.canvasWidth * this.canvasHeight;
+    this.quickMaskBuf = this.activeMaskData && this.activeMaskData.data.length === total
+      ? new Uint8Array(this.activeMaskData.data)
+      : new Uint8Array(total);
+    this.quickMaskRadius = Math.max(1, radius);
+    this.quickMaskAdds = adds;
+    this.quickMaskHardness = Math.max(0, Math.min(1, hardness));
+    this.quickMaskOpacity = Math.max(0.05, Math.min(1, opacity));
+    this.quickMaskLast = null;
+    this.addQuickMaskBrushPoint(x, y);
+  }
+
+  public addQuickMaskBrushPoint(x: number, y: number): void {
+    const buf = this.quickMaskBuf;
+    if (!buf) return;
+    const w = this.canvasWidth;
+    const h = this.canvasHeight;
+    const r = this.quickMaskRadius;
+    const innerR = r * this.quickMaskHardness;
+    const span = Math.max(0.5, r - innerR);
+    const op = this.quickMaskOpacity;
+    const adds = this.quickMaskAdds;
+    const from = this.quickMaskLast ?? { x, y };
+    const dist = Math.hypot(x - from.x, y - from.y);
+    const steps = Math.max(1, Math.ceil(dist / Math.max(1, r * 0.28)));
+
+    for (let s = 1; s <= steps; s++) {
+      const cx = from.x + ((x - from.x) * s) / steps;
+      const cy = from.y + ((y - from.y) * s) / steps;
+      const y0 = Math.max(0, Math.floor(cy - r));
+      const y1 = Math.min(h - 1, Math.ceil(cy + r));
+      const x0 = Math.max(0, Math.floor(cx - r));
+      const x1 = Math.min(w - 1, Math.ceil(cx + r));
+      for (let py = y0; py <= y1; py++) {
+        const dy = py - cy;
+        const row = py * w;
+        for (let px = x0; px <= x1; px++) {
+          const dx = px - cx;
+          const d = Math.hypot(dx, dy);
+          if (d > r) continue;
+          const falloff = d <= innerR ? 1 : Math.max(0, 1 - (d - innerR) / span);
+          const strength = falloff * falloff * (3 - 2 * falloff) * op;
+          const idx = row + px;
+          const cur = buf[idx];
+          if (adds) {
+            const target = Math.min(255, Math.round(cur + (255 - cur) * strength));
+            if (target > cur) buf[idx] = target;
+          } else {
+            const target = Math.max(0, Math.round(cur * (1 - strength)));
+            if (target < cur) buf[idx] = target;
+          }
+        }
+      }
+    }
+    this.quickMaskLast = { x, y };
+    const { bounds, activePixelCount } = computeMaskBoundsAndCount(buf, w, h);
+    if (activePixelCount > 0) {
+      this.activeMaskData = { width: w, height: h, data: buf, bounds, activePixelCount };
+      this.activeSelection = { type: 'lasso', points: [], bounds };
+    } else {
+      this.activeMaskData = null;
+      this.activeSelection = null;
+    }
+    this.renderActiveSelection();
+  }
+
+  public finishQuickMaskBrush(): SelectionSnapshot | null {
+    const before = this.quickMaskBefore;
+    this.quickMaskBuf = null;
+    this.quickMaskBefore = null;
+    this.quickMaskLast = null;
+    this.renderActiveSelection();
+    return before;
+  }
+
   public clearSelection() {
     this.activeSelection = null;
     this.maskEdges = [];
@@ -900,13 +1011,23 @@ export class SelectionEngine {
       const dstRow = oy * ovW * 4;
       for (let ox = 0; ox < ovW; ox++) {
         const sx = Math.min(maxX, minX + ox * stride);
-        if (data[srcRow + sx] > 0) {
+        const cov = data[srcRow + sx];
+        if (cov > 0) {
           const k = dstRow + ox * 4;
-          // Premultiplied tint (0x3b82f6 @ alpha 0.12 => ~31/255)
-          rgba[k] = 7;
-          rgba[k + 1] = 16;
-          rgba[k + 2] = 30;
-          rgba[k + 3] = 31;
+          if (this.quickMaskMode) {
+            // Ruby red translucent film (0xef4444 @ up to 0.48 alpha, scaled by mask coverage)
+            const a = Math.max(1, Math.round((cov / 255) * 122));
+            rgba[k] = Math.round((239 * a) / 255);
+            rgba[k + 1] = Math.round((68 * a) / 255);
+            rgba[k + 2] = Math.round((68 * a) / 255);
+            rgba[k + 3] = a;
+          } else {
+            // Premultiplied tint (0x3b82f6 @ alpha 0.12 => ~31/255)
+            rgba[k] = 7;
+            rgba[k + 1] = 16;
+            rgba[k + 2] = 30;
+            rgba[k + 3] = 31;
+          }
         }
       }
     }
@@ -922,6 +1043,9 @@ export class SelectionEngine {
     this.selectionOverlaySprite.position.set(minX, minY);
     this.selectionOverlaySprite.scale.set(stride);
     this.selectionOverlaySprite.visible = true;
+
+    // In Quick Mask mode, show pure ruby red film without marching ants
+    if (this.quickMaskMode) return;
 
     // 2. Run-length merge horizontal and vertical boundary segments for fast marching ants
     for (let y = minY; y <= maxY; y++) {

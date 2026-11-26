@@ -35,6 +35,8 @@ export function useSelectionTools(ctx: ToolContext) {
   const [selectionAntialias, setSelectionAntialias] = useState(true);
   const [selectionFeather, setSelectionFeatherState] = useState(0);
   const [polygonPointCount, setPolygonPointCount] = useState(0);
+  const [quickMaskActive, setQuickMaskActiveState] = useState(false);
+  const quickMaskActiveRef = useRef(false);
   const setSelectionFeather = (radius: number) => setSelectionFeatherState(
     Number.isFinite(radius) ? Math.max(0, Math.min(64, Math.round(radius))) : 0,
   );
@@ -60,9 +62,65 @@ export function useSelectionTools(ctx: ToolContext) {
   const syncSelection = () => {
     const engine = selectionEngineRef.current;
     if (!engine) return;
-    brushRendererRef.current?.setSelectionMask(engine.getMaskArray(), engine.getMaskGraphic());
+    if (quickMaskActiveRef.current) {
+      brushRendererRef.current?.setSelectionMask(null, null);
+    } else {
+      brushRendererRef.current?.setSelectionMask(engine.getMaskArray(), engine.getMaskGraphic());
+    }
     setHasSelectionState(engine.hasSelection());
     setPolygonPointCount(engine.getPolygonPointCount());
+  };
+
+  /** 切換快速遮色片 (Quick Mask) 紅膜塗抹模式，關閉時立即將紅膜轉回精準選區 */
+  const toggleQuickMask = (force?: boolean) => {
+    const engine = selectionEngineRef.current;
+    const next = force !== undefined ? force : !quickMaskActiveRef.current;
+    if (next === quickMaskActiveRef.current) return;
+    quickMaskActiveRef.current = next;
+    setQuickMaskActiveState(next);
+    engine?.setQuickMaskMode(next);
+    syncSelection();
+  };
+
+  const isQuickMaskActive = () => quickMaskActiveRef.current;
+
+  const startQuickMaskStroke = (local: Point, isEraser: boolean) => {
+    const engine = selectionEngineRef.current;
+    if (!engine || !quickMaskActiveRef.current) return false;
+    engine.startQuickMaskBrush(
+      local.x,
+      local.y,
+      Math.max(1, ctx.brushProps.size / 2),
+      !isEraser,
+      ctx.brushProps.hardness ?? 0.85,
+      ctx.brushProps.opacity ?? 1,
+    );
+    return true;
+  };
+
+  const moveQuickMaskStroke = (local: Point) => {
+    const engine = selectionEngineRef.current;
+    if (!engine?.isQuickMaskBrushing()) return false;
+    engine.addQuickMaskBrushPoint(local.x, local.y);
+    return true;
+  };
+
+  const finishQuickMaskStroke = () => {
+    const engine = selectionEngineRef.current;
+    if (!engine?.isQuickMaskBrushing()) return false;
+    const before = engine.finishQuickMaskBrush();
+    syncSelection();
+    pushSelectionUndo(before, '快速遮色片塗抹');
+    return true;
+  };
+
+  const applyColorRangeMask = (mask: Uint8Array, mode: SelectionMode = 'replace') => {
+    const engine = selectionEngineRef.current;
+    if (!engine) return;
+    const before = engine.exportSnapshot();
+    engine.applyMask(mask, mode);
+    syncSelection();
+    pushSelectionUndo(before, '色域選取');
   };
 
   const pushSelectionUndo = (before: SelectionSnapshot | null, desc: string) => {
@@ -534,6 +592,13 @@ export function useSelectionTools(ctx: ToolContext) {
     refreshSelection: syncSelection,
     featherSelection,
     selectColorRange,
+    applyColorRangeMask,
+    quickMaskActive,
+    isQuickMaskActive,
+    toggleQuickMask,
+    startQuickMaskStroke,
+    moveQuickMaskStroke,
+    finishQuickMaskStroke,
     loadLayerSelection,
     startSelectBrush,
     moveSelectBrush,

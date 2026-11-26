@@ -7,6 +7,7 @@ import {
   LayerType,
   computeTidiedAscendingNonMaskIds,
   filterTopLevelSelectedLayers,
+  hasActiveLayerEffects,
   isLayerRulerEffectiveForLayer,
   orderLayersForReparenting,
   resolveEffectiveLayerColor,
@@ -14,7 +15,7 @@ import {
   selectLayerRange,
   tidyLayerModels,
 } from '@atelier/shared';
-import type { AdjustmentKind, LayerColorMeta, LayerRulerMeta, PaletteColorDisplayMode } from '@atelier/shared';
+import type { AdjustmentKind, LayerColorMeta, LayerEffectsMeta, LayerRulerMeta, PaletteColorDisplayMode } from '@atelier/shared';
 import { RulerManager } from '../engine/RulerManager';
 import { FolderAccessPanel } from './FolderAccessPanel';
 import type { FolderAccess } from './workspace/useFolderAccess';
@@ -74,6 +75,7 @@ import { useAnchoredPopover } from '../utils/popoverPosition';
 import { useWheelStep } from '../hooks/useWheelStep';
 import { ADJUSTMENT_KIND_ICONS, mergeIncludesAdjustment } from './adjustmentLayerMenu';
 import { LayerPaletteColorControl, LayerPaperRow, LayerTintControls, LayerTintSwatch, type ColorScope } from './LayerColorControls';
+import { LayerEffectsPopover } from './LayerEffectsPopover';
 import { getPaletteContrastColor } from '../utils/layerColorDisplay';
 
 /** Public / ownerless layers: neutral, so they never look like one painter's (every user colour is saturated) */
@@ -196,6 +198,7 @@ interface LayerPanelProps {
   onTransferLayer?: (layerId: string, targetUserId: string) => void;
   onReorderLayer: (layerId: string, newSortOrder: number, ascendingIds?: string[]) => void | Promise<void>;
   onUpdateLayerProps?: (layerId: string, props: Partial<LayerModel>) => void | Promise<void>;
+  onPreviewLayerEffects?: (layerId: string, effects: LayerEffectsMeta | null) => void;
   onBakeScreentone?: (layerId: string, params: { density: number; angleRad: number; dotScale: number }) => void;
   /** Per-viewer visibility overrides (not synced): layerId -> shown for me */
   localVisibility?: Record<string, boolean>;
@@ -461,6 +464,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   onTransferLayer,
   onReorderLayer,
   onUpdateLayerProps,
+  onPreviewLayerEffects,
   onBakeScreentone,
   localVisibility = {},
   onToggleLocalVisibility,
@@ -503,6 +507,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   const layers = allLayers.filter((l) => l.layerType !== 'mask');
   const maskOf = new Map(allLayers.filter((l) => l.layerType === 'mask' && l.parentId).map((m) => [m.parentId as string, m]));
   const activeMask = allLayers.find((l) => l.id === activeLayerId && l.layerType === 'mask') || null;
+  const [effectsOpenSignal, setEffectsOpenSignal] = useState(0);
   const canManage = (l: LayerModel) => (canManageProp ? canManageProp(l) : Boolean(user && l.ownerId === user.id));
   // Groups nest: a row's depth and whether a collapsed group above hides it
   const byId = new Map(layers.map((l) => [l.id, l]));
@@ -1190,6 +1195,18 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             effective={tintOf(active?.id ?? '')}
             onChangeLocal={onChangeLocalLayerColor}
             onChangeShared={(id, props) => onUpdateLayerProps?.(id, props)}
+          />
+          <LayerEffectsPopover
+            labels={t.layers.effects}
+            layer={activeMask ? null : active}
+            disabled={!canEditActive || !onUpdateLayerProps}
+            openSignal={effectsOpenSignal}
+            onPreview={onPreviewLayerEffects}
+            onCommit={(id, effects) => {
+              const target = allLayers.find((l) => l.id === id);
+              if (!target) return;
+              void onUpdateLayerProps?.(id, { meta: { ...(target.meta ?? {}), effects } });
+            }}
           />
           <button type="button" disabled={!canEditActive} aria-pressed={Boolean(active?.clipToBelow)}
             onClick={() => active && onUpdateLayerProps?.(active.id, { clipToBelow: !active.clipToBelow })}
@@ -1882,6 +1899,21 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                   <div className="flex shrink-0 items-center gap-1 pr-1 text-neutral-400">
                     {isClipped && <span title={t.layers.clippingMaskTooltip}><CornerDownRight className="h-3 w-3 text-pink-400" /></span>}
                     {isClippingBase && <span className="h-2 w-0.5 rounded bg-pink-400/70" title={t.layers.clippingBaseTooltip} />}
+                    {!isAdjustment && hasActiveLayerEffects(layer.meta?.effects) && (
+                      <button
+                        type="button"
+                        data-testid={`layer-fx-badge-${layer.id}`}
+                        title={t.layers.effects.tooltip}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelectLayer(layer.id);
+                          setEffectsOpenSignal((n) => n + 1);
+                        }}
+                        className="rounded border border-indigo-400/60 bg-indigo-500/25 px-1 py-0 text-[9px] font-bold leading-4 text-indigo-200 hover:bg-indigo-500/40"
+                      >
+                        fx
+                      </button>
+                    )}
                     {!isAdjustment && layer.alphaLocked && <span title={t.layers.lockedAlphaTooltip} className="text-amber-400"><AlphaLockIcon /></span>}
                     {layer.isLocked && <span title={t.layers.layerLocked}><Lock className="h-3 w-3 text-amber-400" /></span>}
                     {!isGroup && !layer.isLocked && !ownerDisplay.isPublicUnclaimed && (isAdjustment ? readOnly || !canManage(layer) : !canDrawRow) && (

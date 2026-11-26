@@ -111,6 +111,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       badge: 'JPEG / JPG',
     },
     {
+      id: 'webp',
+      title: t.export.webp,
+      desc: t.export.webpDesc,
+      icon: <FileImage className="w-5 h-5 text-teal-400" />,
+      ext: '.webp',
+      badge: 'WebP',
+    },
+    {
       id: 'transparent_png',
       title: t.export.transparentPng,
       desc: t.export.transparentPngDesc,
@@ -205,6 +213,17 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             { icc }
           );
           filename = `${safeTitle}.jpg`;
+          break;
+
+        case 'webp':
+          blob = await ExportEngine.exportWebp(
+            items,
+            canvas.width,
+            canvas.height,
+            canvas.bgColor,
+            0.92
+          );
+          filename = `${safeTitle}.webp`;
           break;
 
         case 'transparent_png':

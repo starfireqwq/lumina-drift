@@ -678,6 +678,14 @@ export const DEFAULT_SHORTCUTS: ShortcutItem[] = [
     currentCombo: 'Delete',
   },
   {
+    id: 'action_toggle_quick_mask',
+    category: 'actions',
+    name: '快速遮色片模式 (Quick Mask)',
+    description: '切換紅膜塗抹選取模式，以筆刷與橡皮擦塗抹後轉回選區',
+    defaultCombo: 'KeyQ',
+    currentCombo: 'KeyQ',
+  },
+  {
     id: 'action_brush_larger',
     category: 'actions',
     name: '增大筆刷尺寸 (下一級)',

@@ -270,8 +270,10 @@ export interface ToolOptionsBarProps {
   onSelectionMask: () => void;
   onSelectionGrow: (px: number) => void;
   onFeatherActiveSelection: (px: number) => void;
-  /** 依顏色範圍選取: pixels of the active layer near the main colour */
+  /** 依顏色範圍選取: opens the Color Range selection dialog */
   onColorRange: () => void;
+  quickMaskActive: boolean;
+  onToggleQuickMask: () => void;
   lassoErase: boolean;
   onLassoErase: (on: boolean) => void;
   pasteToNewLayer: boolean;
@@ -663,8 +665,43 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
       {isSelectTool && (
         <>
           <Sep />
-          <button type="button" onClick={p.onColorRange} title={tr.toolOptions.colorRangeTooltip}
-            className="shrink-0 rounded-md border border-neutral-700 px-2 py-1 text-[11px] text-neutral-200 hover:bg-neutral-800">{tr.toolOptions.colorRange}</button>
+          <button
+            type="button"
+            data-testid="open-color-range-btn"
+            onClick={p.onColorRange}
+            title={tr.toolOptions.colorRangeTooltip}
+            className="shrink-0 rounded-md border border-neutral-700 px-2 py-1 text-[11px] text-neutral-200 hover:bg-neutral-800"
+          >
+            {tr.toolOptions.colorRange}
+          </button>
+        </>
+      )}
+      {!p.isTransformActive && (
+        <>
+          <Sep />
+          <button
+            type="button"
+            data-testid="quick-mask-toggle"
+            aria-pressed={p.quickMaskActive}
+            onClick={p.onToggleQuickMask}
+            title={`${tr.toolOptions.quickMaskTooltip} (${shortcut('action_toggle_quick_mask')})`}
+            className={`flex shrink-0 items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors ${
+              p.quickMaskActive
+                ? 'border-rose-400 bg-rose-600/35 text-rose-100 ring-1 ring-rose-400/50'
+                : 'border-neutral-700 text-neutral-200 hover:bg-neutral-800'
+            }`}
+          >
+            <span className={`h-2 w-2 rounded-full ${p.quickMaskActive ? 'bg-rose-400 animate-pulse' : 'bg-rose-500/70'}`} />
+            <span>{tr.toolOptions.quickMask}</span>
+          </button>
+          {p.quickMaskActive && (
+            <span
+              data-testid="quick-mask-banner"
+              className="shrink-0 rounded-md border border-rose-500/40 bg-rose-950/50 px-2 py-0.5 text-[11px] text-rose-200"
+            >
+              {tr.toolOptions.quickMaskHint}
+            </span>
+          )}
         </>
       )}
       {(t === 'magic_wand' || t === 'lasso') && (

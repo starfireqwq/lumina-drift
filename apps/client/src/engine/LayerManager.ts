@@ -35,8 +35,10 @@ import {
 import { compressTileBuffer, decompressTileBuffer, DEFAULT_TILE_SIZE, type Affine2D, type BlendMode, type LayerModel, type TileCoord, type TileData } from '@atelier/shared';
 import { compileAdjustment, normalizeAdjustment, resolveAdjustmentScope, type LayerAdjustment } from '@atelier/shared';
 import { DEFAULT_LAYER_SUB_COLOR, resolveEffectiveLayerColor, type LayerColorMeta } from '@atelier/shared';
+import { hasActiveLayerEffects, layerEffectsKey, type LayerEffectsMeta } from '@atelier/shared';
 import { AdjustmentFilter } from './adjustmentFilter';
 import { LayerColorFilter } from './layerColorFilter';
+import { LayerEffectsFilter } from './layerEffectsFilter';
 import {
   adjustmentScopeIsFresh,
   adjustmentScopeKey,
@@ -267,6 +269,8 @@ class LayerItem implements PixiLayerItem {
   screentoneFilter?: Filter | null;
   layerColorFilter?: LayerColorFilter | null;
   layerColorKey?: string;
+  layerEffectsFilter?: LayerEffectsFilter | null;
+  layerEffectsKey?: string;
   onionFilter?: Filter | null;
   maskFilters?: Map<string, MaskFilter>;
   /** On a layer with filters, the filter that does its blend mode (see syncLayers) */
@@ -501,6 +505,23 @@ export class LayerManager {
     if (this.lastSyncedLayers) this.syncLayers(this.lastSyncedLayers);
   }
 
+  /** Live Layer Effects preview map (shown on this screen only while dragging sliders in the fx popover) */
+  private layerEffectsPreviews = new Map<string, LayerEffectsMeta>();
+  /** Isolated containers for folder/group layers that have active Layer Effects */
+  private groupEffectContainers = new Map<string, {
+    container: Container;
+    filter: LayerEffectsFilter;
+    blendFilter: { mode: string; filter: Filter } | null;
+    effectsKey: string;
+    minSortOrder: number;
+  }>();
+
+  public setLayerEffectsPreview(layerId: string, effects: LayerEffectsMeta | null): void {
+    if (effects) this.layerEffectsPreviews.set(layerId, effects);
+    else this.layerEffectsPreviews.delete(layerId);
+    if (this.lastSyncedLayers) this.syncLayers(this.lastSyncedLayers);
+  }
+
   public syncLayers(layers: LayerModel[]) {
     this.lastSyncedLayers = layers;
     const existingIds = new Set(this.layersMap.keys());
@@ -545,7 +566,26 @@ export class LayerManager {
         item.layerColorKey = undefined;
       }
 
-      // Groups can nest: every enclosing group's eye and opacity apply
+      // Non-destructive Layer Effects on drawable layers
+      const ownEffects = model.layerType !== 'mask' && model.layerType !== 'adjustment'
+        ? (this.layerEffectsPreviews.get(model.id) ?? model.meta?.effects ?? null)
+        : null;
+      if (hasActiveLayerEffects(ownEffects) && ownEffects) {
+        const fxKey = layerEffectsKey(ownEffects);
+        if (!item.layerEffectsFilter) {
+          item.layerEffectsFilter = new LayerEffectsFilter(ownEffects, this.layersContainer);
+        } else if (item.layerEffectsKey !== fxKey) {
+          item.layerEffectsFilter.setEffects(ownEffects);
+        }
+        item.layerEffectsKey = fxKey;
+      } else if (item.layerEffectsFilter) {
+        item.layerEffectsFilter.destroy();
+        item.layerEffectsFilter = null;
+        item.layerEffectsKey = undefined;
+      }
+
+      // Find nearest enclosing folder/group with active Layer Effects (so the folder composites as one silhouette)
+      let styledGroupModel: LayerModel | null = null;
       let effectiveVisible = model.isVisible;
       let effectiveAlpha = Math.max(0, Math.min(1, model.opacity));
       let parentId = model.layerType === 'mask' ? null : model.parentId;
@@ -553,8 +593,39 @@ export class LayerManager {
         const parentModel = byId.get(parentId);
         if (!parentModel) break;
         if (!parentModel.isVisible) effectiveVisible = false;
-        effectiveAlpha *= Math.max(0, Math.min(1, parentModel.opacity));
+        const gFx = parentModel.layerType === 'group'
+          ? (this.layerEffectsPreviews.get(parentModel.id) ?? parentModel.meta?.effects ?? null)
+          : null;
+        if (!styledGroupModel && hasActiveLayerEffects(gFx)) {
+          styledGroupModel = parentModel;
+        } else {
+          effectiveAlpha *= Math.max(0, Math.min(1, parentModel.opacity));
+        }
         parentId = parentModel.parentId;
+      }
+
+      if (styledGroupModel && model.layerType !== 'mask') {
+        const gFx = (this.layerEffectsPreviews.get(styledGroupModel.id) ?? styledGroupModel.meta?.effects)!;
+        const gFxKey = layerEffectsKey(gFx);
+        let entry = this.groupEffectContainers.get(styledGroupModel.id);
+        if (!entry) {
+          const container = new Container();
+          container.sortableChildren = true;
+          container.label = `group-effects:${styledGroupModel.id}`;
+          const filter = new LayerEffectsFilter(gFx, this.layersContainer);
+          this.layersContainer.addChild(container);
+          entry = { container, filter, blendFilter: null, effectsKey: gFxKey, minSortOrder: model.sortOrder };
+          this.groupEffectContainers.set(styledGroupModel.id, entry);
+        } else if (entry.effectsKey !== gFxKey) {
+          entry.filter.setEffects(gFx);
+          entry.effectsKey = gFxKey;
+        }
+        entry.minSortOrder = Math.min(entry.minSortOrder, model.sortOrder);
+        if (item.display.parent !== entry.container) {
+          entry.container.addChild(item.display);
+        }
+      } else if (item.display.parent !== this.layersContainer) {
+        this.layersContainer.addChild(item.display);
       }
 
       // Onion skin (display only): the neighbouring frame in one flat colour, or shaded by its own lights and darks
@@ -582,25 +653,77 @@ export class LayerManager {
       }
     }
 
-    // Re-index children only when display stacking order actually changed (avoids dirtying Pixi every anim frame)
-    let inOrder = this.layersContainer.children.length === drawable.length;
-    if (inOrder) {
-      for (let i = 0; i < drawable.length; i++) {
-        const item = this.layersMap.get(drawable[i].id);
-        if (!item || this.layersContainer.children[i] !== item.display) {
-          inOrder = false;
-          break;
+    // Reconcile folder/group effect containers (update filters/opacity/zIndex and remove unused ones)
+    const activeGroupIds = new Set<string>();
+    for (const [gid, entry] of this.groupEffectContainers) {
+      const gModel = byId.get(gid);
+      const gFx = gModel ? (this.layerEffectsPreviews.get(gid) ?? gModel.meta?.effects ?? null) : null;
+      if (!gModel || !hasActiveLayerEffects(gFx) || entry.container.children.length === 0) {
+        while (entry.container.children.length > 0) {
+          this.layersContainer.addChild(entry.container.children[0]);
         }
+        this.layersContainer.removeChild(entry.container);
+        entry.container.filters = null;
+        entry.filter.destroy();
+        entry.blendFilter?.filter.destroy();
+        entry.container.destroy();
+        this.groupEffectContainers.delete(gid);
+        continue;
       }
+      activeGroupIds.add(gid);
+      let gVisible = gModel.isVisible;
+      let gp = gModel.parentId ? byId.get(gModel.parentId) : undefined;
+      for (let d = 0; gp && d < 16; d++) {
+        if (!gp.isVisible) gVisible = false;
+        gp = gp.parentId ? byId.get(gp.parentId) : undefined;
+      }
+      entry.container.visible = gVisible;
+      entry.container.alpha = Math.max(0, Math.min(1, gModel.opacity));
+      entry.container.zIndex = entry.minSortOrder;
+      entry.minSortOrder = Number.POSITIVE_INFINITY;
+      const gMode = this.mapPixiBlendMode(gModel.blendMode);
+      const gFilters: Filter[] = [entry.filter];
+      if (gMode !== 'normal') {
+        let bf = entry.blendFilter;
+        if (!bf || bf.mode !== gMode) {
+          bf?.filter.destroy();
+          bf = { mode: gMode, filter: this.createBlendFilter(gMode) };
+          entry.blendFilter = bf;
+        }
+        gFilters.push(bf.filter);
+      } else if (entry.blendFilter) {
+        entry.blendFilter.filter.destroy();
+        entry.blendFilter = null;
+      }
+      const prevG = entry.container.filters;
+      const sameG = prevG && prevG.length === gFilters.length && gFilters.every((f, idx) => prevG[idx] === f);
+      if (!sameG) entry.container.filters = gFilters;
+      entry.container.sortChildren();
     }
-    if (!inOrder) {
-      for (let i = 0; i < drawable.length; i++) {
-        const item = this.layersMap.get(drawable[i].id);
-        if (item && item.display.parent === this.layersContainer) {
-          this.layersContainer.setChildIndex(item.display, i);
+
+    // Re-index children only when display stacking order actually changed (avoids dirtying Pixi every anim frame)
+    if (activeGroupIds.size > 0) {
+      this.layersContainer.sortChildren();
+    } else {
+      let inOrder = this.layersContainer.children.length === drawable.length;
+      if (inOrder) {
+        for (let i = 0; i < drawable.length; i++) {
+          const item = this.layersMap.get(drawable[i].id);
+          if (!item || this.layersContainer.children[i] !== item.display) {
+            inOrder = false;
+            break;
+          }
         }
       }
-      this.layersContainer.sortChildren();
+      if (!inOrder) {
+        for (let i = 0; i < drawable.length; i++) {
+          const item = this.layersMap.get(drawable[i].id);
+          if (item && item.display.parent === this.layersContainer) {
+            this.layersContainer.setChildIndex(item.display, i);
+          }
+        }
+        this.layersContainer.sortChildren();
+      }
     }
 
     // Layer masks (on layers and on groups) are never drawn: they mask through MaskFilters,
@@ -785,14 +908,15 @@ export class LayerManager {
         item.screentoneFilter = null;
       }
 
-      // Colour follows screentone and precedes the clip, masks and onion skin.
-      const hasAnyFilter = Boolean(item.screentoneFilter || item.layerColorFilter || clip.length || masks.length || item.onionFilter);
+      // Colour follows screentone and precedes clip/masks; Layer Effects wrap around masked/clipped pixels before onion skin & blend.
+      const hasAnyFilter = Boolean(item.screentoneFilter || item.layerColorFilter || clip.length || masks.length || item.layerEffectsFilter || item.onionFilter);
       const activeFilters: Filter[] = hasAnyFilter
         ? [
             ...(item.screentoneFilter ? [item.screentoneFilter] : []),
             ...(item.layerColorFilter ? [item.layerColorFilter] : []),
             ...clip,
             ...(masks.length ? maskFiltersOf() : []),
+            ...(item.layerEffectsFilter ? [item.layerEffectsFilter] : []),
             ...(item.onionFilter ? [item.onionFilter] : []),
           ]
         : [];
@@ -928,6 +1052,7 @@ export class LayerManager {
         (dep.model as LayerModel & { onionTint?: number }).onionTint ?? '',
         dep.model.screentoneEnabled ? `st${dep.model.screentoneLpi},${dep.model.screentoneAngle},${dep.model.screentoneDotScale}` : '',
         dep.layerColorKey ?? '',
+        dep.layerEffectsKey ?? '',
         // A resident layer drawn on as a whole texture does not bump its version per dab
         drawing && id === this.activeId ? performance.now() : '',
       ].join(';');
@@ -3206,6 +3331,10 @@ export class LayerManager {
       acc += `|${item.model.id}:${item.version}:${item.model.sortOrder}:${item.display.alpha}:${item.model.blendMode}`;
       if (item.adjust) acc += `:${item.adjust.paramsKey}`;
       if (item.layerColorKey) acc += `:${item.layerColorKey}`;
+      if (item.layerEffectsKey) acc += `:fx=${item.layerEffectsKey}`;
+    }
+    for (const [gid, entry] of this.groupEffectContainers) {
+      acc += `|gfx:${gid}:${entry.effectsKey}`;
     }
     return acc;
   }
@@ -3951,9 +4080,10 @@ export class LayerManager {
     item.destroyed = true;
     item.coldTiles.clear();
     item.cleanCache.clear();
-    this.layersContainer.removeChild(item.display);
+    item.display.parent?.removeChild(item.display);
     item.maskFilters?.forEach((f) => f.destroy());
     item.layerColorFilter?.destroy();
+    item.layerEffectsFilter?.destroy();
     item.blendFilter?.filter.destroy();
     if (item.adjust) {
       item.display.filters = null;

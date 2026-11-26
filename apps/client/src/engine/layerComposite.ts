@@ -5,13 +5,16 @@ import {
   evaluateTransformKeyframes,
   applyAdjustmentStep,
   applyLayerColorToImageData,
+  applyLayerEffectsToRgba,
   compileAdjustment,
+  hasActiveLayerEffects,
   normalizeAdjustment,
   resolveAdjustmentScope,
   resolveEffectiveLayerColor,
   type Affine2D,
   type BlendMode,
   type LayerColorMeta,
+  type LayerEffectsMeta,
   type LayerModel,
   type VectorStroke,
 } from '@atelier/shared';
@@ -83,6 +86,26 @@ function adjustmentBaseCanvas(item: LayerCanvasItem, width: number, height: numb
   for (let i = 0; i < cov.length; i++) img.data[i * 4 + 3] = cov[i];
   ctx.putImageData(img, 0, 0);
   return white;
+}
+
+/** Applies non-destructive Layer Effects onto a canvas copy; returns the original canvas when inactive. */
+export function applyLayerEffectsToCanvas(
+  source: HTMLCanvasElement,
+  effects: LayerEffectsMeta | null | undefined,
+): HTMLCanvasElement {
+  const { width, height } = source;
+  if (!hasActiveLayerEffects(effects) || !effects || width <= 0 || height <= 0) return source;
+  const out = document.createElement('canvas');
+  out.width = width;
+  out.height = height;
+  const ctx = out.getContext('2d');
+  if (!ctx) return source;
+  ctx.drawImage(source, 0, 0);
+  const img = ctx.getImageData(0, 0, width, height);
+  const styled = applyLayerEffectsToRgba(img.data, width, height, effects);
+  img.data.set(styled);
+  ctx.putImageData(img, 0, 0);
+  return out;
 }
 
 /** Applies the display colour, then the layer's own mask and any extra (group) masks */
@@ -171,8 +194,8 @@ export class LayerTree {
       return { item, clipBase: item.layer.clipToBelow ? base : null };
     });
   }
-  /** Final pixels of one layer: display colour, own and group masks, then clipping */
-  flattened(item: LayerCanvasItem, clipBase: LayerCanvasItem | null): HTMLCanvasElement {
+  /** Final pixels of one layer: display colour, own and group masks, clipping, then own layer effects */
+  flattened(item: LayerCanvasItem, clipBase: LayerCanvasItem | null, opts?: { skipGroupMasks?: boolean; skipEffects?: boolean }): HTMLCanvasElement {
     if (isAdjustmentItem(item)) {
       // No pixels of its own (its effect is in the merged picture)
       const empty = document.createElement('canvas');
@@ -181,17 +204,23 @@ export class LayerTree {
       return empty;
     }
     const { config } = resolveEffectiveLayerColor(item.layer.id, this.layersById);
-    const src = maskedLayerCanvas(item, this.groupMasks(item), config);
-    if (!clipBase || clipBase === item) return src;
-    const out = document.createElement('canvas');
-    out.width = src.width;
-    out.height = src.height;
-    const ctx = out.getContext('2d')!;
-    ctx.drawImage(src, 0, 0);
-    ctx.globalCompositeOperation = 'destination-in';
-    ctx.drawImage(isAdjustmentItem(clipBase) ? adjustmentBaseCanvas(clipBase, src.width, src.height) : maskedLayerCanvas(clipBase), 0, 0);
-    if (!this.visible(clipBase)) ctx.clearRect(0, 0, out.width, out.height);
-    return out;
+    const src = maskedLayerCanvas(item, opts?.skipGroupMasks ? [] : this.groupMasks(item), config);
+    let result = src;
+    if (clipBase && clipBase !== item) {
+      const out = document.createElement('canvas');
+      out.width = src.width;
+      out.height = src.height;
+      const ctx = out.getContext('2d')!;
+      ctx.drawImage(src, 0, 0);
+      ctx.globalCompositeOperation = 'destination-in';
+      ctx.drawImage(isAdjustmentItem(clipBase) ? adjustmentBaseCanvas(clipBase, src.width, src.height) : maskedLayerCanvas(clipBase), 0, 0);
+      if (!this.visible(clipBase)) ctx.clearRect(0, 0, out.width, out.height);
+      result = out;
+    }
+    if (!opts?.skipEffects && hasActiveLayerEffects(item.layer.meta?.effects)) {
+      result = applyLayerEffectsToCanvas(result, item.layer.meta!.effects);
+    }
+    return result;
   }
 }
 
@@ -285,20 +314,87 @@ function drawLayerList(
   list: readonly DrawableEntry[],
   all: readonly DrawableEntry[],
   width: number,
-  height: number
+  height: number,
+  activeGroupScopeId?: string,
 ) {
-  for (const { item, clipBase } of list) {
-    if (!tree.visible(item)) continue;
+  const nearestStyledGroup = (item: LayerCanvasItem): LayerCanvasItem | null => {
+    let p = item.layer.parentId ? tree.byId.get(item.layer.parentId) : undefined;
+    for (let depth = 0; p && depth < 16; depth++) {
+      if (p.layer.id === activeGroupScopeId) return null;
+      if (tree.isGroup(p) && hasActiveLayerEffects(p.layer.meta?.effects)) return p;
+      p = p.layer.parentId ? tree.byId.get(p.layer.parentId) : undefined;
+    }
+    return null;
+  };
+
+  let idx = 0;
+  while (idx < list.length) {
+    const { item, clipBase } = list[idx];
+    if (!tree.visible(item)) {
+      idx++;
+      continue;
+    }
+
+    // If this drawable sits inside a folder with active Layer Effects, composite that folder's
+    // contiguous slice into an isolated canvas, apply the folder's effects, and draw it as one unit.
+    const styledGroup = nearestStyledGroup(item);
+    if (styledGroup) {
+      const groupId = styledGroup.layer.id;
+      const isInGroup = (entry: DrawableEntry): boolean => {
+        let p = entry.item.layer.parentId ? tree.byId.get(entry.item.layer.parentId) : undefined;
+        for (let d = 0; p && d < 16; d++) {
+          if (p.layer.id === groupId) return true;
+          p = p.layer.parentId ? tree.byId.get(p.layer.parentId) : undefined;
+        }
+        return false;
+      };
+      const slice: DrawableEntry[] = [];
+      while (idx < list.length && isInGroup(list[idx])) {
+        slice.push(list[idx]);
+        idx++;
+      }
+      const scratch = document.createElement('canvas');
+      scratch.width = width;
+      scratch.height = height;
+      const sctx = scratch.getContext('2d');
+      if (sctx) {
+        drawLayerList(sctx, tree, slice, all, width, height, groupId);
+        // Apply folder's own mask if enabled
+        if (styledGroup.mask?.enabled) {
+          const img = sctx.getImageData(0, 0, width, height);
+          const cov = maskCoverageSized(styledGroup.mask, width, height);
+          for (let p = 0; p < cov.length; p++) img.data[p * 4 + 3] = (img.data[p * 4 + 3] * cov[p]) / 255;
+          sctx.putImageData(img, 0, 0);
+        }
+        const styled = applyLayerEffectsToCanvas(scratch, styledGroup.layer.meta!.effects);
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, Math.min(1, styledGroup.layer.opacity));
+        ctx.globalCompositeOperation = canvasCompositeOp(styledGroup.layer.blendMode);
+        ctx.drawImage(styled, 0, 0);
+        ctx.restore();
+      }
+      scratch.width = 0;
+      scratch.height = 0;
+      continue;
+    }
+
+    idx++;
     if (isAdjustmentItem(item)) {
       applyAdjustmentItem(ctx, tree, item, all, width, height);
       continue;
     }
     ctx.save();
-    ctx.globalAlpha = Math.max(0, Math.min(1, tree.opacity(item)));
+    let op = tree.opacity(item);
+    if (activeGroupScopeId) {
+      const groupItem = tree.byId.get(activeGroupScopeId);
+      const groupOp = groupItem ? Math.max(0.0001, groupItem.layer.opacity) : 1;
+      op = Math.min(1, op / groupOp);
+    }
+    ctx.globalAlpha = Math.max(0, Math.min(1, op));
     ctx.globalCompositeOperation = canvasCompositeOp(item.layer.blendMode);
     const m = tree.transformMatrix(item, width, height);
     if (!m.isIdentity) ctx.transform(m.a, m.b, m.c, m.d, m.tx, m.ty);
-    ctx.drawImage(tree.flattened(item, clipBase), 0, 0);
+    ctx.drawImage(tree.flattened(item, clipBase, { skipGroupMasks: Boolean(activeGroupScopeId) }), 0, 0);
     ctx.restore();
   }
 }

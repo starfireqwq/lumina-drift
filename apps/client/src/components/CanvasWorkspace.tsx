@@ -10,6 +10,7 @@ import {
   type PluginTimelineBridge,
 } from '../plugins/pluginCanvasBridge';
 import { createSelectionEngineBridge } from '../plugins/pluginSelectionBridge';
+import { ColorRangeDialog, type ColorRangeSourceBuffer, type ColorRangeSourceMode } from './ColorRangeDialog';
 import { getPluginLabels } from '../plugins/pluginLabels';
 import { getPlugins, subscribePlugins } from '../plugins/pluginStore';
 import {
@@ -1138,6 +1139,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   // Phase 10: Vector Engine & Color Curves / Gradient Map Modals
   const [isColorCurvesOpen, setIsColorCurvesOpen] = useState<boolean>(false);
   const [isGradientMapOpen, setIsGradientMapOpen] = useState<boolean>(false);
+  const [isColorRangeOpen, setIsColorRangeOpen] = useState<boolean>(false);
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
   const filterMenuOpenRef = useRef(false);
   filterMenuOpenRef.current = filterMenuOpen;
@@ -1445,6 +1447,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     pasteLayers: () => {},
     duplicateLayers: (_ids: string[]) => {},
     clearSelection: () => {},
+    toggleQuickMask: () => {},
     animAddCel: async () => {},
     animAddBlank: async () => {},
     animJumpKeyframe: (_dir: -1 | 1) => {},
@@ -2356,6 +2359,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         // Tool, Layer, Filter & Navigation hotkeys (when not in an input)
         const targetTag = (ev.target as HTMLElement)?.tagName?.toLowerCase();
         if (targetTag !== 'input' && targetTag !== 'textarea') {
+          if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_toggle_quick_mask'), ev)) {
+            ev.preventDefault();
+            if (!ev.repeat) shortcutActionsRef.current.toggleQuickMask();
+            return;
+          }
           // --- 1. Layer & Group Management Hotkeys ---
           if (shortcutMgr.matchesEvent(shortcutMgr.getComboForAction('action_layer_rename'), ev) || ev.code === 'F2') {
             ev.preventDefault();
@@ -4604,6 +4612,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     createLayer: createLayerFromUser,
     deleteLayer: deleteLayerFromUser,
     clearSelection: () => editSelectionFromUser('selection.clear'),
+    toggleQuickMask: () => selection.toggleQuickMask(),
     selectTool: handleSelectTool,
     selectSubTool: handleSelectSubTool,
     activateCategoryShortcut: handleCategoryShortcut,
@@ -8004,6 +8013,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           onClaimLayer={onClaimLayer || (() => {})}
           onReorderLayer={onReorderLayer || (() => {})}
           onUpdateLayerProps={updateLayerPropsFromPanel}
+          onPreviewLayerEffects={(layerId, effects) => layerManagerRef.current?.setLayerEffectsPreview(layerId, effects)}
           onBakeScreentone={(layerId, params) => handleBakeScreentone(layerId, params)}
           localVisibility={localVisibility}
           onToggleLocalVisibility={toggleLocalVisibility}
@@ -8110,7 +8120,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         onSelectionTransform={() => startTransformMode()}
         onSelectionMask={() => { if (activeLayer) void addLayerMask(activeLayer.layerType === 'mask' && activeLayer.parentId ? activeLayer.parentId : activeLayer.id); }}
         onFeatherActiveSelection={selection.featherSelection}
-        onColorRange={() => selection.selectColorRange()}
+        onColorRange={() => setIsColorRangeOpen(true)}
+        quickMaskActive={selection.quickMaskActive}
+        onToggleQuickMask={() => selection.toggleQuickMask()}
         lassoErase={selection.lassoErase}
         onLassoErase={selection.setLassoErase}
         eraserMode={brushProps.eraserMode === 'soft' ? 'soft' : 'hard'}
@@ -9145,6 +9157,51 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         onPreview={filterCallbacks.gradient}
         onApply={(stops, opacity) => runLayerFilter({ id: 'gradient', values: { stops, opacity } }, false)}
       /></Suspense>}
+
+      {isColorRangeOpen && (
+        <ColorRangeDialog
+          open={isColorRangeOpen}
+          initialColor={brushProps.color}
+          initialFuzziness={Math.max(10, Math.min(180, wandTolerance))}
+          initialCombineMode={selectionMode}
+          canSampleLayer={Boolean(activeLayer && activeLayer.layerType !== 'group' && activeLayer.layerType !== 'adjustment' && activeLayer.layerType !== 'mask')}
+          readSource={async (mode: ColorRangeSourceMode): Promise<ColorRangeSourceBuffer | null> => {
+            const lm = layerManagerRef.current;
+            if (!lm || !canvas) return null;
+            if (mode === 'layer') {
+              const target = activeLayerRef.current;
+              if (target && lm.getLayerItem(target.id)) {
+                const [pm] = await lm.readAsync(target.id, [{ x: 0, y: 0, w: canvas.width, h: canvas.height }]);
+                const rgba = new Uint8ClampedArray(pm.length);
+                for (let i = 0; i < pm.length; i += 4) {
+                  const a = pm[i + 3];
+                  if (!a) continue;
+                  if (a === 255) {
+                    rgba[i] = pm[i];
+                    rgba[i + 1] = pm[i + 1];
+                    rgba[i + 2] = pm[i + 2];
+                    rgba[i + 3] = 255;
+                  } else {
+                    const k = 255 / a;
+                    rgba[i] = Math.min(255, Math.round(pm[i] * k));
+                    rgba[i + 1] = Math.min(255, Math.round(pm[i + 1] * k));
+                    rgba[i + 2] = Math.min(255, Math.round(pm[i + 2] * k));
+                    rgba[i + 3] = a;
+                  }
+                }
+                return { rgba, width: canvas.width, height: canvas.height };
+              }
+            }
+            const merged = lm.renderCompositeCanvas({ transparent: false });
+            const ctx2d = merged.getContext('2d');
+            if (!ctx2d) return null;
+            const img = ctx2d.getImageData(0, 0, merged.width, merged.height);
+            return { rgba: img.data, width: merged.width, height: merged.height };
+          }}
+          onApply={(mask, mode) => selection.applyColorRangeMask(mask, mode)}
+          onClose={() => setIsColorRangeOpen(false)}
+        />
+      )}
 
       <OverlayPresence open={fill.fullFillLayer !== null} kind="dialog">
         <AtelierModal title={t.toolOptions.fullFillTitle} icon={<AlertCircle />} width="sm"

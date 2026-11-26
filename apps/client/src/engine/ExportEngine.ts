@@ -1,9 +1,9 @@
-import { LayerModel, BlendMode, normalizeAdjustment } from '@atelier/shared';
+import { LayerModel, BlendMode, hasActiveLayerEffects, hexToRgb01, normalizeAdjustment, type LayerEffectsMeta } from '@atelier/shared';
 import JSZip from 'jszip';
-import { writePsd, Psd, Layer as PsdLayer } from 'ag-psd';
+import { writePsd, Psd, Layer as PsdLayer, type LayerEffectsInfo } from 'ag-psd';
 
 import { canEmbedIccInRgbImage, embedIccInJpeg, embedIccInPng, type IccEmbedChoice } from './color/iccEmbed';
-import { LayerCanvasItem, LayerTree, compositeLayers, isAdjustmentItem, maskCoverage } from './layerComposite';
+import { applyLayerEffectsToCanvas, LayerCanvasItem, LayerTree, compositeLayers, isAdjustmentItem, maskCoverage } from './layerComposite';
 import { encodeKraDocument, KRA_MIMETYPE, type KraNodeInput } from './kraEncoder';
 import { luminaToPsdAdjustment, psdIsolatedGroupIds } from './psdAdjustmentMapping';
 import {
@@ -123,7 +123,7 @@ function greyMaskCanvas(mask: HTMLCanvasElement, inverted = false): HTMLCanvasEl
   return out;
 }
 
-export type ExportFormat = 'lumina' | 'merged_png' | 'transparent_png' | 'jpeg' | 'psd' | 'ora' | 'kra' | 'layers_zip';
+export type ExportFormat = 'lumina' | 'merged_png' | 'transparent_png' | 'jpeg' | 'webp' | 'psd' | 'ora' | 'kra' | 'layers_zip';
 
 export class ExportEngine {
   /**
@@ -204,6 +204,29 @@ export class ExportEngine {
     if (!icc) return blob;
     const bytes = embedIccInJpeg(new Uint8Array(await blob.arrayBuffer()), icc.bytes);
     return new Blob([bytes], { type: blob.type });
+  }
+
+  /**
+   * 1.2 Export Merged WebP (.webp) with optional transparency and high quality
+   */
+  public static async exportWebp(
+    layerItems: LayerCanvasItem[],
+    width: number,
+    height: number,
+    bgColor: string | null = '#FFFFFF',
+    quality: number = 0.92,
+  ): Promise<Blob> {
+    const mergedCanvas = this.compositeLayers(layerItems, width, height, bgColor);
+    return await new Promise<Blob>((resolve, reject) => {
+      mergedCanvas.toBlob(
+        (blob) => {
+          if (blob) resolve(blob);
+          else reject(new Error('WebP conversion failed'));
+        },
+        'image/webp',
+        quality,
+      );
+    });
   }
 
   /**
@@ -940,12 +963,15 @@ ${await stackXml(null, '    ')}  </stack>
         if (tree.isGroup(item)) {
           return [{ ...properties, kind: 'group', children: nodesOf(layer.id) }];
         }
+        const paintCanvas = hasActiveLayerEffects(layer.meta?.effects)
+          ? applyLayerEffectsToCanvas(item.canvas, layer.meta!.effects)
+          : item.canvas;
         return [{
           ...properties,
           kind: 'paint',
           alphaLocked: layer.alphaLocked,
           clipToBelow: layer.clipToBelow,
-          rgba: readSized(item.canvas, (source) => source.getContext('2d')!.getImageData(0, 0, width, height).data, false),
+          rgba: readSized(paintCanvas, (source) => source.getContext('2d')!.getImageData(0, 0, width, height).data, false),
         }];
       });
 
@@ -982,9 +1008,70 @@ ${await stackXml(null, '    ')}  </stack>
     const tree = new LayerTree(layerItems);
     const isolatedGroups = psdIsolatedGroupIds(layerItems.map((i) => i.layer));
 
+    const toPsdColor = (hex: string) => {
+      const [r, g, b] = hexToRgb01(hex);
+      return { r: Math.round(r * 255), g: Math.round(g * 255), b: Math.round(b * 255) };
+    };
+    const mapPsdEffects = (fx: LayerEffectsMeta | null | undefined): LayerEffectsInfo | undefined => {
+      if (!hasActiveLayerEffects(fx) || !fx) return undefined;
+      const out: LayerEffectsInfo = { scale: 1 };
+      if (fx.border?.enabled && fx.border.mode === 'edge' && fx.border.width > 0 && fx.border.opacity > 0) {
+        out.stroke = [{
+          enabled: true,
+          present: true,
+          position: 'outside',
+          fillType: 'color',
+          blendMode: 'normal',
+          size: { value: fx.border.width, units: 'Pixels' },
+          opacity: fx.border.opacity,
+          color: toPsdColor(fx.border.color),
+        }];
+      }
+      if (fx.dropShadow?.enabled && fx.dropShadow.opacity > 0) {
+        const dist = Math.hypot(fx.dropShadow.offsetX, fx.dropShadow.offsetY);
+        const angle = dist > 0 ? Math.round((Math.atan2(-fx.dropShadow.offsetY, -fx.dropShadow.offsetX) * 180) / Math.PI) : 120;
+        out.dropShadow = [{
+          enabled: true,
+          present: true,
+          blendMode: 'multiply',
+          color: toPsdColor(fx.dropShadow.color),
+          opacity: fx.dropShadow.opacity,
+          distance: { value: Math.round(dist), units: 'Pixels' },
+          angle,
+          size: { value: Math.max(0, fx.dropShadow.blur), units: 'Pixels' },
+          choke: { value: Math.max(0, fx.dropShadow.spread ?? 0), units: 'Pixels' },
+          useGlobalLight: false,
+          antialiased: true,
+        }];
+      }
+      if (fx.outerGlow?.enabled && fx.outerGlow.opacity > 0) {
+        out.outerGlow = {
+          enabled: true,
+          present: true,
+          blendMode: 'screen',
+          color: toPsdColor(fx.outerGlow.color),
+          opacity: fx.outerGlow.opacity,
+          size: { value: Math.max(0, fx.outerGlow.radius), units: 'Pixels' },
+          choke: { value: Math.max(0, fx.outerGlow.spread ?? 0), units: 'Pixels' },
+          antialiased: true,
+        };
+      }
+      if (fx.colorOverlay?.enabled && fx.colorOverlay.opacity > 0) {
+        out.solidFill = [{
+          enabled: true,
+          present: true,
+          blendMode: this.mapToPsdBlendMode(fx.colorOverlay.blendMode ?? 'normal') as any,
+          color: toPsdColor(fx.colorOverlay.color),
+          opacity: fx.colorOverlay.opacity,
+        }];
+      }
+      return (out.stroke || out.dropShadow || out.outerGlow || out.solidFill) ? out : undefined;
+    };
+
     const toPsd = (item: LayerCanvasItem): PsdLayer | null => {
       const isGroup = tree.isGroup(item);
       const blend = this.mapToPsdBlendMode(item.layer.blendMode);
+      const psdEffects = mapPsdEffects(item.layer.meta?.effects);
       const layer: PsdLayer = {
         name: item.layer.name,
         opacity: item.layer.opacity,
@@ -993,6 +1080,7 @@ ${await stackXml(null, '    ')}  </stack>
         blendMode: (isGroup && blend === 'normal' && !isolatedGroups.has(item.layer.id) ? 'pass through' : blend) as any,
         hidden: !item.layer.isVisible,
         clipping: Boolean(item.layer.clipToBelow) && !isGroup,
+        ...(psdEffects ? { effects: psdEffects } : {}),
         ...(item.mask ? {
           mask: { canvas: greyMaskCanvas(item.mask.canvas, item.mask.inverted), top: 0, left: 0, bottom: height, right: width, defaultColor: 0, disabled: !item.mask.enabled },
         } : {}),
@@ -1003,7 +1091,12 @@ ${await stackXml(null, '    ')}  </stack>
         const adjustment = normalizeAdjustment(item.layer.meta?.adjustment);
         return adjustment ? { ...layer, adjustment: luminaToPsdAdjustment(adjustment).adjustment } : null;
       }
-      return { ...layer, canvas: item.canvas, top: 0, left: 0, bottom: height, right: width };
+      const fx = item.layer.meta?.effects;
+      // Photoshop has no native watercolor border effect, so bake watercolor border into layer pixels while keeping other PSD effects live
+      const layerCanvas = fx?.enabled && fx.border?.enabled && fx.border.mode === 'watercolor'
+        ? applyLayerEffectsToCanvas(item.canvas, { enabled: true, border: fx.border })
+        : item.canvas;
+      return { ...layer, canvas: layerCanvas, top: 0, left: 0, bottom: height, right: width };
     };
     const childrenOf = (parentId: string | null): PsdLayer[] =>
       tree.childrenOf(parentId).map(toPsd).filter((l): l is PsdLayer => l !== null);
