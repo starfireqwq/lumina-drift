@@ -1,13 +1,18 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   resolveDefaultBrushDynamics,
+  type BrushColorDynamicsConfig,
   type BrushDynamicChannel,
   type BrushDynamicsConfig,
   type BrushMixMode,
   type BrushTextureBlendMode,
+  type BrushTipPlayMode,
+  type ColorDynamicsScope,
   type DualBrushBlendMode,
+  type DualTipShape,
+  type PigmentBlendModel,
 } from '@atelier/shared';
-import { Upload, X } from 'lucide-react';
+import { Plus, Upload, X } from 'lucide-react';
 import type { BrushProperties } from '../engine/BrushRenderer';
 import { useWheelStep } from '../hooks/useWheelStep';
 import { useI18n } from '../context/I18nContext';
@@ -90,6 +95,7 @@ export const BrushEnginePanel: React.FC<BrushEnginePanelProps> = ({ brushProps: 
   const [preview, setPreview] = useState<string | null>(null);
   const textureFileRef = useRef<HTMLInputElement>(null);
   const dualFileRef = useRef<HTMLInputElement>(null);
+  const multiTipFileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const timer = setTimeout(() => setPreview(renderPreview()?.toDataURL() ?? null), 80);
@@ -129,8 +135,36 @@ export const BrushEnginePanel: React.FC<BrushEnginePanelProps> = ({ brushProps: 
   const section = 'space-y-1.5 rounded-lg border border-neutral-800 bg-neutral-900/60 p-2';
   const head = 'text-[11px] font-semibold text-neutral-200';
   const mixMode: BrushMixMode = p.mixMode ?? 'blend';
+  const pigmentModel: PigmentBlendModel = p.pigmentBlendMode ?? 'subtractive';
   const texMode: BrushTextureBlendMode = p.textureBlendMode ?? 'subtract';
   const dualMode: DualBrushBlendMode = p.dualBlendMode ?? 'multiply';
+  const dualShape: DualTipShape = p.dualTipShape ?? (p.dualTipUrl ? 'custom' : 'same');
+  const tipPlayMode: BrushTipPlayMode = p.tipPlayMode ?? 'single';
+  const tipUrls = p.tipUrls ?? [];
+  const colorDyn: BrushColorDynamicsConfig = {
+    scope: p.colorDynamics?.scope ?? 'perDab',
+    hueJitter: p.colorDynamics?.hueJitter ?? p.hueJitter ?? 0,
+    saturationJitter: p.colorDynamics?.saturationJitter ?? p.satJitter ?? 0,
+    lightnessJitter: p.colorDynamics?.lightnessJitter ?? p.valJitter ?? 0,
+    huePressure: p.colorDynamics?.huePressure ?? 0,
+    saturationPressure: p.colorDynamics?.saturationPressure ?? 0,
+    lightnessPressure: p.colorDynamics?.lightnessPressure ?? 0,
+    hueGradient: p.colorDynamics?.hueGradient ?? 0,
+    saturationGradient: p.colorDynamics?.saturationGradient ?? 0,
+    lightnessGradient: p.colorDynamics?.lightnessGradient ?? 0,
+    gradientLength: p.colorDynamics?.gradientLength ?? 400,
+    fgBgMix: p.colorDynamics?.fgBgMix ?? p.fgBgMix ?? 0,
+    fgBgGradient: p.colorDynamics?.fgBgGradient ?? false,
+  };
+  const patchColorDyn = (patch: Partial<BrushColorDynamicsConfig>) => {
+    const next: BrushColorDynamicsConfig = { ...colorDyn, ...patch };
+    const extra: Partial<BrushProperties> = { colorDynamics: next };
+    if ('hueJitter' in patch) extra.hueJitter = patch.hueJitter;
+    if ('saturationJitter' in patch) extra.satJitter = patch.saturationJitter;
+    if ('lightnessJitter' in patch) extra.valJitter = patch.lightnessJitter;
+    if ('fgBgMix' in patch) extra.fgBgMix = patch.fgBgMix;
+    onChange(extra);
+  };
 
   return (
     <div className="space-y-2" aria-label={t.studio.brushEngine} data-testid="brush-engine-panel">
@@ -314,6 +348,38 @@ export const BrushEnginePanel: React.FC<BrushEnginePanelProps> = ({ brushProps: 
         <Row label={t.studio.colorMixing} hint="" value={p.colorMixing ?? 0} min={0} max={1} onChange={(v) => onChange({ colorMixing: v })} />
         <Row label={t.studio.wetness} hint="" value={p.paintAmount ?? 0.7} min={0.05} max={1} onChange={(v) => onChange({ paintAmount: v })} />
         <Row label={t.studio.colorStretch} hint="" value={p.colorStretch ?? 0} min={0} max={1} onChange={(v) => onChange({ colorStretch: v })} />
+        <div className="space-y-1 pt-0.5">
+          <div className="text-[10px] text-neutral-400">{t.studio.pigmentModelLabel}</div>
+          <div role="radiogroup" aria-label={t.studio.pigmentModelLabel} className="flex flex-wrap gap-1">
+            {(
+              [
+                ['subtractive', t.studio.pigmentModelSubtractive],
+                ['oklab', t.studio.pigmentModelOklab],
+                ['rgb', t.studio.pigmentModelRgb],
+              ] as const
+            ).map(([id, label]) => (
+              <button
+                key={id}
+                type="button"
+                role="radio"
+                data-testid={`pigment-model-${id}`}
+                aria-checked={pigmentModel === id}
+                onClick={() => onChange({ pigmentBlendMode: id })}
+                className={`min-w-0 flex-1 rounded-md border px-1.5 py-0.5 text-[10px] ${
+                  pigmentModel === id
+                    ? 'border-indigo-400 bg-indigo-600 text-white'
+                    : 'border-neutral-700 text-neutral-300 hover:bg-neutral-800'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        {pigmentModel === 'subtractive' && (
+          <Row label={t.studio.pigmentStrength} hint="" value={p.pigmentStrength ?? 0.85} min={0} max={1} onChange={(v) => onChange({ pigmentStrength: v })} />
+        )}
+        <Row label={t.studio.chargeDepletion} hint="" value={p.chargeDepletion ?? 0} min={0} max={1} onChange={(v) => onChange({ chargeDepletion: v })} />
         <label className="flex items-center gap-2 pt-0.5 text-[11px] text-neutral-200">
           <input
             type="checkbox"
@@ -323,23 +389,64 @@ export const BrushEnginePanel: React.FC<BrushEnginePanelProps> = ({ brushProps: 
           />
           {t.studio.wetEdges}
         </label>
+        {p.wetEdges && (
+          <div className="space-y-1 border-l border-neutral-800 pl-2" data-testid="brush-wet-edge-controls">
+            <Row label={t.studio.wetEdgeStrength} hint="" value={p.wetEdgeStrength ?? 0.55} min={0} max={1} onChange={(v) => onChange({ wetEdgeStrength: v })} />
+            <Row label={t.studio.wetEdgeWidth} hint="" value={p.wetEdgeWidth ?? 0.22} min={0.05} max={0.5} step={0.01} onChange={(v) => onChange({ wetEdgeWidth: v })} />
+            <Row label={t.studio.wetEdgeDarkness} hint="" value={p.wetEdgeDarkness ?? 0.35} min={0} max={1} onChange={(v) => onChange({ wetEdgeDarkness: v })} />
+          </div>
+        )}
       </div>
 
-      {/* Color Dynamics (FG/BG Mix + HSV Jitter) */}
-      <div className={section}>
-        <div className="flex items-center justify-between gap-1">
+      {/* Color Dynamics (FG/BG Mix + HSL Random / Pressure / Stroke Gradient) */}
+      <div className={section} data-testid="brush-color-dynamics-section">
+        <div className="flex flex-wrap items-center justify-between gap-1">
           <div className={head}>{t.studio.colorJitter}</div>
-          <Pill
-            testId="dyn-fgbg-pressure"
-            active={Boolean(dyn.colorMix?.pressure)}
-            label={t.studio.dynPressure}
-            onClick={() => patchChannel('colorMix', { pressure: !dyn.colorMix?.pressure })}
-          />
+          <div className="flex items-center gap-1">
+            {(
+              [
+                ['perDab', t.studio.colorScopePerDab],
+                ['perStroke', t.studio.colorScopePerStroke],
+              ] as readonly [ColorDynamicsScope, string][]
+            ).map(([scopeId, label]) => (
+              <Pill
+                key={scopeId}
+                testId={`color-scope-${scopeId}`}
+                active={(colorDyn.scope ?? 'perDab') === scopeId}
+                label={label}
+                onClick={() => patchColorDyn({ scope: scopeId })}
+              />
+            ))}
+            <Pill
+              testId="dyn-fgbg-pressure"
+              active={Boolean(dyn.colorMix?.pressure)}
+              label={t.studio.dynPressure}
+              onClick={() => patchChannel('colorMix', { pressure: !dyn.colorMix?.pressure })}
+            />
+          </div>
         </div>
-        <Row label={t.studio.fgBgMix} hint="" value={p.fgBgMix ?? 0} min={0} max={1} step={0.01} onChange={(v) => onChange({ fgBgMix: v })} />
-        <Row label={t.studio.hueJitter} hint="" value={p.hueJitter ?? 0} min={0} max={1} onChange={(v) => onChange({ hueJitter: v })} />
-        <Row label={t.studio.satJitter} hint="" value={p.satJitter ?? 0} min={0} max={1} onChange={(v) => onChange({ satJitter: v })} />
-        <Row label={t.studio.valJitter} hint="" value={p.valJitter ?? 0} min={0} max={1} onChange={(v) => onChange({ valJitter: v })} />
+        <Row label={t.studio.fgBgMix} hint="" value={colorDyn.fgBgMix ?? 0} min={0} max={1} step={0.01} onChange={(v) => patchColorDyn({ fgBgMix: v })} />
+        <label className="flex items-center gap-2 text-[10px] text-neutral-300">
+          <input
+            type="checkbox"
+            data-testid="color-fgbg-gradient"
+            checked={Boolean(colorDyn.fgBgGradient)}
+            onChange={(e) => patchColorDyn({ fgBgGradient: e.target.checked })}
+          />
+          {t.studio.colorFgBgGradient}
+        </label>
+        <Row label={t.studio.hueJitter} hint="" value={colorDyn.hueJitter ?? 0} min={0} max={1} onChange={(v) => patchColorDyn({ hueJitter: v })} />
+        <Row label={t.studio.satJitter} hint="" value={colorDyn.saturationJitter ?? 0} min={0} max={1} onChange={(v) => patchColorDyn({ saturationJitter: v })} />
+        <Row label={t.studio.valJitter} hint="" value={colorDyn.lightnessJitter ?? 0} min={0} max={1} onChange={(v) => patchColorDyn({ lightnessJitter: v })} />
+        <div className="space-y-1 border-t border-neutral-800/80 pt-1">
+          <Row label={t.studio.colorHuePressure} hint="" value={colorDyn.huePressure ?? 0} min={-1} max={1} step={0.05} onChange={(v) => patchColorDyn({ huePressure: v })} />
+          <Row label={t.studio.colorSatPressure} hint="" value={colorDyn.saturationPressure ?? 0} min={-1} max={1} step={0.05} onChange={(v) => patchColorDyn({ saturationPressure: v })} />
+          <Row label={t.studio.colorLightPressure} hint="" value={colorDyn.lightnessPressure ?? 0} min={-1} max={1} step={0.05} onChange={(v) => patchColorDyn({ lightnessPressure: v })} />
+          <Row label={t.studio.colorHueGradient} hint="" value={colorDyn.hueGradient ?? 0} min={-1} max={1} step={0.05} onChange={(v) => patchColorDyn({ hueGradient: v })} />
+          <Row label={t.studio.colorSatGradient} hint="" value={colorDyn.saturationGradient ?? 0} min={-1} max={1} step={0.05} onChange={(v) => patchColorDyn({ saturationGradient: v })} />
+          <Row label={t.studio.colorLightGradient} hint="" value={colorDyn.lightnessGradient ?? 0} min={-1} max={1} step={0.05} onChange={(v) => patchColorDyn({ lightnessGradient: v })} />
+          <Row label={t.studio.colorGradientLength} hint="" value={colorDyn.gradientLength ?? 400} min={50} max={2000} step={50} unit="px" onChange={(v) => patchColorDyn({ gradientLength: v })} />
+        </div>
       </div>
 
       {/* Paper Texture */}
@@ -416,9 +523,14 @@ export const BrushEnginePanel: React.FC<BrushEnginePanelProps> = ({ brushProps: 
       </div>
 
       {/* Dual Brush */}
-      <div className={section}>
+      <div className={section} data-testid="brush-dual-section">
         <label className={`${head} flex flex-wrap items-center gap-1.5`}>
-          <input type="checkbox" checked={Boolean(p.dualBrush)} onChange={(e) => onChange({ dualBrush: e.target.checked })} />
+          <input
+            type="checkbox"
+            data-testid="brush-dual-toggle"
+            checked={Boolean(p.dualBrush)}
+            onChange={(e) => onChange({ dualBrush: e.target.checked })}
+          />
           <span>{t.studio.dualBrush}</span>
           <span className="font-normal text-neutral-500">{t.studio.dualBrushHint}</span>
         </label>
@@ -430,12 +542,15 @@ export const BrushEnginePanel: React.FC<BrushEnginePanelProps> = ({ brushProps: 
                   ['multiply', t.studio.dualModeMultiply],
                   ['subtract', t.studio.dualModeSubtract],
                   ['darken', t.studio.dualModeDarken],
+                  ['screen', t.studio.dualModeScreen],
+                  ['overlay', t.studio.dualModeOverlay],
                 ] as const
               ).map(([id, label]) => (
                 <button
                   key={id}
                   type="button"
                   role="radio"
+                  data-testid={`dual-mode-${id}`}
                   aria-checked={dualMode === id}
                   onClick={() => onChange({ dualBlendMode: id })}
                   className={`min-w-0 flex-1 rounded-md border px-1.5 py-0.5 text-[10px] ${
@@ -448,7 +563,40 @@ export const BrushEnginePanel: React.FC<BrushEnginePanelProps> = ({ brushProps: 
                 </button>
               ))}
             </div>
+            <div className="space-y-1">
+              <div className="text-[10px] text-neutral-400">{t.studio.dualTipShape}</div>
+              <div role="radiogroup" aria-label={t.studio.dualTipShape} className="flex flex-wrap gap-1">
+                {(
+                  [
+                    ['same', t.studio.dualShapeSame],
+                    ['round', t.studio.dualShapeRound],
+                    ['soft', t.studio.dualShapeSoft],
+                    ['speckle', t.studio.dualShapeSpeckle],
+                    ['bristle', t.studio.dualShapeBristle],
+                    ['square', t.studio.dualShapeSquare],
+                    ['custom', t.studio.dualShapeCustom],
+                  ] as const
+                ).map(([shapeId, label]) => (
+                  <button
+                    key={shapeId}
+                    type="button"
+                    role="radio"
+                    data-testid={`dual-shape-${shapeId}`}
+                    aria-checked={dualShape === shapeId}
+                    onClick={() => onChange({ dualTipShape: shapeId })}
+                    className={`rounded-md border px-1.5 py-0.5 text-[10px] ${
+                      dualShape === shapeId
+                        ? 'border-indigo-400 bg-indigo-600 text-white'
+                        : 'border-neutral-700 text-neutral-300 hover:bg-neutral-800'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <Row label={t.studio.dualSize} hint="" value={p.dualSize ?? 0.4} min={0.1} max={1} onChange={(v) => onChange({ dualSize: v })} />
+            <Row label={t.studio.dualSpacing} hint="" value={p.dualSpacing ?? 0.35} min={0.05} max={2} step={0.05} onChange={(v) => onChange({ dualSpacing: v })} />
             <Row label={t.studio.scatter} hint="" value={p.dualScatter ?? 0.6} min={0} max={2} onChange={(v) => onChange({ dualScatter: v })} />
             <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
               <button
@@ -462,7 +610,7 @@ export const BrushEnginePanel: React.FC<BrushEnginePanelProps> = ({ brushProps: 
               {p.dualTipUrl && (
                 <button
                   type="button"
-                  onClick={() => onChange({ dualTipUrl: null })}
+                  onClick={() => onChange({ dualTipUrl: null, dualTipShape: dualShape === 'custom' ? 'same' : dualShape })}
                   className="text-[10px] text-neutral-400 hover:text-white"
                 >
                   {t.studio.clearDualTip}
@@ -475,12 +623,106 @@ export const BrushEnginePanel: React.FC<BrushEnginePanelProps> = ({ brushProps: 
                 className="hidden"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
-                  if (f) void readImageAsDataUrl(f).then((url) => onChange({ dualTipUrl: url }));
+                  if (f) void readImageAsDataUrl(f).then((url) => onChange({ dualTipUrl: url, dualTipShape: 'custom' }));
                   e.target.value = '';
                 }}
               />
             </div>
           </>
+        )}
+      </div>
+
+      {/* Multi-Tip Playback */}
+      <div className={section} data-testid="brush-multitip-section">
+        <div className="flex flex-wrap items-center justify-between gap-1">
+          <div className={head}>{t.studio.multiTipTitle}</div>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              data-testid="multitip-add-btn"
+              onClick={() => multiTipFileRef.current?.click()}
+              className="flex items-center gap-1 rounded-md border border-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-200 hover:bg-neutral-800"
+            >
+              <Plus className="h-2.5 w-2.5" />
+              {t.studio.multiTipAdd}
+            </button>
+            {tipUrls.length > 0 && (
+              <button
+                type="button"
+                data-testid="multitip-clear-btn"
+                onClick={() => onChange({ tipUrls: [], tipPlayMode: 'single' })}
+                className="text-[10px] text-neutral-400 hover:text-white"
+              >
+                {t.studio.multiTipClear}
+              </button>
+            )}
+            <input
+              ref={multiTipFileRef}
+              type="file"
+              accept="image/png,image/webp,image/jpeg"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                const files = Array.from(e.target.files ?? []);
+                if (files.length > 0) {
+                  void Promise.all(files.map(readImageAsDataUrl)).then((urls) => {
+                    const nextUrls = [...tipUrls, ...urls];
+                    onChange({
+                      tipUrls: nextUrls,
+                      tipPlayMode: tipPlayMode === 'single' && nextUrls.length >= 2 ? 'sequential' : tipPlayMode,
+                    });
+                  });
+                }
+                e.target.value = '';
+              }}
+            />
+          </div>
+        </div>
+        <div role="radiogroup" aria-label={t.studio.multiTipTitle} className="flex flex-wrap gap-1">
+          {(
+            [
+              ['single', t.studio.multiTipSingle],
+              ['sequential', t.studio.multiTipSequential],
+              ['random', t.studio.multiTipRandom],
+              ['randomNoRepeat', t.studio.multiTipRandomNoRepeat],
+            ] as const
+          ).map(([modeId, label]) => (
+            <button
+              key={modeId}
+              type="button"
+              role="radio"
+              data-testid={`tip-play-${modeId}`}
+              aria-checked={tipPlayMode === modeId}
+              onClick={() => onChange({ tipPlayMode: modeId })}
+              className={`min-w-0 flex-1 rounded-md border px-1.5 py-0.5 text-[10px] ${
+                tipPlayMode === modeId
+                  ? 'border-indigo-400 bg-indigo-600 text-white'
+                  : 'border-neutral-700 text-neutral-300 hover:bg-neutral-800'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {tipUrls.length > 0 && (
+          <div className="flex flex-wrap gap-1 pt-0.5" data-testid="multitip-thumbnails">
+            {tipUrls.map((url, idx) => (
+              <div key={`${idx}_${url.slice(0, 24)}`} className="relative h-8 w-8 overflow-hidden rounded border border-neutral-700 bg-neutral-100">
+                <img src={url} alt={`Tip ${idx + 1}`} className="h-full w-full object-contain" />
+                <button
+                  type="button"
+                  aria-label={`${t.studio.multiTipClear} ${idx + 1}`}
+                  onClick={() => {
+                    const nextUrls = tipUrls.filter((_, i) => i !== idx);
+                    onChange({ tipUrls: nextUrls, ...(nextUrls.length <= 1 ? { tipPlayMode: 'single' } : {}) });
+                  }}
+                  className="absolute right-0 top-0 rounded-bl bg-neutral-900/80 p-0.5 text-neutral-300 hover:text-white"
+                >
+                  <X className="h-2 w-2" />
+                </button>
+              </div>
+            ))}
+          </div>
         )}
       </div>
 

@@ -28,18 +28,29 @@ const COMMON: Partial<BrushProperties> = {
   customTextureUrl: null,
   dualBrush: false,
   dualSize: 0.4,
+  dualSpacing: 0.35,
   dualScatter: 0.6,
   dualTipUrl: null,
   dualBlendMode: 'multiply',
+  dualTipShape: undefined, // Keep the renderer's fallback for presets with a legacy dual tip image.
+  tipUrls: [],
+  tipPlayMode: 'single',
   hueJitter: 0,
   satJitter: 0,
   valJitter: 0,
   fgBgMix: 0,
+  colorDynamics: undefined,
   angleMode: 'direction',
   tipAngle: 0,
   roundness: 1,
   tiltSize: 0,
   wetEdges: false,
+  wetEdgeStrength: 0.55,
+  wetEdgeWidth: 0.22,
+  wetEdgeDarkness: 0.35,
+  pigmentBlendMode: 'subtractive',
+  pigmentStrength: 0.85,
+  chargeDepletion: 0,
   dynamics: undefined,
 };
 
@@ -67,13 +78,22 @@ export const eraserStrokeProperties = (props: BrushProperties): BrushProperties 
   customTextureUrl: null,
   dualBrush: false,
   dualTipUrl: null,
+  dualTipShape: undefined,
+  tipUrls: [],
+  tipPlayMode: 'single',
   hueJitter: 0,
   satJitter: 0,
   valJitter: 0,
   fgBgMix: 0,
+  colorDynamics: undefined,
   roundness: 1,
   tiltSize: 0,
   wetEdges: false,
+  wetEdgeStrength: 0,
+  wetEdgeDarkness: 0,
+  pigmentBlendMode: 'rgb',
+  pigmentStrength: 0,
+  chargeDepletion: 0,
 });
 
 const KEY = 'atelier_brush_tools';
@@ -83,6 +103,8 @@ const strip = (p: Partial<BrushProperties>): Partial<BrushProperties> => {
   if (typeof rest.customBrushUrl === 'string' && rest.customBrushUrl.startsWith('blob:')) rest.customBrushUrl = null;
   if (typeof rest.customTextureUrl === 'string' && rest.customTextureUrl.startsWith('blob:')) rest.customTextureUrl = null;
   if (typeof rest.dualTipUrl === 'string' && rest.dualTipUrl.startsWith('blob:')) rest.dualTipUrl = null;
+  if (Array.isArray(rest.tipUrls)) rest.tipUrls = rest.tipUrls.filter((url) => typeof url === 'string' && !url.startsWith('blob:'));
+  else delete rest.tipUrls;
   return rest;
 };
 

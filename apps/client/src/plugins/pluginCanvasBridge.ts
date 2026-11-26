@@ -5,17 +5,22 @@ import {
   evaluateEasing,
   evaluateTransformKeyframes,
   normalizeBrushDynamics,
+  normalizeColorDynamics,
   type BlendMode,
+  type BrushColorDynamicsConfig,
   type BrushDynamicsConfig,
   type BrushMixMode,
   type BrushTextureBlendMode,
+  type BrushTipPlayMode,
   type CanvasMemberModel,
   type CelMark,
   type DualBrushBlendMode,
+  type DualTipShape,
   type KeyframeEasing,
   type LayerMeta,
   type LayerModel,
   type LayerPermissionModel,
+  type PigmentBlendModel,
   type ScopedUndoOp,
   type SelectionSnapshot,
   type TileCoord,
@@ -175,17 +180,28 @@ export interface PluginBrushState {
   colorStretch?: number;
   fgBgMix?: number;
   wetEdges?: boolean;
+  wetEdgeStrength?: number;
+  wetEdgeWidth?: number;
+  wetEdgeDarkness?: number;
+  pigmentBlendMode?: PigmentBlendModel;
+  pigmentStrength?: number;
+  chargeDepletion?: number;
   hueJitter?: number;
   satJitter?: number;
   valJitter?: number;
+  colorDynamics?: BrushColorDynamicsConfig;
   textureDensity?: number;
   textureScale?: number;
   textureInvert?: boolean;
   textureBlendMode?: BrushTextureBlendMode;
   dualBrush?: boolean;
   dualSize?: number;
+  dualSpacing?: number;
   dualScatter?: number;
   dualBlendMode?: DualBrushBlendMode;
+  dualTipShape?: DualTipShape;
+  tipUrls?: string[];
+  tipPlayMode?: BrushTipPlayMode;
   dynamics?: BrushDynamicsConfig;
 }
 
@@ -2111,8 +2127,12 @@ function parsePluginKeyframe(
 
 const VALID_MIX_MODES = new Set<BrushMixMode>(['blend', 'smudge', 'dilute']);
 const VALID_TEXTURE_BLEND_MODES = new Set<BrushTextureBlendMode>(['subtract', 'multiply', 'overlay']);
-const VALID_DUAL_BLEND_MODES = new Set<DualBrushBlendMode>(['multiply', 'subtract', 'darken']);
+const VALID_DUAL_BLEND_MODES = new Set<DualBrushBlendMode>(['multiply', 'subtract', 'darken', 'screen', 'overlay']);
 const VALID_ANGLE_MODES = new Set<'direction' | 'pen' | 'fixed'>(['direction', 'pen', 'fixed']);
+const VALID_DUAL_TIP_SHAPES = new Set<DualTipShape>(['same', 'round', 'soft', 'speckle', 'bristle', 'square', 'custom']);
+const VALID_TIP_PLAY_MODES = new Set<BrushTipPlayMode>(['single', 'sequential', 'random', 'randomNoRepeat']);
+const VALID_PIGMENT_BLEND_MODES = new Set<PigmentBlendModel>(['rgb', 'oklab', 'subtractive']);
+const EMBEDDED_RASTER_TIP = /^data:image\/(?:png|jpeg|webp|gif|avif|bmp);base64,[A-Za-z0-9+/]+={0,2}$/i;
 
 export function parsePluginBrushPatch(obj: Record<string, unknown>): PluginBrushPatch {
   if (obj.stabilizerLevel !== undefined) {
@@ -2154,12 +2174,18 @@ export function parsePluginBrushPatch(obj: Record<string, unknown>): PluginBrush
   parseBounded('paintAmount', 0, 1);
   parseBounded('colorStretch', 0, 1);
   parseBounded('fgBgMix', 0, 1);
+  parseBounded('wetEdgeStrength', 0, 1);
+  parseBounded('wetEdgeWidth', 0.05, 0.5);
+  parseBounded('wetEdgeDarkness', 0, 1);
+  parseBounded('pigmentStrength', 0, 1);
+  parseBounded('chargeDepletion', 0, 1);
   parseBounded('hueJitter', 0, 1);
   parseBounded('satJitter', 0, 1);
   parseBounded('valJitter', 0, 1);
   parseBounded('textureDensity', 0, 1);
   parseBounded('textureScale', 0.5, 4);
   parseBounded('dualSize', 0.1, 1);
+  parseBounded('dualSpacing', 0.05, 2);
   parseBounded('dualScatter', 0, 2);
 
   const parseBool = <K extends 'wetEdges' | 'textureInvert' | 'dualBrush'>(key: K) => {
@@ -2193,7 +2219,7 @@ export function parsePluginBrushPatch(obj: Record<string, unknown>): PluginBrush
       typeof obj.dualBlendMode !== 'string' ||
       !VALID_DUAL_BLEND_MODES.has(obj.dualBlendMode as DualBrushBlendMode)
     ) {
-      throw new Error('Brush dualBlendMode must be "multiply", "subtract", or "darken".');
+      throw new Error('Brush dualBlendMode must be "multiply", "subtract", "darken", "screen", or "overlay".');
     }
     patch.dualBlendMode = obj.dualBlendMode as DualBrushBlendMode;
   }
@@ -2205,6 +2231,38 @@ export function parsePluginBrushPatch(obj: Record<string, unknown>): PluginBrush
       throw new Error('Brush angleMode must be "direction", "pen", or "fixed".');
     }
     patch.angleMode = obj.angleMode as 'direction' | 'pen' | 'fixed';
+  }
+  const parseEnum = <K extends 'dualTipShape' | 'tipPlayMode' | 'pigmentBlendMode'>(
+    key: K, values: ReadonlySet<NonNullable<PluginBrushPatch[K]>>,
+  ) => {
+    if (obj[key] === undefined) return;
+    const value = obj[key] as NonNullable<PluginBrushPatch[K]>;
+    if (typeof value !== 'string' || !values.has(value)) {
+      throw new Error(`Brush ${key} must be one of ${[...values].join(', ')}.`);
+    }
+    patch[key] = value;
+  };
+  parseEnum('dualTipShape', VALID_DUAL_TIP_SHAPES);
+  parseEnum('tipPlayMode', VALID_TIP_PLAY_MODES);
+  parseEnum('pigmentBlendMode', VALID_PIGMENT_BLEND_MODES);
+
+  if (obj.tipUrls !== undefined) {
+    if (!Array.isArray(obj.tipUrls)) {
+      throw new Error('Brush tipUrls must be an array of embedded raster image data URLs.');
+    }
+    const tipUrls: unknown[] = [...obj.tipUrls];
+    // Loading an external URL here would give the plugin access to the renderer's network.
+    if (!tipUrls.every((url): url is string => typeof url === 'string' && EMBEDDED_RASTER_TIP.test(url))) {
+      throw new Error('Brush tipUrls must be an array of embedded raster image data URLs.');
+    }
+    patch.tipUrls = tipUrls;
+  }
+  if (obj.colorDynamics !== undefined) {
+    if (!obj.colorDynamics || typeof obj.colorDynamics !== 'object' || Array.isArray(obj.colorDynamics)) {
+      throw new Error('Brush colorDynamics must be an object.');
+    }
+    const normalized = normalizeColorDynamics(obj.colorDynamics as BrushColorDynamicsConfig);
+    if (normalized) patch.colorDynamics = normalized;
   }
   if (obj.dynamics !== undefined) {
     if (!obj.dynamics || typeof obj.dynamics !== 'object' || Array.isArray(obj.dynamics)) {

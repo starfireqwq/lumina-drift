@@ -6784,6 +6784,7 @@ import { runPhase8KraRoundTripChecks } from './phase8-kra-roundtrip.checks';
 import { runPhase8UiChecks } from './phase8-ui.checks';
 import { runV15Phase2RulerChecks } from './v15-phase2-rulers.checks';
 import { runDockPillChecks } from './dock-pill.checks';
+import { runV15Phase3BrushV3Checks } from './v15-phase3-brush-v3.checks';
 
 {
   assert.deepEqual(Object.keys(ADJUSTMENT_KIND_ICONS), ADJUSTMENT_KINDS);
@@ -6834,3 +6835,6 @@ console.log('v1.5 Phase 2 ruler engine checks passed');
 
 runDockPillChecks();
 console.log('Dock floating pill checks passed');
+
+await runV15Phase3BrushV3Checks();
+console.log('v1.5 Phase 3 brush engine v3 checks passed');

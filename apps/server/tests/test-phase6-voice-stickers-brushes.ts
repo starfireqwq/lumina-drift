@@ -124,6 +124,28 @@ async function runPhase6Tests() {
       colorMixing: 0.65,
       paintAmount: 0.8,
       pressureCurve: 's-curve',
+      dualBrush: true,
+      dualSize: 0.45,
+      dualSpacing: 0.3,
+      dualScatter: 0.7,
+      dualTipShape: 'bristle',
+      dualBlendMode: 'overlay',
+      tipUrls: ['data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII='],
+      tipPlayMode: 'randomNoRepeat',
+      colorDynamics: {
+        scope: 'perStroke',
+        hueJitter: 0.25,
+        lightnessPressure: 0.35,
+        hueGradient: 0.2,
+        gradientLength: 500,
+      },
+      wetEdges: true,
+      wetEdgeStrength: 0.65,
+      wetEdgeWidth: 0.24,
+      wetEdgeDarkness: 0.45,
+      pigmentBlendMode: 'subtractive',
+      pigmentStrength: 0.9,
+      chargeDepletion: 0.2,
     },
     tipDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=',
     tags: ['Oil', 'Impasto'],
@@ -146,6 +168,13 @@ async function runPhase6Tests() {
   assert.strictEqual(reimported[0].name, customPreset.name);
   assert.strictEqual(reimported[0].properties.colorMixing, 0.65);
   assert.strictEqual(reimported[0].properties.paintAmount, 0.8);
+  assert.strictEqual(reimported[0].properties.dualBrush, true);
+  assert.strictEqual(reimported[0].properties.dualTipShape, 'bristle');
+  assert.strictEqual(reimported[0].properties.dualBlendMode, 'overlay');
+  assert.strictEqual(reimported[0].properties.tipPlayMode, 'randomNoRepeat');
+  assert.strictEqual(reimported[0].properties.colorDynamics?.scope, 'perStroke');
+  assert.strictEqual(reimported[0].properties.wetEdgeDarkness, 0.45);
+  assert.strictEqual(reimported[0].properties.pigmentBlendMode, 'subtractive');
   console.log(`✓ Brush preset export/import round-trip verified: ${reimported[0].name}`);
 
   // --- 4. Testing Real-time WebRTC Voice Signaling & Floating Stickers Gateway ---

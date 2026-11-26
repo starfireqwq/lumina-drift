@@ -178,11 +178,19 @@ export function BrushToolset({ currentBrushProps, selectedId, onApplyPreset }: B
       }))) return;
     } else {
       const category = displayGroup ?? '自訂筆刷';
-      const { color, customBrushUrl, customTextureUrl, dualTipUrl, secondaryColor: _secondary, pressureCurve, ...settings } = currentBrushProps;
+      const {
+        color, customBrushUrl, customTextureUrl, dualTipUrl, secondaryColor: _secondary,
+        pressureCurve, tipUrls, colorDynamics, ...settings
+      } = currentBrushProps;
       const brush: AtelierBrushPreset = {
         id: newBrushId(), name: trimmed, category, version: '2.0',
-        properties: { ...settings, color, pressureCurve, customTextureUrl, dualTipUrl },
+        properties: {
+          ...settings, color, pressureCurve, customTextureUrl, dualTipUrl,
+          tipUrls: tipUrls ? [...tipUrls] : undefined,
+          colorDynamics: colorDynamics ? { ...colorDynamics } : undefined,
+        },
         tipDataUrl: customBrushUrl,
+        tipUrls: tipUrls ? [...tipUrls] : undefined,
         textureDataUrl: customTextureUrl ?? null,
         dualTipDataUrl: dualTipUrl ?? null,
         createdAt: Date.now(),

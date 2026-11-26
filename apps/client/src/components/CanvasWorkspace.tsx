@@ -2138,6 +2138,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       // Test hooks: the undo history (ops carry their foreign-pixel masks) lets browser checks explain an undo
       (window as any).__debugPixi = {
         app, viewport, layerManager, tileEngine, selectionEngine, vectorEngine, animationEngine: timeline,
+        brushRenderer,
         softProof,
         rulerManager: RulerManager.getInstance(),
         undo: scopedUndoRef.current, tileToRgba,
@@ -3157,6 +3158,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   const handleApplyPreset = (preset: AtelierBrushPreset) => {
     const tool = preset.properties.isEraser ? 'eraser' : preset.properties.brushType === 'pencil' ? 'pencil' : 'brush';
+    const presetTips = Array.isArray(preset.tipUrls) ? preset.tipUrls : preset.properties.tipUrls;
+    const tipUrls = Array.isArray(presetTips)
+      ? presetTips.filter((url) => typeof url === 'string' && url.trim().length > 0)
+      : [];
     handleSelectTool(tool, {
       ...BRUSH_TOOL_DEFAULTS[tool],
       ...preset.properties,
@@ -3169,6 +3174,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       customBrushUrl: preset.tipDataUrl || null,
       customTextureUrl: preset.textureDataUrl ?? preset.properties.customTextureUrl ?? null,
       dualTipUrl: preset.dualTipDataUrl ?? preset.properties.dualTipUrl ?? null,
+      tipUrls,
+      colorDynamics: preset.properties.colorDynamics ? { ...preset.properties.colorDynamics } : undefined,
     });
     setSelectedBrushId(preset.id);
   };
@@ -6682,17 +6689,28 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         ...(b.colorStretch !== undefined ? { colorStretch: b.colorStretch } : {}),
         ...(b.fgBgMix !== undefined ? { fgBgMix: b.fgBgMix } : {}),
         ...(b.wetEdges !== undefined ? { wetEdges: b.wetEdges } : {}),
+        ...(b.wetEdgeStrength !== undefined ? { wetEdgeStrength: b.wetEdgeStrength } : {}),
+        ...(b.wetEdgeWidth !== undefined ? { wetEdgeWidth: b.wetEdgeWidth } : {}),
+        ...(b.wetEdgeDarkness !== undefined ? { wetEdgeDarkness: b.wetEdgeDarkness } : {}),
+        ...(b.pigmentBlendMode !== undefined ? { pigmentBlendMode: b.pigmentBlendMode } : {}),
+        ...(b.pigmentStrength !== undefined ? { pigmentStrength: b.pigmentStrength } : {}),
+        ...(b.chargeDepletion !== undefined ? { chargeDepletion: b.chargeDepletion } : {}),
         ...(b.hueJitter !== undefined ? { hueJitter: b.hueJitter } : {}),
         ...(b.satJitter !== undefined ? { satJitter: b.satJitter } : {}),
         ...(b.valJitter !== undefined ? { valJitter: b.valJitter } : {}),
+        ...(b.colorDynamics !== undefined ? { colorDynamics: { ...b.colorDynamics } } : {}),
         ...(b.textureDensity !== undefined ? { textureDensity: b.textureDensity } : {}),
         ...(b.textureScale !== undefined ? { textureScale: b.textureScale } : {}),
         ...(b.textureInvert !== undefined ? { textureInvert: b.textureInvert } : {}),
         ...(b.textureBlendMode !== undefined ? { textureBlendMode: b.textureBlendMode } : {}),
         ...(b.dualBrush !== undefined ? { dualBrush: b.dualBrush } : {}),
         ...(b.dualSize !== undefined ? { dualSize: b.dualSize } : {}),
+        ...(b.dualSpacing !== undefined ? { dualSpacing: b.dualSpacing } : {}),
         ...(b.dualScatter !== undefined ? { dualScatter: b.dualScatter } : {}),
         ...(b.dualBlendMode !== undefined ? { dualBlendMode: b.dualBlendMode } : {}),
+        ...(b.dualTipShape !== undefined ? { dualTipShape: b.dualTipShape } : {}),
+        ...(b.tipUrls != null ? { tipUrls: [...b.tipUrls] } : {}),
+        ...(b.tipPlayMode !== undefined ? { tipPlayMode: b.tipPlayMode } : {}),
         ...(b.dynamics !== undefined ? { dynamics: structuredClone(b.dynamics) } : {}),
       };
     };

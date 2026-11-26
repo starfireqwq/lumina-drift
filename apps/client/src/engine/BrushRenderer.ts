@@ -10,23 +10,31 @@ import {
   Texture,
   TilingSprite,
 } from 'pixi.js';
+import 'pixi.js/advanced-blend-modes';
 import type { BrushTarget, Rect } from './LayerManager';
 import {
+  blendPigmentColors,
+  computeWetEdgeParams,
+  evaluateColorDynamics,
+  evaluateDynamicChannel,
   getSelectionMaskFactor,
+  hasActiveColorDynamics,
   MIN_BRUSH_SPACING,
   hexToRgb,
-  mixPigmentSubtractive,
   PressureCurveConfig,
   PressureCurveType,
   RgbColor,
   rgbToHex,
-  simulateWetColorPickup,
-  evaluateDynamicChannel,
-  evaluateFgBgMixRatio,
+  selectBrushTipIndex,
+  stepPigmentReservoir,
+  type BrushColorDynamicsConfig,
   type BrushDynamicsConfig,
   type BrushMixMode,
   type BrushTextureBlendMode,
+  type BrushTipPlayMode,
   type DualBrushBlendMode,
+  type DualTipShape,
+  type PigmentBlendModel,
 } from '@atelier/shared';
 import { RulerManager } from './RulerManager';
 import { wrapCoord } from './wrapAround';
@@ -63,9 +71,14 @@ export interface BrushProperties {
   customTextureUrl?: string | null; // 自訂或匯入的紙紋貼圖
   dualBrush?: boolean; // 雙重筆刷: the stroke only shows where a second, scattered tip also lands
   dualSize?: number; // second tip size as a share of the main tip, 0.1–1
+  dualSpacing?: number;
   dualScatter?: number; // how far the second tips scatter, 0–2
+  dualTipShape?: DualTipShape;
   dualTipUrl?: string | null; // 雙重筆刷自訂副筆尖貼圖
-  dualBlendMode?: DualBrushBlendMode; // 雙重筆刷混合模式：multiply / subtract / darken
+  dualBlendMode?: DualBrushBlendMode;
+  tipUrls?: string[];
+  tipPlayMode?: BrushTipPlayMode;
+  colorDynamics?: BrushColorDynamicsConfig;
   hueJitter?: number; // 顏色抖動 0–1 per dab
   satJitter?: number;
   valJitter?: number;
@@ -77,6 +90,12 @@ export interface BrushProperties {
   colorStretch?: number; // 延展 0–1: picked-up colour keeps smearing further along the stroke
   mixMode?: BrushMixMode; // 混色模式：blend / smudge / dilute
   wetEdges?: boolean; // 水彩濕邊緣效果
+  wetEdgeStrength?: number;
+  wetEdgeWidth?: number;
+  wetEdgeDarkness?: number;
+  pigmentBlendMode?: PigmentBlendModel;
+  pigmentStrength?: number;
+  chargeDepletion?: number;
   dynamics?: BrushDynamicsConfig; // 細項動態控制（大小／不透明度／流量／角度／散佈／主副色）
 }
 
@@ -86,6 +105,26 @@ const AIRBRUSH_SCRATCH_LIMIT = 2048;
 interface CachedTipEntry {
   texture: Texture;
   scaleRatio: number;
+}
+
+type ProceduralDualTip = Exclude<DualTipShape, 'same' | 'custom'>;
+
+function createStrokeState() {
+  return {
+    strokeDabIndex: 0,
+    lastTipIndex: -1,
+    strokeDistancePx: 0,
+    lastDabPos: null as { x: number; y: number } | null,
+    dualDistanceAcc: 0,
+    dualStamped: false,
+    strokeRandH: Math.random(),
+    strokeRandS: Math.random(),
+    strokeRandL: Math.random(),
+    strokeRandMix: Math.random(),
+    reservoirColor: null as RgbColor | null,
+    smudgeSampled: false,
+    mixerTileCache: new Map<string, Uint8Array | null>(),
+  };
 }
 
 function pickTipBucket(diameter: number): number {
@@ -220,7 +259,12 @@ export class BrushRenderer {
   private defaultTipTextures = new Map<string, CachedTipEntry>();
   private pencilTipTextures = new Map<string, CachedTipEntry>();
   private customTipTexture: Texture | null = null;
+  private customTipUrlLoaded: string | null = null;
   private tipRequest = 0;
+  private multiTipTextures: Array<{ url: string; texture: Texture }> = [];
+  private multiTipKey = '[]';
+  private multiTipRequest = 0;
+  private multiTipLoad: Promise<void> | null = null;
   private customPaperTexture: Texture | null = null;
   private customPaperTextureInverted: Texture | null = null;
   private customPaperUrlLoaded: string | null = null;
@@ -229,7 +273,7 @@ export class BrushRenderer {
   private dualTipTexture: Texture | null = null;
   private dualTipUrlLoaded: string | null = null;
   private dualTipRequest = 0;
-  private smudgeSampled = false;
+  private proceduralDualTips = new Map<ProceduralDualTip, Texture>();
 
   // Stamping batch container and sprite pool for zero-GC ultra-fast stamping
   private stampBatch = new Container();
@@ -242,9 +286,8 @@ export class BrushRenderer {
   private canvasHeight: number = 2048;
 
   // Wet paint state & lazy sparse tile CPU cache for non-blocking color mixing
-  private currentReservoirColor: RgbColor | null = null;
+  private strokeState = createStrokeState();
   private mixerTileReader: ((col: number, row: number) => Uint8Array | null) | null = null;
-  private mixerTileCache = new Map<string, Uint8Array | null>();
   private maskUploadBytes: Uint8Array | null = null;
 
   // Brush-engine scratch buffers: the batch is drawn here first when texture / dual brush / selection mask shape it
@@ -253,6 +296,12 @@ export class BrushRenderer {
   private readonly supportsFloatColorBuffer: boolean;
   private dualRT: RenderTexture | null = null;
   private dualBatch = new Container();
+  private dualSpritePool: Sprite[] = [];
+  private wetRimRT: RenderTexture | null = null;
+  private wetBatch = new Container();
+  private wetSpritePool: Sprite[] = [];
+  private effectBatch = new Container();
+  private effectSprite = this.effectBatch.addChild(new Sprite());
   private paperTexture: Texture | null = null;
   private composite = new Container();
   private previewMode = false;
@@ -365,6 +414,7 @@ export class BrushRenderer {
         else this.clearDualTip();
       }
     }
+    if ('tipUrls' in props) void this.setMultiTipImages(props.tipUrls);
   }
 
   public getProperties(): BrushProperties {
@@ -407,9 +457,31 @@ export class BrushRenderer {
   }
 
   public resetStrokeState() {
-    this.currentReservoirColor = hexToRgb(this.currentProperties.color);
-    this.smudgeSampled = false;
-    this.mixerTileCache.clear();
+    this.strokeState = createStrokeState();
+  }
+
+  public async setMultiTipImages(urls: string[] | null | undefined) {
+    const nextUrls = urls?.filter((url) => url.length > 0) ?? [];
+    this.currentProperties.tipUrls = urls == null ? undefined : nextUrls;
+    const key = JSON.stringify(nextUrls);
+    if (key === this.multiTipKey) return this.multiTipLoad ?? undefined;
+    const request = ++this.multiTipRequest;
+    this.multiTipKey = key;
+    this.multiTipTextures = [];
+    this.multiTipLoad = Promise.allSettled(nextUrls.map(async (url) => {
+      const texture = await Assets.load<Texture>(url);
+      if (!(texture instanceof Texture)) throw new Error('Invalid brush tip texture');
+      return { url, texture };
+    })).then((loaded) => {
+      if (request !== this.multiTipRequest) return;
+      for (const result of loaded) {
+        if (result.status !== 'fulfilled') continue;
+        result.value.texture.source.autoGenerateMipmaps = true;
+        this.multiTipTextures.push(result.value);
+      }
+      this.multiTipLoad = null;
+    });
+    return this.multiTipLoad;
   }
 
   /**
@@ -506,6 +578,39 @@ export class BrushRenderer {
     this.currentProperties.dualTipUrl = null;
   }
 
+  private getDualTipShapeTexture(shape: DualTipShape, fallbackTip: Texture): Texture {
+    if (shape === 'same') return fallbackTip;
+    if (shape === 'custom') return this.dualTipTexture ?? fallbackTip;
+    const cached = this.proceduralDualTips.get(shape);
+    if (cached) return cached;
+
+    const size = 64;
+    const radius = size / 2 - 1;
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return fallbackTip;
+    const image = ctx.createImageData(size, size);
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const dx = (x + 0.5 - size / 2) / radius;
+        const dy = (y + 0.5 - size / 2) / radius;
+        const r = shape === 'square' ? Math.max(Math.abs(dx), Math.abs(dy)) : Math.hypot(dx, dy);
+        let alpha = Math.max(0, Math.min(1, (1 - r) * radius));
+        if (shape === 'soft') alpha *= Math.max(0, (Math.exp(-4 * r * r) - Math.exp(-4)) / (1 - Math.exp(-4)));
+        if (shape === 'speckle') alpha *= Math.max(0, (hash2D(x, y, 38) - 0.55) / 0.45);
+        if (shape === 'bristle') alpha *= Math.max(0, (valueNoise2D(x * 0.62, y * 0.045, 57) - 0.32) / 0.68);
+        const offset = (y * size + x) * 4;
+        image.data[offset] = image.data[offset + 1] = image.data[offset + 2] = 255;
+        image.data[offset + 3] = Math.round(alpha * 255);
+      }
+    }
+    ctx.putImageData(image, 0, 0);
+    const texture = Texture.from(canvas);
+    this.proceduralDualTips.set(shape, texture);
+    return texture;
+  }
+
   /**
    * Upload or set a custom brush image texture (PNG/WebP/SVG)
    */
@@ -518,11 +623,13 @@ export class BrushRenderer {
     const request = ++this.tipRequest;
     const url = imageSource instanceof File ? URL.createObjectURL(imageSource) : typeof imageSource === 'string' ? imageSource : null;
     this.customTipTexture = null;
+    this.customTipUrlLoaded = null;
     try {
       const texture = url ? await Assets.load<Texture>(url) : Texture.from(imageSource as HTMLImageElement);
       if (request !== this.tipRequest) return;
       texture.source.autoGenerateMipmaps = true;
       this.customTipTexture = texture;
+      this.customTipUrlLoaded = url;
       this.currentProperties.customBrushUrl = url;
     } catch (error) {
       if (request === this.tipRequest) this.clearCustomBrush();
@@ -533,6 +640,7 @@ export class BrushRenderer {
   public clearCustomBrush() {
     this.tipRequest++;
     this.customTipTexture = null;
+    this.customTipUrlLoaded = null;
     this.currentProperties.customBrushUrl = null;
   }
 
@@ -710,41 +818,47 @@ export class BrushRenderer {
     // Remote previews and legacy replays (overrideColor) draw plainly: the engine options are this painter's
     const engine = overrideColor === undefined;
     const dedicatedEraser = Boolean(eraserProps);
+    const localPaint = engine && !isEraser && !dedicatedEraser;
+    const stroke = this.strokeState;
     const customTip = dedicatedEraser ? null : this.customTipTexture;
     const hardness = props.hardness;
-    const colorMixing = engine ? props.colorMixing ?? 0.0 : 0;
+    const colorMixing = localPaint ? props.colorMixing ?? 0 : 0;
     const paintAmount = props.paintAmount ?? 0.7;
     const colorStretch = props.colorStretch ?? 0;
     const mixMode = props.mixMode ?? 'blend';
-    const fgBgMix = engine ? props.fgBgMix ?? 0 : 0;
-    const wetEdges = engine && !isEraser && Boolean(props.wetEdges);
+    const pigmentBlendMode = props.pigmentBlendMode ?? 'subtractive';
+    const pigmentStrength = props.pigmentStrength ?? 0.85;
+    const chargeDepletion = localPaint ? Math.max(0, Math.min(1, props.chargeDepletion ?? 0)) : 0;
+    const colorDynamics = props.colorDynamics;
+    const hasColorDynamics = localPaint && hasActiveColorDynamics(colorDynamics, props);
+    const gradientLength = Math.max(50, Math.min(4000, colorDynamics?.gradientLength ?? 400));
+    const wetEdges = localPaint && Boolean(props.wetEdges);
     const roundness = engine ? Math.max(0.1, Math.min(1, props.roundness ?? 1)) : 1;
     const angleMode = props.angleMode ?? 'direction';
     const tipAngle = ((props.tipAngle ?? 0) * Math.PI) / 180;
     const tiltSize = engine ? props.tiltSize ?? 0 : 0;
-    const jitter = engine && ((props.hueJitter ?? 0) > 0 || (props.satJitter ?? 0) > 0 || (props.valJitter ?? 0) > 0);
     const textureDensity = engine ? props.textureDensity ?? 0 : 0;
-    const dual = engine && Boolean(props.dualBrush);
+    const dual = localPaint && Boolean(props.dualBrush);
     const shaped = textureDensity > 0 || dual || wetEdges;
+    const dualRatio = Math.max(0.1, Math.min(1, props.dualSize ?? 0.4));
+    const dualSpacing = Math.max(0.05, Math.min(2, props.dualSpacing ?? 0.35));
+    const dualSpread = Math.max(0, Math.min(2, props.dualScatter ?? 0.6));
+    const dualShape = props.dualTipShape ?? (this.dualTipTexture ? 'custom' : 'same');
+    this.dualBatch.removeChildren();
 
     const explicitAirbrush = !isEraser && props.brushType === 'airbrush';
     const antiAlias: AntiAliasLevel = engine && !(explicitAirbrush && props.antiAlias === 'none')
       ? (props.antiAlias ?? 'medium') : 'medium';
     const isPencil = props.brushType === 'pencil';
     const airbrush = !isEraser && !isPencil && (props.brushType === 'airbrush' || hardness <= 0.25);
+    const tipPlayMode = props.tipPlayMode ?? 'single';
+    const multiTipTextures = localPaint && tipPlayMode !== 'single' ? this.multiTipTextures : [];
+    const prependCustomTip = Boolean(multiTipTextures.length && customTip &&
+      !multiTipTextures.some(({ url }) => url === this.customTipUrlLoaded));
+    const multiTipCount = multiTipTextures.length + Number(prependCustomTip);
+    const usesMixer = colorMixing > 0 && antiAlias !== 'none';
     const antialiasFineInk = engine && !isEraser && !isPencil && !airbrush && hardness >= 0.85 &&
-      antiAlias !== 'none' && !customTip && !shaped && roundness === 1 && colorMixing === 0;
-    if (customTip) {
-      const targetScale = antiAlias === 'none' ? 'nearest' : 'linear';
-      if (customTip.source.scaleMode !== targetScale) {
-        customTip.source.scaleMode = targetScale;
-      }
-    }
-    const tipTexture =
-      customTip ||
-      (isPencil
-        ? this.getOrCreatePencilTipEntry(hardness, antiAlias, props.size).texture
-        : this.getOrCreateProceduralTipEntry(hardness, antiAlias, props.size, airbrush).texture);
+      antiAlias !== 'none' && !customTip && multiTipCount === 0 && !shaped && roundness === 1 && colorMixing === 0;
 
     // Recycle previous batch sprites into pool
     for (const child of this.stampBatch.children) {
@@ -779,24 +893,28 @@ export class BrushRenderer {
     const useScratch = shaped || needsSelectionClip;
 
     // Mixer brush: prefer sparse per-tile lazy cache (reads at most once per entered 256x256 tile, 0 GPU sync stall per batch)
-    const useTileMixer = !isEraser && colorMixing > 0 && minX < this.canvasWidth && minY < this.canvasHeight;
-    const under = useTileMixer && !this.mixerTileReader && targetRT instanceof RenderTexture
+    const mixerTileReader = this.previewMode ? null : this.mixerTileReader;
+    const useTileMixer = usesMixer && minX < this.canvasWidth && minY < this.canvasHeight;
+    const under = useTileMixer && !mixerTileReader && targetRT instanceof RenderTexture
       ? this.readBox(targetRT, bx, by, bw, bh) : null;
     const brushRgb = hexToRgb(baseColorHex);
-    const secondaryRgb = fgBgMix > 0 ? hexToRgb(props.secondaryColor || '#FFFFFF') : null;
+    const secondaryRgb = hasColorDynamics && ((colorDynamics?.fgBgMix ?? props.fgBgMix ?? 0) > 0 || colorDynamics?.fgBgGradient)
+      ? hexToRgb(props.secondaryColor || '#FFFFFF') : null;
+    const mixColor = (a: RgbColor, b: RgbColor, t: number) =>
+      blendPigmentColors(a, b, t, pigmentBlendMode, pigmentStrength);
 
     const sampleMixerUnder = (gx: number, gy: number): [number, number, number, number] => {
       const ix = wrappedPoints ? wrapCoord(Math.round(gx), this.canvasWidth) : Math.max(0, Math.min(this.canvasWidth - 1, Math.round(gx)));
       const iy = wrappedPoints ? wrapCoord(Math.round(gy), this.canvasHeight) : Math.max(0, Math.min(this.canvasHeight - 1, Math.round(gy)));
-      if (this.mixerTileReader) {
+      if (mixerTileReader) {
         const col = ix >> 8;
         const row = iy >> 8;
         const key = `${col}_${row}`;
-        let tile = this.mixerTileCache.get(key);
+        let tile = stroke.mixerTileCache.get(key);
         if (tile === undefined) {
-          const loaded = this.mixerTileReader(col, row);
+          const loaded = mixerTileReader(col, row);
           tile = loaded ? new Uint8Array(loaded) : null;
-          this.mixerTileCache.set(key, tile);
+          stroke.mixerTileCache.set(key, tile);
         }
         if (!tile) return [0, 0, 0, 0];
         const tw = Math.min(256, this.canvasWidth - col * 256);
@@ -812,7 +930,8 @@ export class BrushRenderer {
       return [0, 0, 0, 0];
     };
 
-    const dualScatter = wrappedPoints && dual ? new Map<Sprite, number[]>() : undefined;
+    const rulerMgr = RulerManager.getInstance();
+    const isSymmetry = !this.previewMode && rulerMgr.state.mode === 'symmetry';
     for (let i = 0; i < count; i++) {
       const offset = i * 7;
       const x = dabsArray[offset];
@@ -822,6 +941,32 @@ export class BrushRenderer {
       const strokeAngle = dabsArray[offset + 5];
       const tilt = dabsArray[offset + 6]; // 0 upright … 1 flat (worker), 0 when the device has no tilt
       if (size <= 0 || alpha <= 0) continue;
+
+      let selectedTip = customTip;
+      if (localPaint) {
+        const dabIndex = stroke.strokeDabIndex++;
+        if (stroke.lastDabPos) {
+          let dx = x - stroke.lastDabPos.x;
+          let dy = y - stroke.lastDabPos.y;
+          if (wrappedPoints) {
+            dx -= Math.round(dx / this.canvasWidth) * this.canvasWidth;
+            dy -= Math.round(dy / this.canvasHeight) * this.canvasHeight;
+          }
+          const distance = Math.hypot(dx, dy);
+          stroke.strokeDistancePx += distance;
+          if (dual) stroke.dualDistanceAcc += distance;
+          stroke.lastDabPos.x = x;
+          stroke.lastDabPos.y = y;
+        } else {
+          stroke.lastDabPos = { x, y };
+        }
+        if (multiTipCount > 0) {
+          const previous = stroke.lastTipIndex;
+          const index = selectBrushTipIndex(multiTipCount, tipPlayMode, dabIndex, previous, Math.random());
+          stroke.lastTipIndex = index;
+          selectedTip = multiTipTextures[index - Number(prependCustomTip)]?.texture ?? customTip;
+        }
+      }
 
       // 1. Strict Selection Mask Restriction (quick bounding skip; exact per-pixel clipping uses dst-in below)
       if (!wrappedPoints && needsSelectionClip && this.activeSelectionMask) {
@@ -850,28 +995,26 @@ export class BrushRenderer {
         }
       }
 
-      // 2. Foreground-to-Secondary mix + Mixer brush (blend / smudge / dilute)
       const pressure = dabsArray[offset + 3];
-      let targetRgb = brushRgb;
-      if (!isEraser && fgBgMix > 0 && secondaryRgb) {
-        const mixT = evaluateFgBgMixRatio(fgBgMix, props.dynamics?.colorMix, {
-          pressure,
-          tilt,
-          velocity: 0,
-          rand: Math.random(),
-        });
-        if (mixT > 0.001) {
-          targetRgb = {
-            r: brushRgb.r + (secondaryRgb.r - brushRgb.r) * mixT,
-            g: brushRgb.g + (secondaryRgb.g - brushRgb.g) * mixT,
-            b: brushRgb.b + (secondaryRgb.b - brushRgb.b) * mixT,
-          };
-        }
-      }
+      const targetRgb = hasColorDynamics ? evaluateColorDynamics(brushRgb, secondaryRgb, colorDynamics, {
+        pressure,
+        tilt,
+        strokeProgress: Math.min(1, stroke.strokeDistancePx / gradientLength),
+        randH: Math.random(),
+        randS: Math.random(),
+        randL: Math.random(),
+        randMix: Math.random(),
+        strokeRandH: stroke.strokeRandH,
+        strokeRandS: stroke.strokeRandS,
+        strokeRandL: stroke.strokeRandL,
+        strokeRandMix: stroke.strokeRandMix,
+        fgBgChannel: props.dynamics?.colorMix,
+        mixColor,
+      }, props) : brushRgb;
 
       let dabRgb = targetRgb;
-      if (!isEraser && colorMixing > 0 && antiAlias !== 'none') {
-        const res = (this.currentReservoirColor ??= { ...targetRgb });
+      let alphaMultiplier = 1;
+      if (usesMixer) {
         const sampleR = Math.max(1, size * 0.34);
         const acrossX = -Math.sin(strokeAngle) * sampleR;
         const acrossY = Math.cos(strokeAngle) * sampleR;
@@ -895,41 +1038,30 @@ export class BrushRenderer {
             sumW += w;
           }
         }
-        if (sumW > 0) {
-          const avgA = sumW / offsets.length;
-          const sampledR = sumR / sumW;
-          const sampledG = sumG / sumW;
-          const sampledB = sumB / sumW;
-          if (mixMode === 'smudge' && !this.smudgeSampled) {
-            res.r = sampledR;
-            res.g = sampledG;
-            res.b = sampledB;
-            this.smudgeSampled = true;
-          } else {
-            const pressureBias = mixMode === 'smudge' ? 1 : (1 - pressure * 0.5);
-            const pick = Math.min(0.95, colorMixing * avgA * (1 - colorStretch * 0.36) * pressureBias * (mixMode === 'dilute' ? 0.9 : 0.75));
-            res.r += (sampledR - res.r) * pick;
-            res.g += (sampledG - res.g) * pick;
-            res.b += (sampledB - res.b) * pick;
-          }
-        } else if (mixMode === 'smudge' && !this.smudgeSampled) {
-          // Pure smudge over empty transparent canvas deposits nothing until pigment is picked up
-          continue;
-        }
-        if (mixMode !== 'smudge') {
-          const diluteFactor = mixMode === 'dilute' ? 0.3 : 1;
-          const reload = paintAmount * diluteFactor * (0.05 + 0.25 * pressure) * (1 - colorStretch * 0.8);
-          res.r += (targetRgb.r - res.r) * reload;
-          res.g += (targetRgb.g - res.g) * reload;
-          res.b += (targetRgb.b - res.b) * reload;
-        }
-        if (mixMode === 'dilute') {
-          alpha *= 0.82;
-        }
-        dabRgb = res;
+        const sampledRgb = sumW > 0 ? { r: sumR / sumW, g: sumG / sumW, b: sumB / sumW } : null;
+        const result = stepPigmentReservoir(stroke.reservoirColor, targetRgb, sampledRgb, {
+          mixMode,
+          pigmentBlendMode,
+          pigmentStrength,
+          colorMixing,
+          paintAmount,
+          colorStretch,
+          pressure,
+          sampledAlpha: sumW / offsets.length,
+          strokeDistancePx: stroke.strokeDistancePx,
+          chargeDepletion,
+          hasSampledSmudge: stroke.smudgeSampled,
+        });
+        stroke.reservoirColor = result.nextReservoir;
+        stroke.smudgeSampled = result.smudgeSampled;
+        if (result.skipDab) continue;
+        dabRgb = result.dabColor;
+        alphaMultiplier = result.alphaMultiplier;
+      } else if (chargeDepletion > 0) {
+        const chargeLength = 200 + Math.max(0, Math.min(1, paintAmount)) * 1800;
+        alphaMultiplier = Math.max(0.12, Math.exp(-stroke.strokeDistancePx * chargeDepletion / chargeLength));
       }
-      let dabColor = dabRgb === brushRgb ? baseColorHex : rgbToHex(Math.round(dabRgb.r), Math.round(dabRgb.g), Math.round(dabRgb.b));
-      if (jitter && !isEraser) dabColor = jitterColor(dabColor, props.hueJitter ?? 0, props.satJitter ?? 0, props.valJitter ?? 0);
+      const dabColor = dabRgb === brushRgb ? baseColorHex : rgbToHex(Math.round(dabRgb.r), Math.round(dabRgb.g), Math.round(dabRgb.b));
 
       // 3. Tip angle and tilt
       const rotation =
@@ -945,21 +1077,31 @@ export class BrushRenderer {
         size = 1.6;
       }
 
-      const rulerMgr = RulerManager.getInstance();
-      const isSymmetry = !this.previewMode && rulerMgr.state.mode === 'symmetry';
       const pointsToStamp = wrappedPoints?.[i] ?? (isSymmetry ? rulerMgr.getSymmetryPoints({ x, y }) : [{ x, y }]);
 
-      const dabEntry = customTip
-        ? { texture: customTip, scaleRatio: 1 }
+      if (selectedTip) {
+        const scaleMode = antiAlias === 'none' ? 'nearest' : 'linear';
+        if (selectedTip.source.scaleMode !== scaleMode) selectedTip.source.scaleMode = scaleMode;
+      }
+      const dabEntry = selectedTip
+        ? { texture: selectedTip, scaleRatio: 1 }
         : isPencil
           ? this.getOrCreatePencilTipEntry(hardness, antiAlias, size)
           : this.getOrCreateProceduralTipEntry(hardness, antiAlias, size, airbrush);
 
-      const scatterRandom: number[] | undefined = dualScatter && [];
+      const isPixelEdge = antiAlias === 'none';
+      const mainWidth = (isPixelEdge ? Math.max(1, Math.round(size)) : size) * dabEntry.scaleRatio;
+      const dualStep = Math.max(1.5, mainWidth * dualRatio * dualSpacing);
+      const emitSecondary = dual && pointsToStamp.length > 0 && (!stroke.dualStamped || stroke.dualDistanceAcc >= dualStep);
+      const secondaryTip = emitSecondary ? this.getDualTipShapeTexture(dualShape, dabEntry.texture) : null;
+      const scatterSeed = emitSecondary ? Math.random() * 1000 : 0;
+      if (emitSecondary) {
+        stroke.dualStamped = true;
+        stroke.dualDistanceAcc %= dualStep;
+      }
       for (const pt of pointsToStamp) {
         const sprite = this.spritePool.pop() || new Sprite(dabEntry.texture);
         sprite.texture = dabEntry.texture;
-        const isPixelEdge = antiAlias === 'none';
         sprite.roundPixels = isPixelEdge;
         if (isPixelEdge) {
           const pxW = Math.max(1, Math.round(size));
@@ -979,7 +1121,7 @@ export class BrushRenderer {
           sprite.rotation = isPencil ? rotation + (Math.sin(grainX * 12.9898 + grainY * 78.233) * Math.PI) : rotation;
         }
 
-        const effectiveAlpha = isPixelEdge ? 1.0 : Math.max(0, Math.min(1.0, alpha));
+        const effectiveAlpha = isPixelEdge ? alphaMultiplier : Math.max(0, Math.min(1, alpha * alphaMultiplier));
         if (isEraser) {
           // Selection clipping uses coverage in a scratch texture before erasing the layer.
           sprite.blendMode = useScratch ? 'normal' : 'erase';
@@ -995,19 +1137,21 @@ export class BrushRenderer {
           sprite.blendMode = 'normal';
         }
 
-        if (scatterRandom) dualScatter!.set(sprite, scatterRandom);
         this.stampBatch.addChild(sprite);
+        if (secondaryTip) {
+          this.appendDualStamps(sprite, secondaryTip, dualRatio, dualSpread, scatterSeed);
+        }
       }
     }
 
     if (this.stampBatch.children.length > 0) {
       // The box of what was really stamped (symmetry adds mirrored dabs outside the input's box)
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      const regions: Rect[] | undefined = wrappedPoints && [];
+      const regions: Rect[] | undefined = wrappedPoints || (isSymmetry && useScratch) ? [] : undefined;
       for (const c of this.stampBatch.children as Sprite[]) {
         const r = Math.max(c.width, c.height) * 0.75 + 2; // covers any rotation
-        const x = wrappedPoints && c.roundPixels ? c.x + c.width / 2 : c.x;
-        const y = wrappedPoints && c.roundPixels ? c.y + c.height / 2 : c.y;
+        const x = c.roundPixels ? c.x + c.width / 2 : c.x;
+        const y = c.roundPixels ? c.y + c.height / 2 : c.y;
         regions?.push({ x: x - r, y: y - r, w: 2 * r, h: 2 * r });
         x0 = Math.min(x0, x - r); x1 = Math.max(x1, x + r);
         y0 = Math.min(y0, y - r); y1 = Math.max(y1, y + r);
@@ -1023,8 +1167,8 @@ export class BrushRenderer {
         (scratchFits || Boolean(regions));
       if (useScratch || precise) {
         const renderRegion = ({ x, y, w, h }: Rect) =>
-          this.renderShaped(targetRT, x, y, w, h, textureDensity, dual, tipTexture,
-            isEraser, Boolean(isAlphaLocked), needsSelectionClip, precise, wetEdges, regions, dualScatter);
+          this.renderShaped(targetRT, x, y, w, h, textureDensity, dual, isEraser,
+            Boolean(isAlphaLocked), needsSelectionClip, precise, wetEdges, regions);
         if (regions && !scratchFits) {
           // Opposite-edge copies can make the combined bounds cover the entire canvas.
           const size = AIRBRUSH_SCRATCH_LIMIT;
@@ -1058,6 +1202,8 @@ export class BrushRenderer {
       }
     }
     this.stampBatch.removeChildren();
+    this.dualBatch.removeChildren();
+    this.wetBatch.removeChildren();
   }
 
   /**
@@ -1070,11 +1216,97 @@ export class BrushRenderer {
     else target.draw(container, x, y, w, h, regions);
   }
 
+  private appendDualStamps(main: Sprite, texture: Texture, ratio: number, spread: number, seed: number) {
+    const centerX = main.x + (0.5 - main.anchor.x) * main.width;
+    const centerY = main.y + (0.5 - main.anchor.y) * main.height;
+    const size = Math.max(1, main.width * ratio);
+    const count = 2 + Math.round(spread * 2);
+    for (let i = 0; i < count; i++) {
+      const index = this.dualBatch.children.length;
+      const sprite = this.dualSpritePool[index] ?? new Sprite(texture);
+      if (index < 500) this.dualSpritePool[index] = sprite;
+      sprite.texture = texture;
+      sprite.anchor.set(0.5);
+      const radius = main.width * 0.5 * spread * Math.sqrt(hash2D(i, 0, seed));
+      const angle = hash2D(i, 1, seed) * Math.PI * 2;
+      sprite.position.set(centerX + Math.cos(angle) * radius, centerY + Math.sin(angle) * radius);
+      sprite.width = sprite.height = size;
+      sprite.rotation = hash2D(i, 2, seed) * Math.PI * 2;
+      this.dualBatch.addChild(sprite);
+    }
+  }
+
+  private renderEffectTexture(
+    source: RenderTexture, target: RenderTexture, width: number, height: number,
+    mode: Sprite['blendMode'] | 'dst-in', alpha = 1,
+  ) {
+    // Each pass binds its own target and samples the other render texture.
+    const view = new Texture({ source: source.source, frame: new Rectangle(0, 0, width, height) });
+    this.effectSprite.texture = view;
+    this.effectSprite.blendMode = mode as Sprite['blendMode'];
+    this.effectSprite.alpha = alpha;
+    try {
+      this.renderer.render({ container: this.effectBatch, target, clear: false });
+    } finally {
+      this.effectSprite.texture = Texture.EMPTY;
+      view.destroy(false);
+    }
+  }
+
+  private renderWetEdges(scratch: RenderTexture, bx: number, by: number, bw: number, bh: number) {
+    const props = this.currentProperties;
+    const edge = computeWetEdgeParams(props.wetEdgeStrength, props.wetEdgeWidth, props.wetEdgeDarkness, hexToRgb(props.color));
+    if (edge.innerEraseAlpha <= 0 && edge.rimAlpha <= 0.01) return;
+
+    const batch = this.wetBatch;
+    const mainSprites = this.stampBatch.children as Sprite[];
+    batch.removeChildren();
+    batch.position.set(-bx, -by);
+    for (let i = 0; i < mainSprites.length; i++) {
+      const main = mainSprites[i];
+      const sprite = this.wetSpritePool[i] ?? new Sprite(main.texture);
+      if (i < 500) this.wetSpritePool[i] = sprite;
+      sprite.texture = main.texture;
+      sprite.anchor.set(0.5);
+      sprite.position.set(main.x + (0.5 - main.anchor.x) * main.width, main.y + (0.5 - main.anchor.y) * main.height);
+      sprite.rotation = main.rotation;
+      sprite.width = main.width * edge.innerScale;
+      sprite.height = main.height * edge.innerScale;
+      sprite.alpha = main.alpha * edge.innerEraseAlpha;
+      sprite.tint = 0xffffff;
+      sprite.blendMode = 'erase';
+      batch.addChild(sprite);
+    }
+    this.renderer.render({ container: batch, target: scratch, clear: false });
+
+    if (edge.rimAlpha > 0.01) {
+      const rim = (this.wetRimRT = this.ensureRT(this.wetRimRT, bw, bh));
+      const tint = rgbToHex(edge.rimRgb.r, edge.rimRgb.g, edge.rimRgb.b);
+      const rimSprites = batch.children as Sprite[];
+      for (let i = 0; i < rimSprites.length; i++) {
+        const sprite = rimSprites[i];
+        sprite.width = mainSprites[i].width;
+        sprite.height = mainSprites[i].height;
+        sprite.alpha = mainSprites[i].alpha;
+        sprite.tint = tint;
+        sprite.blendMode = 'normal';
+      }
+      this.renderer.render({ container: batch, target: rim, clear: true, clearColor: [0, 0, 0, 0] });
+      for (const sprite of rimSprites) {
+        sprite.width *= edge.innerScale;
+        sprite.height *= edge.innerScale;
+        sprite.alpha = 1;
+        sprite.blendMode = 'erase';
+      }
+      this.renderer.render({ container: batch, target: rim, clear: false });
+      this.renderEffectTexture(rim, scratch, bw, bh, 'normal', edge.rimAlpha);
+    }
+  }
+
   private renderShaped(
     targetRT: BrushTarget, bx: number, by: number, bw: number, bh: number,
-    textureDensity: number, dual: boolean, tipTexture: Texture, isEraser: boolean, isAlphaLocked: boolean,
-    clipWithSelectionMask = false, precise = false, wetEdges = false,
-    regions?: readonly Rect[], dualScatter?: ReadonlyMap<Sprite, number[]>,
+    textureDensity: number, dual: boolean, isEraser: boolean, isAlphaLocked: boolean,
+    clipWithSelectionMask = false, precise = false, wetEdges = false, regions?: readonly Rect[],
   ) {
     const props = this.currentProperties;
     const scratch = precise
@@ -1085,64 +1317,27 @@ export class BrushRenderer {
     this.renderer.render({ container: this.stampBatch, target: scratch, clear: true, clearColor: [0, 0, 0, 0] });
     this.stampBatch.position.set(0, 0);
 
-    if (wetEdges && !isEraser) {
-      // Subtle watercolor wet-edge effect: carve a slightly shrunken inner core so pigment gathers at edges
-      const innerBatch = new Container();
-      for (const child of this.stampBatch.children) {
-        const main = child as Sprite;
-        const inner = new Sprite(main.texture);
-        inner.anchor.set(main.anchor.x, main.anchor.y);
-        inner.position.set(main.x - bx, main.y - by);
-        inner.width = main.width * 0.72;
-        inner.height = main.height * 0.72;
-        inner.rotation = main.rotation;
-        inner.alpha = Math.min(0.42, main.alpha * 0.55);
-        inner.blendMode = 'erase';
-        innerBatch.addChild(inner);
-      }
-      this.renderer.render({ container: innerBatch, target: scratch, clear: false });
-      innerBatch.destroy({ children: true });
-    }
+    if (wetEdges) this.renderWetEdges(scratch, bx, by, bw, bh);
 
     if (dual) {
       const dualRT = (this.dualRT = this.ensureRT(this.dualRT, bw, bh));
-      const ratio = Math.max(0.1, Math.min(1, props.dualSize ?? 0.4));
-      const spread = Math.max(0, props.dualScatter ?? 0.6);
-      const secondaryTex = this.dualTipTexture ?? tipTexture;
       const dualMode = props.dualBlendMode ?? 'multiply';
-      this.dualBatch.removeChildren().forEach((c) => c.destroy());
-      for (const child of this.stampBatch.children) {
-        const main = child as Sprite;
-        const n = 2 + Math.round(spread * 2);
-        const stored = dualScatter?.get(main);
-        const random = (i: number) => stored ? (stored[i] ??= Math.random()) : Math.random();
-        for (let k = 0; k < n; k++) {
-          const d = new Sprite(secondaryTex);
-          d.anchor.set(0.5);
-          const r = main.width * 0.5 * spread * Math.sqrt(random(k * 3));
-          const a = random(k * 3 + 1) * Math.PI * 2;
-          d.position.set(main.x - bx + Math.cos(a) * r, main.y - by + Math.sin(a) * r);
-          d.width = d.height = Math.max(1, main.width * ratio);
-          d.rotation = random(k * 3 + 2) * Math.PI * 2;
-          this.dualBatch.addChild(d);
-        }
-      }
+      this.dualBatch.position.set(-bx, -by);
       this.renderer.render({ container: this.dualBatch, target: dualRT, clear: true, clearColor: [0, 0, 0, 0] });
-      const holder = new Container();
-      const cut = new Sprite(new Texture({ source: dualRT.source, frame: new Rectangle(0, 0, bw, bh) }));
-      if (dualMode === 'subtract') {
-        cut.blendMode = 'erase';
-        cut.alpha = 0.85;
-      } else if (dualMode === 'darken') {
-        cut.blendMode = 'dst-in' as any;
-        cut.alpha = 0.8;
-      } else {
-        cut.blendMode = 'dst-in' as any;
+      switch (dualMode) {
+        case 'screen':
+        case 'overlay':
+          if (this.dualBatch.children.length > 0) {
+            this.renderEffectTexture(scratch, dualRT, bw, bh, 'dst-in');
+            this.renderEffectTexture(dualRT, scratch, bw, bh, dualMode, dualMode === 'screen' ? 0.55 : 0.75);
+          }
+          break;
+        case 'subtract':
+          this.renderEffectTexture(dualRT, scratch, bw, bh, 'erase', 0.85);
+          break;
+        default:
+          this.renderEffectTexture(dualRT, scratch, bw, bh, 'dst-in', dualMode === 'darken' ? 0.78 : 1);
       }
-      holder.addChild(cut);
-      this.renderer.render({ container: holder, target: scratch, clear: false });
-      cut.texture.destroy(false);
-      holder.destroy({ children: true });
     }
 
     if (textureDensity > 0) {
@@ -1221,8 +1416,14 @@ export class BrushRenderer {
    * option through the same stampDabs (no selection, no rulers).
    */
   public renderPreview(width = 260, height = 72, background = 0xffffff): HTMLCanvasElement | null {
+    const savedStroke = this.strokeState;
+    const savedW = this.canvasWidth;
+    const savedH = this.canvasHeight;
+    const savedMode = this.previewMode;
+    const savedMask = this.stampBatch.mask;
+    let rt: RenderTexture | null = null;
     try {
-      const rt = RenderTexture.create({ width, height, resolution: 1 });
+      rt = RenderTexture.create({ width, height, resolution: 1 });
       const bg = new Graphics().rect(0, 0, width, height).fill({ color: background });
       this.renderer.render({ container: bg, target: rt, clear: true });
       bg.destroy();
@@ -1268,26 +1469,24 @@ export class BrushRenderer {
         dabs.push(x, y, size, pressure, dabAlpha, angle, 0.5 * t);
         prev = { x, y };
       }
-      const savedW = this.canvasWidth;
-      const savedH = this.canvasHeight;
       this.canvasWidth = width;
       this.canvasHeight = height;
       this.previewMode = true;
-      const savedMask = this.stampBatch.mask;
       this.stampBatch.mask = null;
       this.resetStrokeState();
       this.stampDabs(rt, new Float32Array(dabs), dabs.length / 7, undefined, props.isEraser ? false : undefined);
-      this.stampBatch.mask = savedMask;
-      this.previewMode = false;
-      this.canvasWidth = savedW;
-      this.canvasHeight = savedH;
-      const canvas = this.renderer.extract.canvas({ target: rt }) as HTMLCanvasElement;
-      rt.destroy(true);
-      return canvas;
+      return this.renderer.extract.canvas({ target: rt }) as HTMLCanvasElement;
     } catch (err) {
-      this.previewMode = false;
       console.warn('[BrushRenderer] preview failed:', err);
       return null;
+    } finally {
+      this.strokeState = savedStroke;
+      this.canvasWidth = savedW;
+      this.canvasHeight = savedH;
+      this.previewMode = savedMode;
+      this.stampBatch.mask = savedMask;
+      this.stampBatch.position.set(0, 0);
+      rt?.destroy(true);
     }
   }
 
@@ -1317,30 +1516,4 @@ export class BrushRenderer {
 
     return writeRT;
   }
-}
-
-/** 顏色抖動: random hue / saturation / value change per dab (amounts 0–1) */
-function jitterColor(hex: string, hue: number, sat: number, val: number): string {
-  const { r, g, b } = hexToRgb(hex);
-  const max = Math.max(r, g, b) / 255;
-  const min = Math.min(r, g, b) / 255;
-  const d = max - min;
-  let h = 0;
-  if (d > 0) {
-    if (max === r / 255) h = ((g - b) / 255 / d) % 6;
-    else if (max === g / 255) h = (b - r) / 255 / d + 2;
-    else h = (r - g) / 255 / d + 4;
-  }
-  h = (h * 60 + 360) % 360;
-  let s = max === 0 ? 0 : d / max;
-  let v = max;
-  const rand = () => Math.random() * 2 - 1;
-  h = (h + rand() * hue * 180 + 360) % 360;
-  s = Math.min(1, Math.max(0, s + rand() * sat));
-  v = Math.min(1, Math.max(0, v + rand() * val * 0.5));
-  const c = v * s;
-  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
-  const m = v - c;
-  const [r1, g1, b1] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
-  return rgbToHex(Math.round((r1 + m) * 255), Math.round((g1 + m) * 255), Math.round((b1 + m) * 255));
 }
