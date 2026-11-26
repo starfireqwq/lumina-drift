@@ -24,7 +24,10 @@ import {
   Monitor,
   Palette,
   PanelRight,
+  Printer,
   Puzzle,
+  SlidersHorizontal,
+  TriangleAlert,
   ArrowLeftRight,
   RotateCcw,
   Save,
@@ -45,6 +48,8 @@ import { VoiceChatBar } from './VoiceChatBar';
 import { ThemePicker } from './ThemePicker';
 import { OverlayPresence } from './OverlayPresence';
 import { ADJUSTMENT_KIND_ICONS } from './adjustmentLayerMenu';
+import { SoftProofSettingsModal } from './SoftProofSettingsModal';
+import { getSoftProofStore, useSoftProof } from '../engine/color/softProofStore';
 const ConnectGuideModal = React.lazy(() => import('./ConnectGuideModal'));
 import { WorkspaceCloudflareToggle } from './WorkspaceCloudflareToggle';
 import { resolvePluginName, resolvePluginText } from '../plugins/pluginApi';
@@ -109,7 +114,7 @@ interface TopNavbarProps {
 }
 
 type MenuItem =
-  | { kind: 'item'; label: string; icon: React.ReactNode; onSelect: () => void; checked?: boolean; hint?: string; title?: string }
+  | { kind: 'item'; label: string; icon: React.ReactNode; onSelect: () => void; checked?: boolean; hint?: string; title?: string; testId?: string }
   | { kind: 'sep' }
   | { kind: 'title'; label: string };
 
@@ -129,8 +134,8 @@ const getPanelTitle = (id: PanelId, t: Translations): string => {
 };
 
 /** A small dropdown menu (click to open, Esc / outside click to close). Portaled so horizontal scroll never clips it. */
-const DropdownMenu: React.FC<{ label: React.ReactNode; title: string; items?: MenuItem[]; children?: React.ReactNode; align?: 'left' | 'right'; width?: string; buttonClass?: string; protectCanvas?: boolean }> = ({
-  label, title, items, children, align = 'left', width = 'w-56', buttonClass = 'atelier-icon-btn h-8 gap-1 px-2 text-xs font-medium', protectCanvas,
+const DropdownMenu: React.FC<{ label: React.ReactNode; title: string; items?: MenuItem[]; children?: React.ReactNode; align?: 'left' | 'right'; width?: string; buttonClass?: string; protectCanvas?: boolean; testId?: string }> = ({
+  label, title, items, children, align = 'left', width = 'w-56', buttonClass = 'atelier-icon-btn h-8 gap-1 px-2 text-xs font-medium', protectCanvas, testId,
 }) => {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -159,7 +164,7 @@ const DropdownMenu: React.FC<{ label: React.ReactNode; title: string; items?: Me
   }, [open, protectCanvas]);
   return (
     <div ref={ref} className="relative shrink-0">
-      <button type="button" title={title} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((v) => !v)} className={buttonClass}>
+      <button type="button" title={title} aria-haspopup="menu" aria-expanded={open} data-testid={testId} onClick={() => setOpen((v) => !v)} className={buttonClass}>
         {label}
       </button>
       {typeof document !== 'undefined' && createPortal(
@@ -173,7 +178,7 @@ const DropdownMenu: React.FC<{ label: React.ReactNode; title: string; items?: Me
               if (item.kind === 'title') return <div key={i} className="px-2 pb-1 pt-1.5 text-[10px] font-bold uppercase tracking-wider text-neutral-500">{item.label}</div>;
               return (
                 <button key={i} type="button" role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'} aria-checked={item.checked}
-                  title={item.title}
+                  title={item.title} data-testid={item.testId}
                   onClick={() => { item.onSelect(); setOpen(false); }}
                   className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-neutral-200 hover:bg-neutral-800">
                   <span className="flex h-4 w-4 items-center justify-center text-neutral-400 [&>svg]:h-3.5 [&>svg]:w-3.5">{item.icon}</span>
@@ -261,7 +266,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
     ...(onOpenResize && currentCanvas ? [{ kind: 'item' as const, label: `${t.canvas.resizeTitle}…`, icon: <Crop />, onSelect: onOpenResize }] : []),
     { kind: 'sep' },
     ...(onImportImages && currentCanvas && !isGuest ? [{ kind: 'item' as const, label: `${t.reference.openImage}…`, icon: <ImagePlus />, onSelect: () => importInputRef.current?.click() }] : []),
-    ...(onOpenExport ? [{ kind: 'item' as const, label: `${t.navbar.export} (PNG/PSD/ORA)…`, icon: <Download />, onSelect: onOpenExport }] : []),
+    ...(onOpenExport ? [{ kind: 'item' as const, label: `${t.navbar.export} (PNG/PSD/ORA/KRA)…`, icon: <Download />, onSelect: onOpenExport }] : []),
     ...(onOpenReplay ? [{ kind: 'item' as const, label: t.navbar.replay, icon: <Film />, onSelect: onOpenReplay }] : []),
     ...(onOpenCapsule ? [{ kind: 'item' as const, label: t.navbar.timeCapsule, icon: <Archive />, onSelect: onOpenCapsule }] : []),
     { kind: 'sep' },
@@ -275,6 +280,19 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
       const Icon = ADJUSTMENT_KIND_ICONS[kind];
       return { kind: 'item', label: t.layers.adjustment.kinds[kind], icon: <Icon aria-hidden />, onSelect: () => onCreateAdjustmentLayer(kind) };
     }),
+  ] : [];
+
+  // 檢視: soft proof and gamut warning only recolour this screen (see SoftProofController)
+  const softProof = useSoftProof();
+  const [proofSettingsOpen, setProofSettingsOpen] = useState(false);
+  const proofProfileLabel = softProof.profiles.find((p) => p.id === softProof.settings.profileId)?.label;
+  const viewItems: MenuItem[] = currentCanvas ? [
+    { kind: 'item', label: t.softProof.menuProof, icon: <Printer />, checked: softProof.settings.enabled, title: proofProfileLabel,
+      testId: 'view-menu-soft-proof', onSelect: () => getSoftProofStore().toggleEnabled() },
+    { kind: 'item', label: t.softProof.menuGamut, icon: <TriangleAlert />, checked: softProof.settings.gamutWarning, title: proofProfileLabel,
+      testId: 'view-menu-gamut-warning', onSelect: () => getSoftProofStore().toggleGamutWarning() },
+    { kind: 'sep' },
+    { kind: 'item', label: `${t.softProof.menuSettings}…`, icon: <SlidersHorizontal />, testId: 'view-menu-proof-settings', onSelect: () => setProofSettingsOpen(true) },
   ] : [];
 
   const shortcutMgr = ShortcutManager.getInstance();
@@ -506,6 +524,9 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
           {layerItems.length > 0 && (
             <DropdownMenu label={<>{t.navbar.layerMenu}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.layerMenu} items={layerItems} />
           )}
+          {viewItems.length > 0 && (
+            <DropdownMenu label={<>{t.navbar.view}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.view} items={viewItems} testId="navbar-view-menu" />
+          )}
           <DropdownMenu label={<>{t.navbar.window}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.window} items={windowItems} />
           <DropdownMenu label={<>{pluginText.menu}<ChevronDown className="h-3 w-3" /></>} title={pluginText.menu} items={pluginItems} width="w-64" />
           <DropdownMenu label={<>{t.navbar.help}<ChevronDown className="h-3 w-3" /></>} title={t.navbar.help} items={helpItems} />
@@ -525,6 +546,7 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
                   ]), { kind: 'sep' as const }] : []),
               { kind: 'title', label: t.navbar.file }, ...fileItems, { kind: 'sep' },
               ...(layerItems.length > 0 ? [{ kind: 'title' as const, label: t.navbar.layerMenu }, ...layerItems, { kind: 'sep' as const }] : []),
+              ...(viewItems.length > 0 ? [{ kind: 'title' as const, label: t.navbar.view }, ...viewItems, { kind: 'sep' as const }] : []),
               ...windowItems, { kind: 'sep' },
               { kind: 'title', label: pluginText.menu }, ...pluginItems, { kind: 'sep' }, ...helpItems,
             ]} />
@@ -658,6 +680,9 @@ export const TopNavbar: React.FC<TopNavbarProps> = ({
       </div>
       </div>
     </header>
+    <OverlayPresence open={proofSettingsOpen && Boolean(currentCanvas)}>
+      <SoftProofSettingsModal onClose={() => setProofSettingsOpen(false)} />
+    </OverlayPresence>
     <OverlayPresence open={connectGuideOpen}>
       <React.Suspense fallback={null}>
         <ConnectGuideModal onClose={() => setConnectGuideOpen(false)}

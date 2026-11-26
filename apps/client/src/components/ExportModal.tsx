@@ -11,8 +11,16 @@ import {
 import { CanvasModel, LayerModel } from '@atelier/shared';
 import { ExportEngine, ExportFormat, LayerCanvasItem } from '../engine/ExportEngine';
 import { LuminaProjectEngine } from '../engine/LuminaProjectEngine';
+import { getSoftProofStore, useSoftProof } from '../engine/color/softProofStore';
 import { useI18n } from '../context/I18nContext';
 import { AtelierModal, modalButton } from './AtelierModal';
+import {
+  EXPORT_ICC_STORAGE_KEY, hasAdjustmentLayers, ICC_EMBED_FORMATS, normalizeIccEmbedValue, resolveIccEmbedChoice,
+} from './phase8Ui';
+
+const readStoredIccChoice = (): string | null => {
+  try { return localStorage.getItem(EXPORT_ICC_STORAGE_KEY); } catch { return null; }
+};
 
 interface ExportModalProps {
   isOpen: boolean;
@@ -34,8 +42,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [isExporting, setIsExporting] = useState<boolean>(false);
   const [exportSuccess, setExportSuccess] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  // Embedded ICC (PNG / JPEG / PSD): none, the built-in sRGB, or an imported RGB profile (assigned)
+  const softProof = useSoftProof();
+  const [storedIcc, setStoredIcc] = useState<string | null>(readStoredIccChoice);
 
   if (!isOpen || !canvas) return null;
+
+  const rgbProfiles = softProof.profiles.length ? getSoftProofStore().listRgbEmbedProfiles() : [];
+  const iccValue = normalizeIccEmbedValue(storedIcc, rgbProfiles);
+  const chooseIcc = (value: string) => {
+    setStoredIcc(value);
+    try { localStorage.setItem(EXPORT_ICC_STORAGE_KEY, value); } catch { /* private mode */ }
+  };
 
   const formats: Array<{
     id: ExportFormat;
@@ -68,6 +86,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       icon: <Sparkles className="w-5 h-5 text-emerald-400" />,
       ext: '.ora',
       badge: 'OpenRaster',
+    },
+    {
+      id: 'kra',
+      title: t.export.kra,
+      desc: t.export.kraDesc,
+      icon: <Layers className="w-5 h-5 text-fuchsia-400" />,
+      ext: '.kra',
+      badge: 'Krita',
     },
     {
       id: 'merged_png',
@@ -112,6 +138,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       }
 
       const safeTitle = (canvas.title || 'atelier_artwork').replace(/[\\/:*?"<>|]/g, '_');
+      const icc = ICC_EMBED_FORMATS.has(selectedFormat) ? resolveIccEmbedChoice(iccValue, rgbProfiles) : null;
       let blob: Blob;
       let filename: string;
 
@@ -132,7 +159,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             items,
             canvas.width,
             canvas.height,
-            canvas.bgColor
+            canvas.bgColor,
+            { icc }
           );
           filename = `${safeTitle}.psd`;
           break;
@@ -147,13 +175,22 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           filename = `${safeTitle}.ora`;
           break;
 
+        case 'kra':
+          blob = await ExportEngine.exportKrita(items, canvas.width, canvas.height, canvas.bgColor, {
+            title: canvas.title || 'Lumina',
+            dpi: canvas.dpi || 300,
+          });
+          filename = `${safeTitle}.kra`;
+          break;
+
         case 'merged_png':
           blob = await ExportEngine.exportPng(
             items,
             canvas.width,
             canvas.height,
             canvas.bgColor,
-            `${safeTitle}.png`
+            `${safeTitle}.png`,
+            { icc }
           );
           filename = `${safeTitle}.png`;
           break;
@@ -164,7 +201,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             canvas.width,
             canvas.height,
             canvas.bgColor || '#FFFFFF',
-            0.92
+            0.92,
+            { icc }
           );
           filename = `${safeTitle}.jpg`;
           break;
@@ -175,7 +213,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             canvas.width,
             canvas.height,
             null, // Transparent
-            `${safeTitle}_transparent.png`
+            `${safeTitle}_transparent.png`,
+            { icc }
           );
           filename = `${safeTitle}_transparent.png`;
           break;
@@ -222,7 +261,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             )}
           </span>
           <button type="button" onClick={onClose} disabled={isExporting} className={modalButton.secondary}>{t.common.cancel}</button>
-          <button type="button" onClick={handleExport} disabled={isExporting} className={modalButton.primary}>
+          <button type="button" onClick={handleExport} disabled={isExporting} data-testid="export-download" className={modalButton.primary}>
             {isExporting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
             {isExporting ? t.export.exporting : t.export.download}
           </button>
@@ -233,7 +272,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         {formats.map((f) => {
           const isSelected = selectedFormat === f.id;
           return (
-            <button key={f.id} type="button" role="radio" aria-checked={isSelected} onClick={() => setSelectedFormat(f.id)}
+            <button key={f.id} type="button" role="radio" aria-checked={isSelected} data-testid={`export-format-${f.id}`} onClick={() => setSelectedFormat(f.id)}
               className={`flex items-start gap-3 rounded-lg border p-3 text-left transition ${isSelected ? 'border-indigo-500 bg-indigo-600/15' : 'border-neutral-800 hover:border-neutral-700 hover:bg-neutral-800/40'}`}>
               <span className="mt-0.5 shrink-0 rounded-md bg-neutral-800 p-1.5">{f.icon}</span>
               <span className="min-w-0 flex-1">
@@ -249,6 +288,23 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             </button>
           );
         })}
+        {selectedFormat === 'kra' && hasAdjustmentLayers(layers) && (
+          <p className="rounded-md border border-amber-700/70 bg-amber-950/40 px-2.5 py-1.5 text-[11px] text-amber-200">{t.export.kraAdjustmentNote}</p>
+        )}
+        {ICC_EMBED_FORMATS.has(selectedFormat) && (
+          <label className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-neutral-300">
+            <span className="font-semibold">{t.export.iccEmbed}</span>
+            <select data-testid="export-icc-embed" value={iccValue} onChange={(e) => chooseIcc(e.target.value)}
+              className="min-w-0 max-w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-neutral-100">
+              <option value="none">{t.export.iccNone}</option>
+              <option value="srgb">{t.export.iccSrgb}</option>
+              {rgbProfiles.map((p) => (
+                <option key={p.id} value={p.id}>{t.export.iccAssign.replace('{name}', p.label)}</option>
+              ))}
+            </select>
+            <span className="basis-full text-neutral-500">{t.export.iccHint}</span>
+          </label>
+        )}
         {error && <p role="alert" className="rounded-md border border-rose-700 bg-rose-950/60 px-2.5 py-2 text-rose-200">{t.export.exportFailed}：{error}</p>}
       </div>
     </AtelierModal>

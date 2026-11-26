@@ -64,6 +64,7 @@ export interface Translations {
     // Extended menu items
     file: string;
     layerMenu: string;
+    view: string;
     window: string;
     help: string;
     newCanvas: string;
@@ -1703,6 +1704,64 @@ export interface Translations {
     exportFailed: string;
     lumina: string;
     luminaDesc: string;
+    kra: string;
+    kraDesc: string;
+    kraAdjustmentNote: string;
+    iccEmbed: string;
+    iccNone: string;
+    iccSrgb: string;
+    iccAssign: string;
+    iccHint: string;
+    kraHelp: {
+      summary: string;
+      kept: string;
+      adjustments: string;
+      clipping: string;
+      reopen: string;
+    };
+  };
+
+  softProof: {
+    title: string;
+    subtitle: string;
+    menuProof: string;
+    menuGamut: string;
+    menuSettings: string;
+    proofToggle: string;
+    gamutToggle: string;
+    profile: string;
+    builtinBadge: string;
+    iccBadge: string;
+    embedOnly: string;
+    importIcc: string;
+    removeProfile: string;
+    intent: string;
+    intentPerceptual: string;
+    intentRelative: string;
+    bpc: string;
+    warningColor: string;
+    localOnly: string;
+    status: {
+      off: string;
+      building: string;
+      ready: string;
+      error: string;
+    };
+    errors: {
+      too_large: string;
+      parse_failed: string;
+      unsupported_profile: string;
+      missing_profile: string;
+      build_failed: string;
+    };
+    help: {
+      summary: string;
+      enable: string;
+      gamut: string;
+      profiles: string;
+      local: string;
+      embed: string;
+    };
   };
 
   server: {

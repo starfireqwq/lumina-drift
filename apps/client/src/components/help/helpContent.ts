@@ -59,6 +59,31 @@ export function getAutoActionsHelpTopic(t: Translations): HelpTopic {
   };
 }
 
+export function getSoftProofHelpTopic(t: Translations): HelpTopic {
+  const { title, menuProof, menuGamut, menuSettings, help } = t.softProof;
+  return {
+    id: 'soft-proof',
+    category: 'files',
+    title,
+    summary: help.summary,
+    steps: [help.enable, help.gamut, help.profiles, help.local, help.embed],
+    keywords: [title, menuProof, menuGamut, menuSettings, 'CMYK', 'ICC', 'ICM', 'soft proof', 'gamut', 'FOGRA39',
+      'Japan Color', 'SWOP', '印刷', '校樣', '校样', '色域'],
+  };
+}
+
+export function getKraExportHelpTopic(t: Translations): HelpTopic {
+  const { kra, kraHelp } = t.export;
+  return {
+    id: 'kra-export',
+    category: 'files',
+    title: kra,
+    summary: kraHelp.summary,
+    steps: [kraHelp.kept, kraHelp.adjustments, kraHelp.clipping, kraHelp.reopen],
+    keywords: [kra, 'Krita', '.kra', 'kra', 'export', 'inherit alpha', '匯出', '导出'],
+  };
+}
+
 export const HELP_CATEGORIES: Array<{ id: HelpCategoryId; label: string }> = [
   { id: 'start', label: '快速上手' },
   { id: 'draw', label: '繪畫' },
@@ -733,7 +758,7 @@ export const queryTerms = (q: string) =>
 export function getHelpTopics(t: Translations): HelpTopic[] {
   return [
     ...HELP_TOPICS.map((topic) => topic.id === 'text' ? { ...topic, steps: t.textEditor.helpSteps } : topic),
-    getAdjustmentHelpTopic(t), getAutoActionsHelpTopic(t),
+    getAdjustmentHelpTopic(t), getAutoActionsHelpTopic(t), getSoftProofHelpTopic(t), getKraExportHelpTopic(t),
   ];
 }
 
