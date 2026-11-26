@@ -6702,6 +6702,11 @@ import {
 // Phase 6: adjustment layers
 import { ADJUSTMENT_KIND_ICONS, mergeIncludesAdjustment } from '../src/components/adjustmentLayerMenu';
 import { getAdjustmentHelpTopic, queryTerms, scoreTopic } from '../src/components/help/helpContent';
+import { runPhase7AutoActionChecks } from './phase7-auto-actions.checks';
+import { runPhase7AutoActionHostChecks } from './phase7-auto-action-host.checks';
+import { runPhase7AutoActionUiChecks } from './phase7-auto-actions-ui.checks';
+import { runPhase7TextLayoutChecks } from './phase7-text-layout.checks';
+import { runPhase7TextEditorChecks } from './phase7-text-editor.checks';
 
 {
   assert.deepEqual(Object.keys(ADJUSTMENT_KIND_ICONS), ADJUSTMENT_KINDS);
@@ -6724,3 +6729,14 @@ import { getAdjustmentHelpTopic, queryTerms, scoreTopic } from '../src/component
   }
   console.log('Phase 6 adjustment layer menu and help checks passed');
 }
+
+await runPhase7AutoActionChecks();
+console.log('Phase 7 auto-action checks passed');
+await runPhase7AutoActionHostChecks();
+console.log('Phase 7 auto-action host checks passed');
+await runPhase7AutoActionUiChecks();
+console.log('Phase 7 auto-action UI checks passed');
+await runPhase7TextLayoutChecks();
+console.log('Phase 7 text layout checks passed');
+await runPhase7TextEditorChecks();
+console.log('Phase 7 text editor checks passed');
