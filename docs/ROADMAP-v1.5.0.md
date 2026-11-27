@@ -17,7 +17,7 @@
 | **Phase 2.5** | **工作區增強** | 懸浮視窗可伸縮圖標小球／膠囊 Dock（單視窗縮球、多視窗自動拉長膠囊、橫直切換、點擊展開切換、拖出拆球與磁吸合併） | `v1.5.0-alpha.3` | 單聊天室 | `已完成` | 2026-11-27 / `1eb83fd`, `112e793` |
 | **Phase 3** | **P0-C** | 筆刷引擎 v3（雙筆刷、色彩動態、濕邊／顏料混色、多筆尖輪播與 `.sut`/`.brushset` 深度還原） | `v1.5.0-beta.1` | `/teamwork` | `已完成` | 2026-11-27 / `a1c2283`, `e140c1a` |
 | **Phase 4** | **P1-A** | 非破壞性圖層樣式（Layer Effects：邊界／水彩邊界／陰影／發光）＋快速遮色片（Quick Mask）與進階色域選取 | `v1.5.0-beta.2` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-27 / `b128801`, `4767853`, `80b33bb` |
-| **Phase 5** | **P1-B** | 多人繪茶 2.0（跟隨繪師視角、分格認領／接龍格線、房間共用色票盤與參考圖同步） | `v1.5.0-rc.1` | `/teamwork` | `待啟動` | — |
+| **Phase 5** | **P1-B** | 多人繪茶 2.0（跟隨繪師視角、分格認領／接龍格線、房間共用色票盤與參考圖同步） | `v1.5.0-rc.1` | `/teamwork` | `已完成` | 2026-11-27 / `488335e`, `6d582ea`, `d9a19e2` |
 | **Phase 6** | **P2** | 專業製作與效能收尾（動畫時間軸音訊波形＋混音匯出、真 CMYK 4 通道分色匯出、大畫布 Tile LRU 效能優化） | `v1.5.0` | `/teamwork` 或 `/swarm` | `待啟動` | — |
 
 ---
@@ -215,9 +215,30 @@
 > **目標**：提升大型多人共創與繪茶房的互動、分工與觀摩體驗。
 
 #### 任務清單
-- [ ] **5.1 跟隨特定繪師視角（Follow Camera）與即時在線狀態強化**
-- [ ] **5.2 畫布分格認領／接龍格線模式（Grid Slots & Claiming）**
-- [ ] **5.3 房間共用色票盤與參考圖板同步**
+- [x] **5.1 跟隨特定繪師視角（Follow Camera）與即時在線狀態強化**
+  - 於 `packages/shared/src/collab/collab-room.ts` 建立螢幕尺寸／DPI 無關的 `viewportStateToCamera` 與 `cameraToViewportState` 雙向換算，並擴充 `RoomMemberInfo` 支援 `activeTool`、`followingUserId`、`followerCount`。
+  - 後端 `apps/server/src/realtime/room-manager.ts` 新增 `viewport_sync`、`member_tool`、`follow_target` 即時廣播、最新視口快取（按下跟隨即刻對齊）與斷線自動解除跟隨。
+  - 前端 `SocketContext.tsx`、`UserListPanel.tsx` 與 `CanvasWorkspace.tsx` 實作節流視口廣播（75ms 含尾包刷新）、一鍵跟隨按鈕、被跟隨人數／目前使用工具徽章、頂部跟隨狀態膠囊條，以及拖曳／縮放／旋轉畫布或按 `Esc` 立即解除跟隨。
+- [x] **5.2 畫布分格認領／接龍格線模式（Grid Slots & Claiming）**
+  - 後端新增 SQLite `canvas_collab_state` 持久化表與 `apps/server/src/services/collab-room.service.ts`、`GET /api/canvases/:id/collab-state`，搭配 `grid_config_update`、`grid_slot_claim`、`grid_slot_release` 角色權限控管（僅房主／管理員可調整格數與開關；一般畫師可認領與釋放自己格子；旁觀／訪客唯讀）。
+  - 前端新增 `GridSlotsOverlay.tsx`（支援平移／縮放／旋轉／鏡像的畫布分格疊層與可點擊認領標籤）與 `GridSlotsPopover.tsx`（格數預設、認領／釋放、一鍵聚焦定位至該格），並相容單機離線持久化（`collabLocalStore.ts`）。
+- [x] **5.3 房間共用色票盤與參考圖板同步**
+  - `ColorWheelStudio.tsx` 新增「房間共用色票」分區，支援即時同步新增／刪除（新增者本人或房主／管理員可刪）／點選套用，旁觀者與訪客僅可點選套用不可異動。
+  - 新增 `RoomReferenceBoard.tsx` 並於 `SubViewPanel.tsx` 頂部提供「個人參考／房間參考板」雙頁籤切換，完整保留個人本地 `SubView` 不受干擾；共用參考圖板支援圖片上傳壓縮、拖曳位移、縮放、點擊吸色、即時同步與房主／管理員鎖定模式。
+
+#### Phase 5 交接紀錄（2026-11-27）
+- **已完成提交**：
+  - `488335e`：`feat(shared): add Collab 2.0 camera math, grid slots, room swatches, and reference board core`
+  - `6d582ea`：`feat(server): add Collab 2.0 SQLite persistence, realtime Socket sync, RBAC, and integration tests`
+  - `d9a19e2`：`feat(client): add Follow Camera, Grid Slots claiming, Room Swatches, Shared Reference Board, 4 locales, and dual-window smoke test`
+- **實際驗證結果**：
+  - `i18n-coverage.check.ts`：通過（四語系 `zh-TW` / `zh-CN` / `en-US` / `ja-JP` 各 2489 keys 100% 齊全）。
+  - `ui-logic.check.ts`：通過（含 `apps/client/scripts/v15-phase5-collab-v2.checks.ts` 的跟隨視角旋轉／鏡像／DPI 雙向轉換、分格認領衝突與縮格裁剪、共用色票／參考圖驗證與 RBAC 權限斷言）。
+  - `pnpm -r build` 與 `pnpm --filter @atelier/client build:electron`：全數通過。
+  - `pnpm --filter @atelier/server test`：19 項後端整合測試全數通過（含新增 `apps/server/tests/test-phase19-collab-v2.ts` 的多人跟隨視角、斷線自動解除、分格認領權限、共用色票／參考圖鎖定與重連／REST 持久化驗證）。
+  - 隔離式雙視窗 Electron 煙霧測試 `node apps/client/scripts/v15-phase5-collab-v2-electron-smoke.check.cjs`：通過（`0 console errors, 0 page errors`；啟動 `PORT=0` 臨時隔離伺服器與兩個獨立 `APPDATA`/`LOCALAPPDATA`/`--user-data-dir` Electron 實例，實測工具狀態同步、跟隨視角同步 `followRotation=0.35`、`Esc` 與手動拖曳解除跟隨、2×3 分格認領／一鍵定位／釋放、共用色票 `#3B82F6` 同步套用、共用參考圖縮放 `refScale=1.25` 與管理員鎖定，且個人本地 SubView 維持 `1 / 1` 不受干擾）。
+- **備註**：本次執行期間 Codex CLI 達方案額度上限（提示於 2026-12-01 重置），已依交接指示由主代理直接接續完成並通過全套驗證。
+- **下一階段接續點**：Phase 6（P2：專業製作與效能收尾 — 動畫時間軸音訊波形渲染與 MP4/WebM 混音匯出、真 CMYK 4 通道分色匯出＋GCR/UCR 黑版設定與總墨量警告、大畫布 4K～8K+ Tile GPU 紋理 LRU 池化與提交管線效能壓測優化，以及 `v1.5.0` 全功能回歸與發布文件整理）。
 
 ---
 
