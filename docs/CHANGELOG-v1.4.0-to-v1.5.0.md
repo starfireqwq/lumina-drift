@@ -92,6 +92,7 @@
 | 平台／元件 | 檔名 | 檔案大小 | 備註 |
 | :--- | :--- | :--- | :--- |
 | Windows 安裝精靈介面庫 | `LuminaGlassUI.dll` | `0.45 MB`（`471,552 B`） | x86 PE32 DLL，含 GroupBox 亮字修復 |
-| Windows 安裝版（x64） | `Lumina-Drift-Paint-Setup-1.5.0.exe` | `133.26 MB`（`139,731,759 B`） | NSIS 安裝程式 |
-| Windows 免安裝可攜版（x64） | `Lumina-Drift-Paint-Portable-1.5.0.exe` | `121.57 MB`（`127,475,631 B`） | 免安裝可攜執行檔 |
+| Windows 安裝版（x64） | `Lumina-Drift-Paint-Setup-1.5.0.exe` | `133.26 MB`（`139,733,380 B`） | NSIS 安裝程式 |
+| Windows 免安裝可攜版（x64） | `Lumina-Drift-Paint-Portable-1.5.0.exe` | `121.57 MB`（`127,476,261 B`） | 免安裝可攜執行檔 |
 | Android（已簽章） | `Lumina-Drift-Paint-Android-1.5.0.apk` | `2.45 MB`（`2,571,247 B`） | 已通過 `apksigner` v2／v3 簽章驗證 |
+| Web 靜態與自架包 | `Lumina-Drift-Paint-Web-1.5.0.zip` | `5.17 MB`（`5,420,092 B`） | 含前端靜態產物與伺服端部署結構 |

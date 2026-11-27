@@ -37,9 +37,9 @@
 
 #### 介面打磨與實機複測修復
 
-- **工具列與輔助工具集重構**：折疊精簡主工具列獨立顯示文字、漫畫、動畫（共 14 大類）；統一輔助工具集面板、分隔線與精簡說明；整併單一油漆桶並同步上下參照屬性；智能填色整合「圍住塗抹」與「間隙補塗」；新增獨立 5 款橡皮擦工具集（硬邊、軟邊、感壓大小、定寬無感壓、感壓透明）並支援四段消除鋸齒。
+- **工具列與輔助工具集重構**：折疊精簡主工具列獨立顯示文字、漫畫、動畫（共 14 大類）；統一輔助工具集面板、分隔線與精簡說明；整併單一油漆桶並同步上下參照屬性；智能填色整合「圍住塗抹」與「間隙補塗」；新增獨立 5 款橡皮擦工具集（硬邊、軟邊、感壓大小、定寬無感壓、感壓透明）並支援四段消除鋸齒與即時筆觸預覽；淺色主題下筆刷與橡皮擦預覽自動切換為深黑筆觸以維持清晰對比。
 - **操作細節與單機模式淨化**：變形工具綁定 `Ctrl+T`；支援 `Shift + 滾輪` 與 `Ctrl／⌘ + Shift + 滾輪` 旋轉畫布，並可於設定中自訂步進角度；單機／離線模式隱藏多人房間專屬的圖層協作控制項；修復調整圖層標題跳動與切換畫布時快速遮色片狀態重置。
-- **介面流暢度與六大材質升級**：移除炫彩玻璃導致卡頓掉幀的根因；升級「流光霓虹」雙流波動效果（支援彩色 RGB／單色／雙色、主副色與飽和度微調）；全面強化六大介面表面材質質感。
+- **介面流暢度與六大材質升級**：移除炫彩玻璃導致卡頓掉幀的根因；升級「流光霓虹」雙流波動效果（支援彩色 RGB／單色／雙色、主副色與飽和度微調，低飽和度自然往純白發光過渡並排除相鄰／巢狀雙條重複流光）；全面強化六大介面表面材質質感。
 - **Windows 安裝精靈優化**：重編 `LuminaGlassUI.dll`，提升暗色流光玻璃背景下的 GroupBox 亮字可讀性。
 
 ---
@@ -77,9 +77,9 @@
 
 #### 界面打磨与实机复测修复
 
-- **工具栏与辅助工具集重构**：折叠精简主工具栏独立显示文字、漫画、动画（共 14 大类）；统一辅助工具集面板、分隔线与精简说明；整合单一油漆桶并同步上下参照属性；智能填色整合“包围涂抹”与“间隙补涂”；新增独立 5 款橡皮擦工具集（硬边、软边、压感大小、定宽无压感、压感透明）并支持四段抗锯齿。
+- **工具栏与辅助工具集重构**：折叠精简主工具栏独立显示文字、漫画、动画（共 14 大类）；统一辅助工具集面板、分隔线与精简说明；整合单一油漆桶并同步上下参照属性；智能填色整合“包围涂抹”与“间隙补涂”；新增独立 5 款橡皮擦工具集（硬边、软边、压感大小、定宽无压感、压感透明）并支持四段抗锯齿与实时笔触预览；浅色主题下笔刷与橡皮擦预览自动切换为深黑笔触。
 - **操作细节与单机模式净化**：变形工具绑定 `Ctrl+T`；支持 `Shift + 滚轮` 与 `Ctrl／⌘ + Shift + 滚轮` 旋转画布，并可在设置中自定义步进角度；单机／离线模式隐藏多人房间专属的图层协作控件；修复调整图层标题跳动与切换画布时快速蒙版状态重置。
-- **界面流畅度与六大材质升级**：移除炫彩玻璃导致卡顿掉帧的根因；升级“流光霓虹”双流波动效果（支持彩色 RGB／单色／双色、主副色与饱和度微调）；全面强化六大界面表面材质质感。
+- **界面流畅度与六大材质升级**：移除炫彩玻璃导致卡顿掉帧的根因；升级“流光霓虹”双流波动效果（支持彩色 RGB／单色／双色、主副色与饱和度微调，低饱和度自然向纯白发光过渡并排除相邻／嵌套双条重复流光）；全面强化六大界面表面材质质感。
 - **Windows 安装向导优化**：重编 `LuminaGlassUI.dll`，提升暗色流光玻璃背景下的 GroupBox 亮字可读性。
 
 ---
@@ -117,9 +117,9 @@
 
 #### Refinements & Device Verification Fixes
 
-- **Streamlined Toolbar, Unified Fill & Dedicated 5-Preset Eraser Toolset**: Expanded the compact toolbar to 14 categories so Text, Comic, and Animation are directly accessible; unified Sub Tool panel dividers and concise hints; consolidated Paint Bucket with synchronized top-bar and side-panel reference settings; unified Enclose & Fill and Gap Fill inside Smart Fill; added 5 dedicated Eraser presets (Hard, Soft, Pressure Size, Fixed Size, Pressure Opacity) with 4-level anti-aliasing.
+- **Streamlined Toolbar, Unified Fill & Dedicated 5-Preset Eraser Toolset**: Expanded the compact toolbar to 14 categories so Text, Comic, and Animation are directly accessible; unified Sub Tool panel dividers and concise hints; consolidated Paint Bucket with synchronized top-bar and side-panel reference settings; unified Enclose & Fill and Gap Fill inside Smart Fill; added 5 dedicated Eraser presets (Hard, Soft, Pressure Size, Fixed Size, Pressure Opacity) with 4-level anti-aliasing and live stroke previews; automatically switched brush and eraser previews to dark ink on light themes for high legibility.
 - **Controls & Solo-Mode Polish**: Bound Transform to `Ctrl+T`; added `Shift + Wheel` and `Ctrl/⌘ + Shift + Wheel` canvas rotation with customizable step angles in Settings; hid multiplayer-only layer collaboration controls in solo/offline canvases; fixed adjustment-layer header jumping and Quick Mask reset on canvas switches.
-- **UI Performance & Six Surface Materials**: Eliminated the CSS stutter root cause in Chromatic Glass; upgraded Lumina Glow with dual-stream wave effects (RGB / Mono / Dual color modes, primary/secondary pickers, and saturation control); refined all six UI surface materials.
+- **UI Performance & Six Surface Materials**: Eliminated the CSS stutter root cause in Chromatic Glass; upgraded Lumina Glow with dual-stream wave effects (RGB / Mono / Dual color modes, primary/secondary pickers, luminous white-light transition at low saturation, and deduplicated single-seam light streams); refined all six UI surface materials.
 - **Windows Installer Polish**: Rebuilt `LuminaGlassUI.dll` with brighter GroupBox text contrast against the dark glass installer background.
 
 ---
@@ -157,7 +157,7 @@
 
 #### UI 磨き込みと実機検証による修正
 
-- **ツールバー・塗りつぶし・独立消しゴムサブツール群の整備**：コンパクトツールバーを 14 カテゴリへ拡張しテキスト・漫画・アニメーションを直接表示。サブツールセットの区切り線と説明を統一整理し、単一バケツの上下参照設定を同期。スマート塗りに「囲って塗る」と「塗り残し補正」を統合し、4 段階アンチエイリアス対応の 5 種消しゴムサブツール群（硬め・柔らかめ・筆圧サイズ・固定サイズ・筆圧不透明度）を独立搭載しました。
+- **ツールバー・塗りつぶし・独立消しゴムサブツール群の整備**：コンパクトツールバーを 14 カテゴリへ拡張しテキスト・漫画・アニメーションを直接表示。サブツールセットの区切り線と説明を統一整理し、単一バケツの上下参照設定を同期。スマート塗りに「囲って塗る」と「塗り残し補正」を統合し、4 段階アンチエイリアスとリアルタイムストロークプレビュー対応の 5 種消しゴムサブツール群（硬め・柔らかめ・筆圧サイズ・固定サイズ・筆圧不透明度）を独立搭載しました。ライトテーマではブラシ／消しゴムプレビューを黒インクへ自動切替します。
 - **操作性向上とオフライン UI の整理**：変形ツールを `Ctrl+T` に割り当て。`Shift + ホイール`／`Ctrl・⌘ + Shift + ホイール` のキャンバス回転と設定画面での角度カスタマイズを追加。オフライン／ソロ作画時は共同作画専用のレイヤー UI を非表示化し、色調補正レイヤーのヘッダー跳ねやキャンバス切替時のクイックマスク残留を修正しました。
-- **描画パフォーマンスと 6 種サーフェス質感の刷新**：クロマチックガラスで発生していたフレーム落ちの根本原因を除去。ルミナグローをデュアルストリーム発光（RGB／単色／2 色・彩度調整）へ強化し、全 6 種の UI サーフェス質感を磨き上げました。
+- **描画パフォーマンスと 6 種サーフェス質感の刷新**：クロマチックガラスで発生していたフレーム落ちの根本原因を除去。ルミナグローをデュアルストリーム発光（RGB／単色／2 色・低彩度時の白光発光・重複ストリーム排除）へ強化し、全 6 種の UI サーフェス質感を磨き上げました。
 - **Windows インストーラー改善**：`LuminaGlassUI.dll` を再ビルドし、暗色ガラス背景における GroupBox テキストの視認性を向上しました。

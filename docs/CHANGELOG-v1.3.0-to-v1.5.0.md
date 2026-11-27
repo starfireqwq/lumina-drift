@@ -137,6 +137,8 @@
 - **自動化與實機回歸驗證**：全工作區建置（`pnpm -r build`）、Electron 主程式與內嵌伺服端建置（`build:electron`）、前端邏輯自檢（`ui-logic.check.ts`、`navigator-panel.checks.ts`）、四語系覆蓋率檢查（`i18n-coverage.check.ts`）、後端整合測試（`pnpm --filter @atelier/server test`）以及各階段隔離式 Electron 桌面端煙霧測試均已完成驗證。
 - **v1.5.0 最終版發佈產物（2026-11-28 實測建置驗證）**：
   - Windows 安裝精靈元件：`apps/client/resources/installer/LuminaGlassUI.dll`（`471,552 bytes` / `0.45 MB`，x86 PE32 DLL）
-  - Windows 安裝版：`Lumina-Drift-Paint-Setup-1.5.0.exe`（`139,731,759 bytes` / `133.26 MB`）
-  - Windows 免安裝可攜版：`Lumina-Drift-Paint-Portable-1.5.0.exe`（`127,475,631 bytes` / `121.57 MB`）
+  - Windows 安裝版：`Lumina-Drift-Paint-Setup-1.5.0.exe`（`139,733,380 bytes` / `133.26 MB`）
+  - Windows 免安裝可攜版：`Lumina-Drift-Paint-Portable-1.5.0.exe`（`127,476,261 bytes` / `121.57 MB`）
   - Android 已簽章安裝包：`Lumina-Drift-Paint-Android-1.5.0.apk`（`2,571,247 bytes` / `2.45 MB`，已通過 `apksigner` v2／v3 簽章驗證）
+  - Web 靜態與自架部署包：`Lumina-Drift-Paint-Web-1.5.0.zip`（`5,420,092 bytes` / `5.17 MB`）
+  - macOS 安裝包（Apple Silicon `arm64`／Intel `x64`）：由 GitHub Actions `macos-packages.yml` 隨 `v1.5.0` 標籤自動建置並附加至 Release。
