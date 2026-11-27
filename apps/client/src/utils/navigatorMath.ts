@@ -101,6 +101,14 @@ export function sliderToZoomPercent(slider: number): number {
   return MIN_ZOOM_PERCENT * ZOOM_RATIO ** (position / SLIDER_MAX);
 }
 
+export function computeWheelRotationRadians(deltaX: number, deltaY: number, deltaMode = 0): number {
+  // Windows can report Shift + vertical wheel motion on the horizontal axis.
+  const raw = Math.abs(deltaY) >= Math.abs(deltaX) ? deltaY : deltaX;
+  if (raw === 0) return 0;
+  const step = Math.PI / 12;
+  return deltaMode !== 0 || Math.abs(raw) >= 40 ? Math.sign(raw) * step : (raw / 100) * step;
+}
+
 export function normalizeRotationDegrees(radians: number): number {
   const degrees = (radians % (2 * Math.PI)) * 180 / Math.PI;
   const signed = degrees > 180 ? degrees - 360 : degrees < -180 ? degrees + 360 : degrees;

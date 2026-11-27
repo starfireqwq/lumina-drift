@@ -148,6 +148,7 @@ import { CanvasStickersOverlay } from './CanvasStickersOverlay';
 import { ColorWheelStudio } from './ColorWheelStudio';
 import { SubViewPanel } from './SubViewPanel';
 import { NavigatorPanel } from './NavigatorPanel';
+import { computeWheelRotationRadians } from '../utils/navigatorMath';
 import { AutoActionsPanel } from './AutoActionsPanel';
 import { UserListPanel } from './UserListPanel';
 import { ToolRail } from './workspace/ToolRail';
@@ -2009,6 +2010,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
     const handleWheel = (event: WheelEvent) => {
       event.preventDefault();
+      if (event.shiftKey) {
+        const deltaRad = computeWheelRotationRadians(event.deltaX, event.deltaY, event.deltaMode);
+        if (deltaRad) viewportRef.current?.rotateAt(event.clientX, event.clientY, deltaRad);
+        return;
+      }
       if (!event.deltaY) return;
       const factor = event.deltaY < 0 ? 1.12 : 1 / 1.12;
       viewportRef.current?.zoomAt(event.clientX, event.clientY, factor);

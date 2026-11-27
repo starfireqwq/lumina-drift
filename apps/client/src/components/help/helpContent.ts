@@ -305,7 +305,7 @@ export const HELP_TOPICS: HelpTopic[] = [
     id: 'transform', category: 'select', title: '自由變形',
     summary: '有選區時變形選區，否則變形整個圖層有內容的範圍。拖曳框線縮放、上方圓點旋轉。',
     keys: [
-      { action: 'action_filter_free_transform', label: '自由變形' },
+      { action: 'tool_transform', label: '自由變形' },
       { fixed: 'Shift', label: '等比' },
       { fixed: 'Alt', label: '以中心縮放' },
       { fixed: 'Enter', label: '套用' },

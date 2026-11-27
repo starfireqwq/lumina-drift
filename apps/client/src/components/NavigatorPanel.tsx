@@ -3,7 +3,7 @@ import { FlipHorizontal2, FlipVertical2, Maximize2, Minus, Plus, RotateCcw, Rota
 import { useI18n } from '../context/I18nContext';
 import type { ViewportState } from '../engine/Viewport';
 import {
-  canvasPointToPreview, computeNavigatorFit, computeViewportPolygonInCanvas, normalizeRotationDegrees,
+  canvasPointToPreview, computeNavigatorFit, computeViewportPolygonInCanvas, computeWheelRotationRadians, normalizeRotationDegrees,
   previewPointToCanvas, screenPointToCanvas, sliderToZoomPercent, zoomPercentToSlider,
 } from '../utils/navigatorMath';
 
@@ -109,6 +109,12 @@ export function NavigatorPanel({
     const preview = previewRef.current;
     if (!preview) return;
     const onWheel = (event: WheelEvent) => {
+      if (event.shiftKey) {
+        event.preventDefault();
+        const deltaRad = computeWheelRotationRadians(event.deltaX, event.deltaY, event.deltaMode);
+        if (deltaRad) onRotateByDeg(deltaRad * 180 / Math.PI);
+        return;
+      }
       if (!event.deltaY) return;
       event.preventDefault();
       const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? preview.clientHeight : 1;
@@ -119,7 +125,7 @@ export function NavigatorPanel({
     };
     preview.addEventListener('wheel', onWheel, { passive: false });
     return () => preview.removeEventListener('wheel', onWheel);
-  }, [onSetZoomPercent]);
+  }, [onRotateByDeg, onSetZoomPercent]);
 
   const fit = computeNavigatorFit(canvasWidth, canvasHeight, box.width, box.height);
   const { points, coversFullCanvas } = computeViewportPolygonInCanvas(

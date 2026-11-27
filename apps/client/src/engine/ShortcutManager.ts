@@ -192,8 +192,8 @@ export const DEFAULT_SHORTCUTS: ShortcutItem[] = [
     toolScope: 'category',
     name: '變形分類 (Transform)',
     description: '自由變形目前選區或圖層上的內容',
-    defaultCombo: '',
-    currentCombo: '',
+    defaultCombo: 'Control+KeyT',
+    currentCombo: 'Control+KeyT',
   },
   {
     id: 'tool_smart_fill',
@@ -542,8 +542,8 @@ export const DEFAULT_SHORTCUTS: ShortcutItem[] = [
     category: 'filters',
     name: '自由變形 (Free Transform)',
     description: '縮放、等比拉伸、旋轉當前選區或圖層',
-    defaultCombo: 'Control+KeyT',
-    currentCombo: 'Control+KeyT',
+    defaultCombo: '',
+    currentCombo: '',
   },
   {
     id: 'action_filter_screentone',
@@ -894,7 +894,10 @@ export const DEFAULT_SHORTCUTS: ShortcutItem[] = [
 
 const STORAGE_KEY = 'atelier_custom_shortcuts';
 // Former defaults that changed: a saved copy of one of these takes the new default instead
-const RETIRED_DEFAULTS: Record<string, string> = { action_layer_delete: 'Delete' };
+const RETIRED_DEFAULTS: Record<string, readonly string[]> = {
+  action_layer_delete: ['Delete'],
+  action_filter_free_transform: ['Control+KeyT', 'Control+Alt+KeyT'],
+};
 
 /** Keys a browser tab never receives (Chrome / Edge / Firefox act on them first); the desktop app gets them all */
 const BROWSER_RESERVED = new Set([
@@ -904,7 +907,7 @@ const BROWSER_RESERVED = new Set([
 ]);
 /** In a browser, actions whose desktop default the browser keeps get these instead (Photopea does the same: Ctrl+Alt+T) */
 const BROWSER_DEFAULTS: Record<string, string> = {
-  action_filter_free_transform: 'Control+Alt+KeyT',
+  tool_transform: 'Control+Alt+KeyT',
   action_filter_mesh_warp: 'Control+Alt+Shift+KeyT',
   action_layer_new_raster: 'Control+Alt+Shift+KeyN',
   action_selection_invert: 'Control+Alt+KeyI',
@@ -1157,12 +1160,13 @@ export class ShortcutManager {
             continue;
           }
           const match = this.shortcuts.find((s) => s.id === item.id);
+          if (!match) continue;
           // save() also stores untouched defaults: a retired default is not a user choice
-          if (RETIRED_DEFAULTS[item.id] === item.currentCombo) continue;
+          if (RETIRED_DEFAULTS[item.id]?.includes(item.currentCombo)) continue;
           // Nor is a key the browser keeps, where this action has a browser default
           if (BROWSER_DEFAULTS[item.id] && ShortcutManager.isBrowserReserved(item.currentCombo)) continue;
           if (match === wrap) wrapConfigured = true;
-          if (match && (item.currentCombo || match === wrap)) {
+          if (item.currentCombo || match === wrap) {
             match.currentCombo = item.currentCombo;
           }
         }

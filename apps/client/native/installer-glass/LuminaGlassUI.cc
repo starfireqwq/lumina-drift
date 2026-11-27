@@ -32,7 +32,7 @@ constexpr DWORD kCaption = 35;
 constexpr COLORREF kDwmDefault = 0xFFFFFFFF;
 
 enum class Control : DWORD_PTR {
-    None, Dialog, Header, Divider, Branding, WizardImage, Label, Button,
+    None, Dialog, Header, Divider, Branding, WizardImage, Label, Button, GroupBox,
     Progress, RichEdit, Details
 };
 
@@ -330,6 +330,40 @@ void DrawTextLabel(HDC dc, HWND hwnd, RECT& rect, UINT flags, COLORREF color,
     RestoreDC(dc, saved);
 }
 
+void PaintGroupBox(HDC dc, HWND hwnd, const RECT& local) {
+    const float scale = glass.scale;
+    const COLORREF color = IsWindowEnabled(hwnd) ? kText : kDisabled;
+    const auto uiState = SendMessageW(hwnd, WM_QUERYUISTATE, 0, 0);
+    const UINT flags = DT_SINGLELINE | (uiState & UISF_HIDEACCEL ? DT_HIDEPREFIX : 0);
+    wchar_t text[1024];
+    const int length = GetWindowTextW(hwnd, text, ARRAYSIZE(text));
+    RECT title{};
+    if (length) {
+        DrawTextLabel(dc, hwnd, title, flags | DT_CALCRECT, color, text, length);
+        OffsetRect(&title, local.left + static_cast<LONG>(12 * scale + .5f), local.top);
+    }
+
+    const REAL topY = local.top + (length ? (title.bottom - title.top) / 2.0f : scale);
+    const RectF frame(local.left + scale, topY, local.right - local.left - 2 * scale,
+                      local.bottom - topY - scale);
+    if (frame.Width > 0 && frame.Height > 0) {
+        Graphics graphics(dc);
+        graphics.SetSmoothingMode(SmoothingModeAntiAlias);
+        GraphicsPath path;
+        RoundedPath(path, frame, 8 * scale);
+        if (length) {
+            const RectF gap(title.left - 5 * scale, static_cast<REAL>(title.top),
+                            title.right - title.left + 10 * scale, static_cast<REAL>(title.bottom - title.top));
+            graphics.SetClip(gap, CombineModeExclude);
+        }
+        SolidBrush surface(Color(28, 12, 18, 36));
+        graphics.FillPath(&surface, &path);
+        Pen edge(Color(92, 165, 190, 245), scale);
+        graphics.DrawPath(&edge, &path);
+    }
+    if (length) DrawTextLabel(dc, hwnd, title, flags, color, text, length);
+}
+
 void PaintButton(Graphics& graphics, HWND hwnd, const RectF& area, LONG_PTR style, bool hovered) {
     const auto type = style & BS_TYPEMASK;
     const auto state = SendMessageW(hwnd, BM_GETSTATE, 0, 0);
@@ -452,6 +486,10 @@ void Render(HDC dc, HWND hwnd, Control control, const RECT& local) {
         PaintDivider(dc, Bounds(local));
         return;
     }
+    if (control == Control::GroupBox) {
+        PaintGroupBox(dc, hwnd, local);
+        return;
+    }
     const float progress = control == Control::Progress ? ProgressValue(hwnd) : 0.0f;
     {
         Graphics graphics(dc);
@@ -498,6 +536,16 @@ void PaintWindow(HWND hwnd, Control control, HDC target) {
             const RECT bounds = WindowInParent(child, hwnd);
             ExcludeClipRect(target, bounds.left, bounds.top, bounds.right, bounds.bottom);
         }
+    } else if (control == Control::GroupBox) {
+        for (HWND sibling = GetWindow(GetParent(hwnd), GW_CHILD); sibling; sibling = GetWindow(sibling, GW_HWNDNEXT)) {
+            if (sibling == hwnd || !IsWindowVisible(sibling)) continue;
+            if (IsClass(sibling, L"Button") && (GetWindowLongPtrW(sibling, GWL_STYLE) & BS_TYPEMASK) == BS_GROUPBOX) continue;
+            const RECT bounds = WindowInParent(sibling, hwnd);
+            RECT overlap{};
+            if (IntersectRect(&overlap, &rect, &bounds)) {
+                ExcludeClipRect(target, overlap.left, overlap.top, overlap.right, overlap.bottom);
+            }
+        }
     }
     HDC buffer = CreateCompatibleDC(target);
     HBITMAP bitmap = buffer ? CreateCompatibleBitmap(target, rect.right, rect.bottom) : nullptr;
@@ -539,7 +587,8 @@ Control Identify(HWND hwnd) {
     const auto style = GetWindowLongPtrW(hwnd, GWL_STYLE);
     if (IsClass(hwnd, L"Button")) {
         const auto type = style & BS_TYPEMASK;
-        if (type <= BS_AUTORADIOBUTTON && type != BS_GROUPBOX && type != BS_USERBUTTON &&
+        if (type == BS_GROUPBOX) return Control::GroupBox;
+        if (type <= BS_AUTORADIOBUTTON && type != BS_USERBUTTON &&
             !(style & (BS_ICON | BS_BITMAP))) return Control::Button;
         return Control::None;
     }
@@ -576,7 +625,7 @@ BOOL CALLBACK RefreshControl(HWND hwnd, LPARAM animate) {
             RemoveWindowSubclass(hwnd, GlassProc, kSubclass);
             return TRUE;
         }
-        if (control == Control::Progress) SetWindowTheme(hwnd, L"", L"");
+        if (control == Control::Progress || control == Control::GroupBox) SetWindowTheme(hwnd, L"", L"");
         if (control == Control::RichEdit) ColorRichEdit(hwnd, true);
         if (control == Control::Details) ColorDetails(hwnd, true);
         if (control == Control::Divider) RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME);
@@ -597,6 +646,7 @@ BOOL CALLBACK RestoreControl(HWND hwnd, LPARAM) {
     RemoveWindowSubclass(hwnd, GlassProc, kSubclass);
     switch (static_cast<Control>(data)) {
     case Control::Progress:
+    case Control::GroupBox:
         SetWindowTheme(hwnd, nullptr, nullptr);
         break;
     case Control::RichEdit:
@@ -670,11 +720,13 @@ LRESULT CALLBACK GlassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam
             EnumChildWindows(hwnd, RefreshControl, FALSE);
             PostMessageW(glass.parent, kRefresh, 0, 0);
         }
-        if (message == WM_CTLCOLORSTATIC || message == WM_CTLCOLOREDIT) {
+        if (message == WM_CTLCOLORSTATIC || message == WM_CTLCOLOREDIT ||
+            message == WM_CTLCOLORBTN || message == WM_CTLCOLORLISTBOX) {
             HDC dc = reinterpret_cast<HDC>(wParam);
             SetTextColor(dc, kText);
             const HWND child = reinterpret_cast<HWND>(lParam);
-            if (message == WM_CTLCOLOREDIT || IsClass(child, L"Edit")) {
+            if (message == WM_CTLCOLOREDIT || message == WM_CTLCOLORLISTBOX ||
+                (message == WM_CTLCOLORSTATIC && IsClass(child, L"Edit"))) {
                 SetBkColor(dc, kEdit);
                 return reinterpret_cast<LRESULT>(glass.editBrush);
             }

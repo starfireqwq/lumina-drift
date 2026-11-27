@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { CanvasViewport, type ViewportState } from '../src/engine/Viewport';
 import {
   canvasPointToPreview, canvasPointToScreen, computeNavigatorFit, computePanForCanvasCenter,
-  computeViewportPolygonInCanvas, normalizeRotationDegrees, previewPointToCanvas, screenPointToCanvas,
+  computeViewportPolygonInCanvas, computeWheelRotationRadians, normalizeRotationDegrees, previewPointToCanvas, screenPointToCanvas,
   sliderToZoomPercent, zoomPercentToSlider,
 } from '../src/utils/navigatorMath';
 
@@ -13,6 +13,17 @@ const nearPoint = (actual: { x: number; y: number }, x: number, y: number) => {
   near(actual.x, x);
   near(actual.y, y);
 };
+
+const wheelStep = Math.PI / 12;
+near(computeWheelRotationRadians(100, 0), wheelStep);
+near(computeWheelRotationRadians(-100, 0), -wheelStep);
+near(computeWheelRotationRadians(-40, 40), wheelStep);
+near(computeWheelRotationRadians(0, -120), -wheelStep);
+near(computeWheelRotationRadians(0, 3, 1), wheelStep);
+near(computeWheelRotationRadians(-1, 0, 2), -wheelStep);
+near(computeWheelRotationRadians(-12, 4), -0.12 * wheelStep);
+near(computeWheelRotationRadians(0, 39), 0.39 * wheelStep);
+assert.equal(computeWheelRotationRadians(0, 0), 0);
 
 const width = 901;
 const height = 601;

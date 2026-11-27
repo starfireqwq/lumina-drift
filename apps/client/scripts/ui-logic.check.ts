@@ -6247,6 +6247,8 @@ await (async () => {
   }
   for (const [id, combo] of [
     ['action_filter_puppet_warp', 'Control+Alt+KeyP'],
+    ['action_filter_free_transform', ''],
+    ['tool_transform', 'Control+KeyT'],
     ['action_view_wrap_around', 'Alt+KeyW'],
     ['tool_magic_wand', 'KeyW'],
   ]) {
