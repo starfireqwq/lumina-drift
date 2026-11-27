@@ -87,7 +87,7 @@ export async function buildApp(): Promise<FastifyInstance> {
     return {
       status: 'ok',
       service: 'atelier-sync-server',
-      version: '1.4.0',
+      version: '1.5.0',
       connectedClients: app.roomManager ? app.roomManager.getConnectedClientsCount() : 0,
       timestamp: Date.now(),
     };

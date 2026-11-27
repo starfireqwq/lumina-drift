@@ -26,7 +26,7 @@ const SHORTCUT_GROUPS: Array<{ id: ShortcutCategory; label: string }> = [
 const shortName = (name: string) => name.replace(/\s*[（(][^()（）]*[)）]\s*$/, '').trim() || name;
 
 const CAT_KEY = 'atelier_help_cat';
-const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '1.4.0';
+const APP_VERSION = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '1.5.0';
 
 /** Wraps every match of the search terms in <mark> */
 const Highlight: React.FC<{ text: string; terms: string[] }> = ({ text, terms }) => {

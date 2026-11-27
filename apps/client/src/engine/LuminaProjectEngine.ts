@@ -17,7 +17,7 @@ import { compositeLayers, type LayerCanvasItem } from './layerComposite';
 export const LUMINA_MIMETYPE = 'application/x-lumina-drift-project';
 // Adjustment metadata fits schema 1. Older apps will see an unknown layer type.
 export const LUMINA_SCHEMA_VERSION = 1;
-export const LUMINA_APP_VERSION = '1.4.0';
+export const LUMINA_APP_VERSION = '1.5.0';
 
 function projectFilename(canvas: CanvasModel): string {
   const title = (canvas.title || 'artwork').replace(/[\\/:*?"<>|]/g, '_');
