@@ -207,7 +207,21 @@ export const nextSizeStep = (size: number, direction: 1 | -1) => {
   return [...SIZE_STEPS].reverse().find((s) => s < size) ?? 1;
 };
 
-export type ToolCategoryId = 'paint' | 'eraser' | 'blend' | 'fill' | 'gradient' | 'eyedropper' | 'select' | 'transform' | 'vector' | 'comic' | 'hand';
+export type ToolCategoryId =
+  | 'paint'
+  | 'eraser'
+  | 'blend'
+  | 'fill'
+  | 'gradient'
+  | 'eyedropper'
+  | 'select'
+  | 'transform'
+  | 'vector'
+  | 'shape'
+  | 'text'
+  | 'comic'
+  | 'animation'
+  | 'hand';
 
 export type SubToolId = string;
 
@@ -217,11 +231,17 @@ export interface SubToolParams {
   bucketRefLayerId?: string | null;
   bucketTolerance?: number;
   bucketExpand?: number;
+  smartFillMode?: 'enclose' | 'paint';
   referenceLayerId?: string | null;
   gapClosingRadius?: number;
   expandRadius?: number;
   brushSize?: number;
   brushStrength?: number;
+  eraserMode?: 'hard' | 'soft';
+  eraserSizePressure?: boolean;
+  eraserOpacityPressure?: boolean;
+  eraserMinSizeRatio?: number;
+  eraserOpacity?: number;
   smudgeMode?: SmudgeMode;
   liquifyMode?: LiquifyMode;
   liquifyStrength?: number;
@@ -300,7 +320,80 @@ const selectionBrushDefaults: SubToolParams = { ...selectionDefaults, brushSize:
 
 export const TOOL_CATEGORIES: ToolCategoryDef[] = [
   defineCategory('paint', '繪畫', 'brush', ['pencil']),
-  defineCategory('eraser', '橡皮擦', 'eraser'),
+  {
+    id: 'eraser',
+    label: '橡皮擦',
+    icon: Eraser,
+    shortcutId: 'tool_eraser',
+    defaultSubToolId: 'eraser_hard',
+    subTools: [
+      defineSubTool('eraser', 'eraser', {
+        id: 'eraser_hard',
+        label: '硬邊橡皮',
+        hint: '俐落硬邊擦除，支援消除鋸齒',
+        defaultParams: {
+          eraserMode: 'hard',
+          eraserSizePressure: true,
+          eraserOpacityPressure: false,
+          eraserMinSizeRatio: 0.25,
+          eraserOpacity: 1,
+          antialias: 'medium',
+        },
+      }),
+      defineSubTool('eraser', 'eraser', {
+        id: 'eraser_soft',
+        label: '軟邊橡皮',
+        hint: '柔和羽化邊緣擦除，支援消除鋸齒',
+        defaultParams: {
+          eraserMode: 'soft',
+          eraserSizePressure: true,
+          eraserOpacityPressure: false,
+          eraserMinSizeRatio: 0.3,
+          eraserOpacity: 0.9,
+          antialias: 'medium',
+        },
+      }),
+      defineSubTool('eraser', 'eraser', {
+        id: 'eraser_pressure_size',
+        label: '感壓大小橡皮',
+        hint: '依筆壓動態縮放擦除粗細',
+        defaultParams: {
+          eraserMode: 'hard',
+          eraserSizePressure: true,
+          eraserOpacityPressure: false,
+          eraserMinSizeRatio: 0.08,
+          eraserOpacity: 1,
+          antialias: 'medium',
+        },
+      }),
+      defineSubTool('eraser', 'eraser', {
+        id: 'eraser_fixed_size',
+        label: '定寬橡皮（無感壓）',
+        hint: '固定筆徑擦除，不受筆壓影響大小',
+        defaultParams: {
+          eraserMode: 'hard',
+          eraserSizePressure: false,
+          eraserOpacityPressure: false,
+          eraserMinSizeRatio: 1,
+          eraserOpacity: 1,
+          antialias: 'medium',
+        },
+      }),
+      defineSubTool('eraser', 'eraser', {
+        id: 'eraser_pressure_opacity',
+        label: '感壓透明橡皮',
+        hint: '固定筆徑，依筆壓控制擦除透明度',
+        defaultParams: {
+          eraserMode: 'soft',
+          eraserSizePressure: false,
+          eraserOpacityPressure: true,
+          eraserMinSizeRatio: 1,
+          eraserOpacity: 1,
+          antialias: 'medium',
+        },
+      }),
+    ],
+  },
   {
     id: 'blend',
     label: '混色修整',
@@ -320,42 +413,34 @@ export const TOOL_CATEGORIES: ToolCategoryDef[] = [
     label: '填充',
     icon: PaintBucket,
     shortcutId: 'tool_bucket',
-    defaultSubToolId: 'fill_refer_other',
+    defaultSubToolId: 'fill_bucket',
     subTools: [
       defineSubTool('fill', 'bucket', {
-        id: 'fill_refer_other',
-        label: '油漆桶 — 參照其他圖層',
-        hint: '參照所有圖層，點擊填滿封閉區域',
+        id: 'fill_bucket',
+        label: '油漆桶',
+        hint: '點擊填滿封閉區域，可於屬性切換參照圖層',
         defaultParams: { bucketMode: 'click', bucketReference: 'all', bucketTolerance: 32, bucketExpand: 1 },
-      }),
-      defineSubTool('fill', 'bucket', {
-        id: 'fill_refer_edit',
-        label: '油漆桶 — 僅參照編輯圖層',
-        hint: '參照目前編輯的圖層，點擊填滿封閉區域',
-        defaultParams: { bucketMode: 'click', bucketReference: 'current', bucketTolerance: 32, bucketExpand: 1 },
       }),
       defineSubTool('fill', 'smart_fill', {
         id: 'fill_enclose',
-        label: '圍住塗抹',
-        defaultParams: { gapClosingRadius: 4, expandRadius: 2 },
+        label: '智能填色',
+        hint: '整合圍住塗抹與間隙補塗，於屬性切換模式',
+        defaultParams: {
+          smartFillMode: 'enclose',
+          gapClosingRadius: 4,
+          expandRadius: 2,
+          bucketReference: 'all',
+          bucketRefLayerId: null,
+          bucketTolerance: 32,
+          brushSize: 24,
+        },
       }),
       defineSubTool('fill', 'bucket', {
         id: 'fill_lasso',
         label: '套索塗抹',
-        hint: '拖曳套索，填滿圈選範圍',
+        hint: '拖曳套索填色或擦除圈選範圍',
         icon: Lasso,
         defaultParams: { bucketMode: 'lasso', antialias: 'medium', outlineEnabled: false, lassoErase: false },
-      }),
-      defineSubTool('fill', 'paint_unfilled', {
-        id: 'fill_paint_unfilled',
-        defaultParams: {
-          brushSize: 24,
-          bucketReference: 'all',
-          bucketRefLayerId: null,
-          bucketTolerance: 32,
-          gapClosingRadius: 3,
-          expandRadius: 1,
-        },
       }),
     ],
   },
@@ -393,9 +478,12 @@ export const TOOL_CATEGORIES: ToolCategoryDef[] = [
       defineSubTool('vector', 'vector_eraser', { defaultParams: { brushSize: 28, vectorEraserMode: 'intersect' } }),
     ],
   },
-  defineCategory('comic', '圖形與漫畫', 'shape', ['text', 'comic_balloon', 'comic_panel', 'animation'], {
+  defineCategory('shape', '圖形', 'shape', [], {
     shapeSubtype: 'rect', shapeFillMode: 'stroke', shapeLineWidth: 4, shapeCornerRadius: 0,
   }),
+  defineCategory('text', '文字', 'text'),
+  defineCategory('comic', '漫畫', 'comic_balloon', ['comic_panel']),
+  defineCategory('animation', '動畫', 'animation'),
   defineCategory('hand', '移動畫面', 'hand'),
 ];
 
@@ -407,17 +495,19 @@ export const findCategory = (id: ToolCategoryId): ToolCategoryDef | undefined =>
 export const findSubTool = (id: SubToolId): SubToolDef | undefined =>
   ALL_SUB_TOOLS.find((subTool) => subTool.id === id);
 
-export const findCategoryForTool = (tool: ToolType): ToolCategoryDef | undefined =>
-  TOOL_CATEGORIES.find((category) => category.subTools.some((subTool) => subTool.tool === tool));
+export const findCategoryForTool = (tool: ToolType): ToolCategoryDef | undefined => {
+  if (tool === 'paint_unfilled') return findCategory('fill');
+  return TOOL_CATEGORIES.find((category) => category.subTools.some((subTool) => subTool.tool === tool));
+};
 
 export const findSubToolForTool = (
   tool: ToolType,
   hint?: { bucketMode?: 'click' | 'lasso'; bucketReference?: string },
 ): SubToolDef | undefined => {
   if (tool === 'bucket') {
-    if (hint?.bucketMode === 'lasso') return findSubTool('fill_lasso');
-    if (hint?.bucketReference === 'current') return findSubTool('fill_refer_edit');
+    return hint?.bucketMode === 'lasso' ? findSubTool('fill_lasso') : findSubTool('fill_bucket');
   }
+  if (tool === 'paint_unfilled') return findSubTool('fill_enclose');
   return ALL_SUB_TOOLS.find((subTool) => subTool.tool === tool);
 };
 
@@ -431,25 +521,31 @@ const categoryLocaleKeys = {
   select: 'categorySelect',
   transform: 'categoryTransform',
   vector: 'categoryVector',
+  shape: 'shape',
+  text: 'text',
   comic: 'categoryComic',
+  animation: 'animation',
   hand: 'categoryHand',
 } as const satisfies Record<ToolCategoryId, keyof Translations['tools']>;
 
 export const getLocalizedCategoryLabel = (id: ToolCategoryId, t: Translations): string =>
   t.tools[categoryLocaleKeys[id]];
 
-const fillLocaleKeys: Partial<Record<SubToolId, readonly [keyof Translations['tools'], keyof Translations['tools']]>> = {
-  fill_refer_other: ['fillReferOther', 'fillReferOtherHint'],
-  fill_refer_edit: ['fillReferEdit', 'fillReferEditHint'],
-  fill_enclose: ['fillEnclose', 'fillEncloseHint'],
+const subToolLocaleKeys: Partial<Record<SubToolId, readonly [keyof Translations['tools'], keyof Translations['tools']]>> = {
+  eraser_hard: ['eraserHardPreset', 'eraserHardPresetHint'],
+  eraser_soft: ['eraserSoftPreset', 'eraserSoftPresetHint'],
+  eraser_pressure_size: ['eraserPressureSizePreset', 'eraserPressureSizePresetHint'],
+  eraser_fixed_size: ['eraserFixedSizePreset', 'eraserFixedSizePresetHint'],
+  eraser_pressure_opacity: ['eraserPressureOpacityPreset', 'eraserPressureOpacityPresetHint'],
+  fill_bucket: ['fillBucket', 'fillBucketHint'],
+  fill_enclose: ['smartFill', 'fillEncloseHint'],
   fill_lasso: ['fillLasso', 'fillLassoHint'],
-  fill_paint_unfilled: ['fillPaintUnfilled', 'fillPaintUnfilledHint'],
 };
 
 export const getLocalizedSubTool = (id: SubToolId, t: Translations): { label: string; hint: string } => {
   const sub = findSubTool(id);
   if (!sub) return { label: id, hint: '' };
-  const keys = fillLocaleKeys[id];
+  const keys = subToolLocaleKeys[id];
   if (!keys) return getLocalizedTool(sub.tool, t);
   const [labelKey, hintKey] = keys;
   return { label: t.tools[labelKey], hint: t.tools[hintKey] };

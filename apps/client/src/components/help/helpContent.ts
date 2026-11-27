@@ -181,10 +181,14 @@ export const HELP_TOPICS: HelpTopic[] = [
     keywords: ['描邊', '外框', '邊框', 'outline', 'stroke', '貼紙風'],
   },
   {
-    id: 'eraser', category: 'draw', title: '橡皮擦與套索擦除',
-    summary: '橡皮擦有自己的筆刷設定；勾選「套索擦除」可以圈起範圍整塊擦掉。',
+    id: 'eraser', category: 'draw', title: '橡皮擦工具集與感壓控制',
+    summary: '橡皮擦擁有獨立的輔助工具集（硬邊、軟邊、感壓大小、定寬無感壓、感壓透明），並全面支援四段消除鋸齒與套索擦除。',
+    steps: [
+      '硬邊／軟邊橡皮皆可於上方選項列或工具屬性切換四段消除鋸齒（無／弱／中／強）',
+      '可直接在輔助工具集切換「感壓大小橡皮」、「定寬橡皮（無感壓）」或「感壓透明橡皮」，亦可於工具屬性獨立開關感壓大小與感壓透明',
+    ],
     keys: [{ action: 'tool_eraser', label: '橡皮擦' }],
-    keywords: ['橡皮擦', '擦除', '擦掉', 'eraser', '套索擦除'],
+    keywords: ['橡皮擦', '擦除', '擦掉', 'eraser', '硬邊橡皮', '軟邊橡皮', '感壓大小', '定寬橡皮', '感壓透明', '抗鋸齒', '套索擦除'],
   },
   {
     id: 'blur-smudge', category: 'draw', title: '模糊與揉色',
@@ -215,10 +219,14 @@ export const HELP_TOPICS: HelpTopic[] = [
     keywords: ['套索填色', '圈選填色', 'lasso fill'],
   },
   {
-    id: 'smart-fill', category: 'fill', title: '智能填色',
-    summary: '在底色圖層圈住線稿範圍，自動依線稿封閉區域填色並補小缺口，色塊會延伸到線下。',
+    id: 'smart-fill', category: 'fill', title: '智能填色（圍住塗抹／間隙補塗）',
+    summary: '整合「圍住塗抹」與「間隙補塗」兩種模式：圈住線稿或塗過細縫即可自動依參照線稿補滿封閉區域並處理小缺口。',
+    steps: [
+      '圍住塗抹：在底色圖層圈住線稿範圍，自動填滿圈內封閉區域並延伸到線下',
+      '間隙補塗：以筆刷刷過未填色的線稿細縫，自動辨識並補滿漏填處',
+    ],
     keys: [{ action: 'tool_smart_fill', label: '智能填色' }],
-    keywords: ['智能填色', '自動上色', '平塗', '底色', 'flat', 'auto fill', '補縫', '缺口'],
+    keywords: ['智能填色', '圍住塗抹', '間隙填充筆', '間隙補塗', '自動上色', '平塗', '底色', 'flat', 'auto fill', '補縫', '缺口'],
   },
   {
     id: 'gradient', category: 'fill', title: '漸層',

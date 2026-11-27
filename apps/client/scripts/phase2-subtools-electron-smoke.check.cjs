@@ -29,11 +29,9 @@ const electronExe = path.join(clientRoot, 'node_modules/electron/dist/electron.e
 const mainJs = path.join(clientRoot, 'dist-electron/main.js');
 
 const FILL_SUBTOOL_IDS = [
-  'fill_refer_other',
-  'fill_refer_edit',
+  'fill_bucket',
   'fill_enclose',
   'fill_lasso',
-  'fill_paint_unfilled',
 ];
 
 const { pathToFileURL } = require('node:url');
@@ -235,16 +233,16 @@ async function runSoloVerification() {
     if (await startBtn.isVisible({ timeout: 5000 }).catch(() => false)) await startBtn.click();
     await page.locator('[data-canvas-presented="true"]').waitFor({ timeout: 25000 });
 
-    // 1. Verify compact ToolRail renders 11 main categories
+    // 1. Verify compact ToolRail renders 14 main categories (including Text, Comic & Animation)
     const categoryCount = await page.locator('[data-category-id]').count();
-    assert.equal(categoryCount, 11, `Expected 11 main categories in compact ToolRail, got ${categoryCount}`);
+    assert.equal(categoryCount, 14, `Expected 14 main categories in compact ToolRail, got ${categoryCount}`);
 
-    // 2. Click Fill category -> verify SubToolPanel shows all 5 Fill sub-tools
+    // 2. Click Fill category -> verify SubToolPanel shows all 3 unified Fill sub-tools
     await page.locator('[data-category-id="fill"]').click();
     for (const id of FILL_SUBTOOL_IDS) {
       await page.locator(`[data-subtool-id="${id}"]`).waitFor({ state: 'visible', timeout: 5000 });
     }
-    console.log('  ✓ Compact ToolRail (11 categories) & Fill SubToolPanel (5 sub-tools) verified');
+    console.log('  ✓ Compact ToolRail (14 categories) & Fill SubToolPanel (3 unified sub-tools) verified');
 
     // 3. Verify clicking each of the 5 Fill sub-tools activates it cleanly without redundant fillMode toggle
     for (const id of FILL_SUBTOOL_IDS) {
@@ -254,33 +252,32 @@ async function runSoloVerification() {
     }
 
     // 4. Verify CSP repeated shortcut cycling ('g' for Fill category)
-    await page.locator('[data-subtool-id="fill_refer_other"]').click();
+    await page.locator('[data-subtool-id="fill_bucket"]').click();
     const cycled = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 3; i++) {
       await page.keyboard.press('g');
       const activeId = await page.locator('[data-subtool-id][aria-pressed="true"]').first().getAttribute('data-subtool-id');
       cycled.push(activeId);
     }
     assert.deepEqual(cycled, [
-      'fill_refer_edit',
       'fill_enclose',
       'fill_lasso',
-      'fill_paint_unfilled',
-      'fill_refer_other',
+      'fill_bucket',
     ], `CSP shortcut cycle order mismatch: ${JSON.stringify(cycled)}`);
-    console.log('  ✓ CSP repeated shortcut (G) cycling across all 5 Fill sub-tools verified');
+    console.log('  ✓ CSP repeated shortcut (G) cycling across all 3 unified Fill sub-tools verified');
 
     // 5. Verify Classic / Compact rail mode toggle works both ways
     const modeToggle = page.locator('[data-rail-mode-toggle]');
     await modeToggle.click();
     assert.equal(await page.locator('[data-category-id]').count(), 0, 'Classic mode should show flat tools instead of categories');
     await modeToggle.click();
-    assert.equal(await page.locator('[data-category-id]').count(), 11, 'Toggling back should restore 11 compact categories');
+    assert.equal(await page.locator('[data-category-id]').count(), 14, 'Toggling back should restore 14 compact categories');
     console.log('  ✓ Compact <-> Classic ToolRail toggle verified');
 
-    // 6. Select Paint Unfilled Area & verify zero-overflow fill + single-step Ctrl+Z undo
+    // 6. Select Smart Fill -> Gap Fill mode & verify zero-overflow fill + single-step Ctrl+Z undo
     await page.locator('[data-category-id="fill"]').click();
-    await page.locator('[data-subtool-id="fill_paint_unfilled"]').click();
+    await page.locator('[data-subtool-id="fill_enclose"]').click();
+    await page.getByRole('radio', { name: /間隙補塗|间隙补涂|Gap Fill|塗り残し補正/ }).first().click();
     const fillRes = await seedClosedBoxAndPaintUnfilled(page);
     console.log(`  ✓ Solo Paint Unfilled Area verified: insideFilled=${fillRes.after.insideFilled}, outsideFilled=${fillRes.after.outsideFilled}, undoInside=${fillRes.afterUndo.insideCenter}`);
 
@@ -384,9 +381,10 @@ async function runMultiplayerVerification() {
     await layerRow.click();
     await new Promise((r) => setTimeout(r, 250));
 
-    // Select Fill -> Paint Unfilled Area in multiplayer canvas
+    // Select Fill -> Smart Fill (Gap Fill mode) in multiplayer canvas
     await page.locator('[data-category-id="fill"]').click();
-    await page.locator('[data-subtool-id="fill_paint_unfilled"]').click();
+    await page.locator('[data-subtool-id="fill_enclose"]').click();
+    await page.getByRole('radio', { name: /間隙補塗|间隙补涂|Gap Fill|塗り残し補正/ }).first().click();
 
     const mpRes = await seedClosedBoxAndPaintUnfilled(page, mpLayerId);
     await new Promise((r) => setTimeout(r, 700));

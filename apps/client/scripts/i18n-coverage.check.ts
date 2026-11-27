@@ -133,7 +133,7 @@ for (const lang of REQUIRED_LOCALES) {
     }
   }
 
-  const categorySizes = { fill: 5, select: 7, vector: 6, blend: 3, comic: 5 };
+  const categorySizes = { eraser: 5, fill: 3, select: 7, vector: 6, blend: 3, shape: 1, text: 1, comic: 2, animation: 1 };
   for (const [categoryId, size] of Object.entries(categorySizes)) {
     const category = TOOL_CATEGORIES.find(({ id }) => id === categoryId);
     assert.ok(category, `Missing ${categoryId} category in ${lang}`);

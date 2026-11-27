@@ -148,7 +148,7 @@ import { CanvasStickersOverlay } from './CanvasStickersOverlay';
 import { ColorWheelStudio } from './ColorWheelStudio';
 import { SubViewPanel } from './SubViewPanel';
 import { NavigatorPanel } from './NavigatorPanel';
-import { computeWheelRotationRadians } from '../utils/navigatorMath';
+import { computeWheelRotationRadians, getWheelRotationSettings } from '../utils/navigatorMath';
 import { AutoActionsPanel } from './AutoActionsPanel';
 import { UserListPanel } from './UserListPanel';
 import { ToolRail } from './workspace/ToolRail';
@@ -582,8 +582,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     return undefined;
   };
   const currentCanvasRole = resolveCurrentCanvasRole();
-  const isCanvasViewer = !isGuest && user?.serverRole !== 'admin' && currentCanvasRole === 'viewer';
   const isOffline = OfflineSessionStore.isOfflineCanvas(canvas?.id);
+  const isCanvasViewer = !isOffline && !isGuest && user?.serverRole !== 'admin' && currentCanvasRole === 'viewer';
   const isAdmin =
     user?.serverRole === 'admin' ||
     currentCanvasRole === 'owner' ||
@@ -1600,6 +1600,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (raw.layerType === 'group' || raw.layerType === 'adjustment') return false;
     // Masks use their owner's permissions, including owners that have no pixels.
     const owner = (raw.layerType === 'mask' && layersRef.current.find((l) => l.id === raw.parentId)) || raw;
+    if (isOffline) return !raw.isLocked && !owner.isLocked;
     return !isGuest && !isCanvasViewer && !owner.isLocked && Boolean(
       owner.ownerId === user?.id || (!owner.isPublic && owner.ownerId && owner.aclMode === 'shared_all')
     );
@@ -2011,7 +2012,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const handleWheel = (event: WheelEvent) => {
       event.preventDefault();
       if (event.shiftKey) {
-        const deltaRad = computeWheelRotationRadians(event.deltaX, event.deltaY, event.deltaMode);
+        const { shiftStepDeg, ctrlShiftStepDeg } = getWheelRotationSettings();
+        const stepDegrees = event.ctrlKey || event.metaKey ? ctrlShiftStepDeg : shiftStepDeg;
+        const deltaRad = computeWheelRotationRadians(event.deltaX, event.deltaY, event.deltaMode, stepDegrees);
         if (deltaRad) viewportRef.current?.rotateAt(event.clientX, event.clientY, deltaRad);
         return;
       }
@@ -3123,7 +3126,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     try {
       if (params.bucketMode !== undefined) setBucketMode(params.bucketMode);
       if (params.bucketReference !== undefined) setBucketReference(params.bucketReference);
-      if (params.bucketRefLayerId !== undefined || sub.id === 'fill_refer_other' || sub.id === 'fill_refer_edit') {
+      if (params.bucketRefLayerId !== undefined || sub.id === 'fill_bucket') {
         setBucketRefLayerId(params.bucketRefLayerId ?? null);
       }
       if (params.bucketTolerance !== undefined) setBucketTolerance(params.bucketTolerance);
@@ -3136,7 +3139,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         if (params.outlineEnabled !== undefined) setLassoOutlineEnabled(params.outlineEnabled);
         setLassoFillErase(params.lassoErase ?? false);
       }
-      if (sub.id === 'fill_paint_unfilled' && typeof params.brushSize === 'number' && Number.isFinite(params.brushSize)) {
+      if (sub.id === 'fill_enclose' && params.smartFillMode === 'paint' && typeof params.brushSize === 'number' && Number.isFinite(params.brushSize)) {
         handleBrushPropsChange({ size: params.brushSize });
       }
       if (sub.categoryId === 'select') {
@@ -3149,7 +3152,34 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           handleBrushPropsChange({ size: params.brushSize });
         }
       }
-      handleSelectTool(sub.tool, preset);
+      const targetTool: ToolType = sub.id === 'fill_enclose' && params.smartFillMode === 'paint'
+        ? 'paint_unfilled'
+        : sub.tool;
+      handleSelectTool(targetTool, preset);
+      if (sub.categoryId === 'eraser') {
+        const cur = brushPropsRef.current ?? brushProps;
+        const size = typeof params.brushSize === 'number' && Number.isFinite(params.brushSize) ? params.brushSize : cur.size;
+        const eraserMode = params.eraserMode === 'soft' ? 'soft' : 'hard';
+        const sizePressure = params.eraserSizePressure !== false;
+        const opacityPressure = Boolean(params.eraserOpacityPressure);
+        const minSizeRatio = typeof params.eraserMinSizeRatio === 'number'
+          ? Math.max(0.02, Math.min(1, params.eraserMinSizeRatio))
+          : (sizePressure ? 0.25 : 1);
+        handleBrushPropsChange({
+          isEraser: true,
+          eraserMode,
+          hardness: eraserMode === 'soft' ? 0 : 1,
+          antiAlias: params.antialias ?? cur.antiAlias ?? 'medium',
+          opacity: typeof params.eraserOpacity === 'number' ? params.eraserOpacity : 1,
+          size,
+          minSize: sizePressure ? Math.max(1, Math.round(size * minSizeRatio)) : size,
+          dynamics: {
+            ...cur.dynamics,
+            size: { pressure: sizePressure, min: sizePressure ? minSizeRatio : 1 },
+            opacity: { pressure: opacityPressure, min: opacityPressure ? 0.08 : 1 },
+          },
+        });
+      }
       if (sub.categoryId === 'vector') {
         if (params.vectorEraserMode !== undefined) setVectorEraserMode(params.vectorEraserMode);
         if (params.vectorWidthMode !== undefined) setVectorWidthMode(params.vectorWidthMode);
@@ -3205,14 +3235,21 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
 
   const handleBucketReferenceChange = (reference: typeof bucketReference) => {
-    if (currentTool !== 'bucket' || bucketMode !== 'click') {
-      setBucketReference(reference);
-      return;
+    setBucketReference(reference);
+    if (currentTool === 'bucket' && bucketMode === 'click') {
+      subToolStore.updateSubToolParams('fill_bucket', { bucketReference: reference });
     }
-    const sub = subToolStore.syncFromToolType('bucket', { bucketMode, bucketReference: reference });
-    if (!sub) return;
-    subToolStore.updateSubToolParams(sub.id, { bucketReference: reference });
-    applySubTool(sub);
+  };
+
+  const handleSmartFillModeChange = (mode: 'enclose' | 'paint') => {
+    subToolStore.updateSubToolParams('fill_enclose', { smartFillMode: mode });
+    const sub = findSubTool('fill_enclose');
+    if (sub) {
+      subToolStore.selectSubTool('fill_enclose');
+      applySubTool(sub);
+    } else {
+      handleSelectTool(mode === 'paint' ? 'paint_unfilled' : 'smart_fill');
+    }
   };
 
   useEffect(() => {
@@ -3224,26 +3261,45 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   useEffect(() => {
     const id = subToolState.activeSubToolId;
+    const sub = findSubTool(id);
+    const matchesFillTool = id === 'fill_enclose' && (currentTool === 'smart_fill' || currentTool === 'paint_unfilled');
     // The store can render its new selection before React commits the matching fill settings.
-    if (applyingSubToolRef.current || id !== appliedSubToolId || id !== subToolStore.getState().activeSubToolId || findSubTool(id)?.tool !== currentTool) return;
+    if (applyingSubToolRef.current || id !== appliedSubToolId || id !== subToolStore.getState().activeSubToolId || (!matchesFillTool && sub?.tool !== currentTool)) return;
     let params: SubToolParams;
     switch (id) {
-      case 'fill_refer_other':
-      case 'fill_refer_edit':
+      case 'fill_bucket':
         if (bucketMode !== 'click') return;
         params = { bucketMode, bucketReference, bucketRefLayerId, bucketTolerance, bucketExpand };
         break;
       case 'fill_enclose':
-        params = { referenceLayerId, gapClosingRadius, expandRadius };
+        params = {
+          smartFillMode: currentTool === 'paint_unfilled' ? 'paint' : 'enclose',
+          referenceLayerId,
+          gapClosingRadius,
+          expandRadius,
+          brushSize: brushProps.size,
+          bucketReference,
+          bucketRefLayerId,
+          bucketTolerance,
+        };
         break;
       case 'fill_lasso':
         if (bucketMode !== 'lasso') return;
         params = { bucketMode, antialias: brushProps.antiAlias ?? 'medium', outlineEnabled: lassoOutlineEnabled, lassoErase: lassoFillErase };
         break;
-      case 'fill_paint_unfilled':
-        params = { brushSize: brushProps.size, bucketReference, bucketRefLayerId, bucketTolerance, gapClosingRadius, expandRadius };
-        break;
       default:
+        if (sub?.categoryId === 'eraser' && currentTool === 'eraser') {
+          params = {
+            eraserMode: brushProps.eraserMode === 'soft' ? 'soft' : 'hard',
+            antialias: brushProps.antiAlias ?? 'medium',
+            eraserOpacity: brushProps.opacity,
+            eraserSizePressure: brushProps.dynamics?.size ? Boolean(brushProps.dynamics.size.pressure) : brushProps.minSize < brushProps.size,
+            eraserOpacityPressure: Boolean(brushProps.dynamics?.opacity?.pressure),
+            eraserMinSizeRatio: brushProps.dynamics?.size?.min ?? (brushProps.size > 0 ? brushProps.minSize / brushProps.size : 0.25),
+            brushSize: brushProps.size,
+          };
+          break;
+        }
         return;
     }
     const saved = subToolStore.getSubToolParams(id);
@@ -3251,7 +3307,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       subToolStore.updateSubToolParams(id, params);
     }
   }, [subToolState.activeSubToolId, appliedSubToolId, currentTool, bucketMode, bucketReference, bucketRefLayerId, bucketTolerance, bucketExpand,
-    referenceLayerId, gapClosingRadius, expandRadius, brushProps.antiAlias, lassoOutlineEnabled, lassoFillErase, brushProps.size]);
+    referenceLayerId, gapClosingRadius, expandRadius, brushProps.antiAlias, brushProps.eraserMode, brushProps.opacity, brushProps.minSize, brushProps.dynamics, lassoOutlineEnabled, lassoFillErase, brushProps.size]);
 
   useEffect(() => {
     const id = subToolState.activeSubToolId;
@@ -6222,7 +6278,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
 
   // ---------- Layer structure: merge down, group ----------
-  const canManageLayer = (l: LayerModel) => !isGuest && !isCanvasViewer && l.ownerId === user?.id;
+  const canManageLayer = (l: LayerModel) => isOffline || (!isGuest && !isCanvasViewer && l.ownerId === user?.id);
 
   const setAdjustmentPreview = (id: string, adjustment: LayerAdjustment | null) => {
     layerManagerRef.current?.setAdjustmentPreview(id, adjustment);
@@ -8047,7 +8103,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     // Every tool change goes through handleSelectTool: it swaps in the brush tools' own settings
     setCurrentTool: (tool) => handleSelectTool(tool),
     onSelectLayer,
-    onRequestCreateMyLayer,
+    onRequestCreateMyLayer: isOffline ? undefined : onRequestCreateMyLayer,
     onTextTool: (local) => handleTextTool(local),
     pluginTool: {
       isActive: () => Boolean(activePluginToolRef.current),
@@ -8286,9 +8342,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     },
     {
       id: 'brushToolset',
-      title: subToolState.activeCategoryId === 'paint' || subToolState.activeCategoryId === 'eraser'
-        ? getPanelDisplayTitle('brushToolset', t)
-        : `${t.tools.subToolTitle} · ${getLocalizedCategoryLabel(subToolState.activeCategoryId, t)}`,
+      title: getPanelDisplayTitle('brushToolset', t),
       icon: renderPanelIcon('brushToolset'),
       render: () => (
         <SubToolPanel activeCategoryId={subToolState.activeCategoryId} activeSubToolId={subToolState.activeSubToolId}
@@ -8340,6 +8394,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             onChangeBucketExpand={setBucketExpand}
             bucketRefLayerId={bucketRefLayerId}
             onChangeBucketRefLayerId={setBucketRefLayerId}
+            onSmartFillMode={handleSmartFillModeChange}
             layers={layers}
             referenceLayerId={referenceLayerId}
             onChangeReferenceLayerId={(id) => setReferenceLayerId(id)}
@@ -8403,9 +8458,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           onCreateGroup={() => createLayerFromDock('group')}
           onCreateAdjustmentLayer={onCreateLayer ? createAdjustmentLayer : undefined}
           onEditAdjustmentLayer={openAdjustmentDialog}
-          onRequestCreateMyLayer={onRequestCreateMyLayer}
-          onToggleLock={onToggleLock || (() => {})}
-          onToggleVisibility={onToggleVisibility || (() => {})}
+          onRequestCreateMyLayer={isOffline ? undefined : onRequestCreateMyLayer}
+          onToggleLock={isOffline ? (layer) => updateLayerPropsFromPanel(layer.id, { isLocked: !layer.isLocked }) : onToggleLock || (() => {})}
+          onToggleVisibility={isOffline ? (layer) => updateLayerPropsFromPanel(layer.id, { isVisible: !layer.isVisible }) : onToggleVisibility || (() => {})}
           onDeleteLayer={deleteLayerFromUser}
           onReleaseLayer={onReleaseLayer || (() => {})}
           roomMembers={roomMembers && roomMembers.length > 0 ? roomMembers : members}
@@ -8547,9 +8602,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         onWandContiguous={setWandContiguous}
         bucketTolerance={bucketTolerance}
         onBucketTolerance={setBucketTolerance}
+        bucketExpand={bucketExpand}
+        onBucketExpand={setBucketExpand}
         bucketReference={bucketReference}
         onBucketReference={handleBucketReferenceChange}
+        bucketRefLayerId={bucketRefLayerId}
+        onBucketRefLayerId={setBucketRefLayerId}
+        layers={layers}
         bucketMode={bucketMode}
+        onSmartFillMode={handleSmartFillModeChange}
         lassoFillErase={lassoFillErase}
         onLassoFillErase={setLassoFillErase}
         gapClosingRadius={gapClosingRadius}

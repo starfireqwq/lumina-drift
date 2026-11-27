@@ -103,6 +103,7 @@ interface FloatingStudioPanelProps {
   onChangeBucketExpand?: (exp: number) => void;
   bucketRefLayerId?: string | null;
   onChangeBucketRefLayerId?: (id: string | null) => void;
+  onSmartFillMode?: (mode: 'enclose' | 'paint') => void;
   expandRadius?: number;
   onChangeExpandRadius?: (r: number) => void;
   // Liquify brush options
@@ -185,6 +186,7 @@ export const FloatingStudioPanel: React.FC<FloatingStudioPanelProps> = ({
   onChangeBucketExpand,
   bucketRefLayerId = null,
   onChangeBucketRefLayerId,
+  onSmartFillMode,
   expandRadius = 2,
   onChangeExpandRadius,
   liquifyMode = 'push',
@@ -238,8 +240,8 @@ export const FloatingStudioPanel: React.FC<FloatingStudioPanelProps> = ({
 
   return (
     <div className="flex flex-col gap-2.5 text-xs text-neutral-300">
-      {/* Preset Library & Format Extension (.abr / .sut) button */}
-      {onOpenPresetModal && (
+      {/* Preset Library & Format Extension (.abr / .sut) button — only for brush/pencil tools */}
+      {onOpenPresetModal && (currentTool === 'brush' || currentTool === 'pencil') && (
         <button
           type="button"
           onClick={onOpenPresetModal}
@@ -405,7 +407,70 @@ export const FloatingStudioPanel: React.FC<FloatingStudioPanelProps> = ({
           {/* 2. Tool-Specific Parameters */}
           <div className="space-y-2.5">
 
-            {!isWand && currentTool !== 'lasso' && currentTool !== 'smart_fill' && currentTool !== 'canvas_resize' && (
+            {isEraser && (
+              <div className="p-2.5 bg-neutral-900/60 rounded-lg border border-neutral-800 space-y-2">
+                <div className="grid grid-cols-2 gap-1 text-[11px]">
+                  {([
+                    ['hard', t.toolOptions.eraserHard],
+                    ['soft', t.toolOptions.eraserSoft],
+                  ] as const).map(([mode, label]) => {
+                    const active = (brushProps.eraserMode === 'soft' ? 'soft' : 'hard') === mode;
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        aria-pressed={active}
+                        onClick={() => onChangeBrushProps({ eraserMode: mode, hardness: mode === 'soft' ? 0 : 1 })}
+                        className={`py-1 rounded border font-medium transition ${
+                          active
+                            ? 'bg-indigo-600 border-indigo-400 text-white'
+                            : 'bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+                  <label className="flex items-center gap-1.5 rounded border border-neutral-800 bg-neutral-950/50 px-2 py-1 text-neutral-200 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={brushProps.dynamics?.size ? Boolean(brushProps.dynamics.size.pressure) : brushProps.minSize < brushProps.size}
+                      onChange={(e) => {
+                        const enabled = e.target.checked;
+                        onChangeBrushProps({
+                          minSize: enabled ? Math.max(1, Math.round(brushProps.size * 0.2)) : brushProps.size,
+                          dynamics: {
+                            ...brushProps.dynamics,
+                            size: { ...brushProps.dynamics?.size, pressure: enabled, min: enabled ? 0.15 : 1 },
+                          },
+                        });
+                      }}
+                    />
+                    <span className="truncate">{t.toolOptions.eraserPressureSize}</span>
+                  </label>
+                  <label className="flex items-center gap-1.5 rounded border border-neutral-800 bg-neutral-950/50 px-2 py-1 text-neutral-200 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(brushProps.dynamics?.opacity?.pressure)}
+                      onChange={(e) => {
+                        const enabled = e.target.checked;
+                        onChangeBrushProps({
+                          dynamics: {
+                            ...brushProps.dynamics,
+                            opacity: { ...brushProps.dynamics?.opacity, pressure: enabled, min: enabled ? 0.08 : 1 },
+                          },
+                        });
+                      }}
+                    />
+                    <span className="truncate">{t.toolOptions.eraserPressureOpacity}</span>
+                  </label>
+                </div>
+              </div>
+            )}
+
+            {(currentTool === 'brush' || currentTool === 'pencil' || currentTool === 'eraser' || (currentTool === 'bucket' && bucketMode === 'lasso')) && (
               <div className="p-2 bg-neutral-900/60 rounded-lg border border-neutral-800 space-y-1">
                 <span className="text-neutral-400 font-medium">{t.studio.antiAlias}</span>
                 <AntiAliasSelector value={brushProps.antiAlias} onChange={(antiAlias) => onChangeBrushProps({ antiAlias })} />
@@ -510,7 +575,7 @@ export const FloatingStudioPanel: React.FC<FloatingStudioPanelProps> = ({
             )}
 
             {/* Ruler Snapping & Auxiliary Guides (尺規與輔助線吸附控制) */}
-            {!isWand && currentTool !== 'lasso' && currentTool !== 'smart_fill' && currentTool !== 'canvas_resize' && (
+            {['brush', 'pencil', 'eraser', 'blur', 'smudge', 'shape', 'vector_pen', 'vector_bezier'].includes(currentTool) && (
               <div className="p-2.5 bg-neutral-900/60 rounded-lg border border-neutral-800 space-y-2">
                 <div className="flex justify-between items-center text-[11px]">
                   <span className="text-neutral-200 font-semibold flex items-center gap-1.5">
@@ -535,8 +600,29 @@ export const FloatingStudioPanel: React.FC<FloatingStudioPanelProps> = ({
               <div className="p-2.5 bg-neutral-900/70 rounded-lg border border-amber-800/60 space-y-2.5 animate-in fade-in duration-150">
                 <div className="flex items-center gap-1.5 font-semibold text-amber-400 text-[11px]">
                   <PaintBucket className="w-3.5 h-3.5 text-amber-400" />
-                  <span>{isPaintUnfilled ? t.tools.paintUnfilled : t.tools.bucket}</span>
+                  <span>{isPaintUnfilled ? t.tools.smartFill : t.tools.fillBucket}</span>
                 </div>
+
+                {isPaintUnfilled && onSmartFillMode && (
+                  <div className="grid grid-cols-2 gap-1 text-[10px]">
+                    <button
+                      type="button"
+                      aria-pressed={false}
+                      onClick={() => onSmartFillMode('enclose')}
+                      className="py-1 rounded border font-medium transition bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white"
+                    >
+                      {t.tools.fillEnclose}
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={true}
+                      onClick={() => onSmartFillMode('paint')}
+                      className="py-1 rounded border font-medium transition bg-amber-600 border-amber-400 text-white shadow"
+                    >
+                      {t.tools.fillPaintUnfilled}
+                    </button>
+                  </div>
+                )}
 
                 <div className="space-y-1">
                   <span className="text-[11px] text-neutral-300 font-medium">{t.toolOptions.bucketRefMode}</span>
@@ -545,7 +631,7 @@ export const FloatingStudioPanel: React.FC<FloatingStudioPanelProps> = ({
                       ['current', t.toolOptions.refCurrent],
                       ['all', t.toolOptions.refAll],
                       ['specific', t.toolOptions.refSpecific],
-                      ['none', t.toolOptions.refNone],
+                      ['none', t.toolOptions.selectionOnly],
                     ] as const).filter(([reference]) => isClickFill || reference !== 'none').map(([reference, label]) => (
                       <button
                         key={reference}
@@ -587,6 +673,7 @@ export const FloatingStudioPanel: React.FC<FloatingStudioPanelProps> = ({
                   { label: t.toolOptions.gapClosing, value: gapClosingRadius, min: 0, max: 10, unit: ' px', onChange: onChangeGapClosingRadius },
                   { label: t.toolOptions.areaScaling, value: expandRadius, min: -6, max: 6, unit: ' px', signed: true, onChange: onChangeExpandRadius },
                 ] : [
+                  { label: t.toolOptions.tolerance, value: bucketTolerance, min: 0, max: 255, onChange: onChangeBucketTolerance },
                   { label: t.toolOptions.bucketExpand, value: bucketExpand, min: 0, max: 10, unit: ' px', signed: true, onChange: onChangeBucketExpand },
                 ]).map(({ label, value, min, max, unit, signed, onChange }) => (
                   <label key={label} className="block space-y-1">
@@ -616,6 +703,26 @@ export const FloatingStudioPanel: React.FC<FloatingStudioPanelProps> = ({
                     <span>{t.toolOptions.smartFillTitle}</span>
                   </div>
                 </div>
+                {onSmartFillMode && (
+                  <div className="grid grid-cols-2 gap-1 text-[10px]">
+                    <button
+                      type="button"
+                      aria-pressed={true}
+                      onClick={() => onSmartFillMode('enclose')}
+                      className="py-1 rounded border font-medium transition bg-indigo-600 border-indigo-400 text-white shadow"
+                    >
+                      {t.tools.fillEnclose}
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={false}
+                      onClick={() => onSmartFillMode('paint')}
+                      className="py-1 rounded border font-medium transition bg-neutral-800 border-neutral-700 text-neutral-400 hover:text-white"
+                    >
+                      {t.tools.fillPaintUnfilled}
+                    </button>
+                  </div>
+                )}
 
                 {/* 1. Reference Lineart Layer Selector */}
                 <div className="space-y-1">

@@ -27,39 +27,76 @@ export function SubToolPanel({
   const category = findCategory(activeCategoryId);
   const activeSubTool = findSubTool(activeSubToolId);
   const title = getLocalizedCategoryLabel(activeCategoryId, t);
-  const showBrushPresets = activeCategoryId === 'paint' || activeCategoryId === 'eraser';
+  const showBrushPresets = activeCategoryId === 'paint';
 
   return (
     <div className={`flex min-h-0 flex-col ${showBrushPresets ? 'h-full' : ''}`}>
-      <div className="flex shrink-0 items-center justify-between gap-2 px-2 pt-2">
-        <h3 className="text-xs font-semibold text-neutral-200">{title}</h3>
-        {onResetSubTool && activeSubTool?.defaultParams && (
-          <button type="button" data-subtool-reset className="atelier-btn px-2 py-1 text-xs"
-            onClick={() => onResetSubTool(activeSubToolId)}>
-            {t.common.reset}
-          </button>
-        )}
-      </div>
-      <div role="group" aria-label={`${t.tools.subToolTitle} · ${title}`} className={`gap-1 p-2 ${showBrushPresets ? 'flex shrink-0 flex-wrap' : 'grid'}`}>
-        {category?.subTools.map((sub) => {
-          const Icon = sub.icon;
-          const { label, hint } = getLocalizedSubTool(sub.id, t);
-          const key = shortcutLabel(sub.shortcutId);
-          return (
-            <button key={sub.id} type="button" data-subtool-id={sub.id}
-              aria-pressed={activeSubToolId === sub.id} title={showBrushPresets ? hint : undefined}
-              onClick={() => onSelectSubTool(sub.id)}
-              className="flex min-w-0 items-center gap-2 rounded-md border border-transparent px-2 py-1.5 text-left text-xs text-neutral-200 hover:bg-white/5 aria-pressed:border-indigo-400/50 aria-pressed:bg-indigo-500/20">
-              <Icon className="h-4 w-4 shrink-0" />
-              <span className="min-w-0 flex-1">
-                <span className="block font-medium">{label}</span>
-                {!showBrushPresets && <span className="mt-0.5 block text-[11px] text-neutral-400">{hint}</span>}
-              </span>
-              {!showBrushPresets && key && <kbd className="atelier-kbd shrink-0">{key}</kbd>}
-            </button>
-          );
-        })}
-      </div>
+      {showBrushPresets ? (
+        <div
+          role="group"
+          aria-label={`${t.tools.subToolTitle} · ${title}`}
+          className="flex shrink-0 flex-wrap items-center gap-1 border-b border-neutral-700/60 p-1.5"
+        >
+          {category?.subTools.map((sub) => {
+            const Icon = sub.icon;
+            const { label, hint } = getLocalizedSubTool(sub.id, t);
+            return (
+              <button
+                key={sub.id}
+                type="button"
+                data-subtool-id={sub.id}
+                aria-pressed={activeSubToolId === sub.id}
+                title={hint}
+                onClick={() => onSelectSubTool(sub.id)}
+                className="flex min-w-0 items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-left text-xs text-neutral-200 hover:bg-white/5 aria-pressed:border-indigo-400/50 aria-pressed:bg-indigo-500/20"
+              >
+                <Icon className="h-3.5 w-3.5 shrink-0" />
+                <span className="truncate font-medium">{label}</span>
+              </button>
+            );
+          })}
+        </div>
+      ) : (
+        <div role="group" aria-label={`${t.tools.subToolTitle} · ${title}`} className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+          {category?.subTools.map((sub) => {
+            const Icon = sub.icon;
+            const { label, hint } = getLocalizedSubTool(sub.id, t);
+            const key = shortcutLabel(sub.shortcutId);
+            const active = activeSubToolId === sub.id;
+            return (
+              <button
+                key={sub.id}
+                type="button"
+                data-subtool-id={sub.id}
+                aria-pressed={active}
+                title={hint}
+                onClick={() => onSelectSubTool(sub.id)}
+                className={`flex min-w-0 items-center gap-2 border-b border-neutral-700/60 px-2.5 py-2 text-left text-xs transition ${
+                  active
+                    ? 'bg-indigo-600/25 text-neutral-50'
+                    : 'text-neutral-200 hover:bg-neutral-800/70'
+                }`}
+              >
+                <Icon className="h-3.5 w-3.5 shrink-0 text-neutral-300" />
+                <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
+                {key && <kbd className="atelier-kbd shrink-0">{key}</kbd>}
+              </button>
+            );
+          })}
+          {onResetSubTool && activeSubTool?.defaultParams && (
+            <div className="flex justify-end px-2 py-1.5">
+              <button
+                type="button"
+                data-subtool-reset
+                className="atelier-btn px-2 py-0.5 text-[11px]"
+                onClick={() => onResetSubTool(activeSubToolId)}
+              >
+                {t.common.reset}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       {showBrushPresets && (
         <Suspense fallback={null}>
           <BrushToolset currentBrushProps={currentBrushProps} selectedId={selectedBrushId} onApplyPreset={onApplyPreset} />

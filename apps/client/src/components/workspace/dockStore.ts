@@ -511,7 +511,7 @@ export const useDesktopModeAvailable = () => useMediaQuery(TOUCH_UNDER_1280) || 
 
 export const PANEL_TITLES: Record<PanelId, string> = {
   navigator: '導航器',
-  brushToolset: '筆刷工具集',
+  brushToolset: '輔助工具集',
   color: '色彩',
   subView: '子視圖',
   autoActions: '自動動作',

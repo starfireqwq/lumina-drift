@@ -299,9 +299,15 @@ export interface ToolOptionsBarProps {
   // fill
   bucketTolerance: number;
   onBucketTolerance: (n: number) => void;
+  bucketExpand?: number;
+  onBucketExpand?: (n: number) => void;
   bucketReference: 'current' | 'all' | 'specific' | 'none';
   onBucketReference: (r: 'current' | 'all' | 'specific' | 'none') => void;
+  bucketRefLayerId?: string | null;
+  onBucketRefLayerId?: (id: string | null) => void;
+  layers?: Array<{ id: string; name: string; layerType?: string }>;
   bucketMode: 'click' | 'lasso';
+  onSmartFillMode?: (mode: 'enclose' | 'paint') => void;
   lassoFillErase?: boolean;
   onLassoFillErase?: (erase: boolean) => void;
   gapClosingRadius?: number;
@@ -592,7 +598,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
           <Sep />
           <div className="flex shrink-0 items-center gap-1">
             <span className="text-[11px] text-neutral-400">{tr.studio.antiAlias}</span>
-            <AntiAliasSelector compact requireCoverage={t === 'eraser'} value={p.brushProps.antiAlias} onChange={(antiAlias) => p.onBrushProps({ antiAlias })} />
+            <AntiAliasSelector compact value={p.brushProps.antiAlias} onChange={(antiAlias) => p.onBrushProps({ antiAlias })} />
           </div>
         </>
       )}
@@ -739,17 +745,49 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
         </>
       )}
 
+      {(t === 'smart_fill' || isPaintUnfilled) && p.onSmartFillMode && (
+        <>
+          <Sep />
+          <Segmented
+            label={tr.tools.smartFill}
+            value={isPaintUnfilled ? 'paint' : 'enclose'}
+            onChange={p.onSmartFillMode}
+            options={[
+              { id: 'enclose', label: tr.tools.fillEnclose },
+              { id: 'paint', label: tr.tools.fillPaintUnfilled },
+            ]}
+          />
+        </>
+      )}
+
       {(isClickFill || isPaintUnfilled) && (
         <>
           <Sep />
           <Segmented label={tr.toolOptions.referenceLayer} value={fillReference} onChange={p.onBucketReference}
             options={[
-              { id: 'current', label: tr.toolOptions.currentLayer },
-              { id: 'all', label: tr.toolOptions.allLayers },
+              { id: 'current', label: tr.toolOptions.refCurrent },
+              { id: 'all', label: tr.toolOptions.refAll },
+              { id: 'specific', label: tr.toolOptions.refSpecific },
               ...(isClickFill ? [{ id: 'none' as const, label: tr.toolOptions.selectionOnly }] : []),
             ]} />
+          {fillReference === 'specific' && p.onBucketRefLayerId && p.layers && (
+            <select
+              aria-label={tr.toolOptions.selectLayer}
+              value={p.bucketRefLayerId || ''}
+              onChange={(e) => p.onBucketRefLayerId?.(e.target.value || null)}
+              className="atelier-field h-6 max-w-[132px] px-1.5 text-[11px]"
+            >
+              <option value="">{tr.toolOptions.selectLayer}</option>
+              {p.layers.filter((l) => !isPaintUnfilled || l.layerType !== 'group').map((l) => (
+                <option key={l.id} value={l.id}>{l.name}</option>
+              ))}
+            </select>
+          )}
           <Sep />
           <SliderField label={tr.toolOptions.tolerance} value={p.bucketTolerance} max={255} suffix="" onChange={p.onBucketTolerance} />
+          {isClickFill && p.bucketExpand !== undefined && p.onBucketExpand && (
+            <SliderField label={tr.toolOptions.bucketExpand} value={p.bucketExpand} min={0} max={10} suffix="px" onChange={p.onBucketExpand} />
+          )}
           {isClickFill && p.onConfirmSoloFullFill && (
             <label className="flex max-w-full items-center gap-1.5 text-[11px] text-neutral-300">
               <input type="checkbox" checked={p.confirmSoloFullFill}

@@ -392,16 +392,22 @@ export function useFillTools(ctx: ToolContext) {
       return;
     }
 
-    const isOwner = Boolean(user?.id && activeLayer.ownerId === user.id);
-    const isPublicUnclaimed = Boolean(activeLayer.isPublic || !activeLayer.ownerId);
-    if (isPublicUnclaimed && !isAdmin) {
-      warn('📢 此圖層為公開圖層，請先在右側圖層面板點擊「接管此圖層」後方可填色！', 3500);
-      return;
-    }
-    const canFill = isOwner || isAdmin || activeLayer.aclMode === 'shared_all';
-    if (!canFill) {
-      warn('⚠️ 您不是此圖層的擁有者，無法在此圖層填色！', 3000);
-      return;
+    if (OfflineSessionStore.isOfflineCanvas(canvas.id)) {
+      if (!canEditPixels(activeLayer)) {
+        warn('⚠️ 請選取未鎖定且可繪製的圖層，再使用智能填色。', 3000);
+        return;
+      }
+    } else {
+      const isPublicUnclaimed = Boolean(activeLayer.isPublic || !activeLayer.ownerId);
+      if (isPublicUnclaimed && !isAdmin) {
+        warn('📢 此圖層為公開圖層，請先在右側圖層面板點擊「接管此圖層」後方可填色！', 3500);
+        return;
+      }
+      const isOwner = Boolean(user?.id && activeLayer.ownerId === user.id);
+      if (!isOwner && !isAdmin && activeLayer.aclMode !== 'shared_all') {
+        warn('⚠️ 您不是此圖層的擁有者，無法在此圖層填色！', 3000);
+        return;
+      }
     }
 
     // Automatic reference follows the visible drawing rather than guessing a layer from its name.

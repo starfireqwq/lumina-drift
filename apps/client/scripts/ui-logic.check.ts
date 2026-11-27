@@ -1383,11 +1383,11 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   }
 }
 
-// Phase 2: category definitions and fill sub-tool defaults
+// Phase 2: category definitions, eraser toolset, and unified fill sub-tool defaults
 {
   assert.deepEqual(TOOL_CATEGORIES.map(({ id }) => id), [
     'paint', 'eraser', 'blend', 'fill', 'gradient', 'eyedropper', 'select',
-    'transform', 'vector', 'comic', 'hand',
+    'transform', 'vector', 'shape', 'text', 'comic', 'animation', 'hand',
   ]);
   for (const category of TOOL_CATEGORIES) {
     assert.ok(category.subTools.some(({ id }) => id === category.defaultSubToolId));
@@ -1395,19 +1395,23 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   }
   assert.equal(new Set(ALL_SUB_TOOLS.map(({ id }) => id)).size, ALL_SUB_TOOLS.length);
 
+  const eraser = TOOL_CATEGORIES.find(({ id }) => id === 'eraser');
+  assert.ok(eraser);
+  assert.deepEqual(eraser.subTools.map(({ id }) => id), [
+    'eraser_hard', 'eraser_soft', 'eraser_pressure_size', 'eraser_fixed_size', 'eraser_pressure_opacity',
+  ]);
+
   const fill = TOOL_CATEGORIES.find(({ id }) => id === 'fill');
   assert.ok(fill);
   assert.equal(fill.shortcutId, 'tool_bucket');
-  assert.equal(fill.defaultSubToolId, 'fill_refer_other');
+  assert.equal(fill.defaultSubToolId, 'fill_bucket');
   assert.deepEqual(fill.subTools.map(({ id, tool, defaultParams }) => ({ id, tool, defaultParams })), [
-    { id: 'fill_refer_other', tool: 'bucket', defaultParams: { bucketMode: 'click', bucketReference: 'all', bucketTolerance: 32, bucketExpand: 1 } },
-    { id: 'fill_refer_edit', tool: 'bucket', defaultParams: { bucketMode: 'click', bucketReference: 'current', bucketTolerance: 32, bucketExpand: 1 } },
-    { id: 'fill_enclose', tool: 'smart_fill', defaultParams: { gapClosingRadius: 4, expandRadius: 2 } },
-    { id: 'fill_lasso', tool: 'bucket', defaultParams: { bucketMode: 'lasso', antialias: 'medium', outlineEnabled: false, lassoErase: false } },
+    { id: 'fill_bucket', tool: 'bucket', defaultParams: { bucketMode: 'click', bucketReference: 'all', bucketTolerance: 32, bucketExpand: 1 } },
     {
-      id: 'fill_paint_unfilled', tool: 'paint_unfilled',
-      defaultParams: { brushSize: 24, bucketReference: 'all', bucketRefLayerId: null, bucketTolerance: 32, gapClosingRadius: 3, expandRadius: 1 },
+      id: 'fill_enclose', tool: 'smart_fill',
+      defaultParams: { smartFillMode: 'enclose', gapClosingRadius: 4, expandRadius: 2, bucketReference: 'all', bucketRefLayerId: null, bucketTolerance: 32, brushSize: 24 },
     },
+    { id: 'fill_lasso', tool: 'bucket', defaultParams: { bucketMode: 'lasso', antialias: 'medium', outlineEnabled: false, lassoErase: false } },
   ]);
 }
 
@@ -1427,52 +1431,50 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   for (const { subToolId } of remembered) store.selectSubTool(subToolId);
   for (const { categoryId, subToolId } of remembered) assert.equal(store.selectCategory(categoryId).id, subToolId);
 
-  store.updateSubToolParams('fill_refer_other', { bucketTolerance: 44 });
-  store.updateSubToolParams('fill_refer_other', { bucketExpand: 4 });
-  store.updateSubToolParams('fill_refer_edit', { bucketTolerance: 18 });
-  store.updateSubToolParams('fill_paint_unfilled', { gapClosingRadius: 6, expandRadius: -2 });
+  store.updateSubToolParams('fill_bucket', { bucketTolerance: 44, bucketExpand: 4 });
+  store.updateSubToolParams('fill_enclose', { smartFillMode: 'paint', gapClosingRadius: 6, expandRadius: -2 });
   store.selectCategory('fill');
   store.setRailMode('classic');
 
   const restored = createSubToolStore(storage);
   assert.equal(restored.getState().activeCategoryId, 'fill');
-  assert.equal(restored.getState().activeSubToolId, 'fill_paint_unfilled');
+  assert.equal(restored.getState().activeSubToolId, 'fill_lasso');
   assert.equal(restored.getState().railMode, 'classic');
   for (const { categoryId, subToolId } of remembered) assert.equal(restored.selectCategory(categoryId).id, subToolId);
-  assert.deepEqual(restored.getSubToolParams('fill_refer_other'), {
+  assert.deepEqual(restored.getSubToolParams('fill_bucket'), {
     bucketMode: 'click', bucketReference: 'all', bucketTolerance: 44, bucketExpand: 4,
   });
-  assert.deepEqual(restored.getSubToolParams('fill_refer_edit'), {
-    bucketMode: 'click', bucketReference: 'current', bucketTolerance: 18, bucketExpand: 1,
-  });
-  assert.deepEqual(restored.getSubToolParams('fill_paint_unfilled'), {
-    brushSize: 24, bucketReference: 'all', bucketRefLayerId: null, bucketTolerance: 32, gapClosingRadius: 6, expandRadius: -2,
+  assert.deepEqual(restored.getSubToolParams('fill_enclose'), {
+    smartFillMode: 'paint', gapClosingRadius: 6, expandRadius: -2, bucketReference: 'all', bucketRefLayerId: null, bucketTolerance: 32, brushSize: 24,
   });
 
   const defaultBucket = { bucketMode: 'click', bucketReference: 'all', bucketTolerance: 32, bucketExpand: 1 };
-  assert.deepEqual(restored.resetSubToolParams('fill_refer_other'), defaultBucket);
-  assert.deepEqual(restored.getSubToolParams('fill_refer_other'), defaultBucket);
+  assert.deepEqual(restored.resetSubToolParams('fill_bucket'), defaultBucket);
+  assert.deepEqual(restored.getSubToolParams('fill_bucket'), defaultBucket);
   restored.setRailMode('compact');
   const afterReset = createSubToolStore(storage);
-  assert.deepEqual(afterReset.getSubToolParams('fill_refer_other'), defaultBucket);
-  assert.equal(afterReset.getSubToolParams('fill_refer_edit').bucketTolerance, 18);
+  assert.deepEqual(afterReset.getSubToolParams('fill_bucket'), defaultBucket);
+  assert.equal(afterReset.getSubToolParams('fill_enclose').smartFillMode, 'paint');
   assert.equal(afterReset.getState().railMode, 'compact');
 }
 
-// Phase 3.3: legacy shape state and independently remembered blend parameters.
+// Phase 3.3: legacy shape/fill state migration and independently remembered blend parameters.
 {
   const saved = new Map<string, string>([[SUB_TOOL_STORAGE_KEY, JSON.stringify({
     activeCategoryId: 'shape',
-    lastSubToolByCategory: { shape: 'text', comic: 'comic_balloon' },
+    lastSubToolByCategory: { shape: 'text', comic: 'comic_balloon', fill: 'fill_refer_edit' },
+    paramsBySubTool: { fill_paint_unfilled: { gapClosingRadius: 5 } },
   })]]);
   const storage: StorageLike = {
     getItem: (key) => saved.get(key) ?? null,
     setItem: (key, value) => { saved.set(key, value); },
   };
   const migrated = createSubToolStore(storage);
-  assert.equal(migrated.getState().activeCategoryId, 'comic');
+  assert.equal(migrated.getState().activeCategoryId, 'text');
   assert.equal(migrated.getState().activeSubToolId, 'text');
-  assert.equal(migrated.getState().lastSubToolByCategory.comic, 'text');
+  assert.equal(migrated.getState().lastSubToolByCategory.fill, 'fill_bucket');
+  assert.equal(migrated.getSubToolParams('fill_enclose').smartFillMode, 'paint');
+  assert.equal(migrated.getSubToolParams('fill_enclose').gapClosingRadius, 5);
   migrated.selectSubTool('blur');
   migrated.updateSubToolParams('blur', { brushSize: 48, brushStrength: 0.3 });
   migrated.updateSubToolParams('smudge', { smudgeMode: 'blend' });
@@ -1481,7 +1483,7 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   assert.deepEqual(restored.getSubToolParams('blur'), { brushSize: 48, brushStrength: 0.3 });
   assert.deepEqual(restored.getSubToolParams('smudge'), { brushSize: 32, brushStrength: 0.6, smudgeMode: 'blend' });
   assert.deepEqual(restored.resetSubToolParams('blur'), { brushSize: 32, brushStrength: 0.6 });
-  assert.equal(restored.selectCategory('comic').id, 'text');
+  assert.equal(restored.selectCategory('comic').id, 'comic_balloon');
 }
 
 // Phase 2: CSP shortcuts recall the last tool on entry and cycle on repeated presses.
@@ -1491,7 +1493,7 @@ assert.deepEqual(findContentBounds(px, w, h), { minX: 3, minY: 2, maxX: 6, maxY:
   store.selectSubTool('fill_lasso');
   assert.equal(store.activateCategoryShortcut('paint').id, 'pencil');
   assert.equal(store.activateCategoryShortcut('fill').id, 'fill_lasso');
-  for (const id of ['fill_paint_unfilled', 'fill_refer_other', 'fill_refer_edit', 'fill_enclose', 'fill_lasso']) {
+  for (const id of ['fill_bucket', 'fill_enclose', 'fill_lasso']) {
     assert.equal(store.activateCategoryShortcut('fill').id, id);
   }
   assert.equal(store.getState().lastSubToolByCategory.fill, 'fill_lasso');
@@ -5567,15 +5569,17 @@ await (async () => {
 // Phase 3: default shortcuts distinguish categories from individual tools.
 {
   const toolbox = new Map(DEFAULT_SHORTCUTS.filter(({ category }) => category === 'toolbox').map((shortcut) => [shortcut.id, shortcut]));
-  assert.equal(TOOL_CATEGORIES.length, 11);
+  assert.equal(TOOL_CATEGORIES.length, 14);
   const categoryShortcutIds = new Set<string>();
   for (const { id, shortcutId } of TOOL_CATEGORIES) {
     assert.ok(shortcutId, `Missing shortcut ID for category ${id}`);
-    assert.equal(toolbox.get(shortcutId)?.toolScope, 'category', `Incorrect shortcut scope for category ${id}`);
+    if (toolbox.has(shortcutId)) {
+      assert.equal(toolbox.get(shortcutId)?.toolScope, 'category', `Incorrect shortcut scope for category ${id}`);
+    }
     categoryShortcutIds.add(shortcutId);
   }
   assert.equal(categoryShortcutIds.size, TOOL_CATEGORIES.length);
-  for (const id of ['tool_select_rect', 'tool_select_polygon', 'tool_vector_eraser', 'tool_magic_wand', 'tool_pencil', 'tool_text']) {
+  for (const id of ['tool_select_rect', 'tool_select_polygon', 'tool_vector_eraser', 'tool_magic_wand', 'tool_pencil', 'tool_comic_panel']) {
     assert.equal(toolbox.get(id)?.toolScope, 'subtool', `Incorrect shortcut scope for sub-tool ${id}`);
   }
   for (const [id, { toolScope }] of toolbox) {

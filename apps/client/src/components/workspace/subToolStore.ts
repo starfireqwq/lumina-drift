@@ -45,6 +45,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+const LEGACY_SUBTOOL_MAP: Record<string, SubToolId> = {
+  fill_refer_other: 'fill_bucket',
+  fill_refer_edit: 'fill_bucket',
+  fill_paint_unfilled: 'fill_enclose',
+  eraser: 'eraser_hard',
+};
+
+function normalizeSubToolId(raw: unknown): SubToolId | undefined {
+  if (typeof raw !== 'string') return undefined;
+  return LEGACY_SUBTOOL_MAP[raw] ?? raw;
+}
+
 function loadState(storage: StorageLike | undefined): SubToolStoreState {
   let saved: Record<string, unknown> = {};
   try {
@@ -56,20 +68,32 @@ function loadState(storage: StorageLike | undefined): SubToolStoreState {
   }
 
   const savedLast = isRecord(saved.lastSubToolByCategory) ? saved.lastSubToolByCategory : {};
-  const legacyShape = savedLast.shape === 'shape' || savedLast.shape === 'text' ? savedLast.shape : undefined;
   const lastSubToolByCategory = Object.fromEntries(TOOL_CATEGORIES.map((category) => {
-    const savedId = category.id === 'comic' && legacyShape ? legacyShape : savedLast[category.id];
+    const savedId = normalizeSubToolId(savedLast[category.id]);
     const last = category.subTools.find((subTool) => subTool.id === savedId);
     return [category.id, last?.id ?? category.defaultSubToolId];
   })) as SubToolStoreState['lastSubToolByCategory'];
 
-  const savedSubTool = typeof saved.activeSubToolId === 'string' ? findSubTool(saved.activeSubToolId) : undefined;
+  const normalizedActiveSub = normalizeSubToolId(saved.activeSubToolId);
+  const savedSubTool = normalizedActiveSub ? findSubTool(normalizedActiveSub) : undefined;
+  const legacyComicSub = saved.activeCategoryId === 'comic' && typeof savedLast.comic === 'string'
+    ? findSubTool(normalizeSubToolId(savedLast.comic) ?? '')
+    : undefined;
+  const legacyShapeSub = saved.activeCategoryId === 'shape' && typeof savedLast.shape === 'string'
+    ? findSubTool(normalizeSubToolId(savedLast.shape) ?? '')
+    : undefined;
   const savedCategory = TOOL_CATEGORIES.find((category) => category.id === saved.activeCategoryId);
-  const activeCategoryId = saved.activeCategoryId === 'shape'
-    ? 'comic'
-    : savedSubTool?.categoryId ?? savedCategory?.id ?? 'paint';
+  const activeCategoryId: ToolCategoryId = savedSubTool?.categoryId
+    ?? legacyShapeSub?.categoryId
+    ?? legacyComicSub?.categoryId
+    ?? savedCategory?.id
+    ?? 'paint';
   const activeSubToolId = savedSubTool?.categoryId === activeCategoryId
     ? savedSubTool.id
+    : legacyShapeSub?.categoryId === activeCategoryId
+    ? legacyShapeSub.id
+    : legacyComicSub?.categoryId === activeCategoryId
+    ? legacyComicSub.id
     : lastSubToolByCategory[activeCategoryId];
   lastSubToolByCategory[activeCategoryId] = activeSubToolId;
 
@@ -78,6 +102,13 @@ function loadState(storage: StorageLike | undefined): SubToolStoreState {
   for (const subTool of ALL_SUB_TOOLS) {
     const params = savedParams[subTool.id];
     if (isRecord(params)) paramsBySubTool[subTool.id] = params;
+  }
+  if (!paramsBySubTool.fill_bucket) {
+    const legacyBucket = savedParams.fill_refer_other ?? savedParams.fill_refer_edit;
+    if (isRecord(legacyBucket)) paramsBySubTool.fill_bucket = legacyBucket;
+  }
+  if (!paramsBySubTool.fill_enclose && isRecord(savedParams.fill_paint_unfilled)) {
+    paramsBySubTool.fill_enclose = { ...savedParams.fill_paint_unfilled, smartFillMode: 'paint' };
   }
 
   return {

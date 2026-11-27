@@ -60,7 +60,7 @@ export const BRUSH_TOOL_DEFAULTS: Record<BrushToolId, Partial<BrushProperties>> 
   eraser: { ...COMMON, brushType: 'brush', isEraser: true, eraserMode: 'hard', size: 40 },
 };
 
-/** Both eraser modes use a clean round tip. The selected tool's size, opacity and stabilizer still apply. */
+/** Both eraser modes use a clean round tip. Size, opacity, pressure dynamics, anti-aliasing and stabilizer still apply. */
 export const eraserStrokeProperties = (props: BrushProperties): BrushProperties => ({
   ...props,
   isEraser: true,
@@ -71,7 +71,7 @@ export const eraserStrokeProperties = (props: BrushProperties): BrushProperties 
   scatter: 0,
   brushType: 'brush',
   customBrushUrl: null,
-  antiAlias: props.antiAlias === 'none' ? 'medium' : props.antiAlias,
+  antiAlias: props.antiAlias ?? 'medium',
   colorMixing: 0,
   mixMode: 'blend',
   textureDensity: 0,

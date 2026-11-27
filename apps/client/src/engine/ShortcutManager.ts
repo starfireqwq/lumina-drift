@@ -261,7 +261,7 @@ export const DEFAULT_SHORTCUTS: ShortcutItem[] = [
   {
     id: 'tool_text',
     category: 'toolbox',
-    toolScope: 'subtool',
+    toolScope: 'category',
     name: '文字工具 (Text)',
     description: '在畫布上放置文字',
     defaultCombo: 'KeyT',
@@ -333,7 +333,7 @@ export const DEFAULT_SHORTCUTS: ShortcutItem[] = [
   {
     id: 'tool_comic_balloon',
     category: 'toolbox',
-    toolScope: 'subtool',
+    toolScope: 'category',
     name: '對話氣泡 (Balloon)',
     description: '放置漫畫對話氣泡',
     defaultCombo: '',
