@@ -2,9 +2,12 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Check } from 'lucide-react';
 import { useI18n, type Translations } from '../context/I18nContext';
 import {
+  applyLuminaGlowSettings,
   applyTheme,
   contrastRatio,
   CustomThemeSettings,
+  LuminaGlowMode,
+  LuminaGlowSettings,
   resolveTheme,
   SURFACE_STYLES,
   SurfaceStyle,
@@ -72,8 +75,8 @@ const surfacePreviewStyle = (surface: SurfaceStyle, themeColors: ReturnType<type
     case 'chromatic-glass':
       return {
         background: `${themeColors.isLight
-          ? 'linear-gradient(145deg, rgba(255,255,255,0.74), rgba(240,246,255,0.48))'
-          : 'linear-gradient(145deg, rgba(255,255,255,0.22), rgba(20,24,38,0.48))'} padding-box, conic-gradient(from var(--atelier-rgb-angle, 24deg), #ff5ea8, #ffb84d, #5eead4, #60a5fa, #a78bfa, #ff5ea8) border-box`,
+          ? 'linear-gradient(145deg, rgba(255,255,255,0.78), rgba(240,246,255,0.52))'
+          : 'linear-gradient(145deg, rgba(255,255,255,0.22), rgba(20,24,38,0.52))'} padding-box, linear-gradient(125deg, #ff5ea8, #ffb84d, #5eead4, #60a5fa, #a78bfa, #ff5ea8) border-box`,
         border: '1.5px solid transparent',
         boxShadow: themeColors.isLight
           ? 'inset 0 1.5px 0 rgba(255,255,255,0.92), 0 4px 12px -3px rgba(129,140,248,0.32)'
@@ -81,25 +84,29 @@ const surfacePreviewStyle = (surface: SurfaceStyle, themeColors: ReturnType<type
       };
     case 'frosted-matte':
       return {
-        background: themeColors.mattePanel,
-        border: `1px solid ${themeColors.isLight ? 'rgba(148,163,184,0.45)' : 'rgba(255,255,255,0.14)'}`,
+        background: themeColors.isLight
+          ? `repeating-radial-gradient(circle at 0 0, rgba(15,23,42,0.03) 0 1px, transparent 1px 3px), ${themeColors.mattePanel}`
+          : `repeating-radial-gradient(circle at 0 0, rgba(255,255,255,0.045) 0 1px, transparent 1px 3px), ${themeColors.mattePanel}`,
+        border: `1px solid ${themeColors.isLight ? 'rgba(148,163,184,0.65)' : 'rgba(226,232,240,0.22)'}`,
         boxShadow: themeColors.isLight
-          ? 'inset 0 1px 0 rgba(255,255,255,0.65), 0 3px 8px -3px rgba(15,23,42,0.12)'
-          : 'inset 0 1px 0 rgba(255,255,255,0.08), 0 4px 10px -4px rgba(0,0,0,0.45)',
+          ? 'inset 0 1px 2px rgba(255,255,255,0.8), 0 4px 10px -4px rgba(15,23,42,0.16)'
+          : 'inset 0 1px 2px rgba(255,255,255,0.12), inset 0 -1px 2px rgba(0,0,0,0.45), 0 4px 10px -4px rgba(0,0,0,0.5)',
       };
     case 'lumina-glow':
       return {
-        background: themeColors.bg,
-        border: `1px solid ${themeColors.accent}`,
-        boxShadow: `0 0 10px -1px ${themeColors.accentGlow}, inset 0 0 8px -4px ${themeColors.accentGlow}`,
+        background: `${themeColors.bg} padding-box, linear-gradient(90deg, #38bdf8, #a78bfa, #f472b6, #34d399) border-box`,
+        border: '1.5px solid transparent',
+        boxShadow: '0 0 12px -2px rgba(129,140,248,0.65), inset 0 0 8px -4px rgba(56,189,248,0.45)',
       };
     case 'soft-paper':
       return {
-        background: `linear-gradient(180deg, ${themeColors.panel}, ${themeColors.bg})`,
-        border: `1px solid ${themeColors.border}`,
+        background: themeColors.isLight
+          ? `linear-gradient(145deg, #fffdf8, #ebe4d5)`
+          : `linear-gradient(145deg, #2d2a26, #1f1d1a)`,
+        border: `1px solid ${themeColors.isLight ? 'rgba(180,164,136,0.55)' : 'rgba(214,199,174,0.22)'}`,
         boxShadow: themeColors.isLight
-          ? 'inset 0 1px 0 rgba(255,255,255,0.92), inset 0 -1px 0 rgba(0,0,0,0.08), 0 3px 8px -3px rgba(15,23,42,0.14)'
-          : 'inset 0 1px 0 rgba(255,255,255,0.1), inset 0 -1px 0 rgba(0,0,0,0.42), 0 4px 10px -4px rgba(0,0,0,0.55)',
+          ? '-2px -2px 5px rgba(255,255,255,0.92), 2px 3px 6px rgba(120,104,80,0.28)'
+          : '-2px -2px 5px rgba(255,244,226,0.08), 3px 3px 7px rgba(0,0,0,0.65)',
       };
     case 'solid':
     default:
@@ -122,11 +129,54 @@ const centerOf = (e: React.MouseEvent) => {
 
 /** Theme presets plus a custom theme (base, tint, accent) and surface style. `compact` is the top-bar dropdown. */
 export const ThemePicker: React.FC<{ compact?: boolean }> = ({ compact }) => {
-  const { t, themeId, setThemeId, customTheme, setCustomTheme, surfaceStyle, setSurfaceStyle } = useI18n();
+  const {
+    t, themeId, setThemeId, customTheme, setCustomTheme,
+    surfaceStyle, setSurfaceStyle, luminaGlowSettings, setLuminaGlowSettings,
+  } = useI18n();
   const ids: ThemeId[] = [...THEME_PRESETS.map((p) => p.id), 'custom'];
   const [anim, setAnim] = useState<ThemeAnim>(loadThemeAnim);
   const [bounce, setBounce] = useState<ThemeId | null>(null);
   const [surfaceBounce, setSurfaceBounce] = useState<SurfaceStyle | null>(null);
+  const [glowDraft, setGlowDraft] = useState<LuminaGlowSettings>(luminaGlowSettings);
+  const glowDraftRef = useRef(glowDraft);
+  const glowFrame = useRef(0);
+  const glowCommitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!glowCommitTimer.current) {
+      glowDraftRef.current = luminaGlowSettings;
+      setGlowDraft(luminaGlowSettings);
+    }
+  }, [luminaGlowSettings]);
+  useEffect(() => () => {
+    cancelAnimationFrame(glowFrame.current);
+    if (glowCommitTimer.current) {
+      clearTimeout(glowCommitTimer.current);
+      setLuminaGlowSettings(glowDraftRef.current);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const updateGlow = (patch: Partial<LuminaGlowSettings>, immediate = false) => {
+    const next = { ...glowDraftRef.current, ...patch };
+    glowDraftRef.current = next;
+    setGlowDraft(next);
+    if (immediate) {
+      if (glowCommitTimer.current) {
+        clearTimeout(glowCommitTimer.current);
+        glowCommitTimer.current = null;
+      }
+      applyLuminaGlowSettings(next);
+      setLuminaGlowSettings(next);
+      return;
+    }
+    cancelAnimationFrame(glowFrame.current);
+    glowFrame.current = requestAnimationFrame(() => applyLuminaGlowSettings(glowDraftRef.current));
+    if (glowCommitTimer.current) clearTimeout(glowCommitTimer.current);
+    glowCommitTimer.current = setTimeout(() => {
+      glowCommitTimer.current = null;
+      setLuminaGlowSettings(glowDraftRef.current);
+    }, 140);
+  };
 
   // The custom colours being dragged: shown at once through the CSS variables (one rAF per frame),
   // written to the app state (and storage) only once the drag pauses, so the app does not re-render
@@ -296,6 +346,76 @@ export const ThemePicker: React.FC<{ compact?: boolean }> = ({ compact }) => {
             );
           })}
         </div>
+        {surfaceStyle === 'lumina-glow' && (
+          <div className="mt-1 flex flex-col gap-2 rounded-lg border border-neutral-700 bg-neutral-950/50 p-2.5 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[11px] font-medium text-neutral-300">{t.settings.luminaGlowModeLabel}</span>
+              <div className="flex shrink-0 rounded-md border border-neutral-700 p-0.5" role="radiogroup" aria-label={t.settings.luminaGlowModeLabel}>
+                {([
+                  ['rainbow', t.settings.luminaGlowModeRainbow],
+                  ['mono', t.settings.luminaGlowModeMono],
+                  ['dual', t.settings.luminaGlowModeDual],
+                ] as Array<[LuminaGlowMode, string]>).map(([mode, modeLabel]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="radio"
+                    aria-checked={glowDraft.mode === mode}
+                    data-glow-mode-option={mode}
+                    onClick={() => updateGlow({ mode }, true)}
+                    className={`rounded px-2 py-0.5 text-[11px] transition ${
+                      glowDraft.mode === mode ? 'bg-indigo-600 text-white' : 'text-neutral-300 hover:bg-neutral-800'
+                    }`}
+                  >
+                    {modeLabel}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {(glowDraft.mode === 'mono' || glowDraft.mode === 'dual') && (
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <label className="flex items-center gap-2 text-[11px] text-neutral-300">
+                  <span>{glowDraft.mode === 'dual' ? t.settings.luminaGlowPrimaryColor : t.settings.luminaGlowSingleColor}</span>
+                  <input
+                    type="color"
+                    value={glowDraft.primaryColor}
+                    aria-label={t.settings.luminaGlowPrimaryColor}
+                    onChange={(e) => updateGlow({ primaryColor: e.target.value })}
+                    className="h-6 w-8 cursor-pointer rounded border border-neutral-700 bg-transparent"
+                  />
+                </label>
+                {glowDraft.mode === 'dual' && (
+                  <label className="flex items-center gap-2 text-[11px] text-neutral-300">
+                    <span>{t.settings.luminaGlowSecondaryColor}</span>
+                    <input
+                      type="color"
+                      value={glowDraft.secondaryColor}
+                      aria-label={t.settings.luminaGlowSecondaryColor}
+                      onChange={(e) => updateGlow({ secondaryColor: e.target.value })}
+                      className="h-6 w-8 cursor-pointer rounded border border-neutral-700 bg-transparent"
+                    />
+                  </label>
+                )}
+              </div>
+            )}
+            <label className="flex items-center justify-between gap-2 text-[11px]">
+              <span className="text-neutral-300">{t.settings.luminaGlowSaturation}</span>
+              <span className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={1}
+                  value={glowDraft.saturation}
+                  aria-label={t.settings.luminaGlowSaturation}
+                  onChange={(e) => updateGlow({ saturation: Number(e.target.value) })}
+                  className="w-28"
+                />
+                <span className="w-8 text-right font-mono tabular-nums text-neutral-200">{glowDraft.saturation}%</span>
+              </span>
+            </label>
+          </div>
+        )}
         {!compact && <p className="text-[11px] text-neutral-400">{t.settings.surfaceStyleDesc}</p>}
       </div>
 

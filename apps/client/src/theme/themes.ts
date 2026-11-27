@@ -23,6 +23,41 @@ export const SURFACE_STYLES: SurfaceStylePreset[] = [
 ];
 
 export const SURFACE_STYLE_KEY = 'atelier_surface_style';
+export const LUMINA_GLOW_KEY = 'atelier_lumina_glow_settings';
+
+export type LuminaGlowMode = 'rainbow' | 'mono' | 'dual';
+
+export interface LuminaGlowSettings {
+  mode: LuminaGlowMode;
+  primaryColor: string;
+  secondaryColor: string;
+  /** 0..100 chroma saturation */
+  saturation: number;
+}
+
+export const DEFAULT_LUMINA_GLOW_SETTINGS: LuminaGlowSettings = {
+  mode: 'rainbow',
+  primaryColor: '#38bdf8',
+  secondaryColor: '#f472b6',
+  saturation: 85,
+};
+
+export const isLuminaGlowMode = (value: unknown): value is LuminaGlowMode =>
+  value === 'rainbow' || value === 'mono' || value === 'dual';
+
+export const normalizeLuminaGlowSettings = (raw?: Partial<LuminaGlowSettings> | null): LuminaGlowSettings => {
+  const mode = isLuminaGlowMode(raw?.mode) ? raw.mode : DEFAULT_LUMINA_GLOW_SETTINGS.mode;
+  const hexOk = (v: unknown, fallback: string) =>
+    typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v.trim()) ? v.trim() : fallback;
+  const satRaw = Number(raw?.saturation);
+  const saturation = Number.isFinite(satRaw) ? Math.max(0, Math.min(100, Math.round(satRaw))) : DEFAULT_LUMINA_GLOW_SETTINGS.saturation;
+  return {
+    mode,
+    primaryColor: hexOk(raw?.primaryColor, DEFAULT_LUMINA_GLOW_SETTINGS.primaryColor),
+    secondaryColor: hexOk(raw?.secondaryColor, DEFAULT_LUMINA_GLOW_SETTINGS.secondaryColor),
+    saturation,
+  };
+};
 
 export const isSurfaceStyle = (value: unknown): value is SurfaceStyle =>
   typeof value === 'string' && SURFACE_STYLES.some((s) => s.id === value);
@@ -150,6 +185,100 @@ const channelsToHex = (channelsStr: string) => {
 };
 
 let titleBarTimer: ReturnType<typeof setTimeout> | undefined;
+
+const applySaturation = (rgb: [number, number, number], saturationPct: number): [number, number, number] => {
+  const sat = Math.max(0, Math.min(1, saturationPct / 100));
+  const luma = Math.round(0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]);
+  return [
+    Math.max(0, Math.min(255, Math.round(luma + (rgb[0] - luma) * sat))),
+    Math.max(0, Math.min(255, Math.round(luma + (rgb[1] - luma) * sat))),
+    Math.max(0, Math.min(255, Math.round(luma + (rgb[2] - luma) * sat))),
+  ];
+};
+
+const brighten = (rgb: [number, number, number], amount: number): [number, number, number] =>
+  mix(rgb, [255, 255, 255], amount);
+
+const deepen = (rgb: [number, number, number], amount: number): [number, number, number] =>
+  mix(rgb, [16, 20, 36], amount);
+
+export const resolveLuminaGlowVars = (settings: LuminaGlowSettings): Record<string, string> => {
+  const safe = normalizeLuminaGlowSettings(settings);
+  const s = safe.saturation;
+  const p = hexToRgb(safe.primaryColor);
+  const q = hexToRgb(safe.secondaryColor);
+  let palette: Array<[number, number, number]>;
+  if (safe.mode === 'mono') {
+    palette = [
+      deepen(p, 0.25),
+      p,
+      brighten(p, 0.36),
+      p,
+      deepen(p, 0.18),
+      brighten(p, 0.22),
+    ];
+  } else if (safe.mode === 'dual') {
+    const mid = mix(p, q, 0.5);
+    palette = [
+      p,
+      brighten(p, 0.24),
+      mid,
+      q,
+      brighten(q, 0.24),
+      mid,
+    ];
+  } else {
+    palette = [
+      [56, 189, 248],   // cyan
+      [99, 102, 241],   // indigo
+      [192, 132, 252],  // violet
+      [244, 114, 182],  // pink
+      [251, 191, 36],   // amber
+      [52, 211, 153],   // emerald
+    ];
+  }
+  const saturated = palette.map((c) => channels(applySaturation(c, s)));
+  const haloAlpha = (0.18 + (s / 100) * 0.24).toFixed(2);
+  const borderAlpha = (0.34 + (s / 100) * 0.34).toFixed(2);
+  return {
+    '--glow-c1': saturated[0],
+    '--glow-c2': saturated[1],
+    '--glow-c3': saturated[2],
+    '--glow-c4': saturated[3],
+    '--glow-c5': saturated[4],
+    '--glow-c6': saturated[5],
+    '--glow-halo-alpha': haloAlpha,
+    '--glow-border-alpha': borderAlpha,
+  };
+};
+
+export const applyLuminaGlowSettings = (settings: LuminaGlowSettings) => {
+  if (typeof document === 'undefined' || !document.documentElement) return;
+  const vars = resolveLuminaGlowVars(settings);
+  const root = document.documentElement;
+  for (const [key, value] of Object.entries(vars)) root.style.setProperty(key, value);
+  root.dataset.glowMode = normalizeLuminaGlowSettings(settings).mode;
+};
+
+export const loadLuminaGlowSettings = (): LuminaGlowSettings => {
+  try {
+    if (typeof localStorage === 'undefined') return DEFAULT_LUMINA_GLOW_SETTINGS;
+    const raw = localStorage.getItem(LUMINA_GLOW_KEY);
+    if (raw) return normalizeLuminaGlowSettings(JSON.parse(raw));
+  } catch {
+    // ignore
+  }
+  return DEFAULT_LUMINA_GLOW_SETTINGS;
+};
+
+export const saveLuminaGlowSettings = (settings: LuminaGlowSettings) => {
+  try {
+    if (typeof localStorage === 'undefined') return;
+    localStorage.setItem(LUMINA_GLOW_KEY, JSON.stringify(normalizeLuminaGlowSettings(settings)));
+  } catch {
+    // ignore
+  }
+};
 
 export const applySurfaceStyle = (surface: SurfaceStyle) => {
   if (typeof document === 'undefined' || !document.documentElement) return;

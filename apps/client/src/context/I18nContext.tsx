@@ -1,11 +1,16 @@
 import React, { createContext, useContext, useLayoutEffect, useState } from 'react';
 import {
+  applyLuminaGlowSettings,
   applySurfaceStyle,
   applyTheme,
   CustomThemeSettings,
+  loadLuminaGlowSettings,
   loadSurfaceStyle,
   loadThemeSettings,
+  LuminaGlowSettings,
+  normalizeLuminaGlowSettings,
   resolveTheme,
+  saveLuminaGlowSettings,
   saveSurfaceStyle,
   saveThemeSettings,
   SurfaceStyle,
@@ -30,6 +35,8 @@ interface I18nContextType {
   setCustomTheme: (custom: CustomThemeSettings) => void;
   surfaceStyle: SurfaceStyle;
   setSurfaceStyle: (surface: SurfaceStyle) => void;
+  luminaGlowSettings: LuminaGlowSettings;
+  setLuminaGlowSettings: (settings: LuminaGlowSettings) => void;
 }
 
 const I18nContext = createContext<I18nContextType | undefined>(undefined);
@@ -41,6 +48,7 @@ export const I18nProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const { id: themeId, custom: customTheme } = themeState;
   const theme: 'dark' | 'light' = resolveTheme(themeId, customTheme).base === 'light' ? 'light' : 'dark';
   const [surfaceStyle, setSurfaceStyleState] = useState<SurfaceStyle>(loadSurfaceStyle);
+  const [luminaGlowSettings, setLuminaGlowState] = useState<LuminaGlowSettings>(loadLuminaGlowSettings);
 
   const setLanguage = (lang: Language) => {
     setLanguageState(lang);
@@ -52,6 +60,7 @@ export const I18nProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const setTheme = (newTheme: 'dark' | 'light') => setThemeId(newTheme);
   const toggleTheme = () => setThemeId(theme === 'dark' ? 'light' : 'dark');
   const setSurfaceStyle = (surface: SurfaceStyle) => setSurfaceStyleState(surface);
+  const setLuminaGlowSettings = (settings: LuminaGlowSettings) => setLuminaGlowState(normalizeLuminaGlowSettings(settings));
 
   // Layout effect: the theme is on the page in the same commit (the animated switch snapshots right after it)
   useLayoutEffect(() => {
@@ -63,6 +72,11 @@ export const I18nProvider: React.FC<{ children: React.ReactNode }> = ({ children
     applySurfaceStyle(surfaceStyle);
     saveSurfaceStyle(surfaceStyle);
   }, [surfaceStyle]);
+
+  useLayoutEffect(() => {
+    applyLuminaGlowSettings(luminaGlowSettings);
+    saveLuminaGlowSettings(luminaGlowSettings);
+  }, [luminaGlowSettings]);
 
   const value: I18nContextType = {
     language,
@@ -77,6 +91,8 @@ export const I18nProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setCustomTheme,
     surfaceStyle,
     setSurfaceStyle,
+    luminaGlowSettings,
+    setLuminaGlowSettings,
   };
 
   return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
