@@ -5,14 +5,17 @@ import { BrushPackageManager, MIN_BRUSH_SPACING, type AtelierBrushPreset } from 
 import type { BrushProperties } from '../engine/BrushRenderer';
 import { useI18n } from '../context/I18nContext';
 import { brushGroup, getBrushLibrary, newBrushId, subscribeBrushLibrary, updateBrushLibrary } from '../services/brushLibrary';
+import { resolveTheme } from '../theme/themes';
 import { getUiScale } from '../theme/uiScale';
 
 const DRAG_TYPE = 'application/x-lumina-brush-id';
 const thumbnailSize = { width: 144, height: 36 };
 let activeGroup: string | null = null;
 
-function BrushStroke({ brush }: { brush: AtelierBrushPreset }) {
+function BrushStroke({ brush, isLight }: { brush: AtelierBrushPreset; isLight: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const inkColor = isLight ? '#18181b' : '#ffffff';
+  const inkClear = isLight ? 'rgba(24,24,27,0)' : 'rgba(255,255,255,0)';
   useEffect(() => {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext('2d');
@@ -36,15 +39,15 @@ function BrushStroke({ brush }: { brush: AtelierBrushPreset }) {
           ctx.drawImage(tip, x - tw / 2, y - th / 2, tw, th);
         } else {
           const gradient = ctx.createRadialGradient(x, y, r * Math.min(0.98, Math.max(0, Number(hardness ?? 1) || 0)), x, y, r);
-          gradient.addColorStop(0, '#fff');
-          gradient.addColorStop(1, '#ffffff00');
+          gradient.addColorStop(0, inkColor);
+          gradient.addColorStop(1, inkClear);
           ctx.fillStyle = gradient;
           ctx.fillRect(x - r, y - r, r * 2, r * 2);
         }
       }
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = 'source-in';
-      ctx.fillStyle = '#fff';
+      ctx.fillStyle = inkColor;
       ctx.fillRect(0, 0, width, height);
       ctx.globalCompositeOperation = 'source-over';
     };
@@ -62,7 +65,7 @@ function BrushStroke({ brush }: { brush: AtelierBrushPreset }) {
       observer.disconnect();
       image.onload = null;
     };
-  }, [brush]);
+  }, [brush, inkColor, inkClear]);
   return <canvas ref={canvasRef} {...thumbnailSize} aria-hidden="true" className="h-7 w-[104px] max-w-[48%] shrink-0" />;
 }
 
@@ -92,7 +95,8 @@ function downloadBlob(content: BlobPart, mimeType: string, name: string) {
 const estimateMenuHeight = (itemCount: number) => (itemCount * 32 + 12) * getUiScale();
 
 export function BrushToolset({ currentBrushProps, selectedId, onApplyPreset }: BrushToolsetProps) {
-  const { t } = useI18n();
+  const { t, themeId, customTheme } = useI18n();
+  const isLight = resolveTheme(themeId, customTheme).base === 'light';
   const labels = t.brushPreset;
   const library = useSyncExternalStore(subscribeBrushLibrary, getBrushLibrary);
   const [group, setGroup] = useState(activeGroup);
@@ -353,7 +357,7 @@ export function BrushToolset({ currentBrushProps, selectedId, onApplyPreset }: B
               }}
               onDragEnd={() => setDropGroup(null)}
               onClick={() => onApplyPreset(brush)}>
-              <BrushStroke brush={brush} />
+              <BrushStroke brush={brush} isLight={isLight} />
               <span className="truncate">{title(brush)}</span>
             </button>
             <button type="button" aria-label={`${labels.brushActions} · ${title(brush)}`} aria-haspopup="menu"

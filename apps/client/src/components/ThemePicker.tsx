@@ -94,9 +94,9 @@ const surfacePreviewStyle = (surface: SurfaceStyle, themeColors: ReturnType<type
       };
     case 'lumina-glow':
       return {
-        background: `${themeColors.bg} padding-box, linear-gradient(90deg, #38bdf8, #a78bfa, #f472b6, #34d399) border-box`,
+        background: `${themeColors.bg} padding-box, linear-gradient(90deg, rgb(var(--glow-c1, 56 189 248)), rgb(var(--glow-c3, 192 132 252)), rgb(var(--glow-c4, 244 114 182)), rgb(var(--glow-c6, 52 211 153))) border-box`,
         border: '1.5px solid transparent',
-        boxShadow: '0 0 12px -2px rgba(129,140,248,0.65), inset 0 0 8px -4px rgba(56,189,248,0.45)',
+        boxShadow: '0 0 12px -2px rgb(var(--glow-c2, 99 102 241) / var(--glow-halo-alpha, 0.44)), inset 0 0 8px -4px rgb(var(--glow-c1, 56 189 248) / var(--glow-halo-alpha, 0.44))',
       };
     case 'soft-paper':
       return {

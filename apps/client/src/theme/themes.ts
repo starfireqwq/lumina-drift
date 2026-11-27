@@ -186,14 +186,22 @@ const channelsToHex = (channelsStr: string) => {
 
 let titleBarTimer: ReturnType<typeof setTimeout> | undefined;
 
-const applySaturation = (rgb: [number, number, number], saturationPct: number): [number, number, number] => {
+const LUMINA_WHITE_WAVE: Array<[number, number, number]> = [
+  [236, 242, 255],
+  [255, 255, 255],
+  [226, 236, 252],
+  [255, 255, 255],
+  [240, 245, 255],
+  [230, 238, 252],
+];
+
+const applyLightSaturation = (
+  rgb: [number, number, number],
+  saturationPct: number,
+  whiteTarget: [number, number, number] = [255, 255, 255],
+): [number, number, number] => {
   const sat = Math.max(0, Math.min(1, saturationPct / 100));
-  const luma = Math.round(0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]);
-  return [
-    Math.max(0, Math.min(255, Math.round(luma + (rgb[0] - luma) * sat))),
-    Math.max(0, Math.min(255, Math.round(luma + (rgb[1] - luma) * sat))),
-    Math.max(0, Math.min(255, Math.round(luma + (rgb[2] - luma) * sat))),
-  ];
+  return mix(whiteTarget, rgb, sat);
 };
 
 const brighten = (rgb: [number, number, number], amount: number): [number, number, number] =>
@@ -205,17 +213,18 @@ const deepen = (rgb: [number, number, number], amount: number): [number, number,
 export const resolveLuminaGlowVars = (settings: LuminaGlowSettings): Record<string, string> => {
   const safe = normalizeLuminaGlowSettings(settings);
   const s = safe.saturation;
+  const satRatio = s / 100;
   const p = hexToRgb(safe.primaryColor);
   const q = hexToRgb(safe.secondaryColor);
   let palette: Array<[number, number, number]>;
   if (safe.mode === 'mono') {
     palette = [
-      deepen(p, 0.25),
+      deepen(p, 0.22 * satRatio),
       p,
       brighten(p, 0.36),
       p,
-      deepen(p, 0.18),
-      brighten(p, 0.22),
+      deepen(p, 0.16 * satRatio),
+      brighten(p, 0.24),
     ];
   } else if (safe.mode === 'dual') {
     const mid = mix(p, q, 0.5);
@@ -237,9 +246,9 @@ export const resolveLuminaGlowVars = (settings: LuminaGlowSettings): Record<stri
       [52, 211, 153],   // emerald
     ];
   }
-  const saturated = palette.map((c) => channels(applySaturation(c, s)));
-  const haloAlpha = (0.18 + (s / 100) * 0.24).toFixed(2);
-  const borderAlpha = (0.34 + (s / 100) * 0.34).toFixed(2);
+  const saturated = palette.map((c, i) => channels(applyLightSaturation(c, s, LUMINA_WHITE_WAVE[i % LUMINA_WHITE_WAVE.length])));
+  const haloAlpha = (0.44 - satRatio * 0.06).toFixed(2);
+  const borderAlpha = (0.68 - satRatio * 0.06).toFixed(2);
   return {
     '--glow-c1': saturated[0],
     '--glow-c2': saturated[1],

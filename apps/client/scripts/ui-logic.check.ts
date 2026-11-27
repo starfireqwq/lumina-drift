@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { FLOATS_PER_DAB, StrokeWorkerEngine, type WorkerBrushConfig } from '../src/workers/stroke.worker';
-import { contrastRatio, resolveTheme, THEME_PRESETS, DEFAULT_CUSTOM_THEME } from '../src/theme/themes';
+import { contrastRatio, resolveLuminaGlowVars, resolveTheme, THEME_PRESETS, DEFAULT_CUSTOM_THEME } from '../src/theme/themes';
 import { ALL_SUB_TOOLS, nextSizeStep, TOOL_CATEGORIES } from '../src/components/workspace/toolCatalog';
 import { createSubToolStore, SUB_TOOL_STORAGE_KEY, type StorageLike } from '../src/components/workspace/subToolStore';
 import { findContentBounds } from '../src/utils/pixelBounds';
@@ -6857,3 +6857,19 @@ console.log('v1.5 Phase 5 collab 2.0 (follow camera, grid slots, room swatches &
 
 await runV15Phase6ProPerfChecks();
 console.log('v1.5 Phase 6 pro production & performance (audio waveform/mix, CMYK TIFF/PSD + TAC, 4K-8K tile LRU) checks passed');
+
+// Lumina Glow low-saturation white-light verification
+for (const mode of ['rainbow', 'mono', 'dual'] as const) {
+  const whiteVars = resolveLuminaGlowVars({ mode, primaryColor: '#1d4ed8', secondaryColor: '#db2777', saturation: 0 });
+  for (let i = 1; i <= 6; i += 1) {
+    const channels = whiteVars[`--glow-c${i}`].split(' ').map(Number);
+    assert.ok(channels.every((c) => c >= 225), `Expected luminous white light at 0% sat for ${mode} c${i}, got ${whiteVars[`--glow-c${i}`]}`);
+  }
+  assert.ok(Number(whiteVars['--glow-halo-alpha']) >= 0.4, `Expected bright halo at 0% sat, got ${whiteVars['--glow-halo-alpha']}`);
+}
+const lowSatRainbow = resolveLuminaGlowVars({ mode: 'rainbow', primaryColor: '#38bdf8', secondaryColor: '#f472b6', saturation: 17 });
+for (let i = 1; i <= 6; i += 1) {
+  const channels = lowSatRainbow[`--glow-c${i}`].split(' ').map(Number);
+  assert.ok(channels.every((c) => c >= 195), `Expected bright pearl-white glow at 17% sat for c${i}, got ${lowSatRainbow[`--glow-c${i}`]}`);
+}
+console.log('Lumina Glow white-light saturation checks passed');
