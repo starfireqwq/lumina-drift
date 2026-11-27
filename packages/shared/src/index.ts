@@ -6,6 +6,7 @@ export * from './types/chat';
 export * from './types/tiles';
 export * from './tiles/tile-math';
 export * from './tiles/tile-compress';
+export * from './tiles/tile-lru-pool';
 export * from './tiles/undo-merge';
 export * from './permissions/layer-acl';
 export * from './permissions/member-role';
@@ -13,6 +14,8 @@ export * from './protocol/msgpack';
 
 // Phase 4: Color, Brush, Selection, Filters & Blend Modes
 export * from './color/pigment-blend';
+export * from './color/cmyk-separation';
+export * from './color/cmyk-export';
 export * from './brush/pressure-curve';
 export * from './brush/brush-dynamics';
 export * from './brush/stabilizer';
