@@ -127,6 +127,7 @@ import { normalizeTileBytes, TileEngine } from '../engine/TileEngine';
 import { OFFLINE_UNDO_LIMIT, ONLINE_UNDO_LIMIT, ScopedUndoManager } from '../engine/ScopedUndoManager';
 import { OfflineSessionStore } from '../services/offlineStore';
 import { recordUsedColor } from '../services/colorHistoryStore';
+import { getImportedFonts, subscribeFontLibrary } from '../services/fontLibrary';
 import { SelectionEngine } from '../engine/SelectionEngine';
 import { WebGLFilterEngine } from '../engine/WebGLFilterEngine';
 import { ShortcutManager } from '../engine/ShortcutManager';
@@ -7206,7 +7207,43 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
 
   // ---------- Text layers ----------
-  const [textEdit, setTextEdit] = useState<{ layerId: string | null; meta: LayerTextMeta } | null>(null);
+  const [textEdit, setTextEdit] = useState<{
+    layerId: string | null;
+    meta: LayerTextMeta;
+    initial: Pick<LayerTextMeta, 'vertical' | 'fontFamily'>;
+  } | null>(null);
+  const [defaultTextVertical, setDefaultTextVertical] = useState(() => {
+    try {
+      return localStorage.getItem('atelier:defaultTextVertical') === 'true';
+    } catch {
+      return DEFAULT_TEXT.vertical;
+    }
+  });
+  const [defaultTextFontFamily, setDefaultTextFontFamily] = useState(() => {
+    try {
+      return localStorage.getItem('atelier:defaultTextFont')?.trim() || DEFAULT_TEXT.fontFamily;
+    } catch {
+      return DEFAULT_TEXT.fontFamily;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('atelier:defaultTextVertical', String(defaultTextVertical));
+      localStorage.setItem('atelier:defaultTextFont', defaultTextFontFamily);
+    } catch {
+      // Restricted storage still allows preferences for the current session.
+    }
+  }, [defaultTextVertical, defaultTextFontFamily]);
+  const changeTextDirection = (vertical: boolean) => {
+    setDefaultTextVertical(vertical);
+    setTextEdit((edit) => edit ? { ...edit, meta: { ...edit.meta, vertical } } : edit);
+  };
+  const changeTextFont = (fontFamily: string) => {
+    setDefaultTextFontFamily(fontFamily);
+    setTextEdit((edit) => edit ? { ...edit, meta: { ...edit.meta, fontFamily } } : edit);
+  };
+  const importedTextFont = useSyncExternalStore(subscribeFontLibrary,
+    () => getImportedFonts().find((font) => font.family === textEdit?.meta.fontFamily));
   const textHitAt = (local: { x: number; y: number }) =>
     [...layersRef.current].sort((a, b) => b.sortOrder - a.sortOrder).find((l) => {
       if (l.layerType !== 'text' || !l.meta?.text || !l.isVisible) return false;
@@ -7223,7 +7260,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     onSelectLayer?.(layer.id);
     const item = layerManagerRef.current?.getLayerItem(layer.id);
     if (item) item.sprite.visible = false; // the live preview stands in for it while editing
-    setTextEdit({ layerId: layer.id, meta });
+    setTextEdit({ layerId: layer.id, meta, initial: meta });
   };
   /** Text tool click: edit the text layer under it, or start a new text there */
   const handleTextTool = (local: { x: number; y: number }) => {
@@ -7237,7 +7274,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     }
     const hit = textHitAt(local);
     if (hit) editTextLayer(hit);
-    else setTextEdit({ layerId: null, meta: { ...DEFAULT_TEXT, color: brushProps.color, x: Math.round(local.x), y: Math.round(local.y) } });
+    else {
+      const initial = { vertical: defaultTextVertical, fontFamily: defaultTextFontFamily };
+      setTextEdit({
+        layerId: null,
+        initial,
+        meta: { ...DEFAULT_TEXT, ...initial, color: brushProps.color, x: Math.round(local.x), y: Math.round(local.y) },
+      });
+    }
   };
   const previewText = (meta: LayerTextMeta) => {
     const lm = layerManagerRef.current;
@@ -7252,7 +7296,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   useEffect(() => {
     if (textEdit) previewText(textEdit.meta);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [textEdit?.meta]);
+  }, [textEdit?.meta, importedTextFont]);
   const endTextEdit = () => {
     setTextEdit(null);
     layerManagerRef.current?.clearPreview();
@@ -7293,6 +7337,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const editing = textEdit;
     endTextEdit();
     if (!editing || !canvas) return;
+    if (meta.vertical !== editing.initial.vertical) setDefaultTextVertical(meta.vertical);
+    if (meta.fontFamily !== editing.initial.fontFamily) setDefaultTextFontFamily(meta.fontFamily);
     let layer = editing.layerId ? layersRef.current.find((l) => l.id === editing.layerId) ?? null : null;
     const metaBefore: LayerMeta | null = layer ? layer.meta ?? null : null;
     const metaAfter: LayerMeta = { ...(layer?.meta ?? {}), text: meta };
@@ -8244,6 +8290,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const renderToolOptions = (inPanel = false) => (
       <ToolOptionsBar
         currentTool={currentTool}
+        textVertical={textEdit?.meta.vertical ?? defaultTextVertical}
+        textFontFamily={textEdit?.meta.fontFamily ?? defaultTextFontFamily}
+        onTextVertical={changeTextDirection}
+        onTextFontFamily={changeTextFont}
         activeSubToolId={subToolState.activeSubToolId}
         compact={isTouchCanvasMode}
         inPanel={inPanel}

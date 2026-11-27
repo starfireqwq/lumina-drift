@@ -1,9 +1,11 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { AlignCenter, AlignLeft, AlignRight, Bold, Check, Italic, Move, X } from 'lucide-react';
 import { applyTextStyleToRange, type LayerTextMeta } from '@atelier/shared';
 import type { CanvasViewport, ViewportState } from '../engine/Viewport';
-import { caretRectFromLayout, createCanvasMeasurer, indexAtPoint, layoutText, selectionRectsFromLayout, textBoxRect, TEXT_FONTS } from '../engine/textLayer';
+import { caretRectFromLayout, createCanvasMeasurer, indexAtPoint, layoutText, selectionRectsFromLayout, textBoxRect } from '../engine/textLayer';
 import { useI18n } from '../context/I18nContext';
+import { getImportedFonts, subscribeFontLibrary } from '../services/fontLibrary';
+import { FontPicker } from './FontPicker';
 import { TextNumberField, TextStylePopover, textToolButton } from './TextStylePopover';
 import { getToolbarTextStyle, initialTextBox, resizeTextBox, updateTextContent } from './textEditorState';
 import { ColorPopoverButton } from './workspace/ToolOptionsBar';
@@ -42,7 +44,8 @@ export const TextCanvasEditor: React.FC<TextCanvasEditorProps> = ({ meta, isNew,
   const [selection, setSelection] = useState({ start: 0, end: 0 });
   const [focused, setFocused] = useState(false);
   const measurer = useMemo(createCanvasMeasurer, []);
-  const layout = useMemo(() => layoutText(meta, measurer), [meta, measurer]);
+  const importedFont = useSyncExternalStore(subscribeFontLibrary, () => getImportedFonts().find((font) => font.family === meta.fontFamily));
+  const layout = useMemo(() => layoutText(meta, measurer), [meta, measurer, importedFont]);
   const toolbarStyle = useMemo(() => getToolbarTextStyle(meta, selection.start, selection.end), [meta, selection]);
   const caret = focused && selection.start === selection.end ? caretRectFromLayout(layout, meta, selection.end) : null;
   const highlights = useMemo(() => selectionRectsFromLayout(layout, selection.start, selection.end), [layout, selection]);
@@ -228,18 +231,16 @@ export const TextCanvasEditor: React.FC<TextCanvasEditorProps> = ({ meta, isNew,
         className="absolute z-40 flex w-max max-w-[calc(100%-16px)] flex-wrap items-center gap-1 rounded-lg border border-neutral-700 bg-neutral-900/95 p-1 text-[11px] text-neutral-200 shadow-xl">
         <button type="button" onPointerDown={startMove} title={t.dragMove} aria-label={t.dragMove}
           className={`${textToolButton} cursor-move touch-none`}><Move size={14} /></button>
-        <div role="radiogroup" aria-label={t.directionAria} className="flex shrink-0 rounded border border-neutral-700">
+        <div role="group" aria-label={t.directionAria} className="flex shrink-0 gap-0.5 rounded border border-neutral-700 p-0.5">
           {[{ vertical: false, label: t.horizontal }, { vertical: true, label: t.vertical }].map((choice) => (
-            <button key={choice.label} type="button" role="radio" aria-checked={meta.vertical === choice.vertical}
+            <button key={choice.label} type="button" aria-pressed={meta.vertical === choice.vertical}
               onClick={() => patch({ vertical: choice.vertical })}
-              className={`${textToolButton} aria-checked:bg-indigo-600/80`}>{choice.label}</button>
+              className="flex h-7 items-center gap-1 whitespace-nowrap rounded px-2 hover:bg-neutral-800 aria-pressed:bg-indigo-600 aria-pressed:font-semibold aria-pressed:text-white">
+              <AlignLeft size={14} aria-hidden="true" className={choice.vertical ? 'rotate-90' : undefined} />{choice.label}
+            </button>
           ))}
         </div>
-        <select value={meta.fontFamily} onChange={(event) => patch({ fontFamily: event.target.value })} aria-label={t.fontAria}
-          className="atelier-field h-7 w-20 shrink-0 px-1 text-[11px]">
-          {!TEXT_FONTS.some((font) => font.id === meta.fontFamily) && <option value={meta.fontFamily}>{meta.fontFamily}</option>}
-          {TEXT_FONTS.map((font) => <option key={font.id} value={font.id}>{font.label}</option>)}
-        </select>
+        <FontPicker value={meta.fontFamily} onChange={(fontFamily) => patch({ fontFamily })} ariaLabel={t.fontAria} testId="text-editor-font" />
         <TextNumberField label={t.fontSize} compact min={8} max={400} value={mixed.fontSize ? null : style.fontSize}
           testId="text-editor-size" onChange={(fontSize) => styleRange({ fontSize })} />
         <ColorPopoverButton label={t.textColor} title={t.textColor} color={style.color} mixed={mixed.color} data-testid="text-editor-color"

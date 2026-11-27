@@ -24,7 +24,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
-import { ChildProcess, fork, spawn } from 'node:child_process';
+import { ChildProcess, execFile, fork, spawn } from 'node:child_process';
 import http from 'node:http';
 import { createInterface } from 'node:readline';
 
@@ -409,7 +409,87 @@ if (!gotSingleLock) {
   });
 }
 
+const FONT_SCAN_TIMEOUT = 5000;
+const FONT_CACHE_TTL = 30_000;
+
+function runFontCommand(command: string, args: string[]): Promise<string> {
+  return new Promise((resolve) => {
+    execFile(command, args, { timeout: FONT_SCAN_TIMEOUT, windowsHide: true }, (error, stdout) => {
+      resolve(error ? '' : stdout);
+    });
+  });
+}
+
+async function readMacFontDirectory(directory: string): Promise<string[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const entries = await Promise.race([
+      fs.promises.readdir(directory, { recursive: true, withFileTypes: true }),
+      new Promise<fs.Dirent[]>((resolve) => { timer = setTimeout(() => resolve([]), FONT_SCAN_TIMEOUT); }),
+    ]);
+    return entries.filter((entry) => entry.isFile() && /\.(ttf|otf|ttc|dfont)$/i.test(entry.name))
+      .flatMap(({ name }) => {
+        const base = name.replace(/\.[^.]+$/, '');
+        if (base === 'PingFang') return ['PingFang TC', 'PingFang SC', 'PingFang HK'];
+        return base
+          .replace(/[-_](?:regular|bolditalic|bold|semibold|medium|italic|oblique|light|black|thin)$/i, '')
+          .replace(/[_-]/g, ' ')
+          .replace(/([a-z])([A-Z])/g, '$1 $2');
+      });
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function scanDesktopFonts(): Promise<string[]> {
+  switch (process.platform) {
+    case 'win32': {
+      const keys = ['HKLM', 'HKCU'].map((hive) => hive + '\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts');
+      const results = await Promise.all(keys.map((key) => runFontCommand('reg', ['query', key])));
+      const names = results.flatMap((stdout) => stdout.split(/\r?\n/).flatMap((line) => {
+        const name = /^\s+(.+?)\s{2,}REG_\w+\s{2,}/i.exec(line)?.[1];
+        return name?.split('&').map((family) => family.trim()
+          .replace(/(?:\s*\((?:TrueType|OpenType|All res|Type 1|Raster|VGA res)\))+$/i, '').trim()) ?? [];
+      }));
+      const registered = new Set(names.map((name) => name.toLowerCase()));
+      return names.filter((name) => {
+        const base = name.replace(/\b(?:bold italic|bold|italic|oblique)$/i, '').trimEnd();
+        return base === name || !registered.has(base.toLowerCase());
+      });
+    }
+    case 'darwin': {
+      const directories = ['/System/Library/Fonts', '/Library/Fonts', path.join(os.homedir(), 'Library', 'Fonts')];
+      return (await Promise.all(directories.map(readMacFontDirectory))).flat();
+    }
+    case 'linux':
+      return (await runFontCommand('fc-list', [':', 'family'])).split(/[,\r\n]+/);
+    default:
+      return [];
+  }
+}
+
+let desktopFontCache: { families: string[]; expiresAt: number } | undefined;
+let desktopFontScan: Promise<string[]> | undefined;
+
 // IPC Handlers
+ipcMain.handle('fonts:listLocal', (_event, force?: unknown) => {
+  if (desktopFontScan) return desktopFontScan;
+  if (force !== true && desktopFontCache && desktopFontCache.expiresAt > Date.now()) return desktopFontCache.families;
+  desktopFontScan = scanDesktopFonts().catch(() => []).then((names) => {
+    const unique = new Map<string, string>();
+    for (const raw of names) {
+      const family = raw.trim();
+      if (family && !unique.has(family.toLowerCase())) unique.set(family.toLowerCase(), family);
+    }
+    const families = [...unique.values()].sort((a, b) => a.localeCompare(b));
+    desktopFontCache = { families, expiresAt: Date.now() + FONT_CACHE_TTL };
+    return families;
+  }).finally(() => { desktopFontScan = undefined; });
+  return desktopFontScan;
+});
+
 ipcMain.handle('atelier:get-server-status', async () => {
   const healthy = await checkServerHealth(SERVER_PORT);
   return {

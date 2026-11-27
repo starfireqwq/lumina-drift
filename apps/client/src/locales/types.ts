@@ -2619,6 +2619,26 @@ export interface Translations {
     horizontal: string;
     vertical: string;
     fontAria: string;
+    defaultDirection: string;
+    fontSearch: string;
+    importFont: string;
+    rescanFonts: string;
+    scanningFonts: string;
+    deleteFont: string;
+    importedFonts: string;
+    presetFontsTitle: string;
+    localFonts: string;
+    noFontsFound: string;
+    importingFonts: string;
+    fontSample: string;
+    fontErrors: {
+      unsupportedFormat: string;
+      invalidSize: string;
+      importFailed: string;
+      deleteFailed: string;
+    };
+    presetFonts: Record<import('../engine/textLayer').TextFontPresetKey, string>;
+    genericFonts: Record<'sans-serif' | 'serif' | 'cursive' | 'monospace', string>;
     fontSize: string;
     textColor: string;
     strokeWidth: string;

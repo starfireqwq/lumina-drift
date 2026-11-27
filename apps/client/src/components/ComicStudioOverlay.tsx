@@ -18,6 +18,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { useI18n } from '../context/I18nContext';
+import { FontPicker } from './FontPicker';
 import {
   type BalloonGeometryResult,
   type BalloonShape,
@@ -977,7 +978,11 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
                       value={b.text}
                       onPointerDown={(e) => e.stopPropagation()}
                       onChange={(e) => updateBalloon(b.id, { text: e.target.value })}
-                      onBlur={() => setEditingBalloonId((cur) => (cur === b.id ? null : cur))}
+                      onBlur={(event) => {
+                        if (!event.relatedTarget?.closest('[data-font-picker]')) {
+                          setEditingBalloonId((cur) => (cur === b.id ? null : cur));
+                        }
+                      }}
                       onKeyDown={(e) => {
                         if (e.key === 'Escape') {
                           e.stopPropagation();
@@ -1504,19 +1509,13 @@ export const ComicStudioOverlay: React.FC<ComicStudioOverlayProps> = ({
                       }}
                       className="w-14 bg-neutral-900 border border-neutral-700 rounded-lg px-1 py-0.5 text-center text-xs text-white"
                     />
-                    <select
+                    <FontPicker
                       value={currentBalloon.fontFamily}
-                      onChange={(e) =>
-                        updateBalloon(currentBalloon.id, { fontFamily: e.target.value })
-                      }
-                      title={t.comic.fontFamily}
-                      className="bg-neutral-900 border border-neutral-700 rounded-lg px-1.5 py-0.5 text-xs text-white"
-                    >
-                      <option value="sans-serif">Sans-serif</option>
-                      <option value="serif">Serif</option>
-                      <option value="cursive">Cursive</option>
-                      <option value="monospace">Monospace</option>
-                    </select>
+                      onChange={(fontFamily) => updateBalloon(currentBalloon.id, { fontFamily })}
+                      ariaLabel={t.comic.fontFamily}
+                      compact
+                      showGenericFamilies
+                    />
                     <input
                       type="color"
                       value={colorToHex6(currentBalloon.fontColor, '#000000')}

@@ -24,6 +24,9 @@ if (process.platform === 'win32') {
 contextBridge.exposeInMainWorld('atelierDesktop', {
   isElectron: true,
   platform: process.platform,
+  fonts: {
+    listLocal: (force?: boolean) => ipcRenderer.invoke('fonts:listLocal', force) as Promise<string[]>,
+  },
   tablet: process.platform === 'win32' ? {
     configure: (enabled: boolean) => ipcRenderer.send('atelier:wintab-configure', enabled),
     subscribe: (callback: (update: WinTabUpdate) => void) => {

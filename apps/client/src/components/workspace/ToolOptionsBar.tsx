@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { MAX_STABILIZER_LEVEL, STABILIZER_LEVEL_STEP, ToolType, VectorEraserMode, VectorWidthMode } from '@atelier/shared';
 import {
+  AlignLeft,
   ClipboardPaste,
   Copy,
   Crop,
@@ -19,6 +20,7 @@ import {
 } from 'lucide-react';
 import { BrushProperties } from '../../engine/BrushRenderer';
 import { AntiAliasSelector } from '../AntiAliasSelector';
+import { FontPicker } from '../FontPicker';
 import { LiquifyMode } from '../../engine/LiquifyEngine';
 import { SmudgeMode } from '../../engine/BlurSmudgeEngine';
 import { OutlineSettings } from '../../engine/colorOutline';
@@ -245,6 +247,10 @@ const SliderField: React.FC<{
 
 export interface ToolOptionsBarProps {
   currentTool: ToolType;
+  textVertical: boolean;
+  textFontFamily: string;
+  onTextVertical: (vertical: boolean) => void;
+  onTextFontFamily: (fontFamily: string) => void;
   activeSubToolId?: SubToolId;
   compact: boolean;
   onOpenOptions?: () => void;
@@ -388,7 +394,7 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
     </>
   );
 
-  if (p.onOpenOptions) {
+  if (p.onOpenOptions && (t !== 'text' || p.activePluginTool)) {
     return (
       <div role="toolbar" aria-label={tr.toolOptions.title} data-workspace-entry="options"
         className="atelier-chrome flex h-10 min-w-0 shrink-0 items-center gap-1 border-b px-2">
@@ -544,6 +550,24 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
         <div className="flex shrink-0 items-center gap-1.5 pr-1" title={locTool.hint}>
           <span className="flex h-7 w-7 items-center justify-center rounded-md bg-indigo-600/20 text-indigo-300"><Icon className="h-4 w-4" /></span>
           <span className="font-semibold text-neutral-100">{locTool.label}</span>
+        </div>
+      )}
+
+      {t === 'text' && (
+        <div className="flex shrink-0 items-center gap-2">
+          <div role="group" aria-label={tr.textEditor.defaultDirection} className="flex items-center gap-1">
+            <span className="whitespace-nowrap text-[11px] text-neutral-300">{tr.textEditor.defaultDirection}</span>
+            {[false, true].map((vertical) => (
+              <button key={String(vertical)} type="button" aria-pressed={p.textVertical === vertical}
+                data-testid={vertical ? 'tool-options-text-vertical' : 'tool-options-text-horizontal'}
+                className="flex h-7 items-center gap-1 whitespace-nowrap rounded-md border border-neutral-700 px-2 text-xs hover:bg-neutral-800 aria-pressed:border-indigo-500 aria-pressed:bg-indigo-600 aria-pressed:font-semibold aria-pressed:text-white"
+                onClick={() => p.onTextVertical(vertical)}>
+                <AlignLeft size={14} className={vertical ? 'rotate-90' : undefined} aria-hidden="true" />
+                {vertical ? tr.textEditor.vertical : tr.textEditor.horizontal}
+              </button>
+            ))}
+          </div>
+          <FontPicker compact value={p.textFontFamily} onChange={p.onTextFontFamily} testId="tool-options-text-font" />
         </div>
       )}
 

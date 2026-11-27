@@ -2,6 +2,7 @@ import React, { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo
 import { BlendMode, CanvasMemberModel, CanvasModel, CanvasUnit, CreateCanvasDto, LayerMeta, LayerModel, LayerType, clampDpi, getCanvasRoleCapabilities, tidyLayerModels, type AdjustmentKind } from '@atelier/shared';
 import { ApiService } from './services/api';
 import { OfflineSessionStore } from './services/offlineStore';
+import { restoreImportedFonts } from './services/fontLibrary';
 import { LuminaProjectEngine } from './engine/LuminaProjectEngine';
 import { isSupportedProjectFileName } from './engine/kraDecoder';
 import { useAuth } from './context/AuthContext';
@@ -85,6 +86,7 @@ const loadThumbs = (): Record<string, string> => {
 
 export const App: React.FC = () => {
   const { t, language } = useI18n();
+  useEffect(() => { void restoreImportedFonts(); }, []);
   const plugins = useSyncExternalStore(subscribePlugins, getPlugins);
   const canvasFullscreen = useSyncExternalStore(subscribeCanvasFullscreen, getCanvasFullscreen, getCanvasFullscreen);
   useEffect(() => {

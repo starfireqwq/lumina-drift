@@ -3,13 +3,47 @@ import {
   type LayerTextMeta,
 } from '@atelier/shared';
 
-export const TEXT_FONTS: Array<{ id: string; label: string }> = [
-  { id: DEFAULT_LAYER_TEXT.fontFamily, label: '黑體' },
-  { id: '"Noto Serif TC", "PMingLiU", "Songti TC", serif', label: '明體' },
-  { id: '"DFKai-SB", "BiauKai", "Kaiti TC", cursive', label: '楷體' },
-  { id: '"Comic Sans MS", "Comic Neue", cursive', label: '手寫' },
-  { id: 'monospace', label: '等寬' },
-];
+type TextFontPreset = {
+  id: string;
+  label: string;
+  category?: 'sans' | 'rounded' | 'serif' | 'kai' | 'handwriting' | 'display' | 'comic' | 'mono';
+  sample?: string;
+};
+
+const fontPresets = {
+  system: { id: DEFAULT_LAYER_TEXT.fontFamily, label: '系統黑體', category: 'sans' },
+  traditionalSans: { id: '"Noto Sans TC", "PingFang TC", "Microsoft JhengHei", "Heiti TC", sans-serif', label: '繁中黑體', category: 'sans' },
+  rounded: { id: '"HunInn", "jf-openhuninn-2.0", "Kosugi Maru", "Hiragino Maru Gothic ProN", "YouYuan", "Arial Rounded MT Bold", sans-serif', label: '圓體', category: 'rounded' },
+  traditionalSerif: { id: '"Noto Serif TC", "Songti TC", "PMingLiU", "MingLiU", serif', label: '繁中明體', category: 'serif' },
+  kai: { id: '"DFKai-SB", "BiauKai", "Kaiti TC", "STKaiti", cursive, serif', label: '楷體', category: 'kai' },
+  display: { id: '"Noto Sans TC", "PingFang TC", "Microsoft JhengHei UI", "Hiragino Kaku Gothic Std", "Impact", "Arial Black", sans-serif', label: '標題粗黑', category: 'display' },
+  comic: { id: '"GenJyuuGothic", "M PLUS Rounded 1c", "PingFang TC", "Microsoft JhengHei", "Comic Sans MS", sans-serif', label: '漫畫字型', category: 'comic' },
+  handwriting: { id: '"Segoe Print", "Bradley Hand", "Comic Sans MS", "Comic Neue", "Klee One", cursive', label: '手寫字型', category: 'handwriting' },
+  japaneseSans: { id: '"Noto Sans JP", "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif', label: '日系黑體', category: 'sans', sample: '漫画の文字 Aa' },
+  japaneseSerif: { id: '"Noto Serif JP", "Hiragino Mincho ProN", "Yu Mincho", "MS PMincho", serif', label: '日系明體', category: 'serif', sample: '漫画の文字 Aa' },
+  simplifiedSans: { id: '"Noto Sans SC", "PingFang SC", "Microsoft YaHei", "SimHei", sans-serif', label: '簡體黑體', category: 'sans', sample: '漫画新篇章 Aa' },
+  simplifiedSerif: { id: '"Noto Serif SC", "Songti SC", "SimSun", "STSong", serif', label: '簡體宋體', category: 'serif', sample: '漫画新篇章 Aa' },
+  englishSerif: { id: '"Georgia", "Times New Roman", "Palatino Linotype", serif', label: '英文襯線', category: 'serif', sample: 'The next chapter' },
+  mono: { id: '"JetBrains Mono", "Cascadia Mono", "SF Mono", "Consolas", "Noto Sans Mono CJK TC", monospace', label: '等寬字型', category: 'mono', sample: 'Aa 0123456789' },
+} satisfies Record<string, TextFontPreset>;
+
+export type TextFontPresetKey = keyof typeof fontPresets;
+export const TEXT_FONTS: TextFontPreset[] = Object.values(fontPresets);
+const presetKeysByFamily = new Map(Object.entries(fontPresets).map(([key, { id }]) => [id, key as TextFontPresetKey]));
+
+export function getTextFontPresetKey(fontFamily: string): TextFontPresetKey | undefined {
+  return presetKeysByFamily.get(fontFamily);
+}
+
+export function getFontLabel(fontFamily: string): string {
+  const key = getTextFontPresetKey(fontFamily);
+  if (key) return fontPresets[key].label;
+  const family = fontFamily.trim();
+  const quoted = /^(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)')/.exec(family);
+  return quoted
+    ? (quoted[1] ?? quoted[2]).replace(/\\(.)/g, '$1')
+    : family.split(',', 1)[0].trim();
+}
 export const DEFAULT_TEXT: Omit<LayerTextMeta, 'x' | 'y'> = { ...DEFAULT_LAYER_TEXT };
 
 const VERTICAL_FORMS: Record<string, string> = {
