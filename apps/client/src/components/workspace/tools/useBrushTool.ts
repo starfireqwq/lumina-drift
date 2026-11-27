@@ -12,6 +12,7 @@ import { getWrapAroundBoundsOffsets, getWrappedDirtyTilesForPoints } from '../..
 import { hasDrawingContact } from '../../../engine/tabletInput';
 import { OfflineSessionStore } from '../../../services/offlineStore';
 import { recordUsedColor } from '../../../services/colorHistoryStore';
+import { readBeforeTilesAsync } from './asyncTiles';
 
 const OUTLINE_KEY = 'atelier_outline_brush';
 
@@ -273,10 +274,13 @@ export function useBrushTool(ctx: ToolContext) {
     if (!sameCanvas()) return;
     const held: Array<() => void> = [];
     historyHoldRef.current = held;
+    const te = ctx.tileEngineRef.current;
+    te?.setUrgentReads(true);
     try {
       await new Promise<void>(whenCommitted);
       if (sameCanvas()) await action();
     } finally {
+      te?.setUrgentReads(false);
       if (historyHoldRef.current === held) {
         historyHoldRef.current = null;
         if (sameCanvas()) for (const run of held) run();
@@ -427,21 +431,19 @@ export function useBrushTool(ctx: ToolContext) {
       }
       const dirtyCoords = strokeData.quickShapeKind || !sparseTiles
         ? Array.from(dirtyCoordsMap.values()) : sparseTiles;
-      // before = the pre-stroke ping-pong copy, after = the layer now. Both reads are queued on the
-      // GPU now (they hold these pixels whatever is drawn next) and arrive without stalling the page;
-      // LZ4 happens in workers
-      // (a sparse layer: from the tiles backed up on their first write, and the tiles now)
-      const before = lm.readTilesAsync(layerId, dirtyCoords, 'before');
-      const after = lm.readTilesAsync(layerId, dirtyCoords, 'after');
+      // Queue reads for the current pixels and any uncached pre-stroke tiles before freeing backups.
+      const before = readBeforeTilesAsync(lm, layerId, dirtyCoords, 'before');
+      const afterVersion = lm.getLayerVersion(layerId);
+      const after = lm.readTilesAsync(layerId, dirtyCoords, 'after').then(compressTiles);
       lm.syncPingPong(layerId); // queued after the reads: the next stroke's baseline (frees the backups)
-      const compressed = Promise.all([before, after, ink]).then(([b, a, s]) =>
-        Promise.all([compressTiles(b), compressTiles(a), s && compressTiles(s)]));
+      const compressed = Promise.all([before, after, ink?.then((tiles) => tiles && compressTiles(tiles))]);
       unsentRef.current++;
       notifyStrokeSettled();
       emitChainRef.current = emitChainRef.current
         .then(() => compressed)
         .then(([beforeTiles, afterTiles, inkTiles]) => {
           if (!stillHere()) return;
+          lm.recordCleanTiles(layerId, afterTiles, afterVersion);
           const opType = strokeData.isEraser ? 'ERASE' : 'STROKE';
           const undoOp: ScopedUndoOp = {
             opId: `op_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,

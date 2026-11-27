@@ -19,6 +19,8 @@ export const enUS: Translations = {
     cut: 'Cut',
     undo: 'Undo',
     redo: 'Redo',
+    undoing: 'Undoing…',
+    redoing: 'Redoing…',
     back: 'Back',
     next: 'Next',
     done: 'Done',

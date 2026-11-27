@@ -281,7 +281,7 @@ import { PluginFilterWorkerClient } from '../plugins/pluginFilterClient';
 import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../utils/filterMemoryGuard';
 import type { FilterTargetOptions } from './FilterTargetBar';
 import { AtelierModal, modalButton } from './AtelierModal';
-import { AlertCircle, Eye, Grid2x2, Image as ImageIcon, ImagePlus, Layers, ListVideo, Minimize2, Paintbrush, Palette, Sliders } from 'lucide-react';
+import { AlertCircle, Eye, Grid2x2, Image as ImageIcon, ImagePlus, Layers, ListVideo, Loader2, Minimize2, Paintbrush, Palette, Sliders } from 'lucide-react';
 import { type DroppedImages, type ImageDropTarget, ImageImportError, imageEntries, isImageDrag, loadImageEntry, readDroppedImages } from '../utils/imageImport';
 
 /** Where a key types text (a text field), unlike a focused button, slider, checkbox or the page */
@@ -1016,7 +1016,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (!layerManagerRef.current) return;
     if (fromRemote) {
       const now = performance.now();
-      if (now - (remoteThumbAtRef.current.get(layerId) ?? 0) < 4000) return;
+      const last = remoteThumbAtRef.current.get(layerId);
+      if (last !== undefined && now - last < 4000) return;
       remoteThumbAtRef.current.set(layerId, now);
     }
     const thumb = layerManagerRef.current.getLayerThumbnail(layerId, 48, 48, fromRemote);
@@ -1547,6 +1548,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   brushPropsRef.current = brushProps;
 
   const [permissionWarning, setPermissionWarning] = useState<string | null>(null);
+  const [historyBusyKind, setHistoryBusyKind] = useState<'undo' | 'redo' | null>(null);
+  const historyBusyCountRef = useRef(0);
+  const historyBusyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const warn = (message: string, ms = 3000) => {
     setPermissionWarning(message);
     setTimeout(() => setPermissionWarning(null), ms);
@@ -1829,8 +1833,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       if (snapRes?.bundle?.layers) {
         sinceSeq = snapRes.bundle.seq || 0;
         for (const layerSnap of snapRes.bundle.layers) {
-          // Parked layers keep the compressed tiles as they came: hidden frames never touch the GPU
-          if (layerSnap.tiles?.length) layerManager.applyTiles(layerSnap.layerId, layerSnap.tiles);
+          if (layerSnap.tiles?.length) layerManager.ingestSnapshotTiles(layerSnap.layerId, layerSnap.tiles);
           // The checkpoint replaces the ops that carried these, so restore them from it
           for (const vectorStroke of layerSnap.vectorStrokes || []) {
             vectorEngineRef.current?.addStroke(layerSnap.layerId, vectorStroke);
@@ -1883,11 +1886,16 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         }
       }
 
-      // Refresh thumbnails for all layers (ping-pong buffers are made when a layer is drawn on)
-      for (const l of layersRef.current) {
-        layerManager.refreshPingPong(l.id);
-        refreshLayerThumbnail(l.id);
+      layerManager.startProgressiveHydrate();
+      for (const l of layersRef.current) layerManager.refreshPingPong(l.id);
+      const activeLayerId = activeLayerRef.current?.id;
+      const visibleLayers = displayLayersRef.current.filter((l) => l.isVisible);
+      if (activeLayerId && visibleLayers.some((l) => l.id === activeLayerId)) {
+        refreshLayerThumbnail(activeLayerId);
+      } else {
+        scheduleCanvasThumbnail();
       }
+      for (const l of visibleLayers) if (l.id !== activeLayerId) refreshLayerThumbnail(l.id, true);
 
       if (vectorEngineRef.current && activeLayerRef.current) {
         setVectorStrokesList(vectorEngineRef.current.getStrokes(activeLayerRef.current.id));
@@ -2773,12 +2781,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       // Synchronize layers and replay operations if layers are already loaded
       const currentLayers = layersRef.current;
       if (currentLayers && currentLayers.length > 0) {
-        const shownDisplay = displayLayersRef.current;
-        layerManager.syncLayers(shownDisplay);
-        const shownIds = new Set(shownDisplay.filter((l) => l.isVisible).map((l) => l.id));
-        for (const l of currentLayers) {
-          if (shownIds.has(l.id) || !l.meta?.cel) refreshLayerThumbnail(l.id);
-        }
+        layerManager.syncLayers(displayLayersRef.current);
         if (canvas && tileEngine && lastReplayedCanvasIdRef.current !== canvas.id) {
           lastReplayedCanvasIdRef.current = canvas.id;
           loadCheckpointAndReplay(canvas.id, layerManager, tileEngine);
@@ -2796,6 +2799,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
     return () => {
       destroyed = true;
+      if (historyBusyTimerRef.current !== null) {
+        clearTimeout(historyBusyTimerRef.current);
+        historyBusyTimerRef.current = null;
+      }
       timeline.pause();
       cancelFilterWork();
       showFilterRefining(false);
@@ -2866,10 +2873,12 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     setIsColorRangeOpen(false);
     vector.resetForCanvas();
     setPermissionWarning(null);
+    setHistoryBusyKind(null);
     setIsRadialMenuOpen(false);
     setIsDesktopPopupOpen(false);
     lastPointerPosRef.current = null;
     resetThumbnails();
+    remoteThumbAtRef.current.clear();
     shapes.cancel();
     liquify.cancel();
   }, [canvas?.id, canvas?.width, canvas?.height, engineAttempt]);
@@ -2878,14 +2887,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   useEffect(() => {
     if (isEngineReady && layerManagerRef.current) {
       layerManagerRef.current.syncLayers(displayLayersRef.current);
-      for (const l of layers) {
-        refreshLayerThumbnail(l.id);
-      }
 
       // Trigger Op Replay only after layers are fully initialized in layerManager
       if (canvas && layers.length > 0 && tileEngineRef.current && lastReplayedCanvasIdRef.current !== canvas.id) {
         lastReplayedCanvasIdRef.current = canvas.id;
         loadCheckpointAndReplay(canvas.id, layerManagerRef.current, tileEngineRef.current);
+      } else if (!isReplayingRef.current) {
+        for (const l of layers) refreshLayerThumbnail(l.id, l.id !== activeLayerRef.current?.id);
       }
     }
   }, [isEngineReady, layers, canvas?.id]);
@@ -4042,16 +4050,17 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const lm = layerManagerRef.current;
     const item = lm?.getLayerItem(layerId);
     if (!lm || !item) return;
+    const decodeLargeBatch = (tiles: TileData[]) => {
+      const compressed = tiles.filter((tile) => tile.compression === 'lz4');
+      if (compressed.length < 16) return;
+      return decodeTiles(compressed.map((tile) => ({
+        data: normalizeTileBytes(tile.data), compression: 'lz4', w: tile.width, h: tile.height,
+      }))).then((pixels) => new WeakMap(compressed.map((tile, i) => [tile, pixels[i]])));
+    };
     if (OfflineSessionStore.isOfflineCanvas(canvas?.id)) {
-      const compressed = target.filter((tile) => tile.compression === 'lz4');
-      let decoded: WeakMap<TileData, Uint8Array | null> | undefined;
-      if (compressed.length >= 16) {
-        const pixels = await decodeTiles(compressed.map((tile) => ({
-          data: tile.data as Uint8Array, compression: 'lz4', w: tile.width, h: tile.height,
-        })));
-        if (layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== item) return;
-        decoded = new WeakMap(compressed.map((tile, i) => [tile, pixels[i]]));
-      }
+      const decoding = decodeLargeBatch(target);
+      const decoded = decoding && await decoding;
+      if (layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== item) return;
       apply(target, 0, [], [], decoded);
       return;
     }
@@ -4064,11 +4073,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       });
       const version = item.version;
       await Promise.all(foreignReadsRef.current);
+      if (layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== item) return;
       if (item.version !== version) continue;
       const untouched: TileData[] = [];
       const untouchedBefore: TileData[] = [];
       const needRead = valid.filter((tile) => {
-        if (op.opType !== 'FILL') return true;
         const key = `${tile.col}_${tile.row}`;
         const own = mineByTile.get(key)!;
         if (op.foreign?.has(key) || scopedUndoRef.current.hasForeignTile(op, key) || !lm.matchesCachedTile(layerId, own)) return true;
@@ -4081,7 +4090,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       if (layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== item) return;
       if (item.version !== version) continue;
       let conflicts = 0;
-      const raw: TileData[] = [];
+      const raw: (TileData & { data: Uint8Array })[] = [];
       const historyTiles: NonNullable<TilePatchPacket['historyTiles']> = [];
       needRead.forEach((t, index) => {
         const key = `${t.col}_${t.row}`;
@@ -4092,10 +4101,16 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         if (merged.conflicts > 0 || history.hasForeignTile(op, key)) historyTiles.push({ from: own, to: t });
         raw.push({ ...t, compression: 'raw', data: merged.pixels, byteLength: merged.pixels.byteLength });
       });
-      const tiles = raw.length ? await compressTiles(raw) : [];
+      // Compression can transfer its inputs. Keep the merged pixels for GPU upload.
+      const [tiles, untouchedDecoded] = await Promise.all([
+        raw.length ? compressTiles(raw.map((tile) => ({ ...tile, data: tile.data.slice() }))) : [],
+        decodeLargeBatch(untouched),
+      ]);
       if (layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== item) return;
       if (item.version !== version) continue;
-      apply(untouched.concat(tiles), conflicts, untouchedBefore.concat(current), historyTiles);
+      const decoded = untouchedDecoded ?? (tiles.length ? new WeakMap<TileData, Uint8Array | null>() : undefined);
+      tiles.forEach((tile, i) => decoded?.set(tile, raw[i].data));
+      apply(untouched.concat(tiles), conflicts, untouchedBefore.concat(current), historyTiles, decoded);
       return;
     }
   };
@@ -4265,21 +4280,41 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   // undo / redo wait for it (otherwise they would undo the stroke before it)
   // Brush strokes and the other tools' edits commit off the main thread: undo waits for both
   const undoQueueRef = useRef(Promise.resolve());
-  const queueHistoryAction = <T,>(action: () => Promise<T>) => {
+  const queueHistoryAction = <T,>(action: () => Promise<T>, busyKind?: 'undo' | 'redo') => {
     const lm = layerManagerRef.current;
     const queued = undoQueueRef.current.then(async () => {
-      let result: T | undefined;
-      await brush.withHistory(async () => {
-        await new Promise<void>(whenToolCommitsDone);
-        if (layerManagerRef.current === lm) result = await action();
-      });
-      return result;
+      if (!lm || layerManagerRef.current !== lm) return;
+      const te = tileEngineRef.current;
+      te?.setUrgentReads(true);
+      try {
+        if (busyKind && ++historyBusyCountRef.current === 1) {
+          historyBusyTimerRef.current = setTimeout(() => {
+            historyBusyTimerRef.current = null;
+            if (layerManagerRef.current === lm) setHistoryBusyKind(busyKind);
+          }, 120);
+        }
+        let result: T | undefined;
+        await brush.withHistory(async () => {
+          await new Promise<void>(whenToolCommitsDone);
+          if (layerManagerRef.current === lm) result = await action();
+        });
+        return result;
+      } finally {
+        te?.setUrgentReads(false);
+        if (busyKind && --historyBusyCountRef.current === 0) {
+          if (historyBusyTimerRef.current !== null) {
+            clearTimeout(historyBusyTimerRef.current);
+            historyBusyTimerRef.current = null;
+          }
+          if (layerManagerRef.current === lm) setHistoryBusyKind(null);
+        }
+      }
     });
     undoQueueRef.current = queued.then(() => {}, (error) => console.warn('[undo] Could not apply history action:', error));
     return queued;
   };
-  const handleScopedUndo = () => { if (!autoActionBusyRef.current) void queueHistoryAction(undoNow); };
-  const handleScopedRedo = () => { if (!autoActionBusyRef.current) void queueHistoryAction(redoNow); };
+  const handleScopedUndo = () => { if (!autoActionBusyRef.current) void queueHistoryAction(undoNow, 'undo'); };
+  const handleScopedRedo = () => { if (!autoActionBusyRef.current) void queueHistoryAction(redoNow, 'redo'); };
   const deleteLayerWithUndo = async (layerId: string): Promise<boolean> =>
     (await queueHistoryAction(async () => {
       const target = layersRef.current.find((l) => l.id === layerId);
@@ -8105,7 +8140,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           activeLayerId={activeLayer?.id || null}
           subscribeThumbnails={subscribeThumbnails}
           getThumbnailsSnapshot={getThumbnailsSnapshot}
-          onRequestThumbnail={refreshLayerThumbnail}
+          onRequestThumbnail={(id) => {
+            if (!isReplayingRef.current) refreshLayerThumbnail(id, id !== activeLayerRef.current?.id);
+          }}
           onSelectLayer={(id) => { if (!autoActionBusyRef.current) onSelectLayer?.(id); }}
           onCreateLayer={onCreateLayer ? createLayerFromUser : (() => {})}
           onCreateRaster={() => createLayerFromDock('raster')}
@@ -8326,6 +8363,16 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         <div role="status" className="pointer-events-none fixed left-1/2 top-24 z-[80] flex -translate-x-1/2 items-center gap-2 rounded-xl border border-amber-500/70 bg-amber-950/95 px-4 py-2 text-xs text-amber-100 shadow-2xl">
           <AlertCircle className="h-4 w-4 shrink-0 text-amber-400" />
           <span className="font-medium">{permissionWarning}</span>
+        </div>
+      )}
+      {historyBusyKind && (
+        <div
+          role="status"
+          data-history-busy={historyBusyKind}
+          className={`pointer-events-none fixed left-1/2 top-24 z-[81] flex -translate-x-1/2 items-center gap-2 rounded-full border border-white/15 bg-neutral-900/95 px-4 py-2 text-xs font-medium text-neutral-100 shadow-lg ${permissionWarning ? 'mt-11' : ''}`}
+        >
+          <Loader2 aria-hidden="true" className="h-4 w-4 shrink-0 animate-spin text-indigo-300" />
+          <span>{historyBusyKind === 'undo' ? t.common.undoing : t.common.redoing}</span>
         </div>
       )}
       {!canvasFullscreen && renderToolOptions()}

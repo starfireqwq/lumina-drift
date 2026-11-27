@@ -327,6 +327,8 @@ class OfflineSessionStoreImpl {
   private dirtyTileOps = new Map<string, Map<string, { layerId: string; key: string; tile: TileData }>>();
   private dirtyFullRewrite = new Set<string>();
   private deletedLayersByCanvas = new Map<string, Set<string>>();
+  private loadedTilesFromDb = new Set<string>();
+  private loadingTilesByCanvas = new Map<string, Promise<void>>();
   private opsByCanvas = new Map<string, OfflineOpRow[]>();
   private pendingOpsByCanvas = new Map<string, OfflineOpRow[]>();
   private loadedOpsFromDb = new Set<string>();
@@ -440,26 +442,13 @@ class OfflineSessionStoreImpl {
       this.initPromise = (async () => {
         const db = await this.getDB();
         if (!db) return;
-        const hasTileStore = db.objectStoreNames.contains(IDB_TILE_STORE);
         await new Promise<void>((resolve) => {
           try {
-            const storeNames = hasTileStore ? [IDB_STORE, IDB_TILE_STORE] : [IDB_STORE];
-            const tx = db.transaction(storeNames, 'readonly');
+            const tx = db.transaction([IDB_STORE], 'readonly');
             const metaReq = tx.objectStore(IDB_STORE).getAll();
-            const tileReq = hasTileStore ? tx.objectStore(IDB_TILE_STORE).getAll() : null;
-            let metaList: OfflineCanvasRecord[] = [];
-            let tileList: OfflineTileRow[] = [];
-
-            metaReq.onsuccess = () => {
-              metaList = (metaReq.result || []) as OfflineCanvasRecord[];
-            };
-            if (tileReq) {
-              tileReq.onsuccess = () => {
-                tileList = (tileReq.result || []) as OfflineTileRow[];
-              };
-            }
             tx.oncomplete = () => {
               const poisonedIds: string[] = [];
+              const metaList = (metaReq.result || []) as OfflineCanvasRecord[];
               for (const item of metaList) {
                 const cid = item?.canvas?.id;
                 if (!cid) continue;
@@ -478,17 +467,13 @@ class OfflineSessionStoreImpl {
                   });
                   if (item.filePath) this.filePaths.set(cid, item.filePath);
                   if (hasLegacyInlineTiles && item.storageV !== 2) {
+                    this.loadedTilesFromDb.add(cid);
                     this.dirtyFullRewrite.add(cid);
                     this.schedulePersist(cid);
                   }
-                }
-              }
-              for (const row of tileList) {
-                const rec = this.records.get(row.canvasId);
-                if (!rec) continue;
-                const layerMap = rec.tilesByLayer[row.layerId] || (rec.tilesByLayer[row.layerId] = {});
-                if (!layerMap[row.tileKey]) {
-                  layerMap[row.tileKey] = row.tile;
+                } else {
+                  // A synchronous local edit can create a record before its persisted metadata arrives.
+                  this.loadedTilesFromDb.delete(cid);
                 }
               }
               if (poisonedIds.length > 0) {
@@ -506,6 +491,42 @@ class OfflineSessionStoreImpl {
       })();
     }
     return this.initPromise;
+  }
+
+  private async ensureCanvasTilesLoaded(canvasId: string): Promise<void> {
+    if (this.loadedTilesFromDb.has(canvasId)) return;
+    const inFlight = this.loadingTilesByCanvas.get(canvasId);
+    if (inFlight) return inFlight;
+    const rec = this.records.get(canvasId);
+    if (!rec) return;
+
+    const load = (async () => {
+      const db = await this.getDB();
+      if (this.records.get(canvasId) !== rec) return;
+      if (db?.objectStoreNames.contains(IDB_TILE_STORE)) {
+        const rows = await new Promise<OfflineTileRow[]>((resolve, reject) => {
+          const tx = db.transaction([IDB_TILE_STORE], 'readonly');
+          const store = tx.objectStore(IDB_TILE_STORE);
+          const req = store.indexNames.contains('by_canvas')
+            ? store.index('by_canvas').getAll(IDBKeyRange.only(canvasId))
+            : store.getAll(IDBKeyRange.bound(`${canvasId}\0`, `${canvasId}\u0001`, false, true));
+          tx.oncomplete = () => resolve(req.result as OfflineTileRow[]);
+          tx.onabort = () => reject(tx.error ?? new Error('Offline canvas tile load was interrupted.'));
+        });
+        if (this.records.get(canvasId) !== rec) return;
+        const deletedLayers = this.deletedLayersByCanvas.get(canvasId);
+        for (const row of rows) {
+          if (row.canvasId !== canvasId || deletedLayers?.has(row.layerId)) continue;
+          const layerTiles = rec.tilesByLayer[row.layerId] || (rec.tilesByLayer[row.layerId] = {});
+          if (!Object.hasOwn(layerTiles, row.tileKey)) layerTiles[row.tileKey] = row.tile;
+        }
+      }
+      this.loadedTilesFromDb.add(canvasId);
+    })().finally(() => {
+      if (this.loadingTilesByCanvas.get(canvasId) === load) this.loadingTilesByCanvas.delete(canvasId);
+    });
+    this.loadingTilesByCanvas.set(canvasId, load);
+    return load;
   }
 
   private markDirtyTiles(canvasId: string, layerId: string, tiles: TileData[]) {
@@ -562,15 +583,19 @@ class OfflineSessionStoreImpl {
     }
 
     const fullRewrite = this.dirtyFullRewrite.has(canvasId);
+    if (fullRewrite) {
+      await this.ensureCanvasTilesLoaded(canvasId);
+      if (this.records.get(canvasId) !== rec) return;
+    }
     const dirtyMap = this.dirtyTileOps.get(canvasId);
     const deletedLayers = this.deletedLayersByCanvas.get(canvasId);
+    const deletedLayerIds = [...(deletedLayers ?? [])];
     const pendingOps = this.pendingOpsByCanvas.get(canvasId);
     const hasTileStore = db.objectStoreNames.contains(IDB_TILE_STORE);
     const hasOpsStore = db.objectStoreNames.contains(IDB_OPS_STORE);
 
     this.dirtyFullRewrite.delete(canvasId);
     this.dirtyTileOps.delete(canvasId);
-    this.deletedLayersByCanvas.delete(canvasId);
     this.pendingOpsByCanvas.delete(canvasId);
 
     // Metadata-only payload inside offline_canvases (zero whole-canvas tile blob clone on autosave)
@@ -611,8 +636,8 @@ class OfflineSessionStoreImpl {
         };
         if (fullRewrite) {
           removePrefix(canvasId);
-        } else if (deletedLayers) {
-          for (const id of deletedLayers) removePrefix(`${canvasId}\0${id}`);
+        } else {
+          for (const id of deletedLayerIds) removePrefix(`${canvasId}\0${id}`);
         }
         const fullTileSnapshot = fullRewrite
           ? Object.entries(rec.tilesByLayer).map(([layerId, tiles]) => [layerId, Object.entries(tiles)] as const)
@@ -635,7 +660,7 @@ class OfflineSessionStoreImpl {
         const writeBatch = () => {
           try {
             let tail: IDBRequest | undefined;
-            for (let i = 0; i < 24; i++) {
+            for (let i = 0; i < 64; i++) {
               const entry = rows.next();
               if (entry.done) return;
               tail = tileStore.put(entry.value);
@@ -652,7 +677,7 @@ class OfflineSessionStoreImpl {
       tx.oncomplete = () => resolve();
       tx.onabort = () => reject(tx.error ?? new Error('Offline canvas storage was interrupted.'));
     }).catch((error: unknown) => {
-      if (this.records.has(canvasId)) {
+      if (this.records.get(canvasId) === rec) {
         this.dirtyFullRewrite.add(canvasId);
         if (pendingOps && pendingOps.length > 0) {
           const cur = this.pendingOpsByCanvas.get(canvasId) ?? [];
@@ -661,12 +686,19 @@ class OfflineSessionStoreImpl {
       }
       throw error;
     });
+    // In-flight tile loads may still see rows until the deletion transaction commits.
+    if (deletedLayers && this.deletedLayersByCanvas.get(canvasId) === deletedLayers) {
+      for (const id of deletedLayerIds) deletedLayers.delete(id);
+      if (deletedLayers.size === 0) this.deletedLayersByCanvas.delete(canvasId);
+    }
   }
 
   private async deleteRecordFromDB(canvasId: string): Promise<void> {
     this.dirtyTileOps.delete(canvasId);
     this.dirtyFullRewrite.delete(canvasId);
     this.deletedLayersByCanvas.delete(canvasId);
+    this.loadedTilesFromDb.delete(canvasId);
+    this.loadingTilesByCanvas.delete(canvasId);
     this.opsByCanvas.delete(canvasId);
     this.pendingOpsByCanvas.delete(canvasId);
     this.loadedOpsFromDb.delete(canvasId);
@@ -683,6 +715,10 @@ class OfflineSessionStoreImpl {
         tx.objectStore(IDB_STORE).delete(canvasId);
         const clearByCanvas = (storeName: string) => {
           const store = tx.objectStore(storeName);
+          if (!store.indexNames.contains('by_canvas')) {
+            store.delete(IDBKeyRange.bound(`${canvasId}\0`, `${canvasId}\u0001`, false, true));
+            return;
+          }
           const idx = store.index('by_canvas');
           const curReq = idx.openKeyCursor(IDBKeyRange.only(canvasId));
           curReq.onsuccess = () => {
@@ -724,6 +760,9 @@ class OfflineSessionStoreImpl {
     const record = this.records.get(canvasId);
     if (!record || record.thumbnail) return record?.thumbnail;
 
+    await this.ensureCanvasTilesLoaded(canvasId);
+    if (this.records.get(canvasId) !== record) return;
+    if (record.thumbnail) return record.thumbnail;
     const { canvas, layers, tilesByLayer } = record;
     const scale = Math.min(1, 220 / Math.max(canvas.width, canvas.height));
     const width = Math.max(1, Math.round(canvas.width * scale));
@@ -854,6 +893,7 @@ class OfflineSessionStoreImpl {
     };
 
     this.records.set(canvasId, record);
+    this.loadedTilesFromDb.add(canvasId);
     await this.persistRecordNow(canvasId);
     return { canvas: { ...canvas }, layers: layers.map((l) => ({ ...l })) };
   }
@@ -910,6 +950,7 @@ class OfflineSessionStoreImpl {
         updatedAt: now,
       };
       this.records.set(canvasId, rec);
+      this.loadedTilesFromDb.add(canvasId);
     }
     return rec;
   }
@@ -962,6 +1003,7 @@ class OfflineSessionStoreImpl {
   ): Promise<CanvasModel> {
     await this.ensureInitialized();
     const rec = this.ensureRecord(canvasId);
+    await this.ensureCanvasTilesLoaded(canvasId);
     const sameDimensions = width === rec.canvas.width && height === rec.canvas.height && offsetX === 0 && offsetY === 0;
     if (!sameDimensions) {
       for (const layer of rec.layers) {
@@ -1440,6 +1482,7 @@ class OfflineSessionStoreImpl {
   public async getSnapshot(canvasId: string): Promise<{ bundle: { seq: number; layers: LayerTileSnapshot[] } }> {
     await this.ensureInitialized();
     const rec = this.ensureRecord(canvasId);
+    await this.ensureCanvasTilesLoaded(canvasId);
     const layers: LayerTileSnapshot[] = rec.layers.map((l) => ({
       layerId: l.id,
       name: l.name,
@@ -1457,6 +1500,7 @@ class OfflineSessionStoreImpl {
   public async getOpsSince(canvasId: string, sinceSeq: number = 0): Promise<{ ops: any[]; latestSeq: number }> {
     await this.ensureInitialized();
     const rec = this.ensureRecord(canvasId);
+    if (sinceSeq >= rec.seq) return { ops: [], latestSeq: rec.seq };
     const rows = await this.loadCanvasOps(canvasId);
     const ops = rows.filter((r) => r.seq > sinceSeq);
     return { ops, latestSeq: rec.seq };
@@ -1472,6 +1516,7 @@ class OfflineSessionStoreImpl {
     let ops: any[] = await this.loadCanvasOps(canvasId);
     // Pre-upgrade offline artworks have current tiles without stored op history: provide a snapshot fallback op
     if (ops.length === 0) {
+      await this.ensureCanvasTilesLoaded(canvasId);
       let synthSeq = 0;
       const synthesized: any[] = [];
       for (const l of rec.layers) {

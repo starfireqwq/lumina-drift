@@ -19,6 +19,8 @@ export const jaJP: Translations = {
     cut: '切り取り',
     undo: '元に戻す',
     redo: 'やり直し',
+    undoing: '取り消し中…',
+    redoing: 'やり直し中…',
     back: '戻る',
     next: '次へ',
     done: '完了',

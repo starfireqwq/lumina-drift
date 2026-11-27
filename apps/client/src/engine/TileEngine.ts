@@ -51,13 +51,16 @@ export function normalizeTileBytes(data: any): Uint8Array {
   return new Uint8Array(0);
 }
 
-/** Pooled PBO read-back in GPU waves of 24 tiles so large commits never block the compositor */
+/** Pooled PBO read-back with bounded GPU submission and drain batches. */
 const PBO_TILE_BYTES = 256 * 256 * 4;
-const READ_WAVE_RECTS = 24;
-const READ_CHUNK_BYTES = 524288;
-const READ_BUDGET_MS = 3;
-const DEFAULT_PBO_POOL_CAP = 64;
-const LARGE_CANVAS_PBO_POOL_CAP = 96;
+const MAX_IN_FLIGHT_WAVES = 3;
+const READ_WAVE_RECTS = 64;
+const READ_CHUNK_BYTES = 4 * 1024 * 1024;
+const URGENT_READ_CHUNK_BYTES = 8 * 1024 * 1024;
+const READ_BUDGET_MS = 6;
+const URGENT_READ_BUDGET_MS = 16;
+const DEFAULT_PBO_POOL_CAP = 96;
+const LARGE_CANVAS_PBO_POOL_CAP = 192;
 
 export interface TileCommitPipelineStats {
   pboPooled: number;
@@ -108,7 +111,10 @@ export class TileEngine {
   private totalBytesRead = 0;
   private readJobs: ReadJob[] = [];
   private activeWaves: ActiveWave[] = [];
+  private urgentReadDepth = 0;
   private submitScheduled = false;
+  private waveDrainScheduled = false;
+  private readonly waveDrainChannel: MessageChannel | null;
   private waveDrainTimer: ReturnType<typeof setTimeout> | null = null;
   private pollTimers = new Set<ReturnType<typeof setTimeout>>();
   private destroyed = false;
@@ -130,6 +136,8 @@ export class TileEngine {
     this.scratchCanvas.width = tileSize;
     this.scratchCanvas.height = tileSize;
     this.scratchCtx = this.scratchCanvas.getContext('2d', { willReadFrequently: true })!;
+    this.waveDrainChannel = typeof MessageChannel !== 'undefined' ? new MessageChannel() : null;
+    if (this.waveDrainChannel) this.waveDrainChannel.port1.onmessage = this.pumpWaveDrain;
   }
 
   public updateDimensions(width: number, height: number, tileSize?: number) {
@@ -386,6 +394,15 @@ export class TileEngine {
     if (!this.destroyed && this.readJobs.length > 0) this.submitWave(Infinity);
   }
 
+  public setUrgentReads(active: boolean): void {
+    const wasUrgent = this.urgentReadDepth > 0;
+    this.urgentReadDepth = Math.max(0, this.urgentReadDepth + (active ? 1 : -1));
+    if (!wasUrgent && this.urgentReadDepth > 0 && (this.readJobs.length > 0 || this.activeWaves.length > 0)) {
+      this.tryStartWave();
+      this.scheduleWaveDrain();
+    }
+  }
+
   private allocPbo(gl: WebGL2RenderingContext, bytes: number): { buf: WebGLBuffer; pooled: boolean } {
     const canPool = bytes <= PBO_TILE_BYTES;
     if (canPool && this.pboPool.length > 0) {
@@ -408,7 +425,7 @@ export class TileEngine {
   }
 
   private tryStartWave() {
-    if (!this.destroyed && this.activeWaves.length === 0 && this.readJobs.length > 0) {
+    while (!this.destroyed && this.activeWaves.length < MAX_IN_FLIGHT_WAVES && this.readJobs.length > 0) {
       this.submitWave(READ_WAVE_RECTS);
     }
   }
@@ -426,7 +443,12 @@ export class TileEngine {
       const job = this.readJobs[0];
       // Disarm safely if Pixi tore down the renderer or target while the microtask/wave was queued.
       if (job.renderTexture.destroyed || !job.renderer?.gc || !job.renderer.texture?._boundTextures) {
-        job.resolve(job.rects.map((r, i) => job.out[i] ?? new Uint8Array(Math.max(0, r.w * r.h * 4))));
+        for (let idx = job.nextSubmit; idx < job.rects.length; idx++) {
+          const { w, h } = job.rects[idx];
+          job.out[idx] = new Uint8Array(Math.max(0, w * h * 4));
+        }
+        job.remaining -= job.rects.length - job.nextSubmit;
+        if (job.remaining === 0) job.resolve(job.out);
         this.readJobs.shift();
         continue;
       }
@@ -456,12 +478,13 @@ export class TileEngine {
     let timerId: ReturnType<typeof setTimeout>;
     const poll = () => {
       this.pollTimers.delete(timerId);
-      if (this.destroyed) {
-        try { if (!gl.isContextLost()) gl.deleteSync(sync); } catch {}
+      if (this.destroyed) return;
+      if (gl.isContextLost()) {
+        this.destroy();
         return;
       }
-      if (!gl.isContextLost() && gl.clientWaitSync(sync, 0, 0) === gl.TIMEOUT_EXPIRED) {
-        timerId = setTimeout(poll, 2);
+      if (gl.clientWaitSync(sync, 0, 0) === gl.TIMEOUT_EXPIRED) {
+        timerId = setTimeout(poll, 1);
         this.pollTimers.add(timerId);
         return;
       }
@@ -469,26 +492,37 @@ export class TileEngine {
       wave.ready = true;
       this.scheduleWaveDrain();
     };
-    timerId = setTimeout(poll, 2);
+    timerId = setTimeout(poll, 1);
     this.pollTimers.add(timerId);
   }
 
   private scheduleWaveDrain() {
-    if (this.destroyed || this.waveDrainTimer !== null || !this.activeWaves.length || !this.activeWaves.every((w) => w.ready)) return;
-    this.waveDrainTimer = setTimeout(this.pumpWaveDrain, 0);
+    if (this.destroyed || this.waveDrainScheduled || !this.activeWaves[0]?.ready) return;
+    this.waveDrainScheduled = true;
+    if (this.waveDrainChannel) {
+      this.waveDrainChannel.port2.postMessage(null);
+    } else {
+      this.waveDrainTimer = setTimeout(this.pumpWaveDrain, 0);
+    }
   }
 
   private pumpWaveDrain = () => {
+    this.waveDrainScheduled = false;
     this.waveDrainTimer = null;
-    if (this.destroyed || !this.activeWaves.length || !this.activeWaves.every((w) => w.ready)) return;
+    const urgent = this.urgentReadDepth > 0;
+    const chunkBytes = urgent ? URGENT_READ_CHUNK_BYTES : READ_CHUNK_BYTES;
+    const budgetMs = urgent ? URGENT_READ_BUDGET_MS : READ_BUDGET_MS;
     const t0 = performance.now();
     let bytes = 0;
-    while (this.activeWaves.length > 0) {
-      if (this.destroyed) return;
+    while (!this.destroyed && this.activeWaves[0]?.ready) {
       const wave = this.activeWaves[0];
       const { gl, entries } = wave;
+      if (gl.isContextLost()) {
+        this.destroy();
+        return;
+      }
       while (wave.readCursor < entries.length) {
-        if (bytes > 0 && (bytes >= READ_CHUNK_BYTES || performance.now() - t0 >= READ_BUDGET_MS)) {
+        if (bytes > 0 && (bytes >= chunkBytes || performance.now() - t0 >= budgetMs)) {
           gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
           this.scheduleWaveDrain();
           return;
@@ -506,14 +540,19 @@ export class TileEngine {
       }
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       this.activeWaves.shift();
+      this.tryStartWave();
     }
-    this.tryStartWave();
   };
 
   /** Cancels pending async GPU read-backs and frees PBO/sync resources before the Pixi renderer is destroyed. */
   public destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
+    if (this.waveDrainChannel) {
+      this.waveDrainChannel.port1.close();
+      this.waveDrainChannel.port2.close();
+    }
+    this.waveDrainScheduled = false;
     if (this.waveDrainTimer !== null) {
       clearTimeout(this.waveDrainTimer);
       this.waveDrainTimer = null;
@@ -523,8 +562,9 @@ export class TileEngine {
     const gl = (this.renderer as any)?.gl as WebGL2RenderingContext | undefined;
     const pendingJobs = new Set<ReadJob>(this.readJobs);
     for (const wave of this.activeWaves) {
-      try { if (!wave.gl.isContextLost()) wave.gl.deleteSync(wave.sync); } catch {}
-      for (const entry of wave.entries) {
+      try { if (!wave.ready && !wave.gl.isContextLost()) wave.gl.deleteSync(wave.sync); } catch {}
+      for (let idx = wave.readCursor; idx < wave.entries.length; idx++) {
+        const entry = wave.entries[idx];
         pendingJobs.add(entry.job);
         try { if (!wave.gl.isContextLost()) wave.gl.deleteBuffer(entry.buf); } catch {}
       }

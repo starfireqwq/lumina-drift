@@ -2,6 +2,39 @@ import type { TileCoord, TileData } from '@atelier/shared';
 import type { LayerManager } from '../../../engine/LayerManager';
 import { compressTiles } from '../../../engine/commitWorkers';
 
+const tileKey = ({ col, row }: TileCoord) => `${col}_${row}`;
+
+/** Reuse compressed snapshots and queue only the reads needed for the edit's baseline. */
+export async function readBeforeTilesAsync(
+  lm: LayerManager,
+  layerId: string,
+  coords: TileCoord[],
+  which: 'after' | 'before',
+): Promise<TileData[]> {
+  const { cached, missing } = lm.takeBackupCleanTiles(layerId, coords);
+  if (which === 'after' && cached.size) {
+    // An open backup describes the pre-edit pixels, so read the live tile instead.
+    for (const coord of lm.editedSparseTiles(layerId) ?? []) {
+      if (cached.delete(tileKey(coord))) missing.push(coord);
+    }
+  }
+  if (cached.size + missing.length < coords.length) {
+    // Preserve the placeholders readTilesAsync returns for out-of-bounds coordinates.
+    const missingKeys = new Set(missing.map(tileKey));
+    for (const coord of coords) {
+      const key = tileKey(coord);
+      if (cached.has(key) || missingKeys.has(key)) continue;
+      missing.push(coord);
+      missingKeys.add(key);
+    }
+  }
+  if (missing.length) {
+    const tiles = await lm.readTilesAsync(layerId, missing, which).then(compressTiles);
+    for (const tile of tiles) cached.set(tileKey(tile), tile);
+  }
+  return coords.map((coord) => cached.get(tileKey(coord))!);
+}
+
 /**
  * Before / after tiles of an edit, without stalling the page: the "before" read is queued, then
  * `modify` does its (synchronous, GPU) edit, then the "after" read is queued. Queued reads hold the
@@ -16,12 +49,15 @@ export function diffTilesAsync(
   modify: () => void,
   before: 'after' | 'before' = 'after',
 ): Promise<{ beforeTiles: TileData[]; afterTiles: TileData[] }> {
-  const b = lm.readTilesAsync(layerId, coords, before);
+  const beforeRead = readBeforeTilesAsync(lm, layerId, coords, before);
   modify();
-  const a = lm.readTilesAsync(layerId, coords, 'after');
-  return Promise.all([b, a])
-    .then(([bt, at]) => Promise.all([compressTiles(bt), compressTiles(at)]))
-    .then(([beforeTiles, afterTiles]) => ({ beforeTiles, afterTiles }));
+  const item = lm.getLayerItem(layerId);
+  const afterVersion = lm.getLayerVersion(layerId);
+  const afterRead = lm.readTilesAsync(layerId, coords, 'after').then(compressTiles).then((tiles) => {
+    if (lm.getLayerItem(layerId) === item) lm.recordCleanTiles(layerId, tiles, afterVersion);
+    return tiles;
+  });
+  return Promise.all([beforeRead, afterRead]).then(([beforeTiles, afterTiles]) => ({ beforeTiles, afterTiles }));
 }
 
 /** Current tiles of a layer, read without stalling and compressed off the main thread */

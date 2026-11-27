@@ -5,6 +5,7 @@ interface MipState {
   levels: number;
   /** Levels 1… sampled (TEXTURE_MAX_LEVEL > 0) and matching level 0 */
   fresh: boolean;
+  sharp: boolean;
   /** Source-level tile atlas slot pitch in texels (0 = single image without slot isolation) */
   slotPitch: number;
   onDestroy: () => void;
@@ -22,7 +23,11 @@ interface MipResampler {
   program: WebGLProgram;
   vao: WebGLVertexArrayObject;
   fbo: WebGLFramebuffer;
+  scratchTex: WebGLTexture | null;
+  scratchW: number;
+  scratchH: number;
   uTex: WebGLUniformLocation | null;
+  uSrcLevel: WebGLUniformLocation | null;
   uSrcSize: WebGLUniformLocation | null;
   uDstSize: WebGLUniformLocation | null;
   uSlotPitch: WebGLUniformLocation | null;
@@ -130,6 +135,7 @@ void main() {
 const MIP_FRAG_SRC = `#version 300 es
 precision highp float;
 uniform sampler2D uTex;
+uniform int uSrcLevel;
 uniform ivec2 uSrcSize;
 uniform ivec2 uDstSize;
 uniform int uSlotPitch;
@@ -158,7 +164,7 @@ void main() {
     vec4 rowSum = vec4(0.0);
     for (int i = 0; i < 4; i++) {
       int ix = clamp(base.x + i - 1, minX, maxX);
-      rowSum += texelFetch(uTex, ivec2(ix, iy), 0) * w[i];
+      rowSum += texelFetch(uTex, ivec2(ix, iy), uSrcLevel) * w[i];
     }
     sum += rowSum * w[j];
   }
@@ -236,11 +242,11 @@ export class MipmapView {
   }
 
   /** `source` is about to be shown zoomed out: its levels exist and match level 0 */
-  ensure(source: TextureSource, levels: number, slotPitch = 0) {
+  ensure(source: TextureSource, levels: number, slotPitch = 0, fastMode = false) {
     if (!this.supported || source.destroyed || levels < 2) return;
     this.lastUsed = performance.now();
     let s = this.states.get(source);
-    if (s && s.fresh && !this.dirty.has(source) && s.slotPitch === slotPitch) return;
+    if (s && s.fresh && !this.dirty.has(source) && s.slotPitch === slotPitch && (fastMode || s.sharp)) return;
     const gl = this.gl!;
     const info = this.bindForEdit(source);
     if (!s) {
@@ -252,7 +258,7 @@ export class MipmapView {
         gl.texImage2D(info.target, level, info.internalFormat, w, h, 0, info.format, info.type, null);
       }
       const onDestroy = () => this.forget(source);
-      s = { levels, fresh: false, slotPitch, onDestroy };
+      s = { levels, fresh: false, sharp: false, slotPitch, onDestroy };
       this.states.set(source, s);
       source.once('destroy', onDestroy);
       // Pixi picks a mipmapped minFilter from mipLevelCount; style.update() pushes it to the GPU
@@ -263,11 +269,13 @@ export class MipmapView {
       s.slotPitch = slotPitch;
     }
 
-    if (!this.buildSharpMips(gl, source, info, s)) {
-      // Fallback: hardware 2x2 box mipmaps; raise TEXTURE_MAX_LEVEL before generateMipmap
+    if (fastMode || !this.buildSharpMips(gl, source, info, s)) {
+      // Enable the full retained chain before generating hardware mipmaps.
+      gl.texParameteri(info.target, gl.TEXTURE_BASE_LEVEL, 0);
       gl.texParameteri(info.target, gl.TEXTURE_MAX_LEVEL, s.levels - 1);
       gl.generateMipmap(info.target);
     }
+    s.sharp = !fastMode;
     s.fresh = true;
     this.dirty.delete(source);
   }
@@ -327,6 +335,7 @@ export class MipmapView {
     this.releaseAll();
     if (this.gl && this.resampler) {
       this.gl.deleteFramebuffer(this.resampler.fbo);
+      this.gl.deleteTexture(this.resampler.scratchTex);
       this.gl.deleteVertexArray(this.resampler.vao);
       this.gl.deleteProgram(this.resampler.program);
       this.resampler = null;
@@ -426,9 +435,11 @@ export class MipmapView {
 
     const vao = gl.createVertexArray();
     const fbo = gl.createFramebuffer();
-    if (!vao || !fbo) {
+    const scratchTex = gl.createTexture();
+    if (!vao || !fbo || !scratchTex) {
       if (vao) gl.deleteVertexArray(vao);
       if (fbo) gl.deleteFramebuffer(fbo);
+      if (scratchTex) gl.deleteTexture(scratchTex);
       gl.deleteProgram(program);
       this.resamplerFailed = true;
       return null;
@@ -438,7 +449,11 @@ export class MipmapView {
       program,
       vao,
       fbo,
+      scratchTex,
+      scratchW: 0,
+      scratchH: 0,
       uTex: gl.getUniformLocation(program, 'uTex'),
+      uSrcLevel: gl.getUniformLocation(program, 'uSrcLevel'),
       uSrcSize: gl.getUniformLocation(program, 'uSrcSize'),
       uDstSize: gl.getUniformLocation(program, 'uDstSize'),
       uSlotPitch: gl.getUniformLocation(program, 'uSlotPitch'),
@@ -454,10 +469,16 @@ export class MipmapView {
     s: MipState,
   ): boolean {
     if (!info.texture || info.target !== gl.TEXTURE_2D) return false;
+    // Isolate errors from this mip build from earlier renderer work.
+    while (gl.getError() !== gl.NO_ERROR) {}
     const resampler = this.ensureResampler(gl);
-    if (!resampler) return false;
+    if (!resampler?.scratchTex) return false;
 
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(info.target, info.texture);
     const prevFbo = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    const prevReadFbo = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    const prevSampler = gl.getParameter(gl.SAMPLER_BINDING) as WebGLSampler | null;
     const prevViewport = gl.getParameter(gl.VIEWPORT) as Int32Array | number[] | null;
     const prevColorMask = gl.getParameter(gl.COLOR_WRITEMASK) as boolean[] | null;
     const prevScissor = gl.isEnabled(gl.SCISSOR_TEST);
@@ -468,9 +489,30 @@ export class MipmapView {
     const prevMinFilter = gl.getTexParameter(info.target, gl.TEXTURE_MIN_FILTER) as number;
     const prevMagFilter = gl.getTexParameter(info.target, gl.TEXTURE_MAG_FILTER) as number;
 
-    let ok = true;
     try {
       gl.bindFramebuffer(gl.FRAMEBUFFER, resampler.fbo);
+      let srcW = source.pixelWidth;
+      let srcH = source.pixelHeight;
+      const needW = Math.max(1, srcW >> 1);
+      const needH = Math.max(1, srcH >> 1);
+      if (resampler.scratchW < needW || resampler.scratchH < needH) {
+        const nextW = Math.max(resampler.scratchW, needW);
+        const nextH = Math.max(resampler.scratchH, needH);
+        gl.bindTexture(gl.TEXTURE_2D, resampler.scratchTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, nextW, nextH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.bindTexture(info.target, info.texture);
+        if (gl.getError() !== gl.NO_ERROR) return false;
+        resampler.scratchW = nextW;
+        resampler.scratchH = nextH;
+      }
+
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, resampler.scratchTex, 0);
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) return false;
+
       if (prevScissor) gl.disable(gl.SCISSOR_TEST);
       if (prevBlend) gl.disable(gl.BLEND);
       if (prevDepth) gl.disable(gl.DEPTH_TEST);
@@ -480,23 +522,19 @@ export class MipmapView {
 
       gl.useProgram(resampler.program);
       gl.bindVertexArray(resampler.vao);
+      if (prevSampler) gl.bindSampler(0, null);
       gl.uniform1i(resampler.uTex, 0);
-      gl.texParameteri(info.target, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      // texelFetch requires a mipmapped min filter for levels above the base level.
+      gl.texParameteri(info.target, gl.TEXTURE_MIN_FILTER, gl.NEAREST_MIPMAP_NEAREST);
       gl.texParameteri(info.target, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
 
-      let srcW = source.pixelWidth;
-      let srcH = source.pixelHeight;
+      gl.texParameteri(info.target, gl.TEXTURE_BASE_LEVEL, 0);
       for (let level = 1; level < s.levels; level++) {
         const dstW = Math.max(1, srcW >> 1);
         const dstH = Math.max(1, srcH >> 1);
-        gl.texParameteri(info.target, gl.TEXTURE_BASE_LEVEL, level - 1);
         gl.texParameteri(info.target, gl.TEXTURE_MAX_LEVEL, level - 1);
-        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, info.target, info.texture, level);
-        if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
-          ok = false;
-          break;
-        }
         gl.viewport(0, 0, dstW, dstH);
+        gl.uniform1i(resampler.uSrcLevel, level - 1);
         gl.uniform2i(resampler.uSrcSize, srcW, srcH);
         gl.uniform2i(resampler.uDstSize, dstW, dstH);
         const levelSlotPitch = s.slotPitch > 0 ? Math.max(1, s.slotPitch >> (level - 1)) : 0;
@@ -504,13 +542,17 @@ export class MipmapView {
         const k = mipKernelForLevel(level);
         gl.uniform4f(resampler.uKernel, k[0], k[1], k[2], k[3]);
         gl.drawArrays(gl.TRIANGLES, 0, 3);
+        gl.copyTexSubImage2D(info.target, level, 0, 0, 0, 0, dstW, dstH);
         srcW = dstW;
         srcH = dstH;
       }
+      return gl.getError() === gl.NO_ERROR;
     } finally {
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, info.target, null, 0);
       gl.bindFramebuffer(gl.FRAMEBUFFER, prevFbo);
+      if (prevReadFbo !== prevFbo) gl.bindFramebuffer(gl.READ_FRAMEBUFFER, prevReadFbo);
       gl.bindVertexArray(null);
+      if (prevSampler) gl.bindSampler(0, prevSampler);
       gl.texParameteri(info.target, gl.TEXTURE_BASE_LEVEL, 0);
       gl.texParameteri(info.target, gl.TEXTURE_MAX_LEVEL, s.levels - 1);
       if (prevMinFilter) gl.texParameteri(info.target, gl.TEXTURE_MIN_FILTER, prevMinFilter);
@@ -528,7 +570,6 @@ export class MipmapView {
       if (prevCull) gl.enable(gl.CULL_FACE);
       (this.renderer as unknown as { resetState?: () => void }).resetState?.();
     }
-    return ok;
   }
 }
 

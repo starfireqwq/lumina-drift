@@ -59,7 +59,7 @@ import {
 import { normalizeTileBytes } from './TileEngine';
 import { applyMagFilter, ATLAS_MIP_LEVELS, GUTTER, PITCH, TileAtlas, type MagFilter, type Slot } from './TileAtlas';
 import { fullMipLevels, MipmapView } from './MipmapView';
-import { decodeTiles } from './commitWorkers';
+import { compressTiles, decodeTiles } from './commitWorkers';
 
 /** mapPixiBlendMode's filter-based modes: on a filtered layer this filter is appended to do the blend */
 const ADVANCED_BLEND_FILTERS: Record<string, new () => Filter> = {
@@ -121,8 +121,9 @@ const SCRATCH_IDLE_MS = 10000;
 const MIP_IDLE_MS = 5000;
 /** Main-thread time one background step (parking / freezing a layer) may take */
 const STEP_BUDGET_MS = 6;
-/** Per-frame main-thread time budget for incremental viewport cold-tile reheat */
-const REHEAT_BUDGET_MS = 3.5;
+const HYDRATE_BATCH_SIZE = 48;
+const HYDRATE_DRAW_DELAY_MS = 250;
+const FULL_COMPOSITE_COLD_LIMIT = 2400;
 const TILE_LABEL = 'layer-tile';
 
 /** GPU memory for tiles of layers that are not on screen (animation frames, hidden layers): over it, the least recently shown go to the CPU */
@@ -148,6 +149,19 @@ const VIEW_THAW_TILE_THRESHOLD = 192;
 /** A warm tile: its pixels in an atlas slot, shown by a sprite at its canvas position */
 interface GpuTile { col: number; row: number; slot: Slot; sprite: Sprite; w: number; h: number; lastSeenMs?: number }
 interface CpuTile { data: Uint8Array; compression: 'lz4' | 'raw'; w: number; h: number }
+
+const emptyLz4Tiles = new Map<string, { data: Uint8Array; compression: 'lz4' | 'raw' }>();
+
+function getEmptyLz4Tile(w: number, h: number): { data: Uint8Array; compression: 'lz4' | 'raw' } {
+  const key = keyOf(w, h);
+  let empty = emptyLz4Tiles.get(key);
+  if (!empty) {
+    const { data, compression } = compressTileBuffer(new Uint8Array(w * h * 4), 'lz4');
+    empty = { data, compression: compression === 'lz4' ? 'lz4' : 'raw' };
+    emptyLz4Tiles.set(key, empty);
+  }
+  return empty;
+}
 
 /** True if every byte is 0 (premultiplied: fully transparent) */
 function isEmpty(px: Uint8Array, stride = 0, x = 0, w = 0, rows = 0): boolean {
@@ -264,6 +278,7 @@ class LayerItem implements PixiLayerItem {
   cleanCache: Map<string, CpuTile> = new Map();
   /** Warm layer being edited: each tile's pixels before its first write since the last sync (null = it did not exist) */
   bak: Map<string, Slot | null> | null = null;
+  bakClean: Map<string, CpuTile | null> | null = null;
   /** The atlas page this layer last got a slot from: its next tiles go there first (fewer textures per layer) */
   lastPage = -1;
   /** Its cold tiles are being decoded in a worker (prefetch) */
@@ -272,6 +287,7 @@ class LayerItem implements PixiLayerItem {
   lastShown = 0;
   /** Bumps on anything that may change the pixels (thumbnail cache, background jobs) */
   version = 0;
+  stackRevision = 0;
   shown = false;
   hasAnimatedTransform = false;
   destroyed = false;
@@ -313,6 +329,24 @@ class LayerItem implements PixiLayerItem {
 type Job =
   | { kind: 'park'; item: LayerItem; version: number; next: number; tiles: Map<string, GpuTile>; reading?: boolean }
   | { kind: 'freeze'; item: LayerItem; version: number; next: number; keys: string[]; tiles: Map<string, CpuTile>; reading?: boolean };
+
+type HydrateTile = TileCoord & { item: LayerItem; key: string; cpu: CpuTile };
+
+interface StackCache {
+  activeId: string | null;
+  belowIds: string[];
+  aboveIds: string[];
+  belowSig: string;
+  aboveSig: string;
+  viewKey: string;
+  width: number;
+  height: number;
+  scaleX: number;
+  scaleY: number;
+  lastUsedMs: number;
+  hits: number;
+  rebuilds: number;
+}
 
 export class LayerManager {
   public rootContainer: Container;
@@ -378,8 +412,26 @@ export class LayerManager {
   private cullSuspended = 0;
   private tileStructureVersion = 0;
   private lastViewGridKey = '';
-  private reheatRaf = 0;
-  private reheatPending = false;
+  private hydrateEpoch = 0;
+  private hydrateInFlight = false;
+  private hydrateRaf = 0;
+  private hydrateTimer: ReturnType<typeof setTimeout> | null = null;
+  private cleanWritebackInFlight = false;
+  private sharpMipTimer: ReturnType<typeof setTimeout> | null = null;
+  private belowCacheRT: RenderTexture | null = null;
+  private belowCacheSprite: Sprite | null = null;
+  private aboveCacheRT: RenderTexture | null = null;
+  private aboveCacheSprite: Sprite | null = null;
+  private stackCacheSuspended = 0;
+  private stackHidden: Container[] = [];
+  private stackFilterRevision = 0;
+  private stackFailedViewKey = '';
+  private stackBelowSharp = false;
+  private stackAboveSharp = false;
+  private stackCache: StackCache = {
+    activeId: null, belowIds: [], aboveIds: [], belowSig: '', aboveSig: '',
+    viewKey: '', width: 0, height: 0, scaleX: 1, scaleY: 1, lastUsedMs: 0, hits: 0, rebuilds: 0,
+  };
   private evictingOffscreen = false;
   private thumbsPaused = false;
   private destroyed = false;
@@ -394,7 +446,7 @@ export class LayerManager {
   private readonly scratchIdleMs: number;
   private readonly visiblePages = new Set<number>();
 
-  constructor(renderer: Renderer, width: number, height: number, bgColor: string = '#FFFFFF', private readonly solo = false) {
+  constructor(renderer: Renderer, width: number, height: number, bgColor: string = '#FFFFFF', solo = false) {
     this.renderer = renderer;
     this.canvasWidth = width;
     this.canvasHeight = height;
@@ -404,6 +456,7 @@ export class LayerManager {
     const memory = (globalThis.navigator as (Navigator & { deviceMemory?: number }) | undefined)?.deviceMemory ?? 8;
     const screen = globalThis.screen;
     const phone = screen && Math.min(screen.width, screen.height) < 600;
+    const is8K = width * height >= 64 * 1024 * 1024;
     const constrained = solo && (phone || memory <= 4);
     const hiddenMiB = constrained ? Math.max(12, Math.min(memory * 8, 32)) : 48;
     const recBudget = computeRecommendedGpuTileBudget(width, height, memory, Boolean(phone));
@@ -412,8 +465,8 @@ export class LayerManager {
       ? Math.max(128, Math.min(512, memory * 96))
       : Math.min(SOFT_GPU_TILE_LIMIT, recBudget.maxTiles);
     this.softGpuByteLimit = constrained ? Math.min(160 * 1048576, recBudget.maxBytes) : recBudget.maxBytes;
-    this.viewThawThreshold = constrained ? 16 : solo ? 64 : VIEW_THAW_TILE_THRESHOLD;
-    this.prefetchLayers = constrained ? 1 : solo ? 2 : Infinity;
+    this.viewThawThreshold = constrained ? 16 : solo ? 64 : is8K ? 96 : VIEW_THAW_TILE_THRESHOLD;
+    this.prefetchLayers = constrained ? 1 : solo ? 2 : is8K ? 3 : Infinity;
     this.mips = new MipmapView(renderer);
     this.atlas = new TileAtlas(
       renderer,
@@ -546,6 +599,8 @@ export class LayerManager {
   }
 
   public syncLayers(layers: LayerModel[]) {
+    this.deactivateStackCache();
+    this.stackFilterRevision++;
     this.lastSyncedLayers = layers;
     const existingIds = new Set(this.layersMap.keys());
     const sorted = Array.from(new Map(layers.map((layer) => [layer.id, layer])).values())
@@ -806,15 +861,20 @@ export class LayerManager {
       // An adjustment base is clipped to through its mask only (it has no pixels to keep resident)
       if (item.shown && model.clipToBelow && i > 0 && clipBaseOf(i).layerType !== 'adjustment') this.structuralPins.add(clipBaseOf(i).id);
     }
-    let needsReheat = false;
+    let pendingThaw = 0;
     for (const item of this.layersMap.values()) {
-      if (this.isPinned(item)) this.makeResident(item);
-      else if ((item.shown || this.keepWarm(item)) && !item.rt && !item.gpu) this.thaw(item);
-      else if ((item.shown || this.keepWarm(item)) && item.gpu && item.coldTiles.size > 0 && this.viewBounds) {
-        needsReheat = true;
+      if (!item.rt && !item.gpu && !this.isPinned(item) && (item.shown || this.keepWarm(item))) {
+        pendingThaw += item.cpu?.size ?? 0;
       }
     }
-    if (needsReheat) this.drainReheat(now, false);
+    for (const item of this.layersMap.values()) {
+      if (this.isPinned(item)) this.makeResident(item);
+      else if ((item.shown || this.keepWarm(item)) && !item.rt && !item.gpu) {
+        if (pendingThaw > 256 || (item.cpu?.size ?? 0) > this.viewThawThreshold) this.stageColdLayer(item);
+        else this.thaw(item);
+      }
+    }
+    this.startProgressiveHydrate();
 
     for (const m of drawable) {
       const maskItem = m.layerType === 'mask' ? this.layersMap.get(m.id) : undefined;
@@ -1102,6 +1162,7 @@ export class LayerManager {
    * every tile, cold ones too; otherwise what the current view needs.
    */
   public updateAdjustmentScopes(full = false): boolean {
+    if (full || this.adjustmentOrder.length > 0) this.deactivateStackCache();
     if (this.adjustmentOrder.length === 0) return false;
     const mode = full ? 'full' : `view:${this.lastViewGridKey}`;
     const drawing = this.isActivelyDrawing();
@@ -1188,41 +1249,233 @@ export class LayerManager {
    */
   public prepareView(scale: number) {
     this.updateAdjustmentScopes(false);
-    if (!this.mips.supported) return;
     // Bilinear already covers all texels cleanly near 100%; enabling trilinear mip level 1 between
     // 85% and 99% needlessly blurs crisp lineart, so only activate mipmaps below 85%.
-    if (scale >= 0.85 || this.magFilter === 'nearest') {
+    const useMips = this.mips.supported && scale < 0.85 && this.magFilter !== 'nearest';
+    const fastMip = this.isActivelyDrawing(0) || performance.now() - this.lastLocalDrawAt < 160;
+    if (this.sharpMipTimer) {
+      clearTimeout(this.sharpMipTimer);
+      this.sharpMipTimer = null;
+    }
+    if (useMips && fastMip) {
+      this.sharpMipTimer = setTimeout(() => {
+        this.sharpMipTimer = null;
+        if (!this.destroyed) this.onStageChange?.();
+      }, 180);
+    } else if (!useMips) {
       this.mips.suspend();
       this.mips.releaseIdle(MIP_IDLE_MS);
-      return;
     }
-    if (this.solo) {
-      const pages = this.visiblePages;
-      pages.clear();
-      const addPages = (item: LayerItem) => {
-        for (const tile of item.gpu?.values() ?? []) if (tile.sprite.visible) pages.add(tile.slot.page);
-      };
-      for (const item of this.layersMap.values()) if (item.shown) addPages(item);
-      addPages(this.preview);
-      for (const rt of this.atlas.pageTextures(pages)) this.mips.ensure(rt.source, ATLAS_MIP_LEVELS, PITCH);
-    } else {
-      for (const rt of this.atlas.pageTextures()) this.mips.ensure(rt.source, ATLAS_MIP_LEVELS, PITCH);
+    this.syncStackCache(useMips, fastMip);
+    if (useMips) {
+      const live = [...this.layersMap.values()].filter((item) => item.shown && item.display.renderable);
+      if (this.previewContainer.visible) live.push(this.preview);
+      this.ensureViewMips(live, fastMip);
     }
-    for (const item of this.layersMap.values()) if (item.shown) this.ensureResidentMips(item);
-    this.ensureResidentMips(this.preview);
   }
 
-  private ensureResidentMips(item: LayerItem) {
-    if (!item.rt || item.sprite.parent !== item.display || !item.display.visible) return;
-    // The sprite's texture: the layer's, or what a tool shows in its place (a filter preview)
-    const source = item.sprite.texture.source;
-    this.mips.ensure(source, fullMipLevels(source.pixelWidth, source.pixelHeight));
+  private ensureViewMips(items: readonly LayerItem[], fastMip: boolean) {
+    const pages = this.visiblePages;
+    pages.clear();
+    for (const item of items) {
+      for (const tile of item.gpu?.values() ?? []) {
+        if (tile.sprite.visible && this.isTileInView(tile.col, tile.row)) pages.add(tile.slot.page);
+      }
+      if (item.rt && item.sprite.parent === item.display && item.sprite.visible && item.display.visible) {
+        const source = item.sprite.texture.source;
+        this.mips.ensure(source, fullMipLevels(source.pixelWidth, source.pixelHeight), 0, fastMip);
+      }
+    }
+    for (const rt of this.atlas.pageTextures(pages)) this.mips.ensure(rt.source, ATLAS_MIP_LEVELS, PITCH, fastMip);
+  }
+
+  private deactivateStackCache() {
+    for (const display of this.stackHidden) display.renderable = true;
+    this.stackHidden.length = 0;
+    if (this.belowCacheSprite) this.belowCacheSprite.visible = false;
+    if (this.aboveCacheSprite) this.aboveCacheSprite.visible = false;
+    this.stackCache.activeId = null;
+  }
+
+  private releaseStackCache() {
+    this.deactivateStackCache();
+    this.belowCacheSprite?.destroy();
+    this.aboveCacheSprite?.destroy();
+    this.belowCacheRT?.destroy(true);
+    this.aboveCacheRT?.destroy(true);
+    this.belowCacheSprite = this.aboveCacheSprite = null;
+    this.belowCacheRT = this.aboveCacheRT = null;
+    this.stackCache.belowSig = this.stackCache.aboveSig = '';
+  }
+
+  public getStackCacheStats() {
+    const cachedBelowCount = this.belowCacheSprite?.visible ? this.stackCache.belowIds.length : 0;
+    const cachedAboveCount = this.aboveCacheSprite?.visible ? this.stackCache.aboveIds.length : 0;
+    return {
+      active: cachedBelowCount + cachedAboveCount > 0,
+      cachedBelowCount, cachedAboveCount,
+      hits: this.stackCache.hits, rebuilds: this.stackCache.rebuilds,
+    };
+  }
+
+  private stackSegmentSignature(items: readonly LayerItem[]): string {
+    return JSON.stringify(items.map((item) => {
+      const d = item.display;
+      const masks = Array.from(item.maskFilters?.keys() ?? [], (key) => {
+        const dependency = this.layersMap.get(key.slice(key.indexOf(':') + 1));
+        return [key, dependency?.version, dependency?.stackRevision, dependency?.sprite.texture.uid];
+      });
+      return [
+        item.model.id, item.version, item.stackRevision, d.alpha, item.model.blendMode, d.visible,
+        item.rt ? item.sprite.texture.uid : 0, item.gpu?.size ?? 0,
+        d.x, d.y, d.scale.x, d.scale.y, d.rotation, d.skew.x, d.skew.y,
+        d.filters?.length ? this.stackFilterRevision : 0, masks,
+      ];
+    }));
+  }
+
+  private syncStackCache(useMips: boolean, fastMip: boolean) {
+    const active = this.activeId ? this.layersMap.get(this.activeId) : undefined;
+    if (
+      this.destroyed || this.wrapAroundEnabled || this.stackCacheSuspended || this.adjustmentOrder.length ||
+      this.filterOverlaySprite || this.groupEffectContainers.size ||
+      !active?.shown || active.adjust || active.display.parent !== this.layersContainer || active.model.clipToBelow ||
+      this.rootContainer.getGlobalAlpha() !== 1 || this.rootContainer.getGlobalTint() !== 0xffffff
+    ) return this.deactivateStackCache();
+
+    const layers = [...this.layersMap.values()].filter((item) =>
+      item.shown && item.display.visible && !item.adjust && item.display.parent === this.layersContainer);
+    if (layers.length < 5) return this.deactivateStackCache();
+    layers.sort((a, b) => a.display.zIndex - b.display.zIndex);
+    const index = layers.indexOf(active);
+    if (index < 0 || layers[index + 1]?.model.clipToBelow) return this.deactivateStackCache();
+    const below = layers.slice(0, index);
+    const above = layers.slice(index + 1);
+    const canBake = (item: LayerItem) => !item.rt || item.ppClean;
+    const hasBelow = below.length >= 2 && below.every(canBake);
+    const hasAbove = above.length >= 2 && above.every((item) =>
+      canBake(item) && item.model.blendMode === 'normal' && !item.maskFilters?.size);
+    if (!hasBelow && !hasAbove) return this.deactivateStackCache();
+
+    const { width: screenW, height: screenH } = this.renderer.screen;
+    const resolution = this.renderer.resolution;
+    // prepareView runs before Pixi has updated the render groups for this frame.
+    const world = this.rootContainer.getGlobalTransform();
+    const { a, b, c, d, tx, ty } = world;
+    if (!screenW || !screenH || !Number.isFinite(a * d - b * c) || a * d === b * c) {
+      return this.deactivateStackCache();
+    }
+    const viewKey = `${a},${b},${c},${d},${tx},${ty}:${screenW},${screenH},${resolution}`;
+    const cache = this.stackCache;
+    if (viewKey === this.stackFailedViewKey) return this.deactivateStackCache();
+    if (viewKey !== cache.viewKey) {
+      cache.viewKey = viewKey;
+      this.deactivateStackCache();
+      this.onStageChange?.();
+      return;
+    }
+
+    const width = Math.max(1, Math.min(2560, Math.round(screenW * resolution)));
+    const height = Math.max(1, Math.min(1600, Math.round(screenH * resolution)));
+    if (width !== cache.width || height !== cache.height) this.releaseStackCache();
+    cache.width = width;
+    cache.height = height;
+    cache.scaleX = width / screenW;
+    cache.scaleY = height / screenH;
+
+    const sampling = `${viewKey}:${useMips}:${this.magFilter}`;
+    const belowSig = hasBelow
+      ? `${sampling}:${this.lastBgColor}:${this.paperVisible}:${this.stackSegmentSignature(below)}` : '';
+    const aboveSig = hasAbove ? `${sampling}:${this.stackSegmentSignature(above)}` : '';
+    const rebuildBelow = hasBelow && (cache.belowSig !== belowSig || (useMips && !fastMip && !this.stackBelowSharp));
+    const rebuildAbove = hasAbove && (cache.aboveSig !== aboveSig || (useMips && !fastMip && !this.stackAboveSharp));
+    if (rebuildBelow || rebuildAbove || cache.activeId !== this.activeId ||
+        hasBelow !== !!this.belowCacheSprite?.visible || hasAbove !== !!this.aboveCacheSprite?.visible) {
+      this.deactivateStackCache();
+      const transform = world.clone().scale(cache.scaleX, cache.scaleY);
+      try {
+        if (rebuildBelow) {
+          if (useMips) this.ensureViewMips(below, fastMip);
+          this.bakeStackSegment(below, true, transform);
+          this.stackBelowSharp = !fastMip;
+        }
+        if (rebuildAbove) {
+          if (useMips) this.ensureViewMips(above, fastMip);
+          this.bakeStackSegment(above, false, transform);
+          this.stackAboveSharp = !fastMip;
+        }
+      } catch (error) {
+        this.stackFailedViewKey = viewKey;
+        this.releaseStackCache();
+        console.warn('[LayerManager] Viewport stack cache failed:', error);
+        return;
+      }
+
+      const hide = (display: Container) => {
+        if (!display.renderable) return;
+        display.renderable = false;
+        this.stackHidden.push(display);
+      };
+      if (hasBelow) {
+        hide(this.backgroundGraphic);
+        if (this.paperCheckerGraphic) hide(this.paperCheckerGraphic);
+        for (const item of below) hide(item.display);
+        this.belowCacheSprite!.visible = true;
+      }
+      if (hasAbove) {
+        for (const item of above) hide(item.display);
+        this.aboveCacheSprite!.visible = true;
+      }
+      cache.activeId = this.activeId;
+      cache.belowIds = hasBelow ? below.map((item) => item.model.id) : [];
+      cache.aboveIds = hasAbove ? above.map((item) => item.model.id) : [];
+      cache.belowSig = belowSig;
+      cache.aboveSig = aboveSig;
+    }
+    if (!rebuildBelow && !rebuildAbove) cache.hits++;
+    cache.lastUsedMs = performance.now();
+  }
+
+  private bakeStackSegment(items: readonly LayerItem[], below: boolean, transform: Matrix) {
+    let rt = below ? this.belowCacheRT : this.aboveCacheRT;
+    let sprite = below ? this.belowCacheSprite : this.aboveCacheSprite;
+    if (!rt || !sprite) {
+      rt = RenderTexture.create({ width: this.stackCache.width, height: this.stackCache.height, resolution: 1 });
+      sprite = new Sprite(rt);
+      sprite.eventMode = 'none';
+      sprite.visible = false;
+      this.rootContainer.addChildAt(sprite, this.rootContainer.getChildIndex(this.layersContainer) + (below ? 0 : 1));
+      if (below) {
+        this.belowCacheRT = rt;
+        this.belowCacheSprite = sprite;
+      } else {
+        this.aboveCacheRT = rt;
+        this.aboveCacheSprite = sprite;
+      }
+    }
+    const members = new Set(items.map((item) => item.display));
+    const excluded = this.layersContainer.children.filter((display) => !members.has(display) && display.renderable);
+    if (this.previewContainer.renderable) excluded.push(this.previewContainer);
+    if (!below) {
+      if (this.backgroundGraphic.renderable) excluded.push(this.backgroundGraphic);
+      if (this.paperCheckerGraphic?.renderable) excluded.push(this.paperCheckerGraphic);
+    }
+    for (const display of excluded) display.renderable = false;
+    try {
+      this.renderer.render({ container: this.rootContainer, target: rt, clear: true, clearColor: [0, 0, 0, 0], transform });
+      sprite.setFromMatrix(transform.clone().invert());
+      this.stackCache.rebuilds++;
+    } finally {
+      for (const display of excluded) display.renderable = true;
+    }
   }
 
   public setActiveLayer(layerId: string | null) {
+    if (this.activeId !== layerId) this.deactivateStackCache();
     this.activeId = layerId;
     const item = layerId ? this.layersMap.get(layerId) : undefined;
-    if (item && !item.rt && !item.gpu) this.thaw(item);
+    if (item && !item.rt && !item.gpu) this.stageColdLayer(item);
+    if (item?.coldTiles.size) this.scheduleHydrate();
   }
 
   /** Keeps a layer resident for a reason ('transform', …) until pinned to null */
@@ -1307,15 +1560,11 @@ export class LayerManager {
           if (inView) t.lastSeenMs = now;
         }
       }
-      if (bounds && item.coldTiles.size > 0 && (item.shown || this.keepWarm(item))) {
+      if (item.coldTiles.size > 0 && (item.shown || this.keepWarm(item))) {
         anyColdInView = true;
       }
     }
-    if (anyColdInView) {
-      this.drainReheat(now, false);
-    } else {
-      this.reheatPending = false;
-    }
+    if (anyColdInView) this.scheduleHydrate();
   }
 
   public getCanvasDimensions(): { width: number; height: number } {
@@ -1328,6 +1577,7 @@ export class LayerManager {
 
   public setWrapAround(enabled: boolean): void {
     if (this.wrapAroundEnabled === enabled) return;
+    this.deactivateStackCache();
     this.wrapAroundEnabled = enabled;
     if (!enabled) this.releaseWrapAroundView();
     this.lastViewGridKey = '';
@@ -1356,6 +1606,7 @@ export class LayerManager {
 
   public refreshWrapAroundView(): void {
     if (!this.wrapAroundEnabled) return;
+    this.deactivateStackCache();
     const width = this.canvasWidth;
     const height = this.canvasHeight;
     if (!this.wrapAroundContainer || !this.wrapRT) {
@@ -1407,76 +1658,125 @@ export class LayerManager {
     this.wrapShapeGraphic = null;
   }
 
-  private scheduleReheat() {
-    if (this.destroyed || this.reheatRaf) return;
-    if (typeof requestAnimationFrame === 'function') {
-      this.reheatRaf = requestAnimationFrame(this.pumpReheat);
+  public startProgressiveHydrate() {
+    if (this.destroyed) return;
+    for (const item of this.layersMap.values()) {
+      if (!item.rt && !item.gpu && (item.shown || this.keepWarm(item))) this.stageColdLayer(item);
+    }
+    this.scheduleHydrate();
+  }
+
+  private stageColdLayer(item: LayerItem) {
+    // Transfer ownership of the compressed map without walking its entries.
+    item.coldTiles = item.cpu ?? new Map();
+    item.cpu = null;
+    item.gpu = new Map();
+    item.cleanCache.clear();
+    this.rebuildDisplay(item);
+  }
+
+  private scheduleHydrate() {
+    if (
+      this.destroyed || this.hydrateInFlight || this.hydrateRaf || this.hydrateTimer !== null ||
+      typeof requestAnimationFrame !== 'function'
+    ) return;
+    if (!this.deferHydrateWhileDrawing(this.pumpHydrate)) {
+      this.hydrateRaf = requestAnimationFrame(this.pumpHydrate);
     }
   }
 
-  private pumpReheat = () => {
-    this.reheatRaf = 0;
-    if (this.destroyed || !this.viewBounds) {
-      this.reheatPending = false;
-      return;
-    }
-    if (this.drainReheat(performance.now(), true) > 0) {
-      this.onStageChange?.();
-    }
-  };
+  private deferHydrateWhileDrawing(resume: FrameRequestCallback): boolean {
+    if (!this.isActivelyDrawing(HYDRATE_DRAW_DELAY_MS)) return false;
+    this.hydrateTimer = setTimeout(() => {
+      this.hydrateTimer = null;
+      this.hydrateRaf = requestAnimationFrame(resume);
+    }, HYDRATE_DRAW_DELAY_MS);
+    return true;
+  }
 
-  /**
-   * Reheats visible `coldTiles` incrementally up to `REHEAT_BUDGET_MS` per frame, prioritizing
-   * strictly on-screen tiles before the 1-tile prefetch margin, and schedules follow-up rAFs if needed.
-   */
-  private drainReheat(t0: number, _fromRaf: boolean): number {
+  private collectHydrateBatch(): HydrateTile[] {
+    const batch: HydrateTile[] = [];
+    const items = [...this.layersMap.values()].filter((item) =>
+      item.gpu && item.coldTiles.size && (item.shown || this.keepWarm(item)));
+    const active = items.findIndex((item) => item.model.id === this.activeId);
+    if (active > 0) items.unshift(...items.splice(active, 1));
     const bounds = this.viewBounds;
-    if (!bounds) {
-      this.reheatPending = false;
-      return 0;
-    }
-    const sc0 = Math.max(0, Math.floor(bounds.x0 / TS));
-    const sc1 = Math.min(this.cols - 1, Math.floor(bounds.x1 / TS));
-    const sr0 = Math.max(0, Math.floor(bounds.y0 / TS));
-    const sr1 = Math.min(this.rows - 1, Math.floor(bounds.y1 / TS));
-    const c0 = Math.max(0, Math.floor((bounds.x0 - TS) / TS));
-    const c1 = Math.min(this.cols - 1, Math.floor((bounds.x1 + TS) / TS));
-    const r0 = Math.max(0, Math.floor((bounds.y0 - TS) / TS));
-    const r1 = Math.min(this.rows - 1, Math.floor((bounds.y1 + TS) / TS));
-
-    let reheated = 0;
-    let remainingCold = false;
-
-    const reheatRange = (x0: number, x1: number, y0: number, y1: number) => {
-      for (const item of this.layersMap.values()) {
-        if (item.coldTiles.size === 0 || (!item.shown && !this.keepWarm(item))) continue;
-        for (let row = y0; row <= y1; row++) {
-          for (let col = x0; col <= x1; col++) {
-            const key = keyOf(col, row);
-            if (!item.coldTiles.has(key)) continue;
-            if (reheated > 0 && performance.now() - t0 >= REHEAT_BUDGET_MS) {
-              remainingCold = true;
-              return;
+    for (const margin of bounds ? [0, TS] : [0]) {
+      const c0 = bounds ? Math.max(0, Math.ceil((bounds.x0 - margin) / TS) - 1) : 0;
+      const c1 = bounds ? Math.min(this.cols - 1, Math.floor((bounds.x1 + margin) / TS)) : this.cols - 1;
+      const r0 = bounds ? Math.max(0, Math.ceil((bounds.y0 - margin) / TS) - 1) : 0;
+      const r1 = bounds ? Math.min(this.rows - 1, Math.floor((bounds.y1 + margin) / TS)) : this.rows - 1;
+      const area = Math.max(0, c1 - c0 + 1) * Math.max(0, r1 - r0 + 1);
+      for (const item of items) {
+        if (item.coldTiles.size <= area) {
+          for (const [key, cpu] of item.coldTiles) {
+            const [col, row] = key.split('_').map(Number);
+            if (col < c0 || col > c1 || row < r0 || row > r1) continue;
+            batch.push({ item, key, cpu, col, row });
+            if (batch.length === HYDRATE_BATCH_SIZE) return batch;
+          }
+        } else {
+          for (let row = r0; row <= r1; row++) {
+            for (let col = c0; col <= c1; col++) {
+              const key = keyOf(col, row);
+              const cpu = item.coldTiles.get(key);
+              if (!cpu) continue;
+              batch.push({ item, key, cpu, col, row });
+              if (batch.length === HYDRATE_BATCH_SIZE) return batch;
             }
-            if (this.reheatTile(item, col, row)) reheated++;
           }
         }
       }
-    };
-
-    reheatRange(sc0, sc1, sr0, sr1);
-    if (!remainingCold && (reheated === 0 || performance.now() - t0 < REHEAT_BUDGET_MS)) {
-      reheatRange(c0, c1, r0, r1);
+      if (batch.length) break;
     }
-
-    if (remainingCold) {
-      this.reheatPending = true;
-      this.scheduleReheat();
-    } else {
-      this.reheatPending = false;
-    }
-    return reheated;
+    return batch;
   }
+
+  private pumpHydrate = () => {
+    this.hydrateRaf = 0;
+    if (this.destroyed || this.deferHydrateWhileDrawing(this.pumpHydrate)) return;
+    const batch = this.collectHydrateBatch();
+    if (!batch.length) return;
+    const epoch = ++this.hydrateEpoch;
+    const current = () => !this.destroyed && epoch === this.hydrateEpoch;
+    this.hydrateInFlight = true;
+    void decodeTiles(batch.map(({ cpu }) => cpu)).then((raws) => {
+      let index = 0;
+      const upload = () => {
+        this.hydrateRaf = 0;
+        if (!current() || this.deferHydrateWhileDrawing(upload)) return;
+        const deadline = performance.now() + STEP_BUDGET_MS;
+        let changed = false;
+        do {
+          const { item, key, cpu, col, row } = batch[index];
+          const raw = raws[index++];
+          if (
+            item.destroyed || this.layersMap.get(item.model.id) !== item || !item.gpu ||
+            (!item.shown && !this.keepWarm(item)) || !this.isTileInView(col, row) ||
+            item.coldTiles.get(key) !== cpu
+          ) continue;
+          if (raw) {
+            this.uploadColdTile(item, key, col, row, cpu, raw);
+            changed = true;
+          }
+          item.coldTiles.delete(key);
+        } while (index < batch.length && performance.now() < deadline);
+        if (index < batch.length) {
+          this.hydrateRaf = requestAnimationFrame(upload);
+        } else {
+          this.hydrateInFlight = false;
+          this.scheduleHydrate();
+        }
+        if (changed || index === batch.length) this.onStageChange?.();
+      };
+      if (current()) this.hydrateRaf = requestAnimationFrame(upload);
+    }).catch((error) => {
+      if (current()) {
+        this.hydrateInFlight = false;
+        console.warn('[LayerManager] Cold tile decode failed:', error);
+      }
+    });
+  };
 
   /** Restores an offscreen-evicted CPU tile back into its warm GPU atlas slot */
   private reheatTile(item: LayerItem, col: number, row: number): GpuTile | undefined {
@@ -1488,15 +1788,18 @@ export class LayerManager {
     }
     const cpu = item.coldTiles.get(key);
     if (!cpu) return undefined;
-    item.coldTiles.delete(key);
     const raw = decodeTile(cpu, SCRATCH);
-    if (!raw || isEmpty(raw)) return undefined;
-    const gpu = item.gpu ?? (item.gpu = new Map());
-    const tile = this.makeTile(item, col, row);
-    this.atlas.writePixels(tile.slot, raw, 0, 0, cpu.w, cpu.h, tile.w, tile.h);
-    gpu.set(key, tile);
-    item.cleanCache.set(key, cpu);
-    item.display.addChildAt(tile.sprite, 0);
+    const tile = raw && !isEmpty(raw) ? this.uploadColdTile(item, key, col, row, cpu, raw) : undefined;
+    item.coldTiles.delete(key);
+    return tile;
+  }
+
+  private uploadColdTile(item: LayerItem, key: string, col: number, row: number, cpu: CpuTile, raw: Uint8Array) {
+    const { w, h } = this.tileSize(col, row);
+    const tile = this.addTile(item, col, row, cpu.w < w || cpu.h < h);
+    this.atlas.writePixels(tile.slot, raw, 0, 0, cpu.w, cpu.h, w, h);
+    if (cpu.w === w && cpu.h === h) item.cleanCache.set(key, cpu);
+    item.stackRevision++;
     this.lruReheatHits++;
     return tile;
   }
@@ -1506,8 +1809,18 @@ export class LayerManager {
    * safety limits) for full-canvas composites, flood-fills, or exports.
    */
   private withAllTilesVisible<T>(fn: () => T, includeColdTiles = false): T {
+    this.deactivateStackCache();
+    this.stackCacheSuspended++;
+    try {
+      return this.renderWithAllTilesVisible(fn, includeColdTiles);
+    } finally {
+      this.stackCacheSuspended--;
+    }
+  }
+
+  private renderWithAllTilesVisible<T>(fn: () => T, includeColdTiles: boolean): T {
     this.cullSuspended++;
-    const tempCold: Array<{ item: LayerItem; key: string; cpu: CpuTile }> = [];
+    const tempCold: Array<{ item: LayerItem; key: string; cpu: CpuTile; tile: GpuTile }> = [];
     for (const item of this.layersMap.values()) {
       if (item.gpu) {
         for (const t of item.gpu.values()) {
@@ -1521,14 +1834,13 @@ export class LayerManager {
         if (item.shown || item.model.layerType === 'mask') totalCold += item.coldTiles.size;
       }
       // Cap synchronous GPU cold reheat during composite/export so atlas stays under WebGL memory limits
-      if (totalCold > 0 && totalCold <= 2400) {
+      if (totalCold > 0 && totalCold <= FULL_COMPOSITE_COLD_LIMIT) {
         for (const item of this.layersMap.values()) {
           if (!item.shown && item.model.layerType !== 'mask') continue;
           for (const [key, cpu] of [...item.coldTiles]) {
             const [col, row] = key.split('_').map(Number);
-            if (this.reheatTile(item, col, row)) {
-              tempCold.push({ item, key, cpu });
-            }
+            const tile = this.reheatTile(item, col, row);
+            if (tile) tempCold.push({ item, key, cpu, tile });
           }
         }
       }
@@ -1549,13 +1861,12 @@ export class LayerManager {
       if (shapeOverlay) shapeOverlay.visible = shapeVisible;
       if (checker) checker.visible = checkerVisible;
       for (let i = tempCold.length - 1; i >= 0; i--) {
-        const { item, key, cpu } = tempCold[i];
-        const t = item.gpu?.get(key);
-        if (t && item.cleanCache.get(key) === cpu) {
+        const { item, key, cpu, tile } = tempCold[i];
+        if (item.gpu?.get(key) === tile) {
           item.cleanCache.delete(key);
           item.coldTiles.set(key, cpu);
-          this.freeTile(t);
-          item.gpu?.delete(key);
+          this.freeTile(tile);
+          item.gpu.delete(key);
         }
       }
       this.cullSuspended = Math.max(0, this.cullSuspended - 1);
@@ -1612,18 +1923,23 @@ export class LayerManager {
     if (item === this.preview) return;
     const bak = item.bak ?? (item.bak = new Map());
     if (bak.has(key)) return;
+    const bakClean = item.bakClean ?? (item.bakClean = new Map());
     if (!tile) {
       bak.set(key, null);
+      bakClean.set(key, null);
       return;
     }
     const s = this.atlas.alloc([tile.slot.page]);
     this.atlas.copy(tile.slot, s);
     bak.set(key, s);
+    const clean = item.cleanCache.get(key);
+    if (clean) bakClean.set(key, clean);
   }
 
   private dropBackups(item: LayerItem) {
     const bak = item.bak;
     item.bak = null;
+    item.bakClean = null;
     if (!bak?.size) return;
     const id = item.model.id;
     const hold = !this.destroyed && (this.pendingBakReads.get(id) ?? 0) > 0;
@@ -1642,7 +1958,9 @@ export class LayerManager {
   /** Back to the before-state: the backed-up slots become the tiles again, tiles new since then go */
   private restoreBackups(item: LayerItem) {
     const bak = item.bak;
+    const bakClean = item.bakClean;
     item.bak = null;
+    item.bakClean = null;
     if (!bak?.size) return;
     this.flushPendingReads();
     item.version++;
@@ -1668,6 +1986,8 @@ export class LayerManager {
         gpu.set(key, nt);
         item.display.addChildAt(nt.sprite, 0);
       }
+      const clean = bakClean?.get(key);
+      if (clean) item.cleanCache.set(key, clean);
     }
   }
 
@@ -1877,7 +2197,6 @@ export class LayerManager {
         this.pendingReadCount = Math.max(0, this.pendingReadCount - 1);
       });
     }
-    if (!item.gpu) this.thaw(item);
     return this.readTiles(item, rects, which, reader);
   }
 
@@ -1892,7 +2211,8 @@ export class LayerManager {
         for (let col = Math.max(0, Math.floor(r.x / TS)); col <= Math.min(this.cols - 1, Math.floor((r.x + r.w - 1) / TS)); col++) {
           const key = keyOf(col, row);
           const hasBak = which === 'before' && item.bak?.has(key);
-          const slot = hasBak ? item.bak!.get(key) : item.gpu?.get(key)?.slot;
+           const clean = which === 'before' ? (hasBak ? item.bakClean?.get(key) : item.cleanCache.get(key)) : undefined;
+           const slot = clean ? null : hasBak ? item.bak!.get(key) : item.gpu?.get(key)?.slot;
           const tx = col * TS;
           const ty = row * TS;
           const ix0 = Math.max(r.x, tx);
@@ -1900,16 +2220,17 @@ export class LayerManager {
           const ix1 = Math.min(r.x + r.w, tx + TS);
           const iy1 = Math.min(r.y + r.h, ty + TS);
           if (!slot) {
-            if (hasBak) continue; // before-state did not exist
-            const cold = item.coldTiles.get(key) ?? (!item.gpu ? item.cpu?.get(key) : undefined);
+             const cold = hasBak ? clean : clean ?? item.coldTiles.get(key) ?? (!item.gpu ? item.cpu?.get(key) : undefined);
             if (!cold) continue;
             const src = decodeTile(cold);
             if (!src) continue;
-            const sw = ix1 - ix0;
-            const sh = iy1 - iy0;
+             const sw = Math.min(ix1, tx + cold.w) - ix0;
+             const sh = Math.min(iy1, ty + cold.h) - iy0;
+             if (sw <= 0 || sh <= 0) continue;
             const dst = out[ri];
-            if (ix0 === r.x && iy0 === r.y && sw === r.w && sh === r.h && r.w === cold.w && r.h === cold.h) {
-              out[ri] = src.slice();
+             if (ix0 === tx && iy0 === ty && ix0 === r.x && iy0 === r.y &&
+                 sw === r.w && sh === r.h && r.w === cold.w && r.h === cold.h) {
+               dst.set(src.subarray(0, dst.length));
             } else {
               for (let y = 0; y < sh; y++) {
                 const srcOff = ((iy0 - ty + y) * cold.w + (ix0 - tx)) * 4;
@@ -2021,12 +2342,77 @@ export class LayerManager {
     return cached.data.length === bytes.length && cached.data.every((value, index) => value === bytes[index]);
   }
 
+  public takeBackupCleanTiles(layerId: string, coords: TileCoord[]): { cached: Map<string, TileData>; missing: TileCoord[] } {
+    const cached = new Map<string, TileData>();
+    const item = this.layersMap.get(layerId);
+    if (!item || item.rt) return { cached, missing: coords };
+    const missing: TileCoord[] = [];
+    for (const { col, row } of coords) {
+      if (!Number.isInteger(col) || !Number.isInteger(row) || col < 0 || row < 0 || col >= this.cols || row >= this.rows) continue;
+      const key = keyOf(col, row);
+      let clean = item.bakClean?.get(key);
+      if (clean === undefined && !item.bak?.has(key)) {
+        clean = item.cleanCache.get(key) ?? item.coldTiles.get(key);
+        if (clean === undefined && !item.gpu?.has(key) && !item.cpu?.has(key)) clean = null;
+      }
+      if (clean === undefined) {
+        missing.push({ col, row });
+      } else if (clean === null) {
+        const { w, h } = this.tileSize(col, row);
+        const { data, compression } = getEmptyLz4Tile(w, h);
+        cached.set(key, { col, row, width: w, height: h, data, compression, byteLength: data.byteLength });
+      } else {
+        const { data, compression, w, h } = clean;
+        cached.set(key, { col, row, width: w, height: h, data, compression, byteLength: data.byteLength });
+      }
+    }
+    return { cached, missing };
+  }
+
+  public getLayerVersion(layerId: string): number {
+    return this.layersMap.get(layerId)?.version ?? 0;
+  }
+
+  public recordCleanTiles(layerId: string, tiles: TileData[], expectedVersion?: number): void {
+    const item = this.layersMap.get(layerId);
+    if (!item || item.destroyed || item.rt || !item.gpu) return;
+    if (expectedVersion !== undefined && item.version !== expectedVersion) return;
+    for (const t of tiles) {
+      if (t.compression !== 'lz4' || t.width <= 0 || t.height <= 0) continue;
+      const key = keyOf(t.col, t.row);
+      const live = item.gpu.get(key);
+      if (!live || live.w !== t.width || live.h !== t.height || item.bak?.has(key)) continue;
+      item.cleanCache.set(key, { data: normalizeTileBytes(t.data), compression: 'lz4', w: t.width, h: t.height });
+    }
+  }
+
   /** Raw tiles (premultiplied) of a layer, read without stalling; `before` = as of the last sync */
   public readTilesAsync(layerId: string, coords: TileCoord[], which: 'after' | 'before' = 'after'): Promise<TileData[]> {
     const sizes = coords.map((c) => (c.col >= 0 && c.row >= 0 && c.col < this.cols && c.row < this.rows ? this.tileSize(c.col, c.row) : { w: 0, h: 0 }));
     const rects = coords.map((c, i) => ({ x: c.col * TS, y: c.row * TS, w: sizes[i].w, h: sizes[i].h }));
-    return this.readAsync(layerId, rects, which).then((pxs) =>
-      coords.map((c, i) => ({ col: c.col, row: c.row, width: sizes[i].w, height: sizes[i].h, compression: 'raw' as const, data: pxs[i], byteLength: pxs[i].byteLength })));
+    const item = this.layersMap.get(layerId);
+    const version = item?.version;
+    const writingBack = which === 'after' && this.reader && item?.gpu && item.bak?.size && coords.length <= HYDRATE_BATCH_SIZE;
+    return this.readAsync(layerId, rects, which).then((pxs) => {
+      const tiles = coords.map((c, i) => ({
+        col: c.col, row: c.row, width: sizes[i].w, height: sizes[i].h,
+        compression: 'raw' as const, data: pxs[i], byteLength: pxs[i].byteLength,
+      }));
+      if (writingBack && !this.cleanWritebackInFlight && item.version === version && !item.bak && !item.destroyed) {
+        // The caller owns the returned buffers and may transfer them to its commit worker.
+        const copy = tiles.filter((t) => item.gpu?.has(keyOf(t.col, t.row)) && !item.cleanCache.has(keyOf(t.col, t.row)))
+          .map((t) => ({ ...t, data: t.data.slice() }));
+        if (copy.length) {
+          this.cleanWritebackInFlight = true;
+          void compressTiles(copy).then((compressed) => {
+            if (this.layersMap.get(layerId) === item) this.recordCleanTiles(layerId, compressed, version);
+          }).catch((error) => {
+            console.warn('[LayerManager] Clean tile writeback failed:', error);
+          }).finally(() => { this.cleanWritebackInFlight = false; });
+        }
+      }
+      return tiles;
+    });
   }
 
   /**
@@ -2042,16 +2428,25 @@ export class LayerManager {
       const tex = which === 'before' && item.pingPongTexture ? item.pingPongTexture : item.rt;
       return this.read(tex, col * TS, row * TS, w, h);
     }
-    if (!item.gpu && item.cpu) this.thaw(item);
     const key = keyOf(col, row);
     const hasBak = which === 'before' && item.bak?.has(key);
+    const clean = which === 'before' ? (hasBak ? item.bakClean?.get(key) : item.cleanCache.get(key)) : undefined;
+    if (clean) return decodeTile(clean)?.slice() ?? null;
     const slot = hasBak ? item.bak!.get(key) : item.gpu?.get(key)?.slot;
     if (!slot) {
       if (hasBak) return null;
-      const cold = item.coldTiles.get(key);
+      const cold = item.coldTiles.get(key) ?? (!item.gpu ? item.cpu?.get(key) : undefined);
       if (!cold) return null;
       const raw = decodeTile(cold);
-      return raw ? raw.slice() : null;
+      if (!raw) return null;
+      if (cold.w === w && cold.h === h) return raw.slice(0, w * h * 4);
+      const out = new Uint8Array(w * h * 4);
+      const copyBytes = Math.min(cold.w, w) * 4;
+      for (let y = 0; y < Math.min(cold.h, h); y++) {
+        const src = y * cold.w * 4;
+        out.set(raw.subarray(src, src + copyBytes), y * w * 4);
+      }
+      return out;
     }
     return this.read(this.atlas.texture(slot), slot.x, slot.y, w, h);
   }
@@ -2088,7 +2483,6 @@ export class LayerManager {
         }
         const key = keyOf(col, row);
         let t = gpu.get(key) ?? this.reheatTile(item, col, row);
-        item.cleanCache.delete(key);
         if (!t) {
           if (!sub) continue; // transparent onto nothing
           this.backup(item, key, undefined);
@@ -2097,6 +2491,7 @@ export class LayerManager {
           if (item !== this.preview) this.detachIfPendingAfter(item, t);
           this.backup(item, key, t);
         }
+        item.cleanCache.delete(key);
         t.lastSeenMs = performance.now();
         this.atlas.writePixels(t.slot, sub, ix0 - tx, iy0 - ty, sw, sh, t.w, t.h);
       }
@@ -2178,6 +2573,7 @@ export class LayerManager {
 
   /** The display holds the full sprite (resident) or the tile sprites (warm); other children (previews) stay */
   private rebuildDisplay(item: LayerItem) {
+    item.stackRevision++;
     const d = item.display;
     for (const c of [...d.children]) if (c === item.sprite || c.label === TILE_LABEL) d.removeChild(c);
     if (item.rt) d.addChildAt(item.sprite, 0);
@@ -2292,8 +2688,7 @@ export class LayerManager {
 
   private shouldThawByViewport(item: LayerItem, tileCount: number) {
     const transform = (item.model as LayerModel & { renderTransform?: Affine2D }).renderTransform;
-    return this.viewBounds !== null && tileCount > this.viewThawThreshold &&
-      (!this.solo || !transform || transform.isIdentity);
+    return this.viewBounds !== null && tileCount > this.viewThawThreshold && (!transform || transform.isIdentity);
   }
 
   /** Cold → warm now (a layer that comes on screen; prefetch() does this ahead, off the main thread) */
@@ -2338,7 +2733,7 @@ export class LayerManager {
       item.decoding = true;
       const version = item.version;
       const entries = [...item.cpu];
-      const byViewport = this.solo && this.shouldThawByViewport(item, entries.length);
+      const byViewport = this.shouldThawByViewport(item, entries.length);
       const selected = byViewport ? entries.filter(([key]) => {
         const [col, row] = key.split('_').map(Number);
         return this.isTileInView(col, row);
@@ -2361,6 +2756,27 @@ export class LayerManager {
     }
   }
 
+  public ingestSnapshotTiles(layerId: string, tiles: TileData[]) {
+    const item = this.layersMap.get(layerId);
+    if (!item || item.adjust || !tiles?.length) return;
+    if (item.rt || item.gpu?.size || item.bak?.size) {
+      this.applyTiles(layerId, tiles);
+      return;
+    }
+    item.version++;
+    const cold = item.gpu ? item.coldTiles : (item.cpu ??= new Map());
+    if (item.gpu) item.cpu = null;
+    for (const t of tiles) {
+      if (!t || t.width <= 0 || t.height <= 0 || t.col < 0 || t.row < 0 || t.col >= this.cols || t.row >= this.rows) continue;
+      const key = keyOf(t.col, t.row);
+      const { w, h } = this.tileSize(t.col, t.row);
+      if (!Number.isInteger(t.col) || !Number.isInteger(t.row) || t.width > w || t.height > h) continue;
+      cold.set(key, { data: normalizeTileBytes(t.data), compression: t.compression === 'lz4' ? 'lz4' : 'raw', w: t.width, h: t.height });
+      item.cleanCache.delete(key);
+    }
+    if (item.gpu && (item.shown || this.keepWarm(item))) this.scheduleHydrate();
+  }
+
   /**
    * Pixels that arrived from the server or another painter. Sparse layers merge concurrently against
    * any local un-seen commits (`concurrency`) and any in-progress stroke (`item.bak`) so overlapping
@@ -2374,6 +2790,17 @@ export class LayerManager {
   ) {
     const item = this.layersMap.get(layerId);
     if (!item || item.adjust || !tiles?.length) return;
+    // Checkpoint and replay callers use applyTiles too. A full tile can replace the cold
+    // payload directly until there are live pixels or a local edit to merge against.
+    if (tiles.length > this.viewThawThreshold && !item.rt && !item.gpu?.size && !item.bak?.size && !concurrency && !predecoded &&
+        tiles.every((t) => {
+          if (!t || (t.compression !== 'raw' && t.compression !== 'lz4')) return false;
+          const { w, h } = this.tileSize(t.col, t.row);
+          return t.width === w && t.height === h;
+        })) {
+      this.ingestSnapshotTiles(layerId, tiles);
+      return;
+    }
     item.version++;
     const valid = tiles.filter((t) => t && t.width > 0 && t.height > 0);
     const baseTiles = concurrency?.baseTiles;
@@ -2432,6 +2859,7 @@ export class LayerManager {
     }
 
     if (item.gpu) {
+      item.cpu = null;
       for (const t of valid) {
         const key = keyOf(t.col, t.row);
         const common = decodeBase(key, t.width * t.height * 4);
@@ -2450,13 +2878,17 @@ export class LayerManager {
             ? this.read(this.atlas.texture(tile.slot), tile.slot.x, tile.slot.y, w, h)
             : (coldBefore ? decodeTile(coldBefore) : null) ?? new Uint8Array(w * h * 4);
           const bakSlot = item.bak.get(key) ?? null;
-          const beforeStroke = bakSlot ? this.read(this.atlas.texture(bakSlot), bakSlot.x, bakSlot.y, w, h) : new Uint8Array(w * h * 4);
+          const cleanBackup = item.bakClean?.get(key);
+          const beforeStroke = (cleanBackup && decodeTile(cleanBackup)) ??
+            (bakSlot ? this.read(this.atlas.texture(bakSlot), bakSlot.x, bakSlot.y, w, h) : new Uint8Array(w * h * 4));
           const mergedBak = common ? mergePixels3Way(common, beforeStroke, raw, remoteWins) : raw;
+          const bakClean = item.bakClean ?? (item.bakClean = new Map());
           if (isEmpty(mergedBak)) {
             if (bakSlot) {
               this.atlas.free(bakSlot);
               item.bak.set(key, null);
             }
+            bakClean.set(key, null);
           } else {
             let nextBak = bakSlot;
             if (!nextBak) {
@@ -2467,6 +2899,11 @@ export class LayerManager {
               }
             }
             this.atlas.writePixels(nextBak, mergedBak, 0, 0, t.width, t.height, w, h);
+            if (!common && t.width === w && t.height === h && (t.compression === 'lz4' || t.compression === 'raw')) {
+              bakClean.set(key, { data: normalizeTileBytes(t.data).slice(), compression: t.compression, w, h });
+            } else {
+              bakClean.delete(key);
+            }
           }
           finalRaw = overlayActivePixels(beforeStroke, currRaw, mergedBak);
         } else if (common) {
@@ -2559,6 +2996,9 @@ export class LayerManager {
 
   private tick = () => {
     const now = performance.now();
+    if ((this.belowCacheRT || this.aboveCacheRT) && now - this.stackCache.lastUsedMs > SCRATCH_IDLE_MS) {
+      this.releaseStackCache();
+    }
     if (this.compositeRT && now - this.compositeUsed > this.scratchIdleMs) {
       this.compositeRT.destroy(true);
       this.compositeRT = null;
@@ -3394,6 +3834,7 @@ export class LayerManager {
   private filterOverlaySprite: Sprite | null = null;
 
   public setFilterOverlay(texture: RenderTexture | null, zIndex = 1e6) {
+    this.deactivateStackCache();
     if (!texture) {
       if (this.filterOverlaySprite) {
         this.layersContainer.removeChild(this.filterOverlaySprite);
@@ -3554,22 +3995,70 @@ export class LayerManager {
     const overlayVisible = this.filterOverlaySprite?.visible ?? false;
     this.previewContainer.visible = false;
     if (this.filterOverlaySprite) this.filterOverlaySprite.visible = false;
-    this.withAllTilesVisible(() => {
-      this.renderer.render({
-        container: includeBackground ? this.rootContainer : this.layersContainer,
-        target,
-        clear: true,
-        clearColor: [0, 0, 0, 0],
-      });
-    }, true);
-    this.previewContainer.visible = previewVisible;
-    if (this.filterOverlaySprite) this.filterOverlaySprite.visible = overlayVisible;
+    let totalCold = 0;
+    for (const item of this.layersMap.values()) if (item.shown) totalCold += item.coldTiles.size;
+    try {
+      if (totalCold > FULL_COMPOSITE_COLD_LIMIT && !this.adjustmentOrder.length && !this.groupEffectContainers.size) {
+        this.withAllTilesVisible(() => this.renderLargeComposite(target, includeBackground));
+      } else {
+        this.withAllTilesVisible(() => {
+          this.renderer.render({
+            container: includeBackground ? this.rootContainer : this.layersContainer,
+            target,
+            clear: true,
+            clearColor: [0, 0, 0, 0],
+          });
+        }, true);
+      }
+    } finally {
+      this.previewContainer.visible = previewVisible;
+      if (this.filterOverlaySprite) this.filterOverlaySprite.visible = overlayVisible;
+    }
     return target;
   }
 
+  /** Stream cold tiles one layer at a time into a full-resolution composite. */
+  private renderLargeComposite(target: RenderTexture, includeBackground: boolean) {
+    const items = [...this.layersMap.values()].filter((item) => item.shown && item.display.renderable);
+    items.sort((a, b) => a.display.zIndex - b.display.zIndex);
+    const backgroundRenderable = this.backgroundGraphic.renderable;
+    for (const item of items) item.display.renderable = false;
+    try {
+      this.renderer.render({
+        container: includeBackground ? this.rootContainer : this.layersContainer,
+        target, clear: true, clearColor: [0, 0, 0, 0],
+      });
+      this.backgroundGraphic.renderable = false;
+      for (const item of items) {
+        const temporary: Array<[string, CpuTile, GpuTile]> = [];
+        item.display.renderable = true;
+        try {
+          for (const [key, cpu] of item.coldTiles) {
+            const [col, row] = key.split('_').map(Number);
+            const raw = decodeTile(cpu, SCRATCH);
+            if (!raw || isEmpty(raw)) continue;
+            const tile = this.uploadColdTile(item, key, col, row, cpu, raw);
+            temporary.push([key, cpu, tile]);
+          }
+          this.renderer.render({ container: includeBackground ? this.rootContainer : this.layersContainer, target, clear: false });
+        } finally {
+          item.display.renderable = false;
+          for (const [key, cpu, tile] of temporary) {
+            if (item.cleanCache.get(key) === cpu) item.cleanCache.delete(key);
+            item.gpu?.delete(key);
+            this.freeTile(tile);
+          }
+        }
+      }
+    } finally {
+      this.backgroundGraphic.renderable = backgroundRenderable;
+      for (const item of items) item.display.renderable = true;
+    }
+  }
+
   /** True while the local user has an active stroke or drew within the last 650ms */
-  public isActivelyDrawing(): boolean {
-    if (this.lastLocalDrawAt > 0 && performance.now() - this.lastLocalDrawAt < 650) return true;
+  public isActivelyDrawing(recentMs = 650): boolean {
+    if (this.lastLocalDrawAt > 0 && performance.now() - this.lastLocalDrawAt < recentMs) return true;
     for (const l of this.layersMap.values()) {
       if ((l.bak?.size ?? 0) > 0) return true;
     }
@@ -3811,6 +4300,7 @@ export class LayerManager {
   }
 
   private renderThumbAsync(item: LayerItem, thumbWidth: number, thumbHeight: number): Promise<HTMLCanvasElement | null> {
+    this.deactivateStackCache();
     if (!item.rt && !item.gpu && item.cpu) {
       return Promise.resolve(this.rasterizeCpuTilesToCanvas(item.cpu, thumbWidth, thumbHeight));
     }
@@ -4207,11 +4697,16 @@ export class LayerManager {
   public destroy() {
     this.flushPendingReads();
     this.destroyed = true;
+    this.hydrateEpoch++;
+    if (this.hydrateRaf) cancelAnimationFrame(this.hydrateRaf);
+    this.hydrateRaf = 0;
+    if (this.hydrateTimer !== null) clearTimeout(this.hydrateTimer);
+    this.hydrateTimer = null;
+    this.hydrateInFlight = false;
+    if (this.sharpMipTimer) clearTimeout(this.sharpMipTimer);
+    this.releaseStackCache();
     this.releaseWrapAroundView();
     clearInterval(this.tickTimer);
-    if (this.reheatRaf && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(this.reheatRaf);
-    this.reheatRaf = 0;
-    this.reheatPending = false;
     if (this.thumbTimer) clearTimeout(this.thumbTimer);
     for (const url of this.thumbBlobUrls) URL.revokeObjectURL(url);
     this.thumbBlobUrls.clear();

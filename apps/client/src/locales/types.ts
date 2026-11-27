@@ -19,6 +19,8 @@ export interface Translations {
     cut: string;
     undo: string;
     redo: string;
+    undoing: string;
+    redoing: string;
     back: string;
     next: string;
     done: string;

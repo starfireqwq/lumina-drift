@@ -19,6 +19,8 @@ export const zhCN: Translations = {
     cut: '剪切',
     undo: '撤销',
     redo: '重做',
+    undoing: '正在撤销…',
+    redoing: '正在重做…',
     back: '返回',
     next: '下一步',
     done: '完成',
