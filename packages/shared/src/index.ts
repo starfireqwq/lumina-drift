@@ -60,3 +60,4 @@ export * from './canvas/layer-color';
 export * from './canvas/layer-effects';
 export * from './canvas/layer-tree';
 export * from './text/text-meta';
+export * from './collab/collab-room';

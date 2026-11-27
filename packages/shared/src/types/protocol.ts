@@ -39,6 +39,12 @@ export interface RoomMemberInfo {
   presence?: MemberPresence;
   /** This user's total drawing time on this canvas (ms) */
   drawTimeMs?: number;
+  /** Active painting tool currently selected by this painter (e.g. 'brush', 'eraser', 'lasso') */
+  activeTool?: string;
+  /** Target userId this member is currently following (Follow Camera) */
+  followingUserId?: string | null;
+  /** Number of painters currently following this member's camera */
+  followerCount?: number;
 }
 
 /** A connected member's activity; disconnected members are listed in RoomStatePacket.offlineMembers */
