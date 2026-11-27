@@ -70,6 +70,13 @@ import { ApiService } from '../services/api';
 import { AtelierModal, modalButton } from './AtelierModal';
 import { dockActions, PANEL_IDS, useDockLayout } from './workspace/dockStore';
 import { getPanelDisplayTitle } from './workspace/panelIcons';
+import {
+  getWheelRotationSettings,
+  resetWheelRotationSettings,
+  setWheelRotationSettings,
+  subscribeWheelRotationSettings,
+  WHEEL_ROTATION_STEP_LIMITS,
+} from '../utils/navigatorMath';
 import { ALL_SUB_TOOLS, TOOL_CATEGORIES, getLocalizedCategoryLabel, getLocalizedSubTool } from './workspace/toolCatalog';
 
 type SettingsTab = 'shortcuts' | 'general' | 'pressure' | 'server';
@@ -218,6 +225,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const quickShapeDelayMs = useSyncExternalStore(subscribeQuickShapeDelayMs, getQuickShapeDelayMs, getQuickShapeDelayMs);
   const touchSimulatedPressure = useSyncExternalStore(subscribeTouchSimulatedPressure, getTouchSimulatedPressure, getTouchSimulatedPressure);
   const touchGestures = useSyncExternalStore(subscribeTouchGestureSettings, getTouchGestureSettings, getTouchGestureSettings);
+  const wheelRotation = useSyncExternalStore(subscribeWheelRotationSettings, getWheelRotationSettings, getWheelRotationSettings);
   const settings = t.settings;
   const modeLabel = { browser: settings.tabletBrowser, ink: settings.tabletInk, wintab: 'WinTab' };
   const driverMessage = {
@@ -1095,6 +1103,57 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     />
                     <span className="text-[11px] text-neutral-400">{settings.quickShapeDelayDesc}</span>
                   </label>
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-2.5">
+                <h3 className="flex items-center gap-1.5 text-xs font-bold text-neutral-300">
+                  <RotateCcw className="h-3.5 w-3.5 text-indigo-400" aria-hidden />
+                  {settings.wheelRotationTitle}
+                </h3>
+                <div className="flex flex-col gap-3 rounded-xl border border-neutral-800 bg-neutral-900/60 px-3 py-2.5 text-xs text-neutral-200">
+                  {([
+                    { key: 'shiftStepDeg', label: settings.shiftWheelRotation, presets: [1, 3, 5, 10, 15] },
+                    { key: 'ctrlShiftStepDeg', label: settings.ctrlShiftWheelRotation, presets: [0.5, 1, 2, 5] },
+                  ] as const).map(({ key, label, presets }) => {
+                    const angle = wheelRotation[key];
+                    return (
+                      <div key={key} className="flex flex-col gap-2">
+                        <label className="flex flex-col gap-1.5">
+                          <span className="flex items-center justify-between gap-2">
+                            <span>{label}</span>
+                            <span className="shrink-0 tabular-nums" aria-hidden>{angle}°</span>
+                          </span>
+                          <input
+                            type="range"
+                            data-setting={key}
+                            {...WHEEL_ROTATION_STEP_LIMITS[key]}
+                            value={angle}
+                            aria-valuetext={`${angle}°`}
+                            onChange={(event) => setWheelRotationSettings({ [key]: event.target.valueAsNumber })}
+                            className="w-full accent-indigo-400"
+                          />
+                        </label>
+                        <div role="group" aria-label={label} className="flex flex-wrap gap-1.5">
+                          {presets.map((preset) => (
+                            <button
+                              key={preset}
+                              type="button"
+                              aria-pressed={angle === preset}
+                              onClick={() => setWheelRotationSettings({ [key]: preset })}
+                              className="rounded-md border border-neutral-700 px-2 py-1 tabular-nums hover:bg-neutral-800 aria-pressed:border-indigo-500 aria-pressed:bg-indigo-500/20 aria-pressed:text-indigo-100"
+                            >
+                              {preset}°
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <button type="button" onClick={resetWheelRotationSettings}
+                    className="self-start rounded-md border border-neutral-700 px-2 py-1 hover:bg-neutral-800">
+                    {settings.wheelRotationReset}
+                  </button>
                 </div>
               </div>
 

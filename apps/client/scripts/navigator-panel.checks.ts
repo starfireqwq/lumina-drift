@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import { CanvasViewport, type ViewportState } from '../src/engine/Viewport';
 import {
   canvasPointToPreview, canvasPointToScreen, computeNavigatorFit, computePanForCanvasCenter,
-  computeViewportPolygonInCanvas, computeWheelRotationRadians, normalizeRotationDegrees, previewPointToCanvas, screenPointToCanvas,
-  sliderToZoomPercent, zoomPercentToSlider,
+  computeViewportPolygonInCanvas, computeWheelRotationRadians, getWheelRotationSettings,
+  normalizeRotationDegrees, previewPointToCanvas, resetWheelRotationSettings, screenPointToCanvas,
+  setWheelRotationSettings, sliderToZoomPercent, subscribeWheelRotationSettings, zoomPercentToSlider,
 } from '../src/utils/navigatorMath';
 
 const near = (actual: number, expected: number) => assert.ok(
@@ -14,7 +15,9 @@ const nearPoint = (actual: { x: number; y: number }, x: number, y: number) => {
   near(actual.y, y);
 };
 
-const wheelStep = Math.PI / 12;
+const defaults = getWheelRotationSettings();
+assert.deepEqual(defaults, { shiftStepDeg: 5, ctrlShiftStepDeg: 1 });
+const wheelStep = 5 * Math.PI / 180;
 near(computeWheelRotationRadians(100, 0), wheelStep);
 near(computeWheelRotationRadians(-100, 0), -wheelStep);
 near(computeWheelRotationRadians(-40, 40), wheelStep);
@@ -24,6 +27,28 @@ near(computeWheelRotationRadians(-1, 0, 2), -wheelStep);
 near(computeWheelRotationRadians(-12, 4), -0.12 * wheelStep);
 near(computeWheelRotationRadians(0, 39), 0.39 * wheelStep);
 assert.equal(computeWheelRotationRadians(0, 0), 0);
+near(computeWheelRotationRadians(0, 120, 0, 15), 15 * Math.PI / 180);
+const fineStep = computeWheelRotationRadians(100, 0, 0, defaults.ctrlShiftStepDeg);
+near(fineStep, Math.PI / 180);
+assert.ok(fineStep < wheelStep);
+near(computeWheelRotationRadians(-12, 4, 0, 0.5), -0.12 * 0.5 * Math.PI / 180);
+
+let rotationUpdates = 0;
+const unsubscribeRotation = subscribeWheelRotationSettings(() => { rotationUpdates += 1; });
+setWheelRotationSettings({ shiftStepDeg: -10, ctrlShiftStepDeg: 30 });
+assert.deepEqual(getWheelRotationSettings(), { shiftStepDeg: 1, ctrlShiftStepDeg: 10 });
+setWheelRotationSettings({ shiftStepDeg: 70, ctrlShiftStepDeg: -10 });
+assert.deepEqual(getWheelRotationSettings(), { shiftStepDeg: 45, ctrlShiftStepDeg: 0.5 });
+setWheelRotationSettings({ ctrlShiftStepDeg: 1.7 });
+const customSettings = getWheelRotationSettings();
+assert.deepEqual(customSettings, { shiftStepDeg: 45, ctrlShiftStepDeg: 1.5 });
+setWheelRotationSettings({ ctrlShiftStepDeg: 1.5 });
+assert.strictEqual(getWheelRotationSettings(), customSettings);
+assert.equal(rotationUpdates, 3);
+resetWheelRotationSettings();
+assert.deepEqual(getWheelRotationSettings(), defaults);
+assert.equal(rotationUpdates, 4);
+unsubscribeRotation();
 
 const width = 901;
 const height = 601;

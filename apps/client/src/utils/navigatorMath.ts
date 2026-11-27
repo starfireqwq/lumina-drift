@@ -101,11 +101,86 @@ export function sliderToZoomPercent(slider: number): number {
   return MIN_ZOOM_PERCENT * ZOOM_RATIO ** (position / SLIDER_MAX);
 }
 
-export function computeWheelRotationRadians(deltaX: number, deltaY: number, deltaMode = 0): number {
+export const DEFAULT_SHIFT_WHEEL_ROTATION_DEG = 5;
+export const DEFAULT_CTRL_SHIFT_WHEEL_ROTATION_DEG = 1;
+
+export const WHEEL_ROTATION_STEP_LIMITS = {
+  shiftStepDeg: { min: 1, max: 45, step: 1 },
+  ctrlShiftStepDeg: { min: 0.5, max: 10, step: 0.5 },
+} as const;
+
+interface WheelRotationSettings {
+  readonly shiftStepDeg: number;
+  readonly ctrlShiftStepDeg: number;
+}
+
+const DEFAULT_WHEEL_ROTATION_SETTINGS: WheelRotationSettings = {
+  shiftStepDeg: DEFAULT_SHIFT_WHEEL_ROTATION_DEG,
+  ctrlShiftStepDeg: DEFAULT_CTRL_SHIFT_WHEEL_ROTATION_DEG,
+};
+const WHEEL_ROTATION_SETTINGS_KEY = 'atelier:wheel-rotation-settings:v1';
+
+function normalizeWheelRotationSettings(raw?: Partial<WheelRotationSettings> | null): WheelRotationSettings {
+  const normalize = (key: keyof WheelRotationSettings) => {
+    const value = raw?.[key];
+    if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_WHEEL_ROTATION_SETTINGS[key];
+    const { min, max, step } = WHEEL_ROTATION_STEP_LIMITS[key];
+    return Math.max(min, Math.min(max, Math.round(value / step) * step));
+  };
+  return {
+    shiftStepDeg: normalize('shiftStepDeg'),
+    ctrlShiftStepDeg: normalize('ctrlShiftStepDeg'),
+  };
+}
+
+function readWheelRotationSettings(): WheelRotationSettings {
+  try {
+    const stored = typeof localStorage !== 'undefined' ? localStorage.getItem(WHEEL_ROTATION_SETTINGS_KEY) : null;
+    return stored ? normalizeWheelRotationSettings(JSON.parse(stored)) : DEFAULT_WHEEL_ROTATION_SETTINGS;
+  } catch {
+    return DEFAULT_WHEEL_ROTATION_SETTINGS;
+  }
+}
+
+let wheelRotationSettings = readWheelRotationSettings();
+const wheelRotationListeners = new Set<() => void>();
+
+export const getWheelRotationSettings = (): WheelRotationSettings => wheelRotationSettings;
+
+export function subscribeWheelRotationSettings(listener: () => void): () => void {
+  wheelRotationListeners.add(listener);
+  return () => { wheelRotationListeners.delete(listener); };
+}
+
+export function setWheelRotationSettings(patch: Partial<WheelRotationSettings>): void {
+  const next = normalizeWheelRotationSettings({ ...wheelRotationSettings, ...patch });
+  if (next.shiftStepDeg === wheelRotationSettings.shiftStepDeg
+      && next.ctrlShiftStepDeg === wheelRotationSettings.ctrlShiftStepDeg) return;
+  wheelRotationSettings = next;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(WHEEL_ROTATION_SETTINGS_KEY, JSON.stringify(next));
+    }
+  } catch {
+    // Keep the setting for this session when storage is unavailable.
+  }
+  wheelRotationListeners.forEach((listener) => listener());
+}
+
+export function resetWheelRotationSettings(): void {
+  setWheelRotationSettings(DEFAULT_WHEEL_ROTATION_SETTINGS);
+}
+
+export function computeWheelRotationRadians(
+  deltaX: number,
+  deltaY: number,
+  deltaMode = 0,
+  stepDegrees = DEFAULT_SHIFT_WHEEL_ROTATION_DEG,
+): number {
   // Windows can report Shift + vertical wheel motion on the horizontal axis.
   const raw = Math.abs(deltaY) >= Math.abs(deltaX) ? deltaY : deltaX;
   if (raw === 0) return 0;
-  const step = Math.PI / 12;
+  const step = stepDegrees * Math.PI / 180;
   return deltaMode !== 0 || Math.abs(raw) >= 40 ? Math.sign(raw) * step : (raw / 100) * step;
 }
 

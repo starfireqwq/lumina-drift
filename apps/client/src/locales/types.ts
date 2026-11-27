@@ -160,6 +160,8 @@ export interface Translations {
     bucketHint: string;
     paintUnfilled: string;
     paintUnfilledHint: string;
+    fillBucket: string;
+    fillBucketHint: string;
     fillReferOther: string;
     fillReferOtherHint: string;
     fillReferEdit: string;
@@ -170,6 +172,16 @@ export interface Translations {
     fillLassoHint: string;
     fillPaintUnfilled: string;
     fillPaintUnfilledHint: string;
+    eraserHardPreset: string;
+    eraserHardPresetHint: string;
+    eraserSoftPreset: string;
+    eraserSoftPresetHint: string;
+    eraserPressureSizePreset: string;
+    eraserPressureSizePresetHint: string;
+    eraserFixedSizePreset: string;
+    eraserFixedSizePresetHint: string;
+    eraserPressureOpacityPreset: string;
+    eraserPressureOpacityPresetHint: string;
     categoryPaint: string;
     categoryEraser: string;
     categoryBlend: string;
@@ -247,6 +259,8 @@ export interface Translations {
     eraserMode: string;
     eraserHard: string;
     eraserSoft: string;
+    eraserPressureSize: string;
+    eraserPressureOpacity: string;
     lassoErase: string;
     lassoEraseTooltip: string;
     // Fill mode
@@ -2188,6 +2202,10 @@ export interface Translations {
     shortcutPopupPaletteDesc: string;
     shortcutWrapAroundName: string;
     shortcutWrapAroundDesc: string;
+    wheelRotationTitle: string;
+    shiftWheelRotation: string;
+    ctrlShiftWheelRotation: string;
+    wheelRotationReset: string;
     showBrushCrosshair: string;
     showBrushCrosshairDesc: string;
     touchSimulatedPressure: string;
@@ -2205,6 +2223,14 @@ export interface Translations {
     surfaceFrostedMatte: string;
     surfaceLuminaGlow: string;
     surfaceSoftPaper: string;
+    luminaGlowModeLabel: string;
+    luminaGlowModeRainbow: string;
+    luminaGlowModeMono: string;
+    luminaGlowModeDual: string;
+    luminaGlowSingleColor: string;
+    luminaGlowPrimaryColor: string;
+    luminaGlowSecondaryColor: string;
+    luminaGlowSaturation: string;
     themeAria: string;
     themeCustom: string;
     themePresetDark: string;

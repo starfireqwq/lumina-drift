@@ -502,13 +502,16 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
 }) => {
   const { t } = useI18n();
   const { isGuest, user } = useAuth();
-  const readOnly = isGuest || Boolean(isReadOnly);
+  const readOnly = (!isOfflineCanvas && isGuest) || Boolean(isReadOnly);
   // Masks are not rows: each shows as a second thumbnail on the layer it belongs to
   const layers = allLayers.filter((l) => l.layerType !== 'mask');
   const maskOf = new Map(allLayers.filter((l) => l.layerType === 'mask' && l.parentId).map((m) => [m.parentId as string, m]));
   const activeMask = allLayers.find((l) => l.id === activeLayerId && l.layerType === 'mask') || null;
   const [effectsOpenSignal, setEffectsOpenSignal] = useState(0);
-  const canManage = (l: LayerModel) => (canManageProp ? canManageProp(l) : Boolean(user && l.ownerId === user.id));
+  const canManage = (l: LayerModel) => isOfflineCanvas ? !readOnly : (canManageProp ? canManageProp(l) : Boolean(user && l.ownerId === user.id));
+  const canAddToFolder = (folder: LayerModel) => isOfflineCanvas
+    ? !readOnly && !folder.isLocked
+    : (folderAccess?.canAdd(folder) ?? canManage(folder));
   // Groups nest: a row's depth and whether a collapsed group above hides it
   const byId = new Map(layers.map((l) => [l.id, l]));
   const displayMode = isOfflineCanvas ? 'shared' : paletteColorMode;
@@ -569,7 +572,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   const [adjustmentMenuOpen, setAdjustmentMenuOpen] = useState(false);
   const adjustmentBtnRef = useRef<HTMLButtonElement>(null);
   const adjustmentPopRef = useRef<HTMLDivElement>(null);
-  const canCreateLayer = Boolean(!readOnly && (onRequestCreateMyLayer || onCreateRaster || onCreateLayer));
+  const canCreateLayer = Boolean(!readOnly && (onCreateRaster || onCreateLayer || (!isOfflineCanvas && onRequestCreateMyLayer)));
   const showAdjustmentMenu = Boolean(canCreateLayer && onCreateAdjustmentLayer && adjustmentMenuOpen);
   const adjustmentPos = useAnchoredPopover(showAdjustmentMenu, adjustmentBtnRef, adjustmentPopRef, { gap: 4, margin: 8, fallbackWidth: 208 });
 
@@ -758,7 +761,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
       && !collapsedGroups.has(target.id) && layers.some((l) => l.parentId === target.id));
     const parentId = into ? target.id : target.parentId && byId.has(target.parentId) ? target.parentId : null;
     const parent = parentId ? byId.get(parentId) : undefined;
-    if ((moving.parentId ?? null) !== parentId && (!canManage(moving) || (parent && !(folderAccess?.canAdd(parent) ?? canManage(parent))))) return;
+    if ((moving.parentId ?? null) !== parentId && (!canManage(moving) || (parent && !canAddToFolder(parent)))) return;
 
     const list = getSortedDescending();
     const block = list.filter((l) => isWithin(l, fromId));
@@ -949,7 +952,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   };
 
   // Filter out child layers of collapsed groups for display list
-  const allGroups = layers.filter((l) => l.layerType === 'group' && (folderAccess?.canAdd(l) ?? canManage(l)));
+  const allGroups = layers.filter((l) => l.layerType === 'group' && canAddToFolder(l));
   const availableTransferMembers = roomMembers.filter(
     (m) => m.userId !== user?.id && (isOfflineCanvas || m.userId !== LOCAL_ARTIST_USER_ID)
   );
@@ -1073,12 +1076,12 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   const active = layers.find((l) => l.id === (activeMask?.parentId ?? activeLayerId)) || null;
   const activeLayerMask = active ? maskOf.get(active.id) : undefined;
   const activeIsOwner = Boolean(active && user?.id === active.ownerId);
-  const canEditActive = Boolean(!readOnly && active && activeIsOwner);
+  const canEditActive = Boolean(!readOnly && active && (isOfflineCanvas || activeIsOwner));
   const paletteTargets = selectedLayerIds.size > 1
     ? Array.from(selectedLayerIds).map((id) => byId.get(id)).filter((layer): layer is LayerModel => Boolean(layer))
     : active ? [active] : [];
   const canSyncPalette = Boolean(onUpdateLayerProps && !readOnly && paletteTargets.length
-    && paletteTargets.every((layer) => user?.id === layer.ownerId));
+    && (isOfflineCanvas || paletteTargets.every((layer) => user?.id === layer.ownerId)));
   const changePaletteColor = (color: string | null | undefined, scope: ColorScope) => {
     if (scope === 'local') {
       onChangeLocalPaletteColor(paletteTargets.map((layer) => layer.id), color);
@@ -1092,7 +1095,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   // Up / down move within the layer's own group
   const activeSiblings = active ? siblingsOf(active) : [];
   const activeIndex = active ? activeSiblings.findIndex((l) => l.id === active.id) : -1;
-  const canMoveActive = Boolean(!readOnly && active && (activeIsOwner || isAdmin || active.isPublic || !active.ownerId));
+  const canMoveActive = Boolean(!readOnly && active && (isOfflineCanvas || activeIsOwner || isAdmin || active.isPublic || !active.ownerId));
   // A group goes with its content: something has to be left
   const canDeleteActive = Boolean(!readOnly && active && (activeIsOwner || isAdmin) && layers.some((l) => !isWithin(l, active.id)));
   const blendGroups = getLocalizedBlendModeGroups(t);
@@ -1108,8 +1111,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
       on ? 'border-transparent' : 'border-neutral-700/70'
     } ${extra}`;
   const drawCtx = { user, isGuest, isCanvasViewer: Boolean(isReadOnly) };
-  const hasDrawableLayer = hasAnyDrawableLayerForUser(allLayers, drawCtx);
-  const guidance = getLayerDrawGuidanceState({
+  const hasDrawableLayer = !isOfflineCanvas && hasAnyDrawableLayerForUser(allLayers, drawCtx);
+  const guidance = isOfflineCanvas ? null : getLayerDrawGuidanceState({
     layers: allLayers,
     activeLayerId,
     user,
@@ -1118,7 +1121,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
     canCreateLayer,
   });
   const guidanceMessage = (() => {
-    switch (guidance.kind) {
+    switch (guidance?.kind) {
       case 'guest_login_required':
         return t.layers.guidanceGuest;
       case 'viewer_readonly':
@@ -1140,7 +1143,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   return (
     <div className="relative flex h-full w-full min-w-0 select-none flex-col bg-atelier-panel text-xs">
       {/* 1. CSP-style compact layer properties & action bars */}
-      {folderAccess && <FolderAccessPanel access={folderAccess} layers={layers} active={active} userId={user?.id} />}
+      {!isOfflineCanvas && folderAccess && <FolderAccessPanel access={folderAccess} layers={layers} active={active} userId={user?.id} />}
       <div className="shrink-0 space-y-1 border-b border-atelier-border px-2 py-1.5" aria-label={t.layers.title}>
         {/* Row 1: Blend mode + CSP checkered opacity bar + % */}
         <div className="flex items-center gap-1.5">
@@ -1218,7 +1221,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             title={t.layers.lockAlphaTooltip} aria-label={t.layers.lockAlpha} className={iconBtn(!activeIsAdjustment && Boolean(active?.alphaLocked))}>
             <AlphaLockIcon />
           </button>
-          <button type="button" disabled={readOnly || !active || !(activeIsOwner || isAdmin)} aria-pressed={Boolean(active?.isLocked)}
+          <button type="button" disabled={readOnly || !active || !(isOfflineCanvas || activeIsOwner || isAdmin)} aria-pressed={Boolean(active?.isLocked)}
             onClick={() => active && onToggleLock(active)} title={t.layers.lockLayerTooltip} aria-label={t.layers.lockLayerTooltip} className={iconBtn(Boolean(active?.isLocked))}>
             <Lock className="h-3.5 w-3.5" />
           </button>
@@ -1291,25 +1294,25 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
 
           {/* Ownership icons: compact CSP style instead of full-width banners */}
           <div className="ml-auto flex items-center gap-0.5">
-            {active && !activeIsOwner && (active.isPublic || !active.ownerId) && !readOnly && (
+            {!isOfflineCanvas && active && !activeIsOwner && (active.isPublic || !active.ownerId) && !readOnly && (
               <button type="button" onClick={() => onClaimLayer(active.id, false)} title={t.layers.claimTooltip} aria-label={t.layers.claim}
                 className={iconBtn(false, '!border-emerald-500/40 !text-emerald-400 hover:!bg-emerald-500/15')}>
                 <HandMetal className="h-3.5 w-3.5" />
               </button>
             )}
-            {active && !activeIsOwner && !active.isPublic && active.ownerId && isAdmin && !readOnly && (
+            {!isOfflineCanvas && active && !activeIsOwner && !active.isPublic && active.ownerId && isAdmin && !readOnly && (
               <button type="button" onClick={() => setForceClaimTarget(active)} title={t.layers.adminForceClaim} aria-label={t.layers.adminForceClaim}
                 className={iconBtn(false, '!border-amber-500/45 !text-amber-400 hover:!bg-amber-500/15')}>
                 <ShieldAlert className="h-3.5 w-3.5" />
               </button>
             )}
-            {active && activeIsOwner && !readOnly && (
+            {!isOfflineCanvas && active && activeIsOwner && !readOnly && (
               <button type="button" onClick={() => { if (confirm(t.layers.releaseConfirm.replace('{name}', active.name))) onReleaseLayer(active.id); }}
                 title={t.layers.releaseTooltip} aria-label={t.layers.release} className={iconBtn(false)}>
                 <Unlock className="h-3.5 w-3.5" />
               </button>
             )}
-            {active && (activeIsOwner || isAdmin) && !readOnly && onTransferLayer && (
+            {!isOfflineCanvas && active && (activeIsOwner || isAdmin) && !readOnly && onTransferLayer && (
               <div className="relative">
                 <button ref={transferBtnRef} type="button" onClick={() => setTransferLayerId(transferLayerId === active.id ? null : active.id)}
                   title={t.layers.transferTooltip} aria-label={t.layers.transfer} className={iconBtn(transferLayerId === active.id)}>
@@ -1368,7 +1371,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                 )}
               </>
             )}
-            {onRequestCreateMyLayer && (
+            {!isOfflineCanvas && onRequestCreateMyLayer && (
               <button type="button" onClick={onRequestCreateMyLayer} title={t.layers.myLayer} aria-label={t.layers.myLayer}
                 className={`atelier-icon-btn h-6 w-6 ${!hasDrawableLayer ? 'ring-1 ring-indigo-400 text-indigo-300' : ''}`}>
                 <UserPlus className="h-3.5 w-3.5" />
@@ -1425,7 +1428,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
       </div>
 
       {/* Drawability guidance banner: one-click switch / safe claim / create layer / sign-in */}
-      {guidance.kind !== 'none' && guidance.kind !== 'drawable' && (
+      {guidance && guidance.kind !== 'none' && guidance.kind !== 'drawable' && (
         <div
           role="status"
           data-layer-draw-guidance={guidance.kind}
@@ -1517,7 +1520,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
       )}
 
       {/* Slim hint only when no public/owned layer exists yet in collaborative session */}
-      {layers.length > 0 && !hasDrawableLayer && !readOnly && (
+      {!isOfflineCanvas && layers.length > 0 && !hasDrawableLayer && !readOnly && (
         <div className="flex shrink-0 items-center gap-1.5 border-b border-atelier-border bg-indigo-950/30 px-2 py-1 text-[10px] text-indigo-300">
           <Sparkles className="h-3 w-3 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{t.layers.empty}</span>
@@ -1579,7 +1582,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             const ancestors = ancestorsOf(layer);
             const isActive = layer.id === activeLayerId;
             const isOwner = user?.id === layer.ownerId;
-            const canMove = isOwner || isAdmin || layer.isPublic || !layer.ownerId;
+            const canEditRow = isOfflineCanvas ? !readOnly : isOwner;
+            const canMove = isOfflineCanvas ? canEditRow : (isOwner || isAdmin || layer.isPublic || !layer.ownerId);
             const isGroup = layer.layerType === 'group';
             const isAdjustment = layer.layerType === 'adjustment';
             const adjustmentKind = isAdjustment ? layer.meta?.adjustment?.kind : undefined;
@@ -1590,28 +1594,26 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             const isClipped = Boolean(layer.clipToBelow);
             const isClippingBase = baseClippingIds.has(layer.id);
             const isBatchSelected = selectedLayerIds.has(layer.id);
-            const ownerDisplay = resolveLayerOwnerDisplay(layer, {
+            const ownerDisplay = isOfflineCanvas ? null : resolveLayerOwnerDisplay(layer, {
               currentUserId: user?.id ?? null,
               roomMembers,
-              isOfflineCanvas,
               labels: {
                 myLayer: t.layers.myLayer,
                 publicLayer: t.layers.public,
                 painterPrefix: t.layers.painterPrefix,
               },
             });
-            const ownerHex = ownerColor(layer.ownerId, ownerDisplay.isPublicUnclaimed);
-            const ownerDisplayName = ownerDisplay.label;
+            const ownerHex = ownerDisplay ? ownerColor(layer.ownerId, ownerDisplay.isPublicUnclaimed) : null;
             const paletteColor = paletteColorOf(layer.id);
             const gutterStyle = paletteColor ? { backgroundColor: paletteColor, color: getPaletteContrastColor(paletteColor) } : undefined;
             const tint = tintOf(layer.id);
             const tintLabel = tint.source === 'local' ? t.layers.colors.localTint : t.layers.colors.sharedTint;
             const safeOriginalAuthor =
-              layer.meta?.originalAuthor && (isOfflineCanvas || !isBlockedOnlineGuestName(layer.meta.originalAuthor))
+              layer.meta?.originalAuthor && !isBlockedOnlineGuestName(layer.meta.originalAuthor)
                 ? layer.meta.originalAuthor
                 : null;
-            const canDrawRow = isLayerDrawableForUser(layer, drawCtx, allLayers);
-            const canToggleVis = isOwner;
+            const showReadOnlyBadge = ownerDisplay && !ownerDisplay.isPublicUnclaimed && !isGroup && !layer.isLocked
+              && (isAdjustment ? readOnly || !canManage(layer) : !isLayerDrawableForUser(layer, drawCtx, allLayers));
             const isOver = dragOverLayerId === layer.id;
             const localOverride = localVisibility[layer.id];
             const seenByMe = localOverride ?? layer.isVisible;
@@ -1619,12 +1621,14 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             const pctText = `${Math.round((layer.opacity ?? 1) * 100)}%`;
             const extraEffects = [
               !isAdjustment && layer.screentoneEnabled ? t.layers.screentone : null,
-              layer.layerType === 'vector' ? t.layers.vectorLayer : null,
-              layer.layerType === 'text' ? t.layers.textLayer : null,
-              isAdjustment ? t.layers.adjustment.title : null,
-              layer.meta?.animation ? `${t.animation.timeline} ${layer.meta.animation.fps}fps` : null,
-              layer.meta?.camera ? `${t.animation.camera} ${layer.meta.camera.width}×${layer.meta.camera.height}` : null,
-              layer.meta?.audio ? t.animation.audioTrack : null,
+              ...(!isOfflineCanvas ? [
+                layer.layerType === 'vector' ? t.layers.vectorLayer : null,
+                layer.layerType === 'text' ? t.layers.textLayer : null,
+                isAdjustment ? t.layers.adjustment.title : null,
+                layer.meta?.animation ? `${t.animation.timeline} ${layer.meta.animation.fps}fps` : null,
+                layer.meta?.camera ? `${t.animation.camera} ${layer.meta.camera.width}×${layer.meta.camera.height}` : null,
+                layer.meta?.audio ? t.animation.audioTrack : null,
+              ] : []),
             ].filter(Boolean);
 
             return (
@@ -1709,25 +1713,25 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                   }}
                   onPointerUp={() => { if (longPressRef.current) clearTimeout(longPressRef.current); }}
                   onPointerMove={(e) => { if (e.pointerType === 'touch' && longPressRef.current && Math.abs(e.movementY) > 4) clearTimeout(longPressRef.current); }}
-                  onDoubleClick={(e) => { if (isOwner) handleStartRename(layer, e); }}
+                  onDoubleClick={(e) => { if (canEditRow) handleStartRename(layer, e); }}
                   onTouchEnd={() => {
                     const now = Date.now();
-                    if (now - lastTapRef.current.time < 320 && lastTapRef.current.id === layer.id && isOwner) handleStartRename(layer);
+                    if (now - lastTapRef.current.time < 320 && lastTapRef.current.id === layer.id && canEditRow) handleStartRename(layer);
                     lastTapRef.current = { id: layer.id, time: now };
                   }}
                   className={`group relative flex h-9 cursor-pointer items-stretch border-b border-neutral-800/60 ${
                     isActive || activeMask?.parentId === layer.id ? 'bg-indigo-600/20' : 'hover:bg-neutral-800/50'
                   } ${isBatchSelected ? 'ring-1 ring-inset ring-amber-400 bg-amber-900/20' : ''} ${isOver && dropPosition === 'inside' && isGroup ? 'ring-1 ring-inset ring-amber-400 bg-amber-950/30' : ''} ${draggedLayerId === layer.id ? 'opacity-50' : ''}`}
                   // Someone else's layer keeps a subtle tint from the left; mine stays clean
-                  style={isOwner || layer.isPublic || !layer.ownerId ? undefined : { backgroundImage: `linear-gradient(90deg, ${ownerHex}22, ${ownerHex}08 50%, transparent)` }}
+                  style={!ownerHex || isOwner || layer.isPublic || !layer.ownerId ? undefined : { backgroundImage: `linear-gradient(90deg, ${ownerHex}22, ${ownerHex}08 50%, transparent)` }}
                 >
                   {/* Owner stripe */}
-                  {!paletteColor && <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-0 z-10 w-[3px]"
+                  {ownerHex && !paletteColor && <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-0 z-10 w-[3px]"
                     style={{ backgroundColor: ownerHex }} />}
                   {/* Dual eye gutter: synced eye + personal eye side-by-side in CSP density */}
                   <div className={`flex w-9 shrink-0 items-center justify-center gap-0.5 pl-1 ${paletteColor ? '' : 'border-r border-neutral-800/60'}`}
                     style={gutterStyle} onClick={(e) => e.stopPropagation()}>
-                    <button type="button" disabled={!canToggleVis} onClick={() => onToggleVisibility(layer)}
+                    <button type="button" disabled={!canEditRow} onClick={() => onToggleVisibility(layer)}
                       aria-label={layer.isVisible ? t.layers.hide : t.layers.show}
                       title={layer.isVisible ? t.layers.hide : t.layers.show}
                       className={`flex h-6 w-4 items-center justify-center rounded ${paletteColor ? 'enabled:hover:bg-current/10' : 'text-neutral-300 enabled:hover:bg-neutral-700/60 disabled:opacity-40'}`}>
@@ -1872,10 +1876,14 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                       <span className="shrink-0 tabular-nums">{pctText}</span>
                       <span className="shrink-0">{blendLabel(layer.blendMode)}</span>
                       {tint.config && <LayerTintSwatch config={tint.config} label={tint.inherited ? t.layers.colors.inheritedTint.replace('{source}', tintLabel) : tintLabel} />}
-                      <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: ownerHex }} />
-                      <span className="truncate" title={safeOriginalAuthor ? t.layers.originalAuthor.replace('{author}', safeOriginalAuthor) : ownerDisplayName}>
-                        {ownerDisplayName}
-                      </span>
+                      {ownerDisplay && ownerHex && (
+                        <>
+                          <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ backgroundColor: ownerHex }} />
+                          <span className="truncate" title={safeOriginalAuthor ? t.layers.originalAuthor.replace('{author}', safeOriginalAuthor) : ownerDisplay.label}>
+                            {ownerDisplay.label}
+                          </span>
+                        </>
+                      )}
                       {extraEffects.length > 0 && <span className="truncate text-indigo-400">· {extraEffects.join(' · ')}</span>}
                     </span>
                     {editingLayerId === layer.id ? (
@@ -1916,7 +1924,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                     )}
                     {!isAdjustment && layer.alphaLocked && <span title={t.layers.lockedAlphaTooltip} className="text-amber-400"><AlphaLockIcon /></span>}
                     {layer.isLocked && <span title={t.layers.layerLocked}><Lock className="h-3 w-3 text-amber-400" /></span>}
-                    {!isGroup && !layer.isLocked && !ownerDisplay.isPublicUnclaimed && (isAdjustment ? readOnly || !canManage(layer) : !canDrawRow) && (
+                    {showReadOnlyBadge && (
                       <span title={t.layers.readOnlyTooltip} className="text-[10px] text-neutral-500"><Lock className="h-2.5 w-2.5 opacity-60" /></span>
                     )}
                     {canMove && !isBatchMode && (
@@ -2064,7 +2072,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
       })()}
 
       <AdminConfirmModal
-        isOpen={Boolean(forceClaimTarget)}
+        isOpen={!isOfflineCanvas && Boolean(forceClaimTarget)}
         layerName={forceClaimTarget?.name || ''}
         onConfirm={() => {
           if (forceClaimTarget) {

@@ -36,8 +36,11 @@ enum class Control : DWORD_PTR {
     Progress, RichEdit, Details
 };
 
+enum class RefreshMode : LPARAM { Attach, Animate, Page };
+
 struct Glass {
     HWND parent = nullptr;
+    HHOOK pageHook = nullptr;
     HBRUSH editBrush = nullptr;
     ULONG_PTR gdiplus = 0;
     Bitmap* icon = nullptr;
@@ -330,20 +333,29 @@ void DrawTextLabel(HDC dc, HWND hwnd, RECT& rect, UINT flags, COLORREF color,
     RestoreDC(dc, saved);
 }
 
-void PaintGroupBox(HDC dc, HWND hwnd, const RECT& local) {
-    const float scale = glass.scale;
-    const COLORREF color = IsWindowEnabled(hwnd) ? kText : kDisabled;
-    const auto uiState = SendMessageW(hwnd, WM_QUERYUISTATE, 0, 0);
-    const UINT flags = DT_SINGLELINE | (uiState & UISF_HIDEACCEL ? DT_HIDEPREFIX : 0);
+struct GroupBoxTitle {
+    RECT bounds{};
+    UINT flags = DT_SINGLELINE;
+    int length = 0;
     wchar_t text[1024];
-    const int length = GetWindowTextW(hwnd, text, ARRAYSIZE(text));
-    RECT title{};
-    if (length) {
-        DrawTextLabel(dc, hwnd, title, flags | DT_CALCRECT, color, text, length);
-        OffsetRect(&title, local.left + static_cast<LONG>(12 * scale + .5f), local.top);
-    }
+};
 
-    const REAL topY = local.top + (length ? (title.bottom - title.top) / 2.0f : scale);
+void MeasureGroupBoxTitle(HDC dc, HWND hwnd, const RECT& local, GroupBoxTitle& title) {
+    title.length = GetWindowTextW(hwnd, title.text, ARRAYSIZE(title.text));
+    if (!title.length) return;
+    const auto uiState = SendMessageW(hwnd, WM_QUERYUISTATE, 0, 0);
+    if (uiState & UISF_HIDEACCEL) title.flags |= DT_HIDEPREFIX;
+    DrawTextLabel(dc, hwnd, title.bounds, title.flags | DT_CALCRECT, 0, title.text, title.length);
+    OffsetRect(&title.bounds, local.left + static_cast<LONG>(12 * glass.scale + .5f), local.top);
+}
+
+void PaintGroupBox(HDC dc, HWND hwnd, const RECT& local, const GroupBoxTitle& title) {
+    const float scale = glass.scale;
+    RECT textBounds = title.bounds;
+    const LONG rightPadding = static_cast<LONG>(6 * scale + .5f);
+    textBounds.right = (std::min)(textBounds.right, local.right - rightPadding);
+    const bool hasTitle = title.length && textBounds.right > textBounds.left;
+    const REAL topY = hasTitle ? (textBounds.top + textBounds.bottom) / 2.0f : local.top + scale;
     const RectF frame(local.left + scale, topY, local.right - local.left - 2 * scale,
                       local.bottom - topY - scale);
     if (frame.Width > 0 && frame.Height > 0) {
@@ -351,9 +363,10 @@ void PaintGroupBox(HDC dc, HWND hwnd, const RECT& local) {
         graphics.SetSmoothingMode(SmoothingModeAntiAlias);
         GraphicsPath path;
         RoundedPath(path, frame, 8 * scale);
-        if (length) {
-            const RectF gap(title.left - 5 * scale, static_cast<REAL>(title.top),
-                            title.right - title.left + 10 * scale, static_cast<REAL>(title.bottom - title.top));
+        if (hasTitle) {
+            const RectF gap(textBounds.left - 5 * scale, static_cast<REAL>(textBounds.top),
+                            textBounds.right - textBounds.left + 10 * scale,
+                            static_cast<REAL>(textBounds.bottom - textBounds.top));
             graphics.SetClip(gap, CombineModeExclude);
         }
         SolidBrush surface(Color(28, 12, 18, 36));
@@ -361,7 +374,10 @@ void PaintGroupBox(HDC dc, HWND hwnd, const RECT& local) {
         Pen edge(Color(92, 165, 190, 245), scale);
         graphics.DrawPath(&edge, &path);
     }
-    if (length) DrawTextLabel(dc, hwnd, title, flags, color, text, length);
+    if (hasTitle) {
+        const COLORREF color = IsWindowEnabled(hwnd) ? RGB(240, 245, 255) : kDisabled;
+        DrawTextLabel(dc, hwnd, textBounds, title.flags | DT_END_ELLIPSIS, color, title.text, title.length);
+    }
 }
 
 void PaintButton(Graphics& graphics, HWND hwnd, const RectF& area, LONG_PTR style, bool hovered) {
@@ -476,7 +492,7 @@ void PaintControlText(HDC dc, HWND hwnd, Control control, RECT rect, float progr
                   enabled ? (control == Control::Branding ? kMuted : kText) : kDisabled, text, length);
 }
 
-void Render(HDC dc, HWND hwnd, Control control, const RECT& local) {
+void Render(HDC dc, HWND hwnd, Control control, const RECT& local, const GroupBoxTitle& title) {
     const RECT area = InParent(hwnd);
     const RectF bounds = Bounds(area);
     const RectF outer = Bounds(InParent(glass.parent));
@@ -487,7 +503,7 @@ void Render(HDC dc, HWND hwnd, Control control, const RECT& local) {
         return;
     }
     if (control == Control::GroupBox) {
-        PaintGroupBox(dc, hwnd, local);
+        PaintGroupBox(dc, hwnd, local, title);
         return;
     }
     const float progress = control == Control::Progress ? ProgressValue(hwnd) : 0.0f;
@@ -525,11 +541,23 @@ void Render(HDC dc, HWND hwnd, Control control, const RECT& local) {
         control == Control::Progress) PaintControlText(dc, hwnd, control, local, progress);
 }
 
+void ExcludeGroupBoxContents(HDC dc, HWND group, HWND first, const RECT& interior) {
+    for (HWND item = first; item; item = GetWindow(item, GW_HWNDNEXT)) {
+        if (item == group || !IsWindowVisible(item)) continue;
+        const RECT bounds = WindowInParent(item, group);
+        if (bounds.left < interior.left || bounds.top < interior.top ||
+            bounds.right > interior.right || bounds.bottom > interior.bottom) continue;
+        if (IsClass(item, L"Button") && (GetWindowLongPtrW(item, GWL_STYLE) & BS_TYPEMASK) == BS_GROUPBOX) continue;
+        ExcludeClipRect(dc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+    }
+}
+
 void PaintWindow(HWND hwnd, Control control, HDC target) {
     RECT rect{};
     GetClientRect(hwnd, &rect);
     if (rect.right <= 0 || rect.bottom <= 0) return;
     const int saved = SaveDC(target);
+    GroupBoxTitle title;
     if (control == Control::Dialog) {
         for (HWND child = GetWindow(hwnd, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
             if (!IsWindowVisible(child)) continue;
@@ -537,26 +565,24 @@ void PaintWindow(HWND hwnd, Control control, HDC target) {
             ExcludeClipRect(target, bounds.left, bounds.top, bounds.right, bounds.bottom);
         }
     } else if (control == Control::GroupBox) {
-        for (HWND sibling = GetWindow(GetParent(hwnd), GW_CHILD); sibling; sibling = GetWindow(sibling, GW_HWNDNEXT)) {
-            if (sibling == hwnd || !IsWindowVisible(sibling)) continue;
-            if (IsClass(sibling, L"Button") && (GetWindowLongPtrW(sibling, GWL_STYLE) & BS_TYPEMASK) == BS_GROUPBOX) continue;
-            const RECT bounds = WindowInParent(sibling, hwnd);
-            RECT overlap{};
-            if (IntersectRect(&overlap, &rect, &bounds)) {
-                ExcludeClipRect(target, overlap.left, overlap.top, overlap.right, overlap.bottom);
-            }
-        }
+        MeasureGroupBoxTitle(target, hwnd, rect, title);
+        RECT interior = rect;
+        const LONG inset = static_cast<LONG>(4 * glass.scale + .5f);
+        InflateRect(&interior, -inset, -inset);
+        interior.top = (std::max)(interior.top, title.bounds.bottom);
+        ExcludeGroupBoxContents(target, hwnd, GetWindow(hwnd, GW_CHILD), interior);
+        ExcludeGroupBoxContents(target, hwnd, GetWindow(GetParent(hwnd), GW_CHILD), interior);
     }
     HDC buffer = CreateCompatibleDC(target);
     HBITMAP bitmap = buffer ? CreateCompatibleBitmap(target, rect.right, rect.bottom) : nullptr;
     if (bitmap) {
         HGDIOBJ oldBitmap = SelectObject(buffer, bitmap);
-        Render(buffer, hwnd, control, rect);
+        Render(buffer, hwnd, control, rect, title);
         BitBlt(target, 0, 0, rect.right, rect.bottom, buffer, 0, 0, SRCCOPY);
         SelectObject(buffer, oldBitmap);
         DeleteObject(bitmap);
     } else {
-        Render(target, hwnd, control, rect);
+        Render(target, hwnd, control, rect, title);
     }
     if (buffer) DeleteDC(buffer);
     RestoreDC(target, saved);
@@ -615,7 +641,14 @@ Control Identify(HWND hwnd) {
     return Control::None;
 }
 
-BOOL CALLBACK RefreshControl(HWND hwnd, LPARAM animate) {
+void RepaintControl(HWND hwnd) {
+    if (IsWindowVisible(hwnd)) {
+        RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_NOERASE | RDW_UPDATENOW | RDW_NOCHILDREN);
+    }
+}
+
+BOOL CALLBACK RefreshControl(HWND hwnd, LPARAM reason) {
+    const auto mode = static_cast<RefreshMode>(reason);
     const auto attached = static_cast<Control>(reinterpret_cast<DWORD_PTR>(GetPropW(hwnd, kControlProperty)));
     if (attached == Control::None) {
         const Control control = Identify(hwnd);
@@ -625,19 +658,39 @@ BOOL CALLBACK RefreshControl(HWND hwnd, LPARAM animate) {
             RemoveWindowSubclass(hwnd, GlassProc, kSubclass);
             return TRUE;
         }
-        if (control == Control::Progress || control == Control::GroupBox) SetWindowTheme(hwnd, L"", L"");
+        if (control == Control::Progress) SetWindowTheme(hwnd, L"", L"");
         if (control == Control::RichEdit) ColorRichEdit(hwnd, true);
         if (control == Control::Details) ColorDetails(hwnd, true);
         if (control == Control::Divider) RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME);
+        else if (control == Control::GroupBox) RepaintControl(hwnd);
         else InvalidateRect(hwnd, nullptr, FALSE);
         return TRUE;
     }
-    if (!animate || !IsWindowVisible(hwnd)) return TRUE;
+    if (mode == RefreshMode::Page && attached == Control::GroupBox) RepaintControl(hwnd);
+    if (mode != RefreshMode::Animate || !IsWindowVisible(hwnd)) return TRUE;
     const bool defaultButton = attached == Control::Button && IsWindowEnabled(hwnd) &&
         (GetWindowLongPtrW(hwnd, GWL_STYLE) & BS_TYPEMASK) == BS_DEFPUSHBUTTON;
     if (attached == Control::Progress || (attached == Control::Header && HasHeader()) ||
         attached == Control::WizardImage || defaultButton) InvalidateRect(hwnd, nullptr, FALSE);
     return TRUE;
+}
+
+LRESULT CALLBACK WatchPageLifecycle(int code, WPARAM wParam, LPARAM lParam) {
+    if (code == HC_ACTION && glass.parent) {
+        const auto& event = *reinterpret_cast<const CWPRETSTRUCT*>(lParam);
+        const bool shown = event.message == WM_WINDOWPOSCHANGED && event.lParam &&
+            (reinterpret_cast<const WINDOWPOS*>(event.lParam)->flags & SWP_SHOWWINDOW);
+        const bool pageChange = (event.message == WM_CREATE && event.lResult != -1) ||
+            event.message == WM_INITDIALOG || (event.message == WM_SHOWWINDOW && event.wParam) || shown;
+        // Dialog-template windows can suppress WM_PARENTNOTIFY.
+        if (pageChange && IsChild(glass.parent, event.hwnd) && IsClass(event.hwnd, L"#32770")) {
+            const auto mode = static_cast<LPARAM>(RefreshMode::Page);
+            RefreshControl(event.hwnd, mode);
+            EnumChildWindows(event.hwnd, RefreshControl, mode);
+            if (shown) PostMessageW(glass.parent, kRefresh, 0, 0);
+        }
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
 BOOL CALLBACK RestoreControl(HWND hwnd, LPARAM) {
@@ -646,7 +699,6 @@ BOOL CALLBACK RestoreControl(HWND hwnd, LPARAM) {
     RemoveWindowSubclass(hwnd, GlassProc, kSubclass);
     switch (static_cast<Control>(data)) {
     case Control::Progress:
-    case Control::GroupBox:
         SetWindowTheme(hwnd, nullptr, nullptr);
         break;
     case Control::RichEdit:
@@ -668,7 +720,7 @@ void FrameTick(HWND hwnd) {
         const COLORREF border = RGB(color.GetR(), color.GetG(), color.GetB());
         glass.animatedBorder = SUCCEEDED(glass.setDwm(hwnd, kBorder, &border, sizeof(border)));
     }
-    EnumChildWindows(hwnd, RefreshControl, TRUE);
+    EnumChildWindows(hwnd, RefreshControl, static_cast<LPARAM>(RefreshMode::Animate));
     const HWND header = HeaderBackground();
     if (header && HasHeader()) {
         const RECT rect = InParent(header);
@@ -701,7 +753,7 @@ LRESULT CALLBACK GlassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam
             }
             break;
         case kRefresh: {
-            EnumChildWindows(hwnd, RefreshControl, FALSE);
+            EnumChildWindows(hwnd, RefreshControl, static_cast<LPARAM>(RefreshMode::Attach));
             const HWND header = HeaderBackground();
             if (header) {
                 const RECT rect = InParent(header);
@@ -716,8 +768,9 @@ LRESULT CALLBACK GlassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam
         }
     }
     if (control == Control::Dialog) {
-        if (message == WM_WINDOWPOSCHANGED && !root && (reinterpret_cast<WINDOWPOS*>(lParam)->flags & SWP_SHOWWINDOW)) {
-            EnumChildWindows(hwnd, RefreshControl, FALSE);
+        if (!glass.pageHook && !root && message == WM_WINDOWPOSCHANGED && lParam &&
+            (reinterpret_cast<const WINDOWPOS*>(lParam)->flags & SWP_SHOWWINDOW)) {
+            EnumChildWindows(hwnd, RefreshControl, static_cast<LPARAM>(RefreshMode::Page));
             PostMessageW(glass.parent, kRefresh, 0, 0);
         }
         if (message == WM_CTLCOLORSTATIC || message == WM_CTLCOLOREDIT ||
@@ -755,6 +808,35 @@ LRESULT CALLBACK GlassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam
         return 0;
     }
 
+    if (control == Control::GroupBox || control == Control::Button) {
+        switch (message) {
+        case WM_NCPAINT:
+            if (control == Control::GroupBox) return 0;
+            break;
+        case WM_PRINT:
+            // The generic print handler dispatches WM_PRINTCLIENT without button-class painting.
+            return DefWindowProcW(hwnd, message, wParam,
+                control == Control::GroupBox ? lParam & ~PRF_NONCLIENT : lParam);
+        case WM_SETTEXT:
+        case WM_ENABLE:
+        case WM_UPDATEUISTATE:
+        case WM_THEMECHANGED:
+        case WM_STYLECHANGED:
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+        case WM_SETFONT:
+        case WM_SYSCOLORCHANGE:
+        case BM_SETSTYLE:
+        case BM_SETSTATE:
+        case BM_SETCHECK: {
+            // The button procedure can draw directly before returning from these messages.
+            const LRESULT result = DefSubclassProc(hwnd, message, wParam, lParam);
+            RepaintControl(hwnd);
+            return result;
+        }
+        }
+    }
+
     switch (message) {
     case WM_ERASEBKGND:
         return 1;
@@ -766,7 +848,7 @@ LRESULT CALLBACK GlassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam
         return 0;
     }
     case WM_PRINTCLIENT:
-        PaintWindow(hwnd, control, reinterpret_cast<HDC>(wParam));
+        if (wParam) PaintWindow(hwnd, control, reinterpret_cast<HDC>(wParam));
         return 0;
     case WM_MOUSEMOVE:
         if (control == Control::Button) {
@@ -788,9 +870,8 @@ LRESULT CALLBACK GlassProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam
         break;
     }
     const LRESULT result = DefSubclassProc(hwnd, message, wParam, lParam);
-    if ((control == Control::Button && (message == BM_SETSTYLE || message == BM_SETSTATE || message == BM_SETCHECK)) ||
-        (control == Control::Progress && (message == PBM_SETPOS || message == PBM_DELTAPOS ||
-                                        message == PBM_STEPIT || message == PBM_SETRANGE || message == PBM_SETRANGE32))) {
+    if (control == Control::Progress && (message == PBM_SETPOS || message == PBM_DELTAPOS ||
+                                        message == PBM_STEPIT || message == PBM_SETRANGE || message == PBM_SETRANGE32)) {
         InvalidateRect(hwnd, nullptr, FALSE);
     }
     return result;
@@ -835,6 +916,7 @@ extern "C" __declspec(dllexport) void __stdcall AttachInstallerGlass(HWND hwndPa
     }
     UpdateScale();
     ApplyDwm(hwndParent);
+    glass.pageHook = SetWindowsHookExW(WH_CALLWNDPROCRET, WatchPageLifecycle, nullptr, GetCurrentThreadId());
     glass.start = GetTickCount64();
     glass.timer = SetTimer(hwndParent, kAnimationTimer, 33, nullptr);
     FrameTick(hwndParent);
@@ -844,6 +926,7 @@ extern "C" __declspec(dllexport) void __stdcall AttachInstallerGlass(HWND hwndPa
 extern "C" __declspec(dllexport) void __stdcall DetachInstallerGlass() {
     const HWND hwnd = glass.parent;
     if (hwnd && GetWindowThreadProcessId(hwnd, nullptr) != GetCurrentThreadId()) return;
+    if (glass.pageHook) UnhookWindowsHookEx(glass.pageHook);
     if (hwnd) {
         if (glass.timer) KillTimer(hwnd, glass.timer);
         RemoveWindowSubclass(hwnd, GlassProc, kSubclass);
