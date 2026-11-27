@@ -2,13 +2,26 @@ import React, { createContext, useContext, useEffect, useRef, useState, useSyncE
 import { io as socketIO, Socket } from 'socket.io-client';
 import * as socketParser from 'socket.io-parser';
 import {
+  addRoomSwatch as addRoomSwatchHelper,
   tileSocketParser,
   calculatePainterLevel,
+  CanvasGridConfig,
   CanvasSticker,
   ChatMessage,
+  claimGridSlot as claimGridSlotHelper,
+  createDefaultGridConfig,
+  createDefaultReferenceBoard,
   CursorPacket,
+  FollowStatePacket,
   LayerModel,
+  MAX_ROOM_REFERENCE_ITEMS,
   MemberPresence,
+  MemberToolUpdatePacket,
+  MemberViewportPacket,
+  normalizeGridConfig,
+  normalizeReferenceBoard,
+  normalizeReferenceItem,
+  normalizeRoomSwatches,
   OfflineMemberInfo,
   OpBroadcastPacket,
   OpRejectedPacket,
@@ -16,10 +29,17 @@ import {
   PRESENCE_IDLE_AFTER_MS,
   PresenceUpdatePacket,
   PreviewDabPacket,
+  releaseGridSlot as releaseGridSlotHelper,
+  removeRoomSwatch as removeRoomSwatchHelper,
+  RoomCollabStateSnapshot,
   RoomMemberInfo,
+  RoomReferenceBoardState,
+  RoomReferenceItem,
   RoomStatePacket,
+  RoomSwatch,
   TileData,
   TilePatchPacket,
+  ViewportCameraState,
 } from '@atelier/shared';
 import { useAuth } from './AuthContext';
 import { ApiService } from '../services/api';
@@ -29,6 +49,7 @@ import { P2PTileManager, P2PStats } from '../engine/P2PTileManager';
 import { getUserColor } from '../utils/userColors';
 import { sharedRoomFromLocation } from '../utils/serverLinks';
 import { resolveInitialActiveCanvasId, sanitizeOnlineGuestName } from '../utils/roomJoinGuard';
+import { loadOfflineCollabState, saveOfflineCollabState } from '../utils/collabLocalStore';
 
 export interface EventLogItem {
   id: string;
@@ -150,6 +171,35 @@ interface SocketContextType {
   roomAccessError: { canvasId: string; code: 'PASSWORD_REQUIRED' | 'PASSWORD_INVALID'; message: string } | null;
   /** Retries joining a password room; the password is kept for reconnects in this tab */
   unlockRoom: (canvasId: string, password: string) => void;
+  // Phase 5 (Collab 2.0): Follow Camera, Tool Presence, Grid Slots, Room Swatches & Reference Board
+  followingUserId: string | null;
+  followersByTarget: Record<string, string[]>;
+  roomGrid: CanvasGridConfig;
+  roomSwatches: RoomSwatch[];
+  roomReferenceBoard: RoomReferenceBoardState;
+  collabError: { code: string; scope: string; message: string; at: number } | null;
+  getMemberCameras: () => Map<string, ViewportCameraState>;
+  subscribeMemberViewport: (cb: (packet: MemberViewportPacket) => void) => () => void;
+  emitViewportSync: (camera: ViewportCameraState, activeTool?: string) => void;
+  emitMemberTool: (activeTool: string) => void;
+  setFollowTarget: (targetUserId: string | null) => void;
+  updateGridConfig: (patch: { enabled?: boolean; rows?: number; cols?: number; showLabels?: boolean; clearSlots?: boolean }) => void;
+  claimGridSlot: (slotIndex: number, label?: string, force?: boolean) => void;
+  releaseGridSlot: (slotIndex: number) => void;
+  addRoomSwatch: (hex: string, name?: string) => void;
+  removeRoomSwatch: (swatchId: string) => void;
+  addRoomRefItem: (item: {
+    title?: string;
+    imageDataUrl: string;
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+    scale?: number;
+  }) => void;
+  updateRoomRefItem: (itemId: string, updates: Partial<RoomReferenceItem>) => void;
+  removeRoomRefItem: (itemId: string) => void;
+  setRoomRefBoardLocked: (lockedByAdmin: boolean) => void;
 }
 
 const SocketContext = createContext<SocketContextType | undefined>(undefined);
@@ -199,6 +249,27 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
   const previewListenersRef = useRef(new Set<(packet: PreviewDabPacket) => void>());
   const opListenersRef = useRef(new Set<() => void>());
   const ownOpSeqListenersRef = useRef(new Set<(clientOpId: string, seq: number, layerId: string) => void>());
+  const memberCamerasRef = useRef(new Map<string, ViewportCameraState>());
+  const memberViewportListenersRef = useRef(new Set<(packet: MemberViewportPacket) => void>());
+  const viewportSyncThrottleRef = useRef<{
+    lastSentAt: number;
+    timer: ReturnType<typeof setTimeout> | null;
+    pending: { camera: ViewportCameraState; activeTool?: string } | null;
+  }>({ lastSentAt: 0, timer: null, pending: null });
+  const [followingUserId, setFollowingUserId] = useState<string | null>(null);
+  const followingUserIdRef = useRef<string | null>(null);
+  followingUserIdRef.current = followingUserId;
+  const [followersByTarget, setFollowersByTarget] = useState<Record<string, string[]>>({});
+  const [roomGrid, setRoomGrid] = useState<CanvasGridConfig>(() => createDefaultGridConfig());
+  const roomGridRef = useRef(roomGrid);
+  roomGridRef.current = roomGrid;
+  const [roomSwatches, setRoomSwatches] = useState<RoomSwatch[]>([]);
+  const roomSwatchesRef = useRef(roomSwatches);
+  roomSwatchesRef.current = roomSwatches;
+  const [roomReferenceBoard, setRoomReferenceBoard] = useState<RoomReferenceBoardState>(() => createDefaultReferenceBoard());
+  const roomReferenceBoardRef = useRef(roomReferenceBoard);
+  roomReferenceBoardRef.current = roomReferenceBoard;
+  const [collabError, setCollabError] = useState<{ code: string; scope: string; message: string; at: number } | null>(null);
   /** Same call shape as the old state setter, but only the cursor layer hears about it */
   const setRemoteCursors = (update: Map<string, CursorPacket> | ((prev: Map<string, CursorPacket>) => Map<string, CursorPacket>)) => {
     const next = typeof update === 'function' ? update(remoteCursorsRef.current) : update;
@@ -239,6 +310,11 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     subscribeOwnOpSeq: (cb: (clientOpId: string, seq: number, layerId: string) => void) => {
       ownOpSeqListenersRef.current.add(cb);
       return () => { ownOpSeqListenersRef.current.delete(cb); };
+    },
+    getMemberCameras: () => memberCamerasRef.current,
+    subscribeMemberViewport: (cb: (packet: MemberViewportPacket) => void) => {
+      memberViewportListenersRef.current.add(cb);
+      return () => { memberViewportListenersRef.current.delete(cb); };
     },
   }));
   // For the browser load test (tests/load-browsers.ts), like window.__debugPixi
@@ -575,6 +651,73 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       setStickers((prev) => prev.filter((s) => s.id !== data.stickerId));
     });
 
+    socket.on('collab_state_sync', (snapshot: RoomCollabStateSnapshot) => {
+      if (snapshot.canvasId !== activeCanvasIdRef.current) return;
+      setRoomGrid(normalizeGridConfig(snapshot.grid));
+      setRoomSwatches(normalizeRoomSwatches(snapshot.swatches));
+      setRoomReferenceBoard(normalizeReferenceBoard(snapshot.referenceBoard));
+      setFollowersByTarget(snapshot.followersByTarget ?? {});
+      const cams = new Map<string, ViewportCameraState>();
+      if (snapshot.latestCameras) {
+        for (const [uid, cam] of Object.entries(snapshot.latestCameras)) {
+          cams.set(uid, cam);
+        }
+      }
+      memberCamerasRef.current = cams;
+    });
+
+    socket.on('member_viewport', (packet: MemberViewportPacket) => {
+      if (packet.canvasId !== activeCanvasIdRef.current) return;
+      memberCamerasRef.current.set(packet.userId, packet.camera);
+      if (packet.activeTool) {
+        setMembers((prev) =>
+          prev.some((m) => m.socketId === packet.socketId && m.activeTool !== packet.activeTool)
+            ? prev.map((m) => (m.socketId === packet.socketId ? { ...m, activeTool: packet.activeTool } : m))
+            : prev
+        );
+      }
+      memberViewportListenersRef.current.forEach((cb) => cb(packet));
+    });
+
+    socket.on('member_tool_update', (packet: MemberToolUpdatePacket) => {
+      if (packet.canvasId !== activeCanvasIdRef.current) return;
+      setMembers((prev) =>
+        prev.map((m) => (m.socketId === packet.socketId ? { ...m, activeTool: packet.activeTool } : m))
+      );
+    });
+
+    socket.on('follow_state', (packet: FollowStatePacket) => {
+      if (packet.canvasId !== activeCanvasIdRef.current) return;
+      const map = packet.followersByTarget ?? {};
+      setFollowersByTarget(map);
+      // If our target left or server cleared our follow, sync local followingUserId
+      const currentTarget = followingUserIdRef.current;
+      const myUid = userRef.current?.id;
+      if (currentTarget && myUid && !(map[currentTarget] ?? []).includes(myUid)) {
+        setFollowingUserId(null);
+      }
+    });
+
+    socket.on('grid_state_updated', (data: { canvasId: string; grid: CanvasGridConfig }) => {
+      if (data.canvasId !== activeCanvasIdRef.current) return;
+      setRoomGrid(normalizeGridConfig(data.grid));
+    });
+
+    socket.on('room_swatches_updated', (data: { canvasId: string; swatches: RoomSwatch[] }) => {
+      if (data.canvasId !== activeCanvasIdRef.current) return;
+      setRoomSwatches(normalizeRoomSwatches(data.swatches));
+    });
+
+    socket.on('room_ref_board_updated', (data: { canvasId: string; board: RoomReferenceBoardState }) => {
+      if (data.canvasId !== activeCanvasIdRef.current) return;
+      setRoomReferenceBoard(normalizeReferenceBoard(data.board));
+    });
+
+    socket.on('collab_error', (err: { code: string; scope: string; message: string }) => {
+      setCollabError({ ...err, at: Date.now() });
+      addLog('ERROR', `[${err.code}] ${err.message}`, '#F59E0B');
+    });
+
     socket.on('room_state', (state: RoomStatePacket & { totalCanvasStrokes?: number }) => {
       if (state.canvasId === activeCanvasIdRef.current) {
         // Joined: any password prompt for this canvas is answered
@@ -838,9 +981,22 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
       }
       joinedCanvasIdRef.current = null;
       setRoomAccessError(null);
+      setFollowingUserId(null);
+      setFollowersByTarget({});
+      memberCamerasRef.current = new Map();
+      setRoomGrid(createDefaultGridConfig());
+      setRoomSwatches([]);
+      setRoomReferenceBoard(createDefaultReferenceBoard());
       return;
     }
     if (OfflineSessionStore.isOfflineCanvas(activeCanvasId)) {
+      const localCollab = loadOfflineCollabState(activeCanvasId);
+      setFollowingUserId(null);
+      setFollowersByTarget({});
+      memberCamerasRef.current = new Map();
+      setRoomGrid(localCollab.grid);
+      setRoomSwatches(localCollab.swatches);
+      setRoomReferenceBoard(localCollab.referenceBoard);
       if (!OfflineSessionStore.isOfflineMode()) {
         const previous = joinedCanvasIdRef.current;
         if (previous && socketRef.current) {
@@ -891,6 +1047,12 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     latestSeqRef.current = 0;
 
     setRoomAccessError(null);
+    setFollowingUserId(null);
+    setFollowersByTarget({});
+    memberCamerasRef.current = new Map();
+    setRoomGrid(createDefaultGridConfig());
+    setRoomSwatches([]);
+    setRoomReferenceBoard(createDefaultReferenceBoard());
     socketRef.current.emit('join_canvas', joinPayload(activeCanvasId));
     setRemoteCursors(new Map());
     addLog('MEMBER', `正在切換並同步畫布 #${activeCanvasId.slice(0, 8)}...`, '#6366F1');
@@ -1239,6 +1401,234 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
     socketRef.current?.emit('join_canvas', joinPayload(canvasId));
   };
 
+  // Phase 5 (Collab 2.0) actions
+  const persistOfflineCollab = (
+    canvasId: string,
+    patch: { grid?: CanvasGridConfig; swatches?: RoomSwatch[]; referenceBoard?: RoomReferenceBoardState }
+  ) => {
+    const nextGrid = patch.grid ?? roomGridRef.current;
+    const nextSwatches = patch.swatches ?? roomSwatchesRef.current;
+    const nextBoard = patch.referenceBoard ?? roomReferenceBoardRef.current;
+    if (patch.grid) setRoomGrid(nextGrid);
+    if (patch.swatches) setRoomSwatches(nextSwatches);
+    if (patch.referenceBoard) setRoomReferenceBoard(nextBoard);
+    saveOfflineCollabState(canvasId, { grid: nextGrid, swatches: nextSwatches, referenceBoard: nextBoard });
+  };
+
+  const emitViewportSync = (camera: ViewportCameraState, activeTool?: string) => {
+    const canvasId = activeCanvasIdRef.current;
+    if (!canvasId || OfflineSessionStore.isOfflineCanvas(canvasId) || !socketRef.current?.connected) return;
+    const throttle = viewportSyncThrottleRef.current;
+    const sendNow = (cam: ViewportCameraState, tool?: string) => {
+      throttle.lastSentAt = Date.now();
+      socketRef.current?.emit('viewport_sync', { canvasId, camera: cam, ...(tool ? { activeTool: tool } : {}) });
+    };
+    const elapsed = Date.now() - throttle.lastSentAt;
+    if (elapsed >= 75) {
+      if (throttle.timer) {
+        clearTimeout(throttle.timer);
+        throttle.timer = null;
+      }
+      throttle.pending = null;
+      sendNow(camera, activeTool);
+    } else {
+      throttle.pending = { camera, activeTool };
+      if (!throttle.timer) {
+        throttle.timer = setTimeout(() => {
+          throttle.timer = null;
+          const p = throttle.pending;
+          throttle.pending = null;
+          if (p && activeCanvasIdRef.current === canvasId && socketRef.current?.connected) {
+            sendNow(p.camera, p.activeTool);
+          }
+        }, 75 - elapsed);
+      }
+    }
+  };
+
+  const emitMemberTool = (activeTool: string) => {
+    const canvasId = activeCanvasIdRef.current;
+    if (!canvasId || OfflineSessionStore.isOfflineCanvas(canvasId) || !socketRef.current?.connected) return;
+    socketRef.current.emit('member_tool', { canvasId, activeTool });
+  };
+
+  const setFollowTarget = (targetUserId: string | null) => {
+    const canvasId = activeCanvasIdRef.current;
+    const myUid = userRef.current?.id;
+    const cleanTarget = targetUserId && targetUserId !== myUid ? targetUserId : null;
+    setFollowingUserId(cleanTarget);
+    if (!canvasId || OfflineSessionStore.isOfflineCanvas(canvasId) || !socketRef.current?.connected) return;
+    socketRef.current.emit('follow_target', { canvasId, targetUserId: cleanTarget });
+  };
+
+  const updateGridConfig = (patch: {
+    enabled?: boolean;
+    rows?: number;
+    cols?: number;
+    showLabels?: boolean;
+    clearSlots?: boolean;
+  }) => {
+    const canvasId = activeCanvasIdRef.current;
+    if (!canvasId) return;
+    if (OfflineSessionStore.isOfflineCanvas(canvasId)) {
+      const cur = roomGridRef.current;
+      const next = normalizeGridConfig({
+        ...cur,
+        enabled: patch.enabled !== undefined ? patch.enabled : cur.enabled,
+        rows: patch.rows !== undefined ? patch.rows : cur.rows,
+        cols: patch.cols !== undefined ? patch.cols : cur.cols,
+        showLabels: patch.showLabels !== undefined ? patch.showLabels : cur.showLabels,
+        slots: patch.clearSlots ? [] : cur.slots,
+        updatedAt: Date.now(),
+      });
+      persistOfflineCollab(canvasId, { grid: next });
+      return;
+    }
+    socketRef.current?.emit('grid_config_update', { canvasId, ...patch });
+  };
+
+  const claimGridSlot = (slotIndex: number, label?: string, force?: boolean) => {
+    const canvasId = activeCanvasIdRef.current;
+    if (!canvasId) return;
+    if (OfflineSessionStore.isOfflineCanvas(canvasId)) {
+      const uid = userRef.current?.id || LOCAL_ARTIST_ID;
+      const name = userRef.current?.displayName || 'Local Artist';
+      const res = claimGridSlotHelper(
+        roomGridRef.current,
+        slotIndex,
+        { userId: uid, displayName: name, color: getUserColor(uid).hex, label },
+        { force: true }
+      );
+      if (res.ok) persistOfflineCollab(canvasId, { grid: res.config });
+      return;
+    }
+    socketRef.current?.emit('grid_slot_claim', { canvasId, slotIndex, ...(label ? { label } : {}), ...(force ? { force } : {}) });
+  };
+
+  const releaseGridSlot = (slotIndex: number) => {
+    const canvasId = activeCanvasIdRef.current;
+    if (!canvasId) return;
+    if (OfflineSessionStore.isOfflineCanvas(canvasId)) {
+      const uid = userRef.current?.id || LOCAL_ARTIST_ID;
+      const res = releaseGridSlotHelper(roomGridRef.current, slotIndex, { userId: uid, canForce: true });
+      if (res.ok) persistOfflineCollab(canvasId, { grid: res.config });
+      return;
+    }
+    socketRef.current?.emit('grid_slot_release', { canvasId, slotIndex });
+  };
+
+  const addRoomSwatch = (hex: string, name?: string) => {
+    const canvasId = activeCanvasIdRef.current;
+    if (!canvasId) return;
+    if (OfflineSessionStore.isOfflineCanvas(canvasId)) {
+      const uid = userRef.current?.id || LOCAL_ARTIST_ID;
+      const res = addRoomSwatchHelper(roomSwatchesRef.current, {
+        id: `sw_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        hex,
+        name,
+        addedBy: uid,
+        addedByName: userRef.current?.displayName || 'Local Artist',
+      });
+      if (res.ok) persistOfflineCollab(canvasId, { swatches: res.swatches });
+      return;
+    }
+    socketRef.current?.emit('room_swatch_add', { canvasId, hex, ...(name ? { name } : {}) });
+  };
+
+  const removeRoomSwatch = (swatchId: string) => {
+    const canvasId = activeCanvasIdRef.current;
+    if (!canvasId) return;
+    if (OfflineSessionStore.isOfflineCanvas(canvasId)) {
+      const uid = userRef.current?.id || LOCAL_ARTIST_ID;
+      const res = removeRoomSwatchHelper(roomSwatchesRef.current, swatchId, { userId: uid, canForce: true });
+      if (res.ok) persistOfflineCollab(canvasId, { swatches: res.swatches });
+      return;
+    }
+    socketRef.current?.emit('room_swatch_remove', { canvasId, swatchId });
+  };
+
+  const addRoomRefItem = (item: {
+    title?: string;
+    imageDataUrl: string;
+    x?: number;
+    y?: number;
+    width?: number;
+    height?: number;
+    scale?: number;
+  }) => {
+    const canvasId = activeCanvasIdRef.current;
+    if (!canvasId) return;
+    if (OfflineSessionStore.isOfflineCanvas(canvasId)) {
+      const board = roomReferenceBoardRef.current;
+      if (board.items.length >= MAX_ROOM_REFERENCE_ITEMS) return;
+      const uid = userRef.current?.id || LOCAL_ARTIST_ID;
+      const maxZ = board.items.reduce((acc, it) => Math.max(acc, it.zIndex), 0);
+      const nextItem = normalizeReferenceItem({
+        id: `ref_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        title: item.title,
+        imageDataUrl: item.imageDataUrl,
+        x: item.x ?? 16 + (board.items.length % 4) * 20,
+        y: item.y ?? 16 + (board.items.length % 4) * 20,
+        width: item.width ?? 220,
+        height: item.height ?? 165,
+        scale: item.scale ?? 1,
+        rotation: 0,
+        opacity: 1,
+        zIndex: maxZ + 1,
+        addedBy: uid,
+        addedByName: userRef.current?.displayName || 'Local Artist',
+        updatedAt: Date.now(),
+      });
+      if (!nextItem) return;
+      persistOfflineCollab(canvasId, {
+        referenceBoard: { ...board, items: [...board.items, nextItem], updatedAt: Date.now() },
+      });
+      return;
+    }
+    socketRef.current?.emit('room_ref_add', { canvasId, ...item });
+  };
+
+  const updateRoomRefItem = (itemId: string, updates: Partial<RoomReferenceItem>) => {
+    const canvasId = activeCanvasIdRef.current;
+    if (!canvasId) return;
+    if (OfflineSessionStore.isOfflineCanvas(canvasId)) {
+      const board = roomReferenceBoardRef.current;
+      const nextItems = board.items
+        .map((it) => (it.id === itemId ? normalizeReferenceItem({ ...it, ...updates, updatedAt: Date.now() }) ?? it : it));
+      persistOfflineCollab(canvasId, {
+        referenceBoard: { ...board, items: nextItems, updatedAt: Date.now() },
+      });
+      return;
+    }
+    socketRef.current?.emit('room_ref_update', { canvasId, itemId, updates });
+  };
+
+  const removeRoomRefItem = (itemId: string) => {
+    const canvasId = activeCanvasIdRef.current;
+    if (!canvasId) return;
+    if (OfflineSessionStore.isOfflineCanvas(canvasId)) {
+      const board = roomReferenceBoardRef.current;
+      persistOfflineCollab(canvasId, {
+        referenceBoard: { ...board, items: board.items.filter((it) => it.id !== itemId), updatedAt: Date.now() },
+      });
+      return;
+    }
+    socketRef.current?.emit('room_ref_remove', { canvasId, itemId });
+  };
+
+  const setRoomRefBoardLocked = (lockedByAdmin: boolean) => {
+    const canvasId = activeCanvasIdRef.current;
+    if (!canvasId) return;
+    if (OfflineSessionStore.isOfflineCanvas(canvasId)) {
+      const board = roomReferenceBoardRef.current;
+      persistOfflineCollab(canvasId, {
+        referenceBoard: { ...board, lockedByAdmin, updatedAt: Date.now() },
+      });
+      return;
+    }
+    socketRef.current?.emit('room_ref_lock', { canvasId, lockedByAdmin });
+  };
+
   return (
     <SocketTelemetryContext.Provider value={telemetryContextValue}>
       <SocketContext.Provider
@@ -1286,6 +1676,24 @@ export const SocketProvider: React.FC<{ children: React.ReactNode }> = ({ childr
           reconnectServer,
           roomAccessError,
           unlockRoom,
+          followingUserId,
+          followersByTarget,
+          roomGrid,
+          roomSwatches,
+          roomReferenceBoard,
+          collabError,
+          emitViewportSync,
+          emitMemberTool,
+          setFollowTarget,
+          updateGridConfig,
+          claimGridSlot,
+          releaseGridSlot,
+          addRoomSwatch,
+          removeRoomSwatch,
+          addRoomRefItem,
+          updateRoomRefItem,
+          removeRoomRefItem,
+          setRoomRefBoardLocked,
         }}
       >
         {children}

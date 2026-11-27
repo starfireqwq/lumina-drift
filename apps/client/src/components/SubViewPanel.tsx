@@ -5,6 +5,8 @@ import {
   RotateCcw, RotateCw, Scan, Trash2, X, ZoomIn, ZoomOut,
 } from 'lucide-react';
 import { useI18n } from '../context/I18nContext';
+import { useSocket } from '../context/SocketContext';
+import { RoomReferenceBoard } from './RoomReferenceBoard';
 import {
   addSubViewFiles,
   clearSubViewImages,
@@ -31,6 +33,7 @@ import type { SubViewTransform } from '../utils/subViewMath';
 export interface SubViewPanelProps {
   onPickColor: (hex: string) => void;
   embedded?: boolean;
+  canvasOwnerId?: string;
 }
 
 type Point = { x: number; y: number };
@@ -108,9 +111,11 @@ function toCanvasPoint(canvas: HTMLCanvasElement, clientX: number, clientY: numb
   return { x: clientX - rect.left, y: clientY - rect.top };
 }
 
-export function SubViewPanel({ onPickColor, embedded = false }: SubViewPanelProps) {
+export function SubViewPanel({ onPickColor, embedded = false, canvasOwnerId }: SubViewPanelProps) {
   const { t } = useI18n();
   const labels = t.subView;
+  const { roomReferenceBoard } = useSocket();
+  const [boardTab, setBoardTab] = useState<'personal' | 'room'>('personal');
   const state = useSubViewState();
   const item = state.items[state.activeIndex];
   const imageUrl = item?.objectUrl;
@@ -376,6 +381,45 @@ export function SubViewPanel({ onPickColor, embedded = false }: SubViewPanelProp
       }}
       onDrop={handleDrop}
     >
+      {/* Personal SubView vs Shared Room Reference Board tab switch */}
+      <div className="flex shrink-0 items-center gap-1 border-b border-neutral-800/80 pb-1">
+        <button
+          type="button"
+          data-testid="subview-tab-personal"
+          aria-pressed={boardTab === 'personal'}
+          onClick={() => setBoardTab('personal')}
+          className={`flex-1 rounded px-2 py-0.5 text-[11px] font-medium transition ${
+            boardTab === 'personal'
+              ? 'bg-indigo-600 text-white'
+              : 'text-neutral-300 hover:bg-neutral-800'
+          }`}
+        >
+          {t.collab.subViewTabPersonal}
+        </button>
+        <button
+          type="button"
+          data-testid="subview-tab-room-board"
+          aria-pressed={boardTab === 'room'}
+          onClick={() => setBoardTab('room')}
+          className={`flex-1 inline-flex items-center justify-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium transition ${
+            boardTab === 'room'
+              ? 'bg-indigo-600 text-white'
+              : 'text-neutral-300 hover:bg-neutral-800'
+          }`}
+        >
+          <span className="truncate">{t.collab.subViewTabRoomBoard}</span>
+          {roomReferenceBoard.items.length > 0 && (
+            <span className="rounded-full bg-black/30 px-1 font-mono text-[9px]">
+              {roomReferenceBoard.items.length}
+            </span>
+          )}
+        </button>
+      </div>
+
+      {boardTab === 'room' ? (
+        <RoomReferenceBoard onPickColor={onPickColor} canvasOwnerId={canvasOwnerId} />
+      ) : (
+        <>
       <div className="flex min-w-0 shrink-0 items-center gap-0.5">
         <input
           ref={fileInputRef}
@@ -468,6 +512,8 @@ export function SubViewPanel({ onPickColor, embedded = false }: SubViewPanelProp
         <div className="pointer-events-none absolute inset-1 z-10 flex items-center justify-center rounded-lg border-2 border-dashed border-indigo-400 bg-neutral-950/85 p-2 text-center text-xs font-semibold text-indigo-200">
           {labels.dropHint}
         </div>
+      )}
+        </>
       )}
     </section>
   );

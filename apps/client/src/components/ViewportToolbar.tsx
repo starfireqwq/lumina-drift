@@ -6,6 +6,7 @@ import {
   FlipHorizontal,
   Grid3X3,
   Image as ImageIcon,
+  LayoutGrid,
   Maximize2,
   RotateCcw,
   RotateCw,
@@ -32,6 +33,8 @@ interface ViewportToolbarProps {
   onToggleMirror: () => void;
   wrapAroundEnabled?: boolean;
   onToggleWrapAround?: () => void;
+  gridSlotsEnabled?: boolean;
+  onOpenGridSlots?: () => void;
   onOpenRuler?: () => void;
   onOpenReference?: () => void;
   onOpenRadial?: () => void;
@@ -66,6 +69,8 @@ export const ViewportToolbar: React.FC<ViewportToolbarProps> = ({
   onToggleMirror,
   wrapAroundEnabled,
   onToggleWrapAround,
+  gridSlotsEnabled,
+  onOpenGridSlots,
   onOpenRuler,
   onOpenReference,
   onOpenRadial,
@@ -119,6 +124,14 @@ export const ViewportToolbar: React.FC<ViewportToolbarProps> = ({
           <button type="button" data-testid="viewport-wrap-around-toggle" onClick={onToggleWrapAround}
             aria-pressed={Boolean(wrapAroundEnabled)} aria-label={t.canvas.wrapAround} title={t.canvas.wrapAroundHint} className={btn}>
             <Grid3X3 className="h-3.5 w-3.5" />
+          </button>
+        )}
+        {onOpenGridSlots && (
+          <button type="button" data-testid="viewport-grid-slots-toggle" onClick={onOpenGridSlots}
+            aria-pressed={Boolean(gridSlotsEnabled)} aria-label={t.collab.gridModeTitle} title={t.collab.gridModeTitle}
+            className={`${btn} ${gridSlotsEnabled ? 'border-indigo-500/70 bg-indigo-950/70 text-indigo-200' : ''}`}>
+            <LayoutGrid className="h-3.5 w-3.5" />
+            {showRulerLabel && <span>{t.collab.gridMode}</span>}
           </button>
         )}
         <Sep />

@@ -10,7 +10,7 @@ import {
   RoomMemberInfo,
   ServerRole,
 } from '@atelier/shared';
-import { Users, ShieldCheck, ShieldAlert, Edit3, Flame, Trophy, Crown, Eye } from 'lucide-react';
+import { Users, ShieldCheck, ShieldAlert, Edit3, Flame, Trophy, Crown, Eye, Video, Wrench } from 'lucide-react';
 import { useSocket, useSocketTelemetry } from '../context/SocketContext';
 import { useAuth } from '../context/AuthContext';
 import { ApiService } from '../services/api';
@@ -18,6 +18,7 @@ import { OfflineSessionStore } from '../services/offlineStore';
 import { formatDrawTime, formatDrawTimeExact, formatLastSeen } from '../utils/presenceFormat';
 import { useI18n } from '../context/I18nContext';
 import { memberCardKey, roomMemberCards } from '../utils/roomMembers';
+import { getToolDisplayLabel } from '../utils/collabLocalStore';
 
 interface UserListPanelProps {
   members: RoomMemberInfo[];
@@ -195,7 +196,7 @@ export const UserListPanel: React.FC<UserListPanelProps> = ({
   const { t } = useI18n();
   const { user, isGuest } = useAuth();
   const { totalCanvasStrokes: telemetryTotal, memberStats } = useSocketTelemetry();
-  const { offlineMembers } = useSocket();
+  const { offlineMembers, followingUserId, followersByTarget, setFollowTarget } = useSocket();
   const totalCanvasStrokes = propTotalCanvasStrokes ?? telemetryTotal;
 
   // "12 分鐘前" has to move on by itself
@@ -374,6 +375,55 @@ export const UserListPanel: React.FC<UserListPanelProps> = ({
                       }}
                     />
                   </div>
+
+                  {/* Phase 5.1: Active tool, follower badge & one-click Follow Camera */}
+                  {(() => {
+                    const isSelf = Boolean(user && m.userId === user.id);
+                    const isFollowing = Boolean(followingUserId && followingUserId === m.userId);
+                    const followerCount = followersByTarget[m.userId]?.length ?? m.followerCount ?? 0;
+                    const toolLabel = getToolDisplayLabel(m.activeTool, t.tools as unknown as Record<string, unknown>);
+                    return (
+                      <div className="flex flex-wrap items-center justify-between gap-1 pt-0.5 text-[10px]">
+                        <div className="flex min-w-0 items-center gap-1">
+                          {toolLabel && (
+                            <span
+                              data-member-tool={m.activeTool}
+                              className="inline-flex items-center gap-0.5 rounded bg-neutral-800/90 px-1.5 py-0.5 text-neutral-300 border border-neutral-700/70 truncate max-w-[110px]"
+                              title={`${t.collab.activeToolPrefix}: ${toolLabel}`}
+                            >
+                              <Wrench className="h-2.5 w-2.5 shrink-0 text-neutral-400" />
+                              <span className="truncate">{toolLabel}</span>
+                            </span>
+                          )}
+                          {followerCount > 0 && (
+                            <span
+                              data-followed-by-count={followerCount}
+                              className="inline-flex items-center gap-0.5 rounded bg-emerald-950/80 px-1.5 py-0.5 text-emerald-300 border border-emerald-700/70 whitespace-nowrap"
+                            >
+                              <Eye className="h-2.5 w-2.5 shrink-0" />
+                              <span>{t.collab.followedByCount.replace('{n}', String(followerCount))}</span>
+                            </span>
+                          )}
+                        </div>
+                        {!isOfflineMode && !isSelf && (
+                          <button
+                            type="button"
+                            data-testid={`follow-member-${m.userId}`}
+                            aria-pressed={isFollowing}
+                            onClick={() => setFollowTarget(isFollowing ? null : m.userId)}
+                            className={`inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 font-medium transition ${
+                              isFollowing
+                                ? 'border border-indigo-400/80 bg-indigo-600 text-white shadow-sm'
+                                : 'border border-neutral-700/80 bg-neutral-800/80 text-neutral-300 hover:border-indigo-500/70 hover:text-white'
+                            }`}
+                          >
+                            <Video className="h-2.5 w-2.5 shrink-0" />
+                            <span>{isFollowing ? t.collab.followingBadge : t.collab.followCamera}</span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {!m.isGuest && (
                     <div

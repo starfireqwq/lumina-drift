@@ -105,6 +105,10 @@ import {
   type AdjustmentKind,
   type LayerAdjustment,
   type LayerPropsSnapshot,
+  cameraToViewportState,
+  getGridSlotCamera,
+  viewportStateToCamera,
+  type ViewportCameraState,
 } from '@atelier/shared';
 import { adjustmentParamsKey, buildAdjustmentEditUndo, nextAdjustmentLayerName } from './workspace/adjustmentEditing';
 import { createAutoActionHost, type AutoActionHostDeps } from './workspace/autoActionHost';
@@ -136,6 +140,8 @@ import {
   type ResizeBox,
 } from '../utils/canvasResize';
 import { ViewportToolbar } from './ViewportToolbar';
+import { GridSlotsOverlay } from './GridSlotsOverlay';
+import { GridSlotsPopover } from './GridSlotsPopover';
 import { OverlayPresence } from './OverlayPresence';
 import { CanvasStickersOverlay } from './CanvasStickersOverlay';
 import { ColorWheelStudio } from './ColorWheelStudio';
@@ -537,7 +543,25 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     updateSticker,
     removeSticker,
     toggleVoiceMute,
+    followingUserId,
+    roomGrid,
+    getMemberCameras,
+    subscribeMemberViewport,
+    emitViewportSync,
+    emitMemberTool,
+    setFollowTarget,
+    updateGridConfig,
+    claimGridSlot,
+    releaseGridSlot,
   } = useSocket();
+  const [isGridSlotsOpen, setIsGridSlotsOpen] = useState(false);
+  const followingUserIdRef = useRef<string | null>(followingUserId);
+  followingUserIdRef.current = followingUserId;
+  const applyingFollowCameraRef = useRef(false);
+  const emitViewportSyncRef = useRef(emitViewportSync);
+  emitViewportSyncRef.current = emitViewportSync;
+  const setFollowTargetRef = useRef(setFollowTarget);
+  setFollowTargetRef.current = setFollowTarget;
 
   const resolveCurrentCanvasRole = (): 'owner' | 'admin' | 'editor' | 'viewer' | undefined => {
     const uid = user?.id;
@@ -1194,6 +1218,62 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const [appliedSubToolId, setAppliedSubToolId] = useState<SubToolId | null>(null);
   const currentToolRef = useRef(currentTool);
   currentToolRef.current = currentTool;
+
+  // Phase 5.1: Broadcast active tool & sync Follow Camera viewport
+  const applySharedCamera = useCallback(
+    (camera: ViewportCameraState) => {
+      const vp = viewportRef.current;
+      const host = containerRef.current;
+      if (!vp || !host || !canvas) return;
+      const w = host.clientWidth || window.innerWidth;
+      const h = host.clientHeight || window.innerHeight;
+      if (w <= 0 || h <= 0) return;
+      const nextState = cameraToViewportState(camera, w, h, canvas.width, canvas.height, vp.getDisplayScale());
+      applyingFollowCameraRef.current = true;
+      try {
+        vp.setState(nextState);
+      } finally {
+        applyingFollowCameraRef.current = false;
+      }
+    },
+    [canvas]
+  );
+
+  useEffect(() => {
+    if (!canvas || isOffline) return;
+    emitMemberTool(currentTool);
+  }, [canvas?.id, isOffline, currentTool]);
+
+  useEffect(() => {
+    if (!canvas || isOffline) return;
+    return subscribeMemberViewport((packet) => {
+      if (followingUserIdRef.current && packet.userId === followingUserIdRef.current) {
+        applySharedCamera(packet.camera);
+      }
+    });
+  }, [canvas?.id, isOffline, subscribeMemberViewport, applySharedCamera]);
+
+  useEffect(() => {
+    if (!followingUserId || !canvas || isOffline) return;
+    const cached = getMemberCameras().get(followingUserId);
+    if (cached) applySharedCamera(cached);
+  }, [followingUserId, canvas?.id, isOffline, getMemberCameras, applySharedCamera]);
+
+  const handleFocusGridSlot = useCallback(
+    (slotIndex: number) => {
+      const vp = viewportRef.current;
+      const host = containerRef.current;
+      if (!vp || !host || !canvas) return;
+      if (followingUserIdRef.current) setFollowTargetRef.current(null);
+      const w = host.clientWidth || window.innerWidth;
+      const h = host.clientHeight || window.innerHeight;
+      const cam = getGridSlotCamera(roomGrid, slotIndex, canvas.width, canvas.height, w, h, vp.getDisplayScale());
+      if (!cam) return;
+      const nextState = cameraToViewportState(cam, w, h, canvas.width, canvas.height, vp.getDisplayScale());
+      vp.setState(nextState);
+    },
+    [canvas, roomGrid]
+  );
 
   // Plugin API v2.5: enabled custom tools, active tool selection, per-tool options, and pointer stroke controller
   const installedPlugins = useSyncExternalStore(subscribePlugins, getPlugins, getPlugins);
@@ -2075,6 +2155,24 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         vpBoundsDirty = true;
         scheduleRender();
         if (!vpSyncRaf) vpSyncRaf = requestAnimationFrame(flushViewportSync);
+        if (!applyingFollowCameraRef.current) {
+          if (followingUserIdRef.current) {
+            setFollowTargetRef.current(null);
+          }
+          const w = app.screen.width || container.clientWidth || viewWidth;
+          const h = app.screen.height || container.clientHeight || viewHeight;
+          if (w > 0 && h > 0) {
+            const cam = viewportStateToCamera(
+              st,
+              w,
+              h,
+              canvas.width,
+              canvas.height,
+              viewport.getDisplayScale()
+            );
+            emitViewportSyncRef.current(cam, currentToolRef.current);
+          }
+        }
       });
       const initialVp = viewport.getState();
       notifyViewportSubs(initialVp);
@@ -2206,10 +2304,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         if (resChanged) {
           viewport.setDisplayScale(editingResolution);
         }
-        if (wasFit) {
-          viewport.centerInView(viewWidth, viewHeight, true);
-        } else if (sizeChanged) {
-          viewport.panBy((viewWidth - prevWidth) / 2, (viewHeight - prevHeight) / 2);
+        applyingFollowCameraRef.current = true;
+        try {
+          if (wasFit) {
+            viewport.centerInView(viewWidth, viewHeight, true);
+          } else if (sizeChanged) {
+            viewport.panBy((viewWidth - prevWidth) / 2, (viewHeight - prevHeight) / 2);
+          }
+        } finally {
+          applyingFollowCameraRef.current = false;
         }
         vpBoundsDirty = true;
         flushViewportBoundsAndZoom();
@@ -2283,6 +2386,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             ev.preventDefault();
             setIsResizeModalOpen(false);
           }
+          return;
+        }
+        if (ev.key === 'Escape' && followingUserIdRef.current) {
+          ev.preventDefault();
+          setFollowTargetRef.current(null);
           return;
         }
         const shortcutMgr = ShortcutManager.getInstance();
@@ -7867,7 +7975,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       render: () => (
         <div className="p-2">
           <ColorWheelStudio isOpen onClose={() => {}} brushProps={brushProps} onUpdateBrushProps={handleBrushPropsChange}
-            onActivateCanvasEyedropper={() => handleSelectTool('eyedropper')} embedded />
+            onActivateCanvasEyedropper={() => handleSelectTool('eyedropper')} canvasOwnerId={canvas.ownerId} embedded />
         </div>
       ),
     },
@@ -7875,7 +7983,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       id: 'subView',
       title: getPanelDisplayTitle('subView', t),
       icon: renderPanelIcon('subView'),
-      render: () => <SubViewPanel embedded onPickColor={(hex) => {
+      render: () => <SubViewPanel embedded canvasOwnerId={canvas.ownerId} onPickColor={(hex) => {
         handleBrushPropsChange({ color: hex, isEraser: false });
         recordUsedColor(hex);
       }} />,
@@ -8390,6 +8498,41 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                   <span className="truncate">{t.collab.viewerReadOnlyBadge}</span>
                 </div>
               </OverlayPresence>
+              <OverlayPresence open={Boolean(followingUserId)} kind="popover">
+                {(() => {
+                  const target = members.find((m) => m.userId === followingUserId);
+                  const targetName = target?.displayName || followingUserId || '';
+                  return (
+                    <div
+                      role="status"
+                      data-testid="follow-camera-banner"
+                      data-following-user-id={followingUserId ?? ''}
+                      className={`atelier-popover absolute left-1/2 z-30 flex max-w-[calc(100%-16px)] -translate-x-1/2 items-center gap-2 rounded-full border border-indigo-400/70 bg-indigo-950/95 px-3 py-1 text-[11px] font-medium text-indigo-100 shadow-xl backdrop-blur-md ${
+                        isCanvasViewer || (Boolean(originalEditId) && !animPlaying) ? 'top-12' : 'top-3'
+                      }`}
+                    >
+                      <span
+                        className="inline-block h-2 w-2 shrink-0 rounded-full animate-pulse"
+                        style={{ backgroundColor: target?.color || '#818cf8' }}
+                      />
+                      <span className="truncate">
+                        {t.collab.followingBanner.replace('{name}', targetName)}
+                      </span>
+                      <span className="hidden sm:inline text-[10px] text-indigo-300/80">
+                        {t.collab.followingHint}
+                      </span>
+                      <button
+                        type="button"
+                        data-testid="follow-camera-stop-btn"
+                        onClick={() => setFollowTarget(null)}
+                        className="shrink-0 rounded-full border border-indigo-400/60 bg-indigo-700/80 px-2 py-0.5 text-[10px] font-semibold text-white hover:bg-indigo-600"
+                      >
+                        {t.collab.stopFollowing}
+                      </button>
+                    </div>
+                  );
+                })()}
+              </OverlayPresence>
               <ViewportConsumer subscribe={subscribeViewportZoom} getSnapshot={getViewportZoomSnapshot}>
                 {(viewportState) => (
                   <>
@@ -8595,6 +8738,21 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                   </>
                 )}
               </ConditionalViewportConsumer>
+
+              {roomGrid.enabled && (
+                <ConditionalViewportConsumer active={roomGrid.enabled} subscribe={subscribeViewport} getSnapshot={getViewportSnapshot}>
+                  {() => (
+                    <GridSlotsOverlay
+                      grid={roomGrid}
+                      canvasWidth={canvas.width}
+                      canvasHeight={canvas.height}
+                      currentUserId={user?.id}
+                      canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
+                      onFocusSlot={handleFocusGridSlot}
+                    />
+                  )}
+                </ConditionalViewportConsumer>
+              )}
 
               {!canvasFullscreen && (
                 <ConditionalViewportConsumer active={stickers.length > 0} subscribe={subscribeViewport} getSnapshot={getViewportSnapshot}>
@@ -8923,6 +9081,21 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           )}
 
           {!canvasFullscreen && (
+            <GridSlotsPopover
+              open={isGridSlotsOpen}
+              onClose={() => setIsGridSlotsOpen(false)}
+              grid={roomGrid}
+              canManage={isOffline || isAdmin}
+              canEdit={isOffline || (!isGuest && !isCanvasViewer)}
+              currentUserId={user?.id}
+              onUpdateGrid={updateGridConfig}
+              onClaimSlot={(slotIndex) => claimGridSlot(slotIndex)}
+              onReleaseSlot={(slotIndex) => releaseGridSlot(slotIndex)}
+              onFocusSlot={handleFocusGridSlot}
+            />
+          )}
+
+          {!canvasFullscreen && (
             <ViewportConsumer subscribe={subscribeViewportZoom} getSnapshot={getViewportZoomSnapshot}>
               {(viewportState) => (
                 <ViewportToolbar
@@ -8942,6 +9115,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                   onToggleMirror={() => viewportRef.current?.toggleMirrorX()}
                   wrapAroundEnabled={wrapAroundEnabled}
                   onToggleWrapAround={onToggleWrapAround}
+                  gridSlotsEnabled={roomGrid.enabled}
+                  onOpenGridSlots={() => setIsGridSlotsOpen((v) => !v)}
                   onOpenRuler={() => setIsRulerModalOpen(true)}
                   onOpenReference={() => setIsReferenceHUDOpen(true)}
                   onOpenFilters={() => openFilterRef.current()}
@@ -9016,6 +9191,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         brushProps={brushProps}
         onUpdateBrushProps={handleBrushPropsChange}
         onActivateCanvasEyedropper={() => handleSelectTool('eyedropper')}
+        canvasOwnerId={canvas.ownerId}
       />
 
       {isRulerModalOpen && (

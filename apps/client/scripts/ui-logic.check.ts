@@ -6786,6 +6786,7 @@ import { runV15Phase2RulerChecks } from './v15-phase2-rulers.checks';
 import { runDockPillChecks } from './dock-pill.checks';
 import { runV15Phase3BrushV3Checks } from './v15-phase3-brush-v3.checks';
 import { runV15Phase4EffectsSelectionChecks } from './v15-phase4-effects-selection.checks';
+import { runV15Phase5CollabV2Checks } from './v15-phase5-collab-v2.checks';
 
 {
   assert.deepEqual(Object.keys(ADJUSTMENT_KIND_ICONS), ADJUSTMENT_KINDS);
@@ -6842,3 +6843,6 @@ console.log('v1.5 Phase 3 brush engine v3 checks passed');
 
 await runV15Phase4EffectsSelectionChecks();
 console.log('v1.5 Phase 4 layer effects, quick mask & color range checks passed');
+
+await runV15Phase5CollabV2Checks();
+console.log('v1.5 Phase 5 collab 2.0 (follow camera, grid slots, room swatches & reference board) checks passed');

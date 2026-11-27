@@ -14,6 +14,10 @@ import { ToolWindow } from './workspace/ToolWindow';
 import { BrushProperties } from '../engine/BrushRenderer';
 import { useUiScale } from '../theme/uiScale';
 import { useI18n } from '../context/I18nContext';
+import { useSocket } from '../context/SocketContext';
+import { useAuth } from '../context/AuthContext';
+import { OfflineSessionStore } from '../services/offlineStore';
+import { canEditRoomCollab, canManageRoomCollab } from '@atelier/shared';
 import { colorHistoryStore, recordUsedColor, useColorHistoryState } from '../services/colorHistoryStore';
 import { normalizeHexColor, parseAcoPalette, parseGplPalette, serializeAcoPalette, serializeGplPalette } from '../utils/colorPaletteIO';
 import {
@@ -51,6 +55,7 @@ interface ColorWheelStudioProps {
   embedded?: boolean;
   /** Edits one colour only (e.g. the outline colour): no background slot, no X / D keys */
   single?: boolean;
+  canvasOwnerId?: string;
 }
 
 const CHECKER_BG_STYLE: React.CSSProperties = {
@@ -77,9 +82,24 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
   onActivateCanvasEyedropper,
   embedded = false,
   single = false,
+  canvasOwnerId,
 }) => {
   const { t } = useI18n();
   const studio = t.studio;
+  const { user, isGuest } = useAuth();
+  const { activeCanvasId, members, roomSwatches, addRoomSwatch, removeRoomSwatch } = useSocket();
+  const isOfflineCanvas = !activeCanvasId || OfflineSessionStore.isOfflineCanvas(activeCanvasId);
+  const selfMember = user ? members.find((m) => m.userId === user.id) : undefined;
+  const roomRole = isOfflineCanvas
+    ? { isCanvasOwner: true, canvasRole: 'owner', isGuest: false }
+    : {
+        serverRole: user?.serverRole,
+        canvasRole: selfMember?.canvasRole ?? (canvasOwnerId && user?.id === canvasOwnerId ? 'owner' : undefined),
+        isCanvasOwner: Boolean(canvasOwnerId && user?.id === canvasOwnerId),
+        isGuest,
+      };
+  const canEditRoomSwatches = canEditRoomCollab(roomRole);
+  const canManageRoomSwatches = canManageRoomCollab(roomRole);
   const fgColor = brushProps.color || '#3B82F6';
   const bgColor = brushProps.secondaryColor || '#FFFFFF';
 
@@ -759,6 +779,70 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
                   );
                 })}
               </div>
+            </section>
+
+            {/* Phase 5.3: Shared Room Swatches */}
+            <section data-testid="room-swatches-section" aria-label={t.collab.roomSwatchesTitle} className="flex flex-col gap-1 border-t border-neutral-800 pt-2">
+              <div className="flex items-center gap-1">
+                <h3 className="text-[11px] font-medium text-neutral-200">{t.collab.roomSwatchesTitle}</h3>
+                <span className="mr-auto rounded bg-indigo-950/80 px-1.5 py-0.5 text-[9px] text-indigo-300 border border-indigo-800/70">
+                  {isOfflineCanvas ? t.collab.roomSwatchesLocal : t.collab.roomSwatchesSynced}
+                </span>
+                <button
+                  type="button"
+                  data-testid="room-swatch-add-current"
+                  disabled={
+                    !canEditRoomSwatches ||
+                    !normalizedCurrentColor ||
+                    roomSwatches.some((sw) => sw.hex === normalizedCurrentColor)
+                  }
+                  onClick={() => {
+                    if (normalizedCurrentColor) addRoomSwatch(normalizedCurrentColor);
+                  }}
+                  title={t.collab.roomSwatchesAdd}
+                  aria-label={t.collab.roomSwatchesAdd}
+                  className="atelier-icon-btn h-7 w-7 disabled:opacity-40"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+              </div>
+              {roomSwatches.length === 0 ? (
+                <p className="text-[10px] text-neutral-500">
+                  {canEditRoomSwatches ? t.collab.roomSwatchesEmpty : t.collab.roomSwatchesReadOnly}
+                </p>
+              ) : (
+                <div className={swatchGrid} data-testid="room-swatches-list">
+                  {roomSwatches.map((sw) => {
+                    const label = sw.name ? `${sw.name} (${sw.hex}) · ${sw.addedByName}` : `${sw.hex} · ${sw.addedByName}`;
+                    const canDelete = canEditRoomSwatches && (sw.addedBy === user?.id || canManageRoomSwatches || isOfflineCanvas);
+                    return (
+                      <div key={sw.id} className="group relative">
+                        <button
+                          type="button"
+                          data-room-swatch={sw.hex}
+                          style={{ backgroundColor: sw.hex }}
+                          title={label}
+                          aria-label={label}
+                          onClick={() => applyColor(sw.hex)}
+                          className={`block ${swatchClass(sw.hex)}`}
+                        />
+                        {canDelete && (
+                          <button
+                            type="button"
+                            data-testid={`room-swatch-remove-${sw.hex}`}
+                            onClick={() => removeRoomSwatch(sw.id)}
+                            title={t.collab.roomSwatchesRemove}
+                            aria-label={`${t.collab.roomSwatchesRemove} ${sw.hex}`}
+                            className="pointer-events-none absolute -right-1 -top-1 rounded-full bg-neutral-900 p-0.5 text-white opacity-0 outline-offset-1 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </section>
           </>
         )}

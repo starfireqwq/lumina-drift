@@ -2426,6 +2426,51 @@ export interface Translations {
     unitHours: string;
     unitMinutes: string;
     unitSeconds: string;
+    // Phase 5.1 Follow Camera & Active Tool
+    followCamera: string;
+    stopFollowing: string;
+    followingBadge: string;
+    followingBanner: string;
+    followingHint: string;
+    followedByCount: string;
+    activeToolPrefix: string;
+    // Phase 5.2 Grid Slots & Claiming
+    gridMode: string;
+    gridModeTitle: string;
+    gridEnable: string;
+    gridRows: string;
+    gridCols: string;
+    gridShowLabels: string;
+    gridClearAll: string;
+    gridAdminOnlyHint: string;
+    gridSlotClaim: string;
+    gridSlotRelease: string;
+    gridSlotFocus: string;
+    gridSlotEmpty: string;
+    gridSlotMine: string;
+    gridSlotOwnerPrefix: string;
+    gridSlotCount: string;
+    // Phase 5.3 Shared Room Swatches & Reference Board
+    roomSwatchesTitle: string;
+    roomSwatchesAdd: string;
+    roomSwatchesRemove: string;
+    roomSwatchesEmpty: string;
+    roomSwatchesSynced: string;
+    roomSwatchesLocal: string;
+    roomSwatchesReadOnly: string;
+    subViewTabPersonal: string;
+    subViewTabRoomBoard: string;
+    refBoardTitle: string;
+    refBoardAdd: string;
+    refBoardLock: string;
+    refBoardUnlock: string;
+    refBoardLockedBadge: string;
+    refBoardEmpty: string;
+    refBoardEmptyHint: string;
+    refBoardDelete: string;
+    refBoardScale: string;
+    refBoardPickHint: string;
+    refBoardReadOnly: string;
   };
 
   auth: {
