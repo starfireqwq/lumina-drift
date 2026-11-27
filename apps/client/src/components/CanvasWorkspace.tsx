@@ -147,6 +147,7 @@ import { OverlayPresence } from './OverlayPresence';
 import { CanvasStickersOverlay } from './CanvasStickersOverlay';
 import { ColorWheelStudio } from './ColorWheelStudio';
 import { SubViewPanel } from './SubViewPanel';
+import { NavigatorPanel } from './NavigatorPanel';
 import { AutoActionsPanel } from './AutoActionsPanel';
 import { UserListPanel } from './UserListPanel';
 import { ToolRail } from './workspace/ToolRail';
@@ -282,7 +283,7 @@ import { PluginFilterWorkerClient } from '../plugins/pluginFilterClient';
 import { assessFilterCompositeMemory, filterNewLayerPlacement, filterNonEmptyTileCoords } from '../utils/filterMemoryGuard';
 import type { FilterTargetOptions } from './FilterTargetBar';
 import { AtelierModal, modalButton } from './AtelierModal';
-import { AlertCircle, Eye, Grid2x2, Image as ImageIcon, ImagePlus, Layers, ListVideo, Loader2, Minimize2, Paintbrush, Palette, Sliders } from 'lucide-react';
+import { AlertCircle, Compass, Eye, Grid2x2, Image as ImageIcon, ImagePlus, Layers, ListVideo, Loader2, Minimize2, Paintbrush, Palette, Sliders } from 'lucide-react';
 import { type DroppedImages, type ImageDropTarget, ImageImportError, imageEntries, isImageDrag, loadImageEntry, readDroppedImages } from '../utils/imageImport';
 
 /** Where a key types text (a text field), unlike a focused button, slider, checkbox or the page */
@@ -668,12 +669,21 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const [isEngineReady, setIsEngineReady] = useState<boolean>(false);
   const [isCanvasPresented, setIsCanvasPresented] = useState(false);
   const requestRenderRef = useRef<() => void>(() => pixiAppRef.current?.render());
+  const navigatorSubsRef = useRef(new Set<() => void>());
+  const subscribeNavigatorTick = useCallback((refresh: () => void) => {
+    navigatorSubsRef.current.add(refresh);
+    return () => { navigatorSubsRef.current.delete(refresh); };
+  }, []);
+  const notifyNavigatorDirty = useCallback(() => navigatorSubsRef.current.forEach((refresh) => refresh()), []);
+  const renderNavigatorPreview = useCallback((target: HTMLCanvasElement, maxSide: number) =>
+    layerManagerRef.current?.renderNavigatorPreview(target, maxSide) ?? false, []);
   const setPlaybackResolutionRef = useRef<(reduced: boolean) => void>(() => {});
   const presentCanvas = useCallback(() => {
     layerManagerRef.current?.refreshWrapAroundView();
     pixiAppRef.current?.render();
+    notifyNavigatorDirty();
     setIsCanvasPresented(true);
-  }, []);
+  }, [notifyNavigatorDirty]);
   const [engineError, setEngineError] = useState(false);
   const [engineAttempt, setEngineAttempt] = useState(0);
 
@@ -853,8 +863,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const pv = computeCameraPreviewViewport(ev, c.width, c.height, viewW, viewH);
     const current = vp.getState();
     if (current.zoom !== pv.zoom || current.panX !== pv.panX || current.panY !== pv.panY ||
-        current.rotation !== pv.rotation || current.mirrorX) {
-      vp.setState({ zoom: pv.zoom, panX: pv.panX, panY: pv.panY, rotation: pv.rotation, mirrorX: false });
+        current.rotation !== pv.rotation || current.mirrorX || current.mirrorY) {
+      vp.setState({ zoom: pv.zoom, panX: pv.panX, panY: pv.panY, rotation: pv.rotation, mirrorX: false, mirrorY: false });
     }
     setCameraPreviewRect((rect) => {
       const next = pv.frameRect;
@@ -1473,6 +1483,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     panY: 0,
     rotation: 0,
     mirrorX: false,
+    mirrorY: false,
   });
   const viewportZoomStateRef = useRef<ViewportState>({
     zoom: 1.0,
@@ -1480,6 +1491,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     panY: 0,
     rotation: 0,
     mirrorX: false,
+    mirrorY: false,
   });
   const lastZoomDisplayScaleRef = useRef<number>(1);
   const viewportSubsRef = useRef(new Set<() => void>());
@@ -1503,6 +1515,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       Math.abs(prevZ.zoom - next.zoom) > 1e-6 ||
       Math.abs(prevZ.rotation - next.rotation) > 1e-6 ||
       prevZ.mirrorX !== next.mirrorX ||
+      Boolean(prevZ.mirrorY) !== Boolean(next.mirrorY) ||
       Math.abs(lastZoomDisplayScaleRef.current - curDisplayScale) > 1e-6
     ) {
       lastZoomDisplayScaleRef.current = curDisplayScale;
@@ -1918,10 +1931,20 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (rect?.width && rect.height) viewportRef.current?.centerInView(rect.width, rect.height, fit);
   };
 
-  const getViewCenter = () => {
+  const getViewCenter = useCallback(() => {
     const rect = containerRef.current?.getBoundingClientRect();
     return rect && { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-  };
+  }, []);
+
+  const setNavigatorZoomPercent = useCallback((percent: number) => {
+    const center = getViewCenter();
+    if (center) viewportRef.current?.setZoomPercentAt(center.x, center.y, percent);
+  }, [getViewCenter]);
+
+  const panNavigator = useCallback((x: number, y: number) => {
+    const screen = pixiAppRef.current?.screen;
+    if (screen) viewportRef.current?.panToCanvasPoint(x, y, screen.width, screen.height);
+  }, []);
 
   const openDesktopPopupAt = (position: { x: number; y: number }) => {
     setIsRadialMenuOpen(false);
@@ -2051,6 +2074,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           pipelineForRender?.renderFrame();
           prepareLayerView?.();
           app.render();
+          notifyNavigatorDirty();
           if (pipelineForRender?.hasPendingWork()) scheduleRender();
         });
       };
@@ -2636,6 +2660,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           if (hit('action_studio_subview')) {
             ev.preventDefault();
             if (!ev.repeat) dockActions.toggle('subView');
+            return;
+          }
+          if (hit('action_studio_navigator')) {
+            ev.preventDefault();
+            if (!ev.repeat) dockActions.toggle('navigator');
             return;
           }
           if (hit('action_studio_popup_palette') && getDesktopPopupPaletteEnabled() && !clipboardMenuOpenRef.current) {
@@ -8036,6 +8065,46 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const closeAlign = () => setAlignOpen(false);
   const panelDefs: PanelDef[] = [
     {
+      id: 'navigator',
+      title: getPanelDisplayTitle('navigator', t),
+      icon: renderPanelIcon('navigator'),
+      render: () => (
+        <ViewportConsumer subscribe={subscribeViewport} getSnapshot={getViewportSnapshot}>
+          {(viewportState) => {
+            const view = viewportRef.current;
+            const displayScale = view?.getDisplayScale() ?? getTargetDisplayResolution();
+            // At actual size Pixi can align the rendered position to the physical pixel grid.
+            const position = view?.canvasContainer.position;
+            return (
+              <NavigatorPanel
+                key={`${canvas.id}:${canvas.width}:${canvas.height}`}
+                canvasWidth={canvas.width}
+                canvasHeight={canvas.height}
+                viewportState={position ? { ...viewportState, panX: position.x, panY: position.y } : viewportState}
+                displayScale={displayScale}
+                viewSize={pixiAppRef.current?.screen ?? { width: 0, height: 0 }}
+                renderPreview={renderNavigatorPreview}
+                previewRevision={isEngineReady ? engineAttempt + 1 : 0}
+                subscribePreview={subscribeNavigatorTick}
+                onPanToCanvasPoint={panNavigator}
+                onSetZoomPercent={setNavigatorZoomPercent}
+                onZoomIn={() => setNavigatorZoomPercent(viewportState.zoom * displayScale * 125)}
+                onZoomOut={() => setNavigatorZoomPercent(viewportState.zoom * displayScale * 80)}
+                onResetZoom={() => setNavigatorZoomPercent(100)}
+                onFitView={() => fitViewport()}
+                onResetView={() => fitViewport(false)}
+                onSetRotationDeg={(deg) => view?.setRotation(deg * Math.PI / 180)}
+                onRotateByDeg={(deg) => view?.rotateBy(deg * Math.PI / 180)}
+                onResetRotation={() => view?.resetRotation()}
+                onToggleMirrorX={() => view?.toggleMirrorX()}
+                onToggleMirrorY={() => view?.toggleMirrorY()}
+              />
+            );
+          }}
+        </ViewportConsumer>
+      ),
+    },
+    {
       id: 'color',
       title: getPanelDisplayTitle('color', t),
       icon: renderPanelIcon('color'),
@@ -8677,7 +8746,14 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                   <>
                     {textEdit && (
                       <Suspense fallback={null}>
-                        <TextCanvasEditor meta={textEdit.meta} isNew={!textEdit.layerId} viewport={viewportRef.current} viewportState={viewportState}
+                        <TextCanvasEditor meta={textEdit.meta} isNew={!textEdit.layerId} viewport={viewportRef.current}
+                          viewportState={
+                            // The DOM editor uses one flip axis. A half-turn and the opposite
+                            // horizontal flip represent the same transform as a vertical flip.
+                            viewportState.mirrorY
+                              ? { ...viewportState, rotation: viewportState.rotation + Math.PI, mirrorX: !viewportState.mirrorX, mirrorY: false }
+                              : viewportState
+                          }
                           onChange={(meta) => setTextEdit((t) => (t ? { ...t, meta } : t))}
                           onCommit={() => (textEdit.meta.content.trim() ? void commitText(textEdit.meta) : endTextEdit())}
                           onCancel={endTextEdit} />
@@ -9245,6 +9321,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         placement={isTouchTablet ? 'right' : 'bottom'}
         quickTabs={[
           { id: 'toolPicker', label: t.navbar.tools, icon: <Grid2x2 /> },
+          { id: 'navigator', label: getPanelDisplayTitle('navigator', t), icon: <Compass /> },
           { id: 'color', label: PANEL_TITLES.color, icon: <Palette /> },
           { id: 'subView', label: t.subView.title, icon: <ImageIcon /> },
           { id: 'autoActions', label: t.autoActions.title, icon: <ListVideo /> },

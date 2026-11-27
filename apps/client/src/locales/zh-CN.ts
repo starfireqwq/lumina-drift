@@ -1776,6 +1776,7 @@ export const zhCN: Translations = {
     dropGroupDockRight: '松开后将整组面板停靠在右侧',
     dropGroupDockBottom: '松开后将整组面板停靠在底部',
     panelNames: {
+      navigator: '导航器',
       color: '色彩',
       subView: '子视图',
       autoActions: '自动动作',
@@ -1790,6 +1791,21 @@ export const zhCN: Translations = {
     },
   },
 
+  navigator: {
+    preview: '画布预览（使用方向键平移）',
+    zoom: '缩放',
+    zoomOut: '缩小',
+    zoomIn: '放大',
+    actualSize: '实际大小（100%）',
+    fit: '适合窗口',
+    resetView: '重置视角',
+    rotation: '旋转',
+    rotateLeft: '逆时针旋转 15°',
+    rotateRight: '顺时针旋转 15°',
+    resetRotation: '重置旋转',
+    mirrorX: '水平翻转',
+    mirrorY: '垂直翻转',
+  },
   subView: {
     title: '子视图',
     importImages: '导入图片',
@@ -2134,6 +2150,7 @@ export const zhCN: Translations = {
     popupPaletteTriggerShortcutOnly: '仅使用快捷键',
     popupPaletteShortcutHint: '键盘快捷键：{shortcut}',
     shortcutSubViewDesc: '显示或隐藏子视图面板。',
+    shortcutNavigatorDesc: '显示或隐藏导航器面板。',
     shortcutPopupPaletteDesc: '在指针位置打开桌面弹出转盘。',
     shortcutWrapAroundName: '切换四方连续平铺',
     shortcutWrapAroundDesc: '切换 3×3 平铺视图和跨边界无缝绘制。',

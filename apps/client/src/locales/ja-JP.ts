@@ -1776,6 +1776,7 @@ export const jaJP: Translations = {
     dropGroupDockRight: '離すとグループ全体を右側にドッキング',
     dropGroupDockBottom: '離すとグループ全体を下側にドッキング',
     panelNames: {
+      navigator: 'ナビゲーター',
       color: 'カラー',
       subView: 'サブビュー',
       autoActions: '自動アクション',
@@ -1790,6 +1791,21 @@ export const jaJP: Translations = {
     },
   },
 
+  navigator: {
+    preview: 'キャンバスプレビュー（矢印キーで移動）',
+    zoom: 'ズーム',
+    zoomOut: '縮小',
+    zoomIn: '拡大',
+    actualSize: '実寸（100%）',
+    fit: 'ウィンドウに合わせる',
+    resetView: '表示をリセット',
+    rotation: '回転',
+    rotateLeft: '反時計回りに 15° 回転',
+    rotateRight: '時計回りに 15° 回転',
+    resetRotation: '回転をリセット',
+    mirrorX: '左右反転',
+    mirrorY: '上下反転',
+  },
   subView: {
     title: 'サブビュー',
     importImages: '画像を読み込む',
@@ -2135,6 +2151,7 @@ export const jaJP: Translations = {
     popupPaletteTriggerShortcutOnly: 'ショートカットのみ',
     popupPaletteShortcutHint: 'キーボードショートカット：{shortcut}',
     shortcutSubViewDesc: 'サブビューパネルの表示を切り替えます。',
+    shortcutNavigatorDesc: 'ナビゲーターパネルの表示を切り替えます。',
     shortcutPopupPaletteDesc: 'ポインターの位置にポップアップパレットを開きます。',
     shortcutWrapAroundName: 'ラップアラウンドの切り替え',
     shortcutWrapAroundDesc: '3×3 のタイル表示と、キャンバスの端をまたぐシームレスな描画を切り替えます。',

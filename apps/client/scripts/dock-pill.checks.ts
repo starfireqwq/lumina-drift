@@ -13,7 +13,7 @@ import { getPanelDisplayTitle, PANEL_ICON_COMPONENTS, renderPanelIcon } from '..
 import { translations, type Language } from '../src/locales';
 
 const allPanelIds: readonly PanelId[] = [
-  'color', 'subView', 'autoActions', 'brushToolset', 'toolProps', 'layers',
+  'navigator', 'color', 'subView', 'autoActions', 'brushToolset', 'toolProps', 'layers',
   'members', 'oplog', 'quickKeys', 'filters', 'align',
 ];
 
@@ -65,6 +65,16 @@ function checkLayoutStorage() {
 
   const migrated = loadDockLayout({ getItem: () => JSON.stringify(version4) });
   assert.deepEqual(migrated, { ...version4, version: 5, floatGroups: {} });
+
+  const { navigator, ...legacyPanels } = version4.panels;
+  for (const version of [4, 5]) {
+    const legacyOrder = version4.order.filter((id) => id !== 'navigator');
+    const legacy = { ...version4, version, panels: legacyPanels, order: legacyOrder };
+    const withNavigator = loadDockLayout({ getItem: () => JSON.stringify(legacy) });
+    assert.deepEqual(withNavigator.panels.navigator, navigator);
+    assert.equal(withNavigator.order.find((id) => withNavigator.panels[id].place === 'left'), 'navigator');
+    assert.deepEqual(withNavigator.order.slice(1), legacyOrder);
+  }
 
   const malformed = JSON.stringify({
     ...migrated,
@@ -189,7 +199,7 @@ function checkMergeAndDock() {
   assert.equal(Object.hasOwn(docked.floatGroups, 'layers'), false);
   assert.equal(Object.hasOwn(docked.activeTab, 'layers'), false);
   assert.deepEqual(docked.order.filter((id) => docked.panels[id].visible && docked.panels[id].place === 'left'), [
-    'color', 'subView', 'oplog', 'layers',
+    'color', 'subView', 'oplog', 'layers', 'navigator',
   ]);
 }
 

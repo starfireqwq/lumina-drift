@@ -253,6 +253,7 @@ for (const lang of REQUIRED_LOCALES) {
 // Phase 4 shortcut labels and the pop-up palette's shortcut placeholder.
 const phase4Labels = (t: Translations) => [
   t.subView.title, t.studio.popupPaletteTitle, t.settings.shortcutSubViewDesc, t.settings.shortcutPopupPaletteDesc,
+  t.dock.panelNames.navigator, t.settings.shortcutNavigatorDesc,
 ];
 const englishPhase4Labels = phase4Labels(translations['en-US']);
 for (const lang of REQUIRED_LOCALES) {

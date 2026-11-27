@@ -7,7 +7,7 @@ import { getUiScale, onUiRescale } from '../../theme/uiScale';
  * or floats as a resizable window. Shared by the top bar's 視窗 menu and the workspace.
  */
 export type ToolDockPanelId = 'filters' | 'align';
-export type PanelId = 'color' | 'subView' | 'autoActions' | 'brushToolset' | 'toolProps' | 'layers' | 'members' | 'oplog' | 'quickKeys' | ToolDockPanelId;
+export type PanelId = 'navigator' | 'color' | 'subView' | 'autoActions' | 'brushToolset' | 'toolProps' | 'layers' | 'members' | 'oplog' | 'quickKeys' | ToolDockPanelId;
 export const isToolDockPanel = (id: PanelId): id is ToolDockPanelId => id === 'filters' || id === 'align';
 export type DockSide = 'left' | 'right' | 'bottom';
 export type PanelPlace = DockSide | 'float';
@@ -63,7 +63,7 @@ export const TOOL_RAIL_WIDTH_MAX = 220;
 
 const clampNum = (v: number, min: number, max: number) => Math.max(min, Math.min(max, Math.round(v)));
 
-export const PANEL_IDS: PanelId[] = ['color', 'subView', 'autoActions', 'brushToolset', 'toolProps', 'layers', 'members', 'oplog', 'quickKeys'];
+export const PANEL_IDS: PanelId[] = ['navigator', 'color', 'subView', 'autoActions', 'brushToolset', 'toolProps', 'layers', 'members', 'oplog', 'quickKeys'];
 const LAYOUT_PANEL_IDS: PanelId[] = [...PANEL_IDS, 'filters', 'align'];
 
 const LAYOUT_VERSION = 5;
@@ -78,6 +78,7 @@ export const getFloatGroupState = (layout: DockLayoutState, group: string): Floa
 const defaultLayout = (): DockLayoutState => ({
   version: LAYOUT_VERSION,
   panels: {
+    navigator: { visible: true, place: 'left', collapsed: false, weight: 0.9, float: { x: 100, y: 120, w: 280, h: 320 }, group: 'navigator' },
     color: { visible: true, place: 'right', collapsed: false, weight: 1.28, float: { x: 120, y: 120, w: 280, h: 430 }, group: 'color' },
     subView: { visible: false, place: 'left', collapsed: false, weight: 1, float: { x: 100, y: 120, w: 300, h: 360 }, group: 'subView' },
     autoActions: { visible: false, place: 'left', collapsed: false, weight: 1, float: { x: 120, y: 140, w: 300, h: 420 }, group: 'autoActions' },
@@ -137,6 +138,7 @@ export const loadDockLayout = (storage?: Pick<Storage, 'getItem'>): DockLayoutSt
     const scale = getUiScale();
     const mergedPanels = { ...base.panels, ...parsed.panels };
     const order = parsed.order.filter((id) => LAYOUT_PANEL_IDS.includes(id));
+    if (!parsed.panels.navigator && !order.includes('navigator')) order.unshift('navigator');
     if (!parsed.panels.brushToolset) {
       const props = mergedPanels.toolProps;
       mergedPanels.brushToolset = { ...base.panels.brushToolset, place: props.place, group: props.group, float: props.float };
@@ -508,6 +510,7 @@ export const useTouchCanvasMode = () => {
 export const useDesktopModeAvailable = () => useMediaQuery(TOUCH_UNDER_1280) || isPhoneScreen();
 
 export const PANEL_TITLES: Record<PanelId, string> = {
+  navigator: '導航器',
   brushToolset: '筆刷工具集',
   color: '色彩',
   subView: '子視圖',

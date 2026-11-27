@@ -1,12 +1,13 @@
 import { createElement, type ReactNode } from 'react';
 import {
-  AlignCenter, Image, Keyboard, Layers, ListVideo, Paintbrush, Palette,
+  AlignCenter, Compass, Image, Keyboard, Layers, ListVideo, Paintbrush, Palette,
   SlidersHorizontal, Sparkles, Terminal, Users, type LucideIcon,
 } from 'lucide-react';
 import type { Translations as Translation } from '../../locales/types';
 import type { PanelId } from './dockStore';
 
 export const PANEL_ICON_COMPONENTS: Record<PanelId, LucideIcon> = {
+  navigator: Compass,
   color: Palette,
   subView: Image,
   autoActions: ListVideo,

@@ -68,7 +68,8 @@ import type { TabletPreference } from '../../electron/tabletProtocol';
 import { PressureCurveEditor } from './PressureCurveEditor';
 import { ApiService } from '../services/api';
 import { AtelierModal, modalButton } from './AtelierModal';
-import { dockActions, PANEL_IDS, PANEL_TITLES, useDockLayout } from './workspace/dockStore';
+import { dockActions, PANEL_IDS, useDockLayout } from './workspace/dockStore';
+import { getPanelDisplayTitle } from './workspace/panelIcons';
 import { ALL_SUB_TOOLS, TOOL_CATEGORIES, getLocalizedCategoryLabel, getLocalizedSubTool } from './workspace/toolCatalog';
 
 type SettingsTab = 'shortcuts' | 'general' | 'pressure' | 'server';
@@ -490,6 +491,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   };
   const studioShortcutText = (shortcut: ShortcutItem) => {
     switch (shortcut.id) {
+      case 'action_studio_navigator':
+        return { label: getPanelDisplayTitle('navigator', t), hint: t.settings.shortcutNavigatorDesc };
       case 'action_studio_subview':
         return { label: t.subView.title, hint: t.settings.shortcutSubViewDesc };
       case 'action_studio_popup_palette':
@@ -1104,7 +1107,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="grid grid-cols-2 gap-2">
                   {PANEL_IDS.map((id) => (
                     <label key={id} className="flex items-center justify-between gap-2 rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-xs text-neutral-200">
-                      <span>{id === 'subView' || id === 'autoActions' ? t[id].title : PANEL_TITLES[id]}</span>
+                      <span>{getPanelDisplayTitle(id, t)}</span>
                       <input type="checkbox" data-panel-toggle={id} checked={dockLayout.panels[id].visible} onChange={() => dockActions.toggle(id)} />
                     </label>
                   ))}

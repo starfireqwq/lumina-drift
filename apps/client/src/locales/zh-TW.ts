@@ -1776,6 +1776,7 @@ export const zhTW: Translations = {
     dropGroupDockRight: '放開後將整組面板停靠在右側',
     dropGroupDockBottom: '放開後將整組面板停靠在下方',
     panelNames: {
+      navigator: '導航器',
       color: '色彩',
       subView: '子視圖',
       autoActions: '自動動作',
@@ -1790,6 +1791,21 @@ export const zhTW: Translations = {
     },
   },
 
+  navigator: {
+    preview: '畫布預覽（使用方向鍵平移）',
+    zoom: '縮放',
+    zoomOut: '縮小',
+    zoomIn: '放大',
+    actualSize: '實際大小（100%）',
+    fit: '符合視窗',
+    resetView: '重設視角',
+    rotation: '旋轉',
+    rotateLeft: '逆時針旋轉 15°',
+    rotateRight: '順時針旋轉 15°',
+    resetRotation: '重設旋轉',
+    mirrorX: '水平翻轉',
+    mirrorY: '垂直翻轉',
+  },
   subView: {
     title: '子視圖',
     importImages: '匯入圖片',
@@ -2134,6 +2150,7 @@ export const zhTW: Translations = {
     popupPaletteTriggerShortcutOnly: '僅使用快捷鍵',
     popupPaletteShortcutHint: '鍵盤快捷鍵：{shortcut}',
     shortcutSubViewDesc: '顯示或隱藏子視圖面板。',
+    shortcutNavigatorDesc: '顯示或隱藏導航器面板。',
     shortcutPopupPaletteDesc: '在指標位置開啟桌面快顯輪盤。',
     shortcutWrapAroundName: '切換四方連續平鋪',
     shortcutWrapAroundDesc: '切換 3×3 平鋪檢視與跨邊界無縫繪製。',

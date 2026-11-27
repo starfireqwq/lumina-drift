@@ -596,6 +596,14 @@ export const DEFAULT_SHORTCUTS: ShortcutItem[] = [
     currentCombo: 'KeyS',
   },
   {
+    id: 'action_studio_navigator',
+    category: 'studio',
+    name: '導航器 (Navigator)',
+    description: '切換導航器面板',
+    defaultCombo: 'Alt+Shift+KeyN',
+    currentCombo: 'Alt+Shift+KeyN',
+  },
+  {
     id: 'action_studio_subview',
     category: 'studio',
     name: '子視圖 (Sub View)',

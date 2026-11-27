@@ -1765,6 +1765,7 @@ export interface Translations {
     dropGroupDockRight: string;
     dropGroupDockBottom: string;
     panelNames: {
+      navigator: string;
       color: string;
       subView: string;
       autoActions: string;
@@ -1779,6 +1780,21 @@ export interface Translations {
     };
   };
 
+  navigator: {
+    preview: string;
+    zoom: string;
+    zoomOut: string;
+    zoomIn: string;
+    actualSize: string;
+    fit: string;
+    resetView: string;
+    rotation: string;
+    rotateLeft: string;
+    rotateRight: string;
+    resetRotation: string;
+    mirrorX: string;
+    mirrorY: string;
+  };
   subView: {
     title: string;
     importImages: string;
@@ -2168,6 +2184,7 @@ export interface Translations {
     popupPaletteTriggerShortcutOnly: string;
     popupPaletteShortcutHint: string;
     shortcutSubViewDesc: string;
+    shortcutNavigatorDesc: string;
     shortcutPopupPaletteDesc: string;
     shortcutWrapAroundName: string;
     shortcutWrapAroundDesc: string;

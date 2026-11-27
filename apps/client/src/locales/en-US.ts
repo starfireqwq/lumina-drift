@@ -1776,6 +1776,7 @@ export const enUS: Translations = {
     dropGroupDockRight: 'Release to dock the group right',
     dropGroupDockBottom: 'Release to dock the group at the bottom',
     panelNames: {
+      navigator: 'Navigator',
       color: 'Color',
       subView: 'Sub View',
       autoActions: 'Auto Actions',
@@ -1790,6 +1791,21 @@ export const enUS: Translations = {
     },
   },
 
+  navigator: {
+    preview: 'Canvas preview (use arrow keys to pan)',
+    zoom: 'Zoom',
+    zoomOut: 'Zoom out',
+    zoomIn: 'Zoom in',
+    actualSize: 'Actual size (100%)',
+    fit: 'Fit to view',
+    resetView: 'Reset view',
+    rotation: 'Rotation',
+    rotateLeft: 'Rotate 15° counterclockwise',
+    rotateRight: 'Rotate 15° clockwise',
+    resetRotation: 'Reset rotation',
+    mirrorX: 'Flip horizontally',
+    mirrorY: 'Flip vertically',
+  },
   subView: {
     title: 'Sub View',
     importImages: 'Import images',
@@ -2134,6 +2150,7 @@ export const enUS: Translations = {
     popupPaletteTriggerShortcutOnly: 'Shortcut only',
     popupPaletteShortcutHint: 'Keyboard shortcut: {shortcut}',
     shortcutSubViewDesc: 'Show or hide the Sub View panel.',
+    shortcutNavigatorDesc: 'Show or hide the Navigator panel.',
     shortcutPopupPaletteDesc: 'Open the desktop pop-up palette at the pointer.',
     shortcutWrapAroundName: 'Toggle Wrap-Around',
     shortcutWrapAroundDesc: 'Toggle the 3×3 tiled view and seamless drawing across canvas edges.',

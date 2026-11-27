@@ -1,4 +1,5 @@
 import { Container, Point } from 'pixi.js';
+import { computePanForCanvasCenter } from '../utils/navigatorMath';
 
 const MIN_ZOOM = 0.05;
 const MAX_ZOOM = 32;
@@ -9,6 +10,7 @@ export interface ViewportState {
   panY: number;
   rotation: number; // in radians
   mirrorX: boolean; // horizontal flip
+  mirrorY?: boolean; // vertical flip
 }
 
 export class CanvasViewport {
@@ -26,6 +28,7 @@ export class CanvasViewport {
     panY: 0,
     rotation: 0,
     mirrorX: false,
+    mirrorY: false,
   };
 
   private onChangeCallback?: (state: ViewportState) => void;
@@ -49,7 +52,7 @@ export class CanvasViewport {
   }
 
   public getState(): ViewportState {
-    return { ...this.state };
+    return { ...this.state, mirrorY: Boolean(this.state.mirrorY) };
   }
 
   public setState(next: Partial<ViewportState>) {
@@ -60,6 +63,7 @@ export class CanvasViewport {
     if (next.panY !== undefined && Number.isFinite(next.panY)) this.state.panY = next.panY;
     if (next.rotation !== undefined && Number.isFinite(next.rotation)) this.state.rotation = next.rotation;
     if (next.mirrorX !== undefined) this.state.mirrorX = Boolean(next.mirrorX);
+    if (next.mirrorY !== undefined) this.state.mirrorY = Boolean(next.mirrorY);
     this.updateTransform();
   }
 
@@ -86,22 +90,24 @@ export class CanvasViewport {
     return 1 / this.displayScale;
   }
 
-  public updateTransform() {
-    const { zoom, panX, panY, rotation, mirrorX } = this.state;
+  public updateTransform(snapToPixels = true) {
+    const { zoom, panX, panY, rotation, mirrorX, mirrorY } = this.state;
+    const scaleX = mirrorX ? -zoom : zoom;
+    const scaleY = mirrorY ? -zoom : zoom;
 
     // At 1:1 physical scale (unrotated), snap canvas origin to the physical pixel grid so 100% view
     // never suffers half-pixel bilinear blur.
-    if (Math.abs(rotation) < 1e-4 && Math.abs(zoom * this.displayScale - 1) < 1e-3) {
+    if (snapToPixels && Math.abs(rotation) < 1e-4 && Math.abs(zoom * this.displayScale - 1) < 1e-3) {
       const res = this.displayScale;
-      const halfX = (this.canvasWidth % 2) * 0.5 * zoom;
-      const halfY = (this.canvasHeight % 2) * 0.5 * zoom;
+      const halfX = (this.canvasWidth % 2) * 0.5 * scaleX;
+      const halfY = (this.canvasHeight % 2) * 0.5 * scaleY;
       const sx = Math.round((panX - halfX) * res) / res + halfX;
       const sy = Math.round((panY - halfY) * res) / res + halfY;
       this.canvasContainer.position.set(sx, sy);
     } else {
       this.canvasContainer.position.set(panX, panY);
     }
-    this.canvasContainer.scale.set(mirrorX ? -zoom : zoom, zoom);
+    this.canvasContainer.scale.set(scaleX, scaleY);
     this.canvasContainer.rotation = rotation;
 
     if (this.onChangeCallback) {
@@ -124,7 +130,7 @@ export class CanvasViewport {
     const s = this.state;
     return Math.abs(s.zoom - this.fitZoom(viewWidth, viewHeight)) < 1e-4
       && Math.abs(s.panX - viewWidth / 2) < 0.5 && Math.abs(s.panY - viewHeight / 2) < 0.5
-      && s.rotation === 0 && !s.mirrorX;
+      && s.rotation === 0 && !s.mirrorX && !s.mirrorY;
   }
 
   public centerInView(viewWidth: number, viewHeight: number, fit: boolean = true) {
@@ -135,6 +141,7 @@ export class CanvasViewport {
     this.state.panY = viewHeight / 2;
     this.state.rotation = 0;
     this.state.mirrorX = false;
+    this.state.mirrorY = false;
 
     this.updateTransform();
   }
@@ -146,6 +153,17 @@ export class CanvasViewport {
     this.state.panX += deltaX;
     this.state.panY += deltaY;
     this.updateTransform();
+  }
+
+  public panToCanvasPoint(canvasX: number, canvasY: number, viewWidth: number, viewHeight: number) {
+    const { panX, panY } = computePanForCanvasCenter(
+      canvasX, canvasY, this.state, viewWidth, viewHeight, this.canvasWidth, this.canvasHeight,
+    );
+    if (!Number.isFinite(panX) || !Number.isFinite(panY)) return;
+    this.state.panX = panX;
+    this.state.panY = panY;
+    // At 1:1 an arbitrary canvas point can require a fractional-pixel origin to land at the center.
+    this.updateTransform(false);
   }
 
   /**
@@ -164,15 +182,26 @@ export class CanvasViewport {
     ) {
       newZoom = oneToOne;
     }
-    if (newZoom === oldZoom) return;
+    this.applyZoomAt(clientX, clientY, newZoom);
+  }
+
+  public setZoomPercentAt(clientX: number, clientY: number, percent: number) {
+    if (!Number.isFinite(percent)) return;
+    const zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, percent / 100)) * this.getActualSizeZoom();
+    this.applyZoomAt(clientX, clientY, zoom);
+  }
+
+  private applyZoomAt(clientX: number, clientY: number, newZoom: number) {
+    if (newZoom === this.state.zoom) return;
 
     const rect = this.domElement?.getBoundingClientRect();
     const x = clientX - (rect?.left ?? 0);
     const y = clientY - (rect?.top ?? 0);
-    const ratio = newZoom / oldZoom;
+    const ratio = newZoom / this.state.zoom;
+    const position = this.canvasContainer.position;
     // Scaling about the pointer also preserves its anchor when rotated or mirrored.
-    this.state.panX = x + (this.state.panX - x) * ratio;
-    this.state.panY = y + (this.state.panY - y) * ratio;
+    this.state.panX = x + (position.x - x) * ratio;
+    this.state.panY = y + (position.y - y) * ratio;
     this.state.zoom = newZoom;
     this.updateTransform();
   }
@@ -220,6 +249,15 @@ export class CanvasViewport {
 
   public setMirrorX(mirror: boolean) {
     this.state.mirrorX = mirror;
+    this.updateTransform();
+  }
+
+  public toggleMirrorY() {
+    this.setMirrorY(!this.state.mirrorY);
+  }
+
+  public setMirrorY(mirror: boolean) {
+    this.state.mirrorY = mirror;
     this.updateTransform();
   }
 

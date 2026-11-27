@@ -3827,6 +3827,7 @@ export class LayerManager {
   }
 
   private thumbRT: RenderTexture | null = null;
+  private navigatorRT: RenderTexture | null = null;
 
   private compositeRT: RenderTexture | null = null;
   private compositeUsed = 0;
@@ -4503,6 +4504,62 @@ export class LayerManager {
     }
   }
 
+  public renderNavigatorPreview(targetCanvas: HTMLCanvasElement, maxSide = 280): boolean {
+    if (this.destroyed || !Number.isFinite(maxSide) || maxSide < 1) return false;
+
+    try {
+      const ctx = targetCanvas.getContext('2d');
+      if (!ctx) return false;
+      const scale = Math.min(1, maxSide / Math.max(this.canvasWidth, this.canvasHeight));
+      const tw = Math.max(1, Math.round(this.canvasWidth * scale));
+      const th = Math.max(1, Math.round(this.canvasHeight * scale));
+      if (this.navigatorRT?.width !== tw || this.navigatorRT.height !== th) {
+        this.navigatorRT?.destroy(true);
+        this.navigatorRT = null;
+        this.navigatorRT = RenderTexture.create({ width: tw, height: th, resolution: 1 });
+      }
+
+      const hidden: Container[] = [];
+      for (const display of [this.previewContainer, this.filterOverlaySprite, this.wrapAroundContainer,
+        this.wrapShapeOverlay, this.belowCacheSprite, this.aboveCacheSprite]) {
+        if (display?.visible) hidden.push(display);
+      }
+      // The stack cache represents the main viewport. Draw its source layers and any offscreen
+      // warm sprites directly, without requesting residency or decoding cold tiles.
+      const warmSprites: Sprite[] = [];
+      try {
+        for (const display of hidden) display.visible = false;
+        for (const display of this.stackHidden) display.renderable = true;
+        for (const item of this.layersMap.values()) {
+          if (!item.shown && item.model.layerType !== 'mask') continue;
+          if (!item.gpu) continue;
+          for (const { sprite } of item.gpu.values()) {
+            if (sprite.visible) continue;
+            warmSprites.push(sprite);
+            sprite.visible = true;
+          }
+        }
+        this.renderer.render({
+          container: this.rootContainer, target: this.navigatorRT, clear: true,
+          clearColor: [0, 0, 0, 0], transform: new Matrix().scale(scale, scale),
+        });
+      } finally {
+        for (const sprite of warmSprites) sprite.visible = false;
+        for (const display of this.stackHidden) display.renderable = false;
+        for (const display of hidden) display.visible = true;
+      }
+
+      const preview = this.renderer.extract.canvas({ target: this.navigatorRT }) as HTMLCanvasElement;
+      if (targetCanvas.width !== tw) targetCanvas.width = tw;
+      if (targetCanvas.height !== th) targetCanvas.height = th;
+      ctx.clearRect(0, 0, tw, th);
+      ctx.drawImage(preview, 0, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** Small JPEG of the whole canvas (background + visible layers) for the canvas switcher. */
   public getCanvasThumbnail(maxSide = 220): string | null {
     this.updateAdjustmentScopes(true); // whole-canvas scope composites for adjustment layers
@@ -4715,6 +4772,8 @@ export class LayerManager {
     this.compositeRT?.destroy(true);
     this.compositeRT = null;
     this.thumbRT?.destroy(true);
+    this.navigatorRT?.destroy(true);
+    this.navigatorRT = null;
     for (const item of this.layersMap.values()) this.destroyItem(item);
     this.layersMap.clear();
     this.previewParticlePool = [];
