@@ -2862,6 +2862,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   useEffect(() => {
     transform.reset();
     setHasSelectionState(false);
+    selection.toggleQuickMask(false);
+    setIsColorRangeOpen(false);
     vector.resetForCanvas();
     setPermissionWarning(null);
     setIsRadialMenuOpen(false);

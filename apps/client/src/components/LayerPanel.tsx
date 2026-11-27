@@ -1213,20 +1213,20 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             title={t.layers.clippingMaskTooltip} aria-label={t.layers.clippingMask} className={iconBtn(Boolean(active?.clipToBelow))}>
             <CornerDownRight className="h-3.5 w-3.5" />
           </button>
-          {!activeIsAdjustment && <button type="button" disabled={!canEditActive || activeIsGroup} aria-pressed={Boolean(active?.alphaLocked)}
-            onClick={() => active && onUpdateLayerProps?.(active.id, { alphaLocked: !active.alphaLocked })}
-            title={t.layers.lockAlphaTooltip} aria-label={t.layers.lockAlpha} className={iconBtn(Boolean(active?.alphaLocked))}>
+          <button type="button" disabled={!canEditActive || activeIsGroup || activeIsAdjustment} aria-pressed={!activeIsAdjustment && Boolean(active?.alphaLocked)}
+            onClick={() => active && !activeIsAdjustment && onUpdateLayerProps?.(active.id, { alphaLocked: !active.alphaLocked })}
+            title={t.layers.lockAlphaTooltip} aria-label={t.layers.lockAlpha} className={iconBtn(!activeIsAdjustment && Boolean(active?.alphaLocked))}>
             <AlphaLockIcon />
-          </button>}
+          </button>
           <button type="button" disabled={readOnly || !active || !(activeIsOwner || isAdmin)} aria-pressed={Boolean(active?.isLocked)}
             onClick={() => active && onToggleLock(active)} title={t.layers.lockLayerTooltip} aria-label={t.layers.lockLayerTooltip} className={iconBtn(Boolean(active?.isLocked))}>
             <Lock className="h-3.5 w-3.5" />
           </button>
-          {!activeIsAdjustment && <button type="button" disabled={!canEditActive || activeIsGroup} aria-pressed={Boolean(active?.screentoneEnabled)}
-            onClick={() => active && onUpdateLayerProps?.(active.id, { screentoneEnabled: !active.screentoneEnabled })}
-            title={t.layers.screentoneTooltip} aria-label={t.layers.screentone} className={iconBtn(Boolean(active?.screentoneEnabled))}>
+          <button type="button" disabled={!canEditActive || activeIsGroup || activeIsAdjustment} aria-pressed={!activeIsAdjustment && Boolean(active?.screentoneEnabled)}
+            onClick={() => active && !activeIsAdjustment && onUpdateLayerProps?.(active.id, { screentoneEnabled: !active.screentoneEnabled })}
+            title={t.layers.screentoneTooltip} aria-label={t.layers.screentone} className={iconBtn(!activeIsAdjustment && Boolean(active?.screentoneEnabled))}>
             <Grip className="h-3.5 w-3.5" />
-          </button>}
+          </button>
           {!activeIsGroup && allGroups.length > 0 && canEditActive && active && (
             <div className="relative">
               <button type="button" aria-pressed={Boolean(active.parentId)}
