@@ -74,16 +74,22 @@ interface BrushToolsetProps {
 
 type Edit = { kind: 'group' | 'save' } | { kind: 'rename'; brush: AtelierBrushPreset };
 type Menu = { x: number; y: number; anchor: HTMLElement } &
-  ({ kind: 'brush'; brush: AtelierBrushPreset } | { kind: 'group'; group: string });
+  ({ kind: 'brush'; brush: AtelierBrushPreset } | { kind: 'group'; group: string } | { kind: 'export' });
 
-function downloadBrushes(json: string, name: string) {
-  const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
+function sanitizeFileName(raw: string, fallback: string): string {
+  return raw.replace(/[<>:"/\\|?*\x00-\x1f]+/g, '').replace(/\s+/g, '_').replace(/^[._]+|[._]+$/g, '') || fallback;
+}
+
+function downloadBlob(content: BlobPart, mimeType: string, name: string) {
+  const url = URL.createObjectURL(new Blob([content], { type: mimeType }));
   const link = document.createElement('a');
   link.href = url;
   link.download = name;
   link.click();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+const estimateMenuHeight = (itemCount: number) => (itemCount * 32 + 12) * getUiScale();
 
 export function BrushToolset({ currentBrushProps, selectedId, onApplyPreset }: BrushToolsetProps) {
   const { t } = useI18n();
@@ -96,6 +102,7 @@ export function BrushToolset({ currentBrushProps, selectedId, onApplyPreset }: B
   const [menu, setMenu] = useState<Menu | null>(null);
   const [error, setError] = useState('');
   const [importing, setImporting] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const editInput = useRef<HTMLInputElement>(null);
@@ -236,10 +243,26 @@ export function BrushToolset({ currentBrushProps, selectedId, onApplyPreset }: B
     if (source && brushGroup(source) !== target && await copyBrush(source, target)) selectGroup(target);
   };
 
-  const exportPack = () => downloadBrushes(BrushPackageManager.exportPackToJson({
-    name: 'Lumina Drift', author: 'Lumina Drift', version: '1.0',
-    brushes: library.brushes, createdAt: Date.now(),
-  }), 'Lumina-Drift.asbrushpack');
+  const exportAbr = async (brushes: AtelierBrushPreset[], baseName: string) => {
+    if (exporting || !brushes.length) return;
+    setError('');
+    setExporting(true);
+    try {
+      const bytes = await BrushPackageManager.exportPresetsToAbr(brushes);
+      downloadBlob(new Uint8Array(bytes), 'application/octet-stream', `${sanitizeFileName(baseName, 'Lumina-Drift-Brushes')}.abr`);
+    } catch {
+      setError(labels.exportError);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const exportAsPack = (brushes: AtelierBrushPreset[], packName: string, fileBaseName: string) => {
+    const json = BrushPackageManager.exportPackToJson({
+      name: packName, author: 'Lumina Drift', version: '1.0', brushes, createdAt: Date.now(),
+    });
+    downloadBlob(json, 'application/json', `${sanitizeFileName(fileBaseName, 'Lumina-Drift')}.asbrushpack`);
+  };
 
   const deleteGroup = async (target: string) => {
     if (!window.confirm(labels.deleteGroupConfirm.replace('{name}', target))) return;
@@ -249,14 +272,42 @@ export function BrushToolset({ currentBrushProps, selectedId, onApplyPreset }: B
     })) && activeGroup === target) selectGroup(null);
   };
 
-  const menuItems: Array<[string, () => void]> = menu?.kind === 'brush' ? [
-    [labels.renameBrush, () => beginEdit({ kind: 'rename', brush: menu.brush })],
-    [labels.copyBrush, () => void copyBrush(menu.brush, brushGroup(menu.brush), true)],
-    [labels.exportSingle, () => downloadBrushes(BrushPackageManager.exportPresetToJson(menu.brush), `${menu.brush.name.replace(/\s+/g, '_')}.asbrush`)],
-    [labels.deleteBrush, () => void mutate((state) => ({ ...state, brushes: state.brushes.filter((brush) => brush.id !== menu.brush.id) }))],
-  ] : menu?.kind === 'group' ? [[labels.deleteGroup, () => void deleteGroup(menu.group)]] : [];
-  const menuWidth = Math.min(window.innerWidth - 8, 160 * getUiScale());
-  const menuHeight = Math.min(window.innerHeight - 8, (menu?.kind === 'group' ? 40 : 124) * getUiScale());
+  const menuItems: Array<[string, () => void]> = [];
+  if (menu?.kind === 'brush') {
+    menuItems.push(
+      [labels.renameBrush, () => beginEdit({ kind: 'rename', brush: menu.brush })],
+      [labels.copyBrush, () => void copyBrush(menu.brush, brushGroup(menu.brush), true)],
+      [labels.exportSingle, () => {
+        const fileBaseName = sanitizeFileName(menu.brush.name, 'Lumina-Drift-Brush');
+        downloadBlob(BrushPackageManager.exportPresetToJson(menu.brush), 'application/json', `${fileBaseName}.asbrush`);
+      }],
+      [labels.exportSingleAbr, () => void exportAbr([menu.brush], title(menu.brush))],
+      [labels.deleteBrush, () => void mutate((state) => ({ ...state, brushes: state.brushes.filter((brush) => brush.id !== menu.brush.id) }))],
+    );
+  } else if (menu?.kind === 'group') {
+    const groupBrushes = library.brushes.filter((brush) => brushGroup(brush) === menu.group);
+    if (groupBrushes.length) {
+      menuItems.push(
+        [labels.exportGroupAbr, () => void exportAbr(groupBrushes, menu.group)],
+        [labels.exportGroupPack, () => exportAsPack(groupBrushes, menu.group, menu.group)],
+      );
+    }
+    menuItems.push([labels.deleteGroup, () => void deleteGroup(menu.group)]);
+  } else if (menu?.kind === 'export') {
+    if (displayGroup && displayed.length) {
+      menuItems.push(
+        [labels.exportCurrentGroupAbr.replace('{name}', () => displayGroup), () => void exportAbr(displayed, displayGroup)],
+        [labels.exportCurrentGroupPack.replace('{name}', () => displayGroup), () => exportAsPack(displayed, displayGroup, displayGroup)],
+      );
+    }
+    menuItems.push(
+      [labels.exportAllAbr, () => void exportAbr(library.brushes, 'Lumina-Drift-Brushes')],
+      [labels.exportAllPack, () => exportAsPack(library.brushes, 'Lumina Drift', 'Lumina-Drift')],
+    );
+  }
+  const menuWidth = Math.min(window.innerWidth - 8, 224 * getUiScale());
+  const menuHeight = Math.min(window.innerHeight - 8, estimateMenuHeight(menuItems.length));
+  const menuTop = Math.max(4, Math.min(window.innerHeight - menuHeight - 4, menu?.y ?? 0));
 
   return (
     <div className="flex h-full min-h-[112px] min-w-0 flex-col text-xs">
@@ -335,17 +386,22 @@ export function BrushToolset({ currentBrushProps, selectedId, onApplyPreset }: B
           e.currentTarget.value = '';
           if (file) void importFile(file);
         }} />
-        <button type="button" className="atelier-icon-btn h-7 w-7" aria-label={labels.exportAllPack}
-          title={labels.exportAllPack} disabled={!library.brushes.length} onClick={exportPack}><Download size={14} /></button>
+        <button type="button" className="atelier-icon-btn h-7 w-7" aria-label={t.common.export}
+          aria-haspopup="menu" aria-expanded={menu?.kind === 'export'} title={t.common.export}
+          disabled={!library.brushes.length || exporting} onClick={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const estimatedMenuHeight = estimateMenuHeight(displayGroup && displayed.length ? 4 : 2);
+            setMenu({ kind: 'export', x: rect.left, y: rect.top - estimatedMenuHeight, anchor: e.currentTarget });
+          }}><Download size={14} /></button>
       </div>
       {menu && createPortal(
-        <div ref={menuRef} role="menu" aria-label={menu.kind === 'group' ? menu.group : labels.brushActions}
+        <div ref={menuRef} role="menu" aria-label={menu.kind === 'group' ? menu.group : menu.kind === 'export' ? labels.exportAllPack : labels.brushActions}
           className="atelier-chrome fixed z-[110] flex flex-col overflow-y-auto rounded border border-neutral-600 p-1 text-xs shadow-xl"
-          style={{ width: menuWidth, maxHeight: menuHeight, left: Math.max(4, Math.min(window.innerWidth - menuWidth - 4, menu.x)),
-            top: Math.max(4, Math.min(window.innerHeight - menuHeight - 4, menu.y)) }}
+          style={{ width: menuWidth, maxHeight: window.innerHeight - menuTop - 4,
+            left: Math.max(4, Math.min(window.innerWidth - menuWidth - 4, menu.x)), top: menuTop }}
           onBlur={(e) => { if (e.relatedTarget && !e.currentTarget.contains(e.relatedTarget)) setMenu(null); }}>
           {menuItems.map(([label, action]) => (
-            <button type="button" key={label} role="menuitem" className="rounded px-2 py-1.5 text-left text-neutral-100 hover:bg-neutral-700 focus:bg-neutral-700"
+            <button type="button" key={label} role="menuitem" className="shrink-0 break-words rounded px-2 py-1.5 text-left text-neutral-100 hover:bg-neutral-700 focus:bg-neutral-700"
               onClick={() => {
                 action();
                 setMenu(null);

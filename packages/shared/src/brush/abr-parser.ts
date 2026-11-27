@@ -279,8 +279,7 @@ export class AbrParser {
 
   private parsePatternSection(start: number, end: number, out: Map<string, string>): void {
     let pos = start;
-    let safety = 0;
-    while (pos + 4 <= end && safety++ < 256) {
+    while (pos + 4 <= end) {
       const patLen = this.view.getUint32(pos, false);
       const recStart = pos + 4;
       const recEnd = recStart + patLen;
@@ -486,6 +485,7 @@ export class AbrParser {
     let dualBrush = false;
     let dualSize = 0.4;
     let dualScatter = 0.6;
+    let dualSpacing: number | undefined;
     let dualTipDataUrl: string | null = null;
     let dualBlendMode: DualBrushBlendMode = 'multiply';
     const dualObj = asDescObj(preset['dualBrush']);
@@ -498,12 +498,19 @@ export class AbrParser {
       }
       const dSctr = readNumeric(dualObj['Sctr']);
       if (dSctr !== null) dualScatter = Math.max(0, Math.min(2, dSctr / 100));
+      const dSpacing = readNumeric(dualObj['Spcn']) ?? readNumeric(dBrsh?.['Spcn']);
+      if (dSpacing !== null) dualSpacing = Math.max(MIN_BRUSH_SPACING, Math.min(1.5, dSpacing / 100));
       const dUuid = dBrsh && typeof dBrsh['sampledData'] === 'string' ? dBrsh['sampledData'].trim() : '';
       const dSample = dUuid ? samplesByUuid.get(dUuid) : undefined;
-      if (dSample) dualTipDataUrl = dSample.dataUrl;
+      if (dSample) {
+        dualTipDataUrl = dSample.dataUrl;
+        usedSampleUuids.add(dUuid);
+      }
       const blnM = typeof dualObj['BlnM'] === 'string' ? dualObj['BlnM'] : '';
-      if (/sbtr/i.test(blnM)) dualBlendMode = 'subtract';
+      if (/sbtr|blendSubtraction/i.test(blnM)) dualBlendMode = 'subtract';
       else if (/drkn/i.test(blnM)) dualBlendMode = 'darken';
+      else if (/scrn/i.test(blnM)) dualBlendMode = 'screen';
+      else if (/ovrl/i.test(blnM)) dualBlendMode = 'overlay';
       else dualBlendMode = 'multiply';
     }
 
@@ -513,7 +520,7 @@ export class AbrParser {
     let valJitter = 0;
     let fgBgMix = 0;
     if (preset['useColorDynamics'] === true) {
-      hueJitter = clamp01((readNumeric(preset['H']) ?? readNumeric(preset['hueJitter']) ?? 0) / 100);
+      hueJitter = clamp01((readNumeric(preset['H']) ?? readNumeric(preset['H   ']) ?? readNumeric(preset['hueJitter']) ?? 0) / 100);
       satJitter = clamp01((readNumeric(preset['Strt']) ?? readNumeric(preset['saturationJitter']) ?? 0) / 100);
       valJitter = clamp01((readNumeric(preset['Brgh']) ?? readNumeric(preset['brightnessJitter']) ?? 0) / 100);
       const fgBg = asDescObj(preset['foregroundBackgroundLength']) ?? asDescObj(preset['clVr']);
@@ -528,7 +535,10 @@ export class AbrParser {
       }
     }
 
-    const wetEdges = preset['wetEdges'] === true;
+    const wetEdges = (preset['wetEdges'] ?? preset['Wtdg']) === true;
+    const toolOptions = asDescObj(preset['toolOptions']);
+    const opacity = readNumeric(toolOptions?.['Opct']);
+    const flow = readNumeric(toolOptions?.['flow']);
 
     return {
       id: `abr_preset_${index}`,
@@ -537,6 +547,8 @@ export class AbrParser {
       height: sample?.height ?? size,
       dataUrl: sample?.dataUrl ?? null,
       size,
+      ...(opacity !== null ? { opacity: clamp01(opacity / 100) } : {}),
+      ...(flow !== null ? { flow: clamp01(flow / 100) } : {}),
       spacing,
       hardness,
       angle: angleDeg !== null ? Math.max(-90, Math.min(90, Math.round(angleDeg))) : 0,
@@ -550,6 +562,7 @@ export class AbrParser {
       textureDataUrl,
       dualBrush,
       dualSize,
+      dualSpacing,
       dualScatter,
       dualTipDataUrl,
       dualBlendMode,

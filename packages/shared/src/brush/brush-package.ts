@@ -4,6 +4,7 @@
  */
 
 import { AbrParser, type ParsedBrushTip } from './abr-parser';
+import { exportPresetsToAbr, type AbrExportOptions } from './abr-exporter';
 import { SutParser } from './sut-parser';
 import { ProcreateParser } from './procreate-parser';
 import { MIN_BRUSH_SPACING } from './brush-spacing';
@@ -278,6 +279,14 @@ export class BrushPackageManager {
    */
   public static exportPackToJson(pack: AtelierBrushPack): string {
     return JSON.stringify(pack, null, 2);
+  }
+
+  public static async exportPresetToAbr(preset: AtelierBrushPreset, options?: AbrExportOptions): Promise<Uint8Array> {
+    return exportPresetsToAbr([preset], options);
+  }
+
+  public static async exportPresetsToAbr(presets: readonly AtelierBrushPreset[], options?: AbrExportOptions): Promise<Uint8Array> {
+    return exportPresetsToAbr(presets, options);
   }
 
   /**
