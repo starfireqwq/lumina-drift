@@ -170,3 +170,14 @@ export const canvasOps = sqliteTable(
     pk: primaryKey({ columns: [table.canvasId, table.seq] }),
   })
 );
+
+// 8. 多人繪茶 2.0 房間協作狀態（分格認領、共用色票、共用參考圖板）
+export const canvasCollabState = sqliteTable('canvas_collab_state', {
+  canvasId: text('canvas_id')
+    .primaryKey()
+    .references(() => canvases.id, { onDelete: 'cascade' }),
+  gridJson: text('grid_json'),
+  swatchesJson: text('swatches_json'),
+  refBoardJson: text('ref_board_json'),
+  updatedAt: integer('updated_at').notNull(),
+});

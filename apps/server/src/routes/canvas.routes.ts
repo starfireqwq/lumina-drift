@@ -27,6 +27,7 @@ import {
   updateCanvasMemberRole,
 } from '../services/canvas.service';
 import { getLayersByCanvasId } from '../services/layer.service';
+import { getCanvasCollabState } from '../services/collab-room.service';
 import {
   autoCreateCheckpoint,
   getCanvasOpParticipants,
@@ -416,6 +417,17 @@ export const canvasRoutes: FastifyPluginAsync = async (fastify) => {
     const onlineIds = fastify.roomManager.getOnlineUserIds(id);
     const members = listCanvasMembers(id, onlineIds);
     return reply.send({ canvasId: id, ownerId: canvas.ownerId, members });
+  });
+
+  // GET /api/canvases/:id/collab-state - Persisted grid slots, room swatches, and reference board
+  fastify.get<{ Params: { id: string } }>('/:id/collab-state', async (request, reply) => {
+    const { id } = request.params;
+    const canvas = getCanvasById(id);
+    if (!canvas) return reply.code(404).send({ error: '畫布不存在' });
+    if (!(await canReadCanvas(fastify, request, canvas))) return reply.code(403).send(ROOM_LOCKED);
+
+    const state = getCanvasCollabState(id);
+    return reply.send({ canvasId: id, ...state });
   });
 
   // PATCH /api/canvases/:id/members/:userId/role - Update a member's room role (UPSERT for public-room accounts)

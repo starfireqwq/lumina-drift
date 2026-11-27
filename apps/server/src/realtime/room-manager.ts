@@ -2,33 +2,52 @@ import { Server as SocketIOServer, Socket } from 'socket.io';
 import * as socketParser from 'socket.io-parser';
 import { FastifyInstance } from 'fastify';
 import { and, eq } from 'drizzle-orm';
+import { nanoid } from 'nanoid';
 import {
+  addRoomSwatch,
   ADJUSTMENT_PIXEL_WRITE_ERROR,
   tileSocketParser,
   AtelierPacket,
   calculatePainterLevel,
+  canEditRoomCollab,
+  canManageRoomCollab,
   canUserPerformLayerAction,
+  CanvasGridConfig,
   CanvasModel,
   CanvasRole,
   CanvasSticker,
+  claimGridSlot,
   CursorPacket,
   decodePacket,
   DRAW_OP_TYPES,
   DRAW_TIME_MAX_GAP_MS,
   encodePacket,
+  FollowStatePacket,
   isPixelOrVectorOp,
   LayerAction,
   LayerModel,
+  MAX_ROOM_REFERENCE_ITEMS,
   MemberPresence,
+  MemberToolUpdatePacket,
+  MemberViewportPacket,
+  normalizeGridConfig,
+  normalizeReferenceItem,
   OpBroadcastPacket,
   OpCommitPacket,
   OpRejectedPacket,
   PresenceUpdatePacket,
   PreviewDabPacket,
+  releaseGridSlot,
+  removeRoomSwatch,
+  RoomCollabActorRole,
+  RoomCollabStateSnapshot,
   RoomMemberInfo,
+  RoomReferenceItem,
   RoomStatePacket,
+  sanitizeViewportCamera,
   TilePatchPacket,
   UserPayload,
+  ViewportCameraState,
 } from '@atelier/shared';
 import { getCanvasById, getCanvasMembership, hasCanvasGroupAccess, incrementCanvasSeq, joinCanvas } from '../services/canvas.service';
 import {
@@ -47,6 +66,12 @@ import { canvasOps } from '../db/schema';
 import { findUserById, verifyPassword } from '../services/auth.service';
 import { createCheckpointInBackground } from '../services/snapshot.service';
 import { addMemberDrawTime, getMemberDrawTime, listCanvasRoster, loadStrokeTotals, touchMembersLastSeen } from '../services/presence.service';
+import {
+  getCanvasCollabState,
+  saveCanvasGridConfig,
+  saveCanvasReferenceBoard,
+  saveCanvasRoomSwatches,
+} from '../services/collab-room.service';
 
 /** Connected members' last-seen time is refreshed this often, so a crashed server loses at most this much */
 const LAST_SEEN_REFRESH_MS = 60_000;
@@ -88,6 +113,10 @@ export class RealtimeRoomManager {
   private canvasStickers = new Map<string, Map<string, CanvasSticker>>();
   // canvasId -> Set<socketId> of users currently in WebRTC Voice Room
   private voiceRooms = new Map<string, Map<string, { isMuted: boolean; isSpeaking: boolean }>>();
+  // canvasId -> Map<followerSocketId, targetUserId>
+  private roomFollowTargets = new Map<string, Map<string, string>>();
+  // canvasId -> Map<userId, ViewportCameraState>
+  private roomLatestCameras = new Map<string, Map<string, ViewportCameraState>>();
   // userId -> stroke count
   private userStrokes = new Map<string, number>();
   // canvasId -> total strokes count
@@ -236,7 +265,7 @@ export class RealtimeRoomManager {
         // Chat outside any real canvas is the lobby channel and needs no room
         const isLobbyChat = event === 'chat_message' && (typeof canvasId !== 'string' || !getCanvasById(canvasId));
         if (!inRoom && !isLobbyChat) {
-          if (event !== 'cursor' && event !== 'preview_dab') {
+          if (event !== 'cursor' && event !== 'preview_dab' && event !== 'viewport_sync') {
             socket.emit('error', { code: 'NOT_IN_ROOM', message: '尚未加入此畫布房間，操作已忽略' });
           }
           return false;
@@ -432,6 +461,81 @@ export class RealtimeRoomManager {
         }
       );
 
+      // Phase 5 (Collab 2.0): Follow Camera, Tool Presence, Grid Slots, Room Swatches & Reference Board
+      on(
+        'viewport_sync',
+        (data: { canvasId: string; camera: Partial<ViewportCameraState>; activeTool?: string }) => {
+          this.handleViewportSync(socket, data);
+        }
+      );
+
+      on('member_tool', (data: { canvasId: string; activeTool: string }) => {
+        this.handleMemberTool(socket, data);
+      });
+
+      on('follow_target', (data: { canvasId: string; targetUserId: string | null }) => {
+        this.handleFollowTarget(socket, data);
+      });
+
+      on(
+        'grid_config_update',
+        (data: { canvasId: string; enabled?: boolean; rows?: number; cols?: number; showLabels?: boolean; clearSlots?: boolean }) => {
+          this.handleGridConfigUpdate(socket, data);
+        }
+      );
+
+      on(
+        'grid_slot_claim',
+        (data: { canvasId: string; slotIndex: number; label?: string; force?: boolean }) => {
+          this.handleGridSlotClaim(socket, data);
+        }
+      );
+
+      on('grid_slot_release', (data: { canvasId: string; slotIndex: number }) => {
+        this.handleGridSlotRelease(socket, data);
+      });
+
+      on('room_swatch_add', (data: { canvasId: string; hex: string; name?: string }) => {
+        this.handleRoomSwatchAdd(socket, data);
+      });
+
+      on('room_swatch_remove', (data: { canvasId: string; swatchId: string }) => {
+        this.handleRoomSwatchRemove(socket, data);
+      });
+
+      on(
+        'room_ref_add',
+        (data: {
+          canvasId: string;
+          title?: string;
+          imageDataUrl: string;
+          x?: number;
+          y?: number;
+          width?: number;
+          height?: number;
+          scale?: number;
+          rotation?: number;
+          opacity?: number;
+        }) => {
+          this.handleRoomRefAdd(socket, data);
+        }
+      );
+
+      on(
+        'room_ref_update',
+        (data: { canvasId: string; itemId: string; updates: Partial<RoomReferenceItem> }) => {
+          this.handleRoomRefUpdate(socket, data);
+        }
+      );
+
+      on('room_ref_remove', (data: { canvasId: string; itemId: string }) => {
+        this.handleRoomRefRemove(socket, data);
+      });
+
+      on('room_ref_lock', (data: { canvasId: string; lockedByAdmin: boolean }) => {
+        this.handleRoomRefLock(socket, data);
+      });
+
       // Realtime Canvas Text Chat Message handler
       on('chat_message', (data: { canvasId?: string; text: string; id?: string }) => {
         if (!data || !data.text || !data.text.trim()) return;
@@ -527,6 +631,7 @@ export class RealtimeRoomManager {
       level: userLevel,
       presence: previous?.presence ?? 'online',
       drawTimeMs: isGuest ? undefined : this.drawClock(canvasId, user.id).drawTimeMs,
+      activeTool: previous?.activeTool ?? 'brush',
     };
 
     if (!this.roomMembers.has(canvasId)) {
@@ -542,6 +647,29 @@ export class RealtimeRoomManager {
 
     // Broadcast room members to all sockets in this canvas
     this.broadcastRoomState(canvasId);
+
+    // Sync persisted + realtime Collab 2.0 room state (grid, swatches, reference board, follow state, cached cameras)
+    try {
+      const persisted = getCanvasCollabState(canvasId);
+      const latestCamerasMap = this.roomLatestCameras.get(canvasId);
+      const latestCameras: Record<string, ViewportCameraState> = {};
+      if (latestCamerasMap) {
+        for (const [uid, cam] of latestCamerasMap.entries()) {
+          latestCameras[uid] = cam;
+        }
+      }
+      const collabSnapshot: RoomCollabStateSnapshot = {
+        canvasId,
+        grid: persisted.grid,
+        swatches: persisted.swatches,
+        referenceBoard: persisted.referenceBoard,
+        followersByTarget: this.buildFollowersByTarget(canvasId),
+        latestCameras,
+      };
+      socket.emit('collab_state_sync', collabSnapshot);
+    } catch (err) {
+      console.error('[Collab] Failed to sync room collab state on join:', err);
+    }
 
     // Sync active stickers for this canvas
     const stickersMap = this.canvasStickers.get(canvasId);
@@ -572,21 +700,41 @@ export class RealtimeRoomManager {
     socket.leave(roomName);
 
     const members = this.roomMembers.get(canvasId);
+    let followChanged = false;
+    const followMap = this.roomFollowTargets.get(canvasId);
+    if (followMap?.delete(socket.id)) {
+      followChanged = true;
+    }
     if (members) {
       const left = members.get(socket.id);
       members.delete(socket.id);
+      const stillHasOtherTab = left ? [...members.values()].some((m) => m.userId === left.userId) : false;
       // Their last tab on this canvas: that is when they were last online
-      if (left && !left.isGuest && ![...members.values()].some((m) => m.userId === left.userId)) {
-        try {
-          touchMembersLastSeen(canvasId, [left.userId]);
-        } catch (err) {
-          console.error('[Presence] Failed to record leave:', err);
+      if (left && !stillHasOtherTab) {
+        if (!left.isGuest) {
+          try {
+            touchMembersLastSeen(canvasId, [left.userId]);
+          } catch (err) {
+            console.error('[Presence] Failed to record leave:', err);
+          }
+          this.drawClocks.delete(`${canvasId}|${left.userId}`);
         }
-        this.drawClocks.delete(`${canvasId}|${left.userId}`);
+        this.roomLatestCameras.get(canvasId)?.delete(left.userId);
+        if (followMap) {
+          for (const [followerSockId, targetUid] of followMap.entries()) {
+            if (targetUid === left.userId) {
+              followMap.delete(followerSockId);
+              followChanged = true;
+            }
+          }
+        }
       }
       if (members.size === 0) {
         this.roomMembers.delete(canvasId);
+        this.roomFollowTargets.delete(canvasId);
+        this.roomLatestCameras.delete(canvasId);
       } else {
+        if (followChanged) this.broadcastFollowState(canvasId);
         this.broadcastRoomState(canvasId);
       }
     }
@@ -1383,9 +1531,17 @@ export class RealtimeRoomManager {
 
   private broadcastRoomState(canvasId: string) {
     const membersMap = this.roomMembers.get(canvasId);
+    const followMap = this.roomFollowTargets.get(canvasId);
+    const followersByTarget = this.buildFollowersByTarget(canvasId);
     const members = Array.from(membersMap?.values() ?? [], (member) => {
       const strokeCount = this.userStrokes.get(member.userId) ?? 0;
-      return { ...member, strokeCount, level: calculatePainterLevel(strokeCount).level };
+      return {
+        ...member,
+        strokeCount,
+        level: calculatePainterLevel(strokeCount).level,
+        followingUserId: followMap?.get(member.socketId) ?? null,
+        followerCount: followersByTarget[member.userId]?.length ?? 0,
+      };
     });
     const canvas = getCanvasById(canvasId);
     const onlineIds = new Set(members.map((m) => m.userId));
@@ -1447,8 +1603,476 @@ export class RealtimeRoomManager {
     this.roomMembers.delete(canvasId);
     this.canvasStickers.delete(canvasId);
     this.voiceRooms.delete(canvasId);
+    this.roomFollowTargets.delete(canvasId);
+    this.roomLatestCameras.delete(canvasId);
     this.restoreStrokeTotals();
     for (const key of this.drawClocks.keys()) if (key.startsWith(`${canvasId}|`)) this.drawClocks.delete(key);
+  }
+
+  // ============================================================================
+  // Phase 5 (Collab 2.0): Follow Camera, Tool Presence, Grid Slots, Room Swatches & Reference Board
+  // ============================================================================
+
+  private getCollabActorRole(canvasId: string, socket: Socket): RoomCollabActorRole {
+    const user = socket.data.user as UserPayload | undefined;
+    const isGuest = Boolean(socket.data.isGuest);
+    if (!user || isGuest) {
+      return { serverRole: 'guest', isGuest: true };
+    }
+    const canvas = getCanvasById(canvasId);
+    const membership = getCanvasMembership(canvasId, user.id);
+    const isOwner = Boolean(canvas && canvas.ownerId === user.id);
+    return {
+      serverRole: user.serverRole,
+      canvasRole: membership?.role ?? (isOwner ? 'owner' : undefined),
+      isCanvasOwner: isOwner,
+      isGuest: false,
+    };
+  }
+
+  private buildFollowersByTarget(canvasId: string): Record<string, string[]> {
+    const followMap = this.roomFollowTargets.get(canvasId);
+    const membersMap = this.roomMembers.get(canvasId);
+    const result: Record<string, string[]> = {};
+    if (!followMap || !membersMap) return result;
+    const sets = new Map<string, Set<string>>();
+    for (const [followerSockId, targetUserId] of followMap.entries()) {
+      const follower = membersMap.get(followerSockId);
+      if (!follower || follower.userId === targetUserId) continue;
+      let set = sets.get(targetUserId);
+      if (!set) {
+        set = new Set<string>();
+        sets.set(targetUserId, set);
+      }
+      set.add(follower.userId);
+    }
+    for (const [targetUserId, set] of sets.entries()) {
+      if (set.size > 0) result[targetUserId] = Array.from(set);
+    }
+    return result;
+  }
+
+  private broadcastFollowState(canvasId: string): void {
+    const followersByTarget = this.buildFollowersByTarget(canvasId);
+    const followMap = this.roomFollowTargets.get(canvasId);
+    const membersMap = this.roomMembers.get(canvasId);
+    if (membersMap) {
+      for (const member of membersMap.values()) {
+        member.followingUserId = followMap?.get(member.socketId) ?? null;
+        member.followerCount = followersByTarget[member.userId]?.length ?? 0;
+      }
+    }
+    const packet: FollowStatePacket = { canvasId, followersByTarget };
+    this.io.to(`canvas_${canvasId}`).emit('follow_state', packet);
+  }
+
+  private handleViewportSync(
+    socket: Socket,
+    data: { canvasId: string; camera: Partial<ViewportCameraState>; activeTool?: string }
+  ): void {
+    const user = socket.data.user as UserPayload | undefined;
+    if (!user?.id || !data?.canvasId) return;
+    const camera = sanitizeViewportCamera(data.camera);
+    if (!camera) return;
+
+    let cameras = this.roomLatestCameras.get(data.canvasId);
+    if (!cameras) {
+      cameras = new Map();
+      this.roomLatestCameras.set(data.canvasId, cameras);
+    }
+    cameras.set(user.id, camera);
+
+    const activeTool =
+      typeof data.activeTool === 'string' && data.activeTool.trim()
+        ? data.activeTool.trim().slice(0, 48)
+        : undefined;
+    if (activeTool) {
+      const member = this.roomMembers.get(data.canvasId)?.get(socket.id);
+      if (member && member.activeTool !== activeTool) {
+        member.activeTool = activeTool;
+        const toolPacket: MemberToolUpdatePacket = {
+          canvasId: data.canvasId,
+          socketId: socket.id,
+          userId: user.id,
+          activeTool,
+        };
+        this.io.to(`canvas_${data.canvasId}`).emit('member_tool_update', toolPacket);
+      }
+    }
+
+    const packet: MemberViewportPacket = {
+      canvasId: data.canvasId,
+      userId: user.id,
+      socketId: socket.id,
+      camera,
+      ...(activeTool ? { activeTool } : {}),
+    };
+    socket.to(`canvas_${data.canvasId}`).emit('member_viewport', packet);
+  }
+
+  private handleMemberTool(socket: Socket, data: { canvasId: string; activeTool: string }): void {
+    const user = socket.data.user as UserPayload | undefined;
+    if (!user?.id || !data?.canvasId || typeof data.activeTool !== 'string') return;
+    const activeTool = data.activeTool.trim().slice(0, 48);
+    if (!activeTool) return;
+    const member = this.roomMembers.get(data.canvasId)?.get(socket.id);
+    if (!member || member.activeTool === activeTool) return;
+    member.activeTool = activeTool;
+    const packet: MemberToolUpdatePacket = {
+      canvasId: data.canvasId,
+      socketId: socket.id,
+      userId: user.id,
+      activeTool,
+    };
+    this.io.to(`canvas_${data.canvasId}`).emit('member_tool_update', packet);
+  }
+
+  private handleFollowTarget(socket: Socket, data: { canvasId: string; targetUserId: string | null }): void {
+    const user = socket.data.user as UserPayload | undefined;
+    if (!user?.id || !data?.canvasId) return;
+    let followMap = this.roomFollowTargets.get(data.canvasId);
+    if (!followMap) {
+      followMap = new Map();
+      this.roomFollowTargets.set(data.canvasId, followMap);
+    }
+
+    const target = typeof data.targetUserId === 'string' && data.targetUserId.trim() ? data.targetUserId.trim() : null;
+    if (!target || target === user.id) {
+      followMap.delete(socket.id);
+      this.broadcastFollowState(data.canvasId);
+      return;
+    }
+
+    const membersMap = this.roomMembers.get(data.canvasId);
+    const targetMember = membersMap ? [...membersMap.values()].find((m) => m.userId === target) : undefined;
+    if (!targetMember) {
+      followMap.delete(socket.id);
+      this.broadcastFollowState(data.canvasId);
+      return;
+    }
+
+    followMap.set(socket.id, target);
+    this.broadcastFollowState(data.canvasId);
+
+    const latestCamera = this.roomLatestCameras.get(data.canvasId)?.get(target);
+    if (latestCamera) {
+      const snapPacket: MemberViewportPacket = {
+        canvasId: data.canvasId,
+        userId: target,
+        socketId: targetMember.socketId,
+        camera: latestCamera,
+        activeTool: targetMember.activeTool,
+      };
+      socket.emit('member_viewport', snapPacket);
+    }
+  }
+
+  private handleGridConfigUpdate(
+    socket: Socket,
+    data: { canvasId: string; enabled?: boolean; rows?: number; cols?: number; showLabels?: boolean; clearSlots?: boolean }
+  ): void {
+    const role = this.getCollabActorRole(data.canvasId, socket);
+    if (!canManageRoomCollab(role)) {
+      socket.emit('collab_error', { code: 'PERMISSION_DENIED', scope: 'grid', message: '僅房主或管理員可設定分格模式' });
+      return;
+    }
+    const current = getCanvasCollabState(data.canvasId).grid;
+    const nextGrid: CanvasGridConfig = normalizeGridConfig({
+      ...current,
+      enabled: data.enabled !== undefined ? Boolean(data.enabled) : current.enabled,
+      rows: data.rows !== undefined ? Number(data.rows) : current.rows,
+      cols: data.cols !== undefined ? Number(data.cols) : current.cols,
+      showLabels: data.showLabels !== undefined ? Boolean(data.showLabels) : current.showLabels,
+      slots: data.clearSlots ? [] : current.slots,
+      updatedAt: Date.now(),
+    });
+    const saved = saveCanvasGridConfig(data.canvasId, nextGrid);
+    this.io.to(`canvas_${data.canvasId}`).emit('grid_state_updated', {
+      canvasId: data.canvasId,
+      grid: saved,
+    });
+  }
+
+  private handleGridSlotClaim(
+    socket: Socket,
+    data: { canvasId: string; slotIndex: number; label?: string; force?: boolean }
+  ): void {
+    const user = socket.data.user as UserPayload | undefined;
+    const role = this.getCollabActorRole(data.canvasId, socket);
+    if (!user?.id || !canEditRoomCollab(role)) {
+      socket.emit('collab_error', { code: 'PERMISSION_DENIED', scope: 'grid', message: '目前身分無法認領分格' });
+      return;
+    }
+    const current = getCanvasCollabState(data.canvasId).grid;
+    const result = claimGridSlot(
+      current,
+      Math.floor(Number(data.slotIndex)),
+      {
+        userId: user.id,
+        displayName: user.displayName,
+        color: socket.data.color || '#6366F1',
+        label: data.label,
+      },
+      { force: Boolean(data.force) && canManageRoomCollab(role) }
+    );
+    if (!result.ok) {
+      socket.emit('collab_error', {
+        code: result.reason?.toUpperCase() || 'CLAIM_FAILED',
+        scope: 'grid',
+        message: result.reason === 'already_claimed' ? '此分格已被其他成員認領' : '無法認領此分格',
+      });
+      return;
+    }
+    const saved = saveCanvasGridConfig(data.canvasId, result.config);
+    this.io.to(`canvas_${data.canvasId}`).emit('grid_state_updated', {
+      canvasId: data.canvasId,
+      grid: saved,
+    });
+  }
+
+  private handleGridSlotRelease(socket: Socket, data: { canvasId: string; slotIndex: number }): void {
+    const user = socket.data.user as UserPayload | undefined;
+    const role = this.getCollabActorRole(data.canvasId, socket);
+    if (!user?.id || !canEditRoomCollab(role)) {
+      socket.emit('collab_error', { code: 'PERMISSION_DENIED', scope: 'grid', message: '目前身分無法釋放分格' });
+      return;
+    }
+    const current = getCanvasCollabState(data.canvasId).grid;
+    const result = releaseGridSlot(current, Math.floor(Number(data.slotIndex)), {
+      userId: user.id,
+      canForce: canManageRoomCollab(role),
+    });
+    if (!result.ok) {
+      socket.emit('collab_error', {
+        code: result.reason?.toUpperCase() || 'RELEASE_FAILED',
+        scope: 'grid',
+        message: result.reason === 'not_owner' ? '僅認領者本人或管理員可釋放此分格' : '無法釋放此分格',
+      });
+      return;
+    }
+    const saved = saveCanvasGridConfig(data.canvasId, result.config);
+    this.io.to(`canvas_${data.canvasId}`).emit('grid_state_updated', {
+      canvasId: data.canvasId,
+      grid: saved,
+    });
+  }
+
+  private handleRoomSwatchAdd(socket: Socket, data: { canvasId: string; hex: string; name?: string }): void {
+    const user = socket.data.user as UserPayload | undefined;
+    const role = this.getCollabActorRole(data.canvasId, socket);
+    if (!user?.id || !canEditRoomCollab(role)) {
+      socket.emit('collab_error', { code: 'PERMISSION_DENIED', scope: 'swatches', message: '目前身分無法新增房間色票' });
+      return;
+    }
+    const current = getCanvasCollabState(data.canvasId).swatches;
+    const result = addRoomSwatch(current, {
+      id: nanoid(10),
+      hex: data.hex,
+      name: data.name,
+      addedBy: user.id,
+      addedByName: user.displayName,
+    });
+    if (!result.ok) {
+      socket.emit('collab_error', {
+        code: result.reason?.toUpperCase() || 'SWATCH_ADD_FAILED',
+        scope: 'swatches',
+        message: result.reason === 'duplicate' ? '房間色票已存在相同顏色' : '無法新增房間色票',
+      });
+      return;
+    }
+    const saved = saveCanvasRoomSwatches(data.canvasId, result.swatches);
+    this.io.to(`canvas_${data.canvasId}`).emit('room_swatches_updated', {
+      canvasId: data.canvasId,
+      swatches: saved,
+    });
+  }
+
+  private handleRoomSwatchRemove(socket: Socket, data: { canvasId: string; swatchId: string }): void {
+    const user = socket.data.user as UserPayload | undefined;
+    const role = this.getCollabActorRole(data.canvasId, socket);
+    if (!user?.id || !canEditRoomCollab(role)) {
+      socket.emit('collab_error', { code: 'PERMISSION_DENIED', scope: 'swatches', message: '目前身分無法刪除房間色票' });
+      return;
+    }
+    const current = getCanvasCollabState(data.canvasId).swatches;
+    const result = removeRoomSwatch(current, data.swatchId, {
+      userId: user.id,
+      canForce: canManageRoomCollab(role),
+    });
+    if (!result.ok) {
+      socket.emit('collab_error', {
+        code: result.reason?.toUpperCase() || 'SWATCH_REMOVE_FAILED',
+        scope: 'swatches',
+        message: result.reason === 'forbidden' ? '僅新增者或管理員可刪除此色票' : '找不到指定色票',
+      });
+      return;
+    }
+    const saved = saveCanvasRoomSwatches(data.canvasId, result.swatches);
+    this.io.to(`canvas_${data.canvasId}`).emit('room_swatches_updated', {
+      canvasId: data.canvasId,
+      swatches: saved,
+    });
+  }
+
+  private handleRoomRefAdd(
+    socket: Socket,
+    data: {
+      canvasId: string;
+      title?: string;
+      imageDataUrl: string;
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+      scale?: number;
+      rotation?: number;
+      opacity?: number;
+    }
+  ): void {
+    const user = socket.data.user as UserPayload | undefined;
+    const role = this.getCollabActorRole(data.canvasId, socket);
+    const canManage = canManageRoomCollab(role);
+    if (!user?.id || !canEditRoomCollab(role)) {
+      socket.emit('collab_error', { code: 'PERMISSION_DENIED', scope: 'referenceBoard', message: '目前身分無法新增共用參考圖' });
+      return;
+    }
+    const board = getCanvasCollabState(data.canvasId).referenceBoard;
+    if (board.lockedByAdmin && !canManage) {
+      socket.emit('collab_error', { code: 'BOARD_LOCKED', scope: 'referenceBoard', message: '管理員已鎖定共用參考圖板' });
+      return;
+    }
+    if (board.items.length >= MAX_ROOM_REFERENCE_ITEMS) {
+      socket.emit('collab_error', { code: 'LIMIT_REACHED', scope: 'referenceBoard', message: '共用參考圖已達數量上限' });
+      return;
+    }
+    const maxZ = board.items.reduce((acc, it) => Math.max(acc, it.zIndex), 0);
+    const item = normalizeReferenceItem({
+      id: nanoid(10),
+      title: data.title,
+      imageDataUrl: data.imageDataUrl,
+      x: data.x ?? 16 + (board.items.length % 4) * 24,
+      y: data.y ?? 16 + (board.items.length % 4) * 24,
+      width: data.width ?? 240,
+      height: data.height ?? 180,
+      scale: data.scale ?? 1,
+      rotation: data.rotation ?? 0,
+      opacity: data.opacity ?? 1,
+      zIndex: maxZ + 1,
+      locked: false,
+      addedBy: user.id,
+      addedByName: user.displayName,
+      updatedAt: Date.now(),
+    });
+    if (!item) {
+      socket.emit('collab_error', { code: 'INVALID_IMAGE', scope: 'referenceBoard', message: '參考圖格式不支援或超過檔案大小上限' });
+      return;
+    }
+    const saved = saveCanvasReferenceBoard(data.canvasId, {
+      ...board,
+      items: [...board.items, item],
+      updatedAt: Date.now(),
+    });
+    this.io.to(`canvas_${data.canvasId}`).emit('room_ref_board_updated', {
+      canvasId: data.canvasId,
+      board: saved,
+    });
+  }
+
+  private handleRoomRefUpdate(
+    socket: Socket,
+    data: { canvasId: string; itemId: string; updates: Partial<RoomReferenceItem> }
+  ): void {
+    const user = socket.data.user as UserPayload | undefined;
+    const role = this.getCollabActorRole(data.canvasId, socket);
+    const canManage = canManageRoomCollab(role);
+    if (!user?.id || !canEditRoomCollab(role)) {
+      socket.emit('collab_error', { code: 'PERMISSION_DENIED', scope: 'referenceBoard', message: '目前身分無法編輯共用參考圖' });
+      return;
+    }
+    const board = getCanvasCollabState(data.canvasId).referenceBoard;
+    if (board.lockedByAdmin && !canManage) {
+      socket.emit('collab_error', { code: 'BOARD_LOCKED', scope: 'referenceBoard', message: '管理員已鎖定共用參考圖板' });
+      return;
+    }
+    const existing = board.items.find((it) => it.id === data.itemId);
+    if (!existing) return;
+    if (existing.locked && !canManage) {
+      socket.emit('collab_error', { code: 'ITEM_LOCKED', scope: 'referenceBoard', message: '此參考圖已被鎖定' });
+      return;
+    }
+    const u = data.updates || {};
+    const merged = normalizeReferenceItem({
+      ...existing,
+      title: u.title !== undefined ? u.title : existing.title,
+      x: u.x !== undefined ? u.x : existing.x,
+      y: u.y !== undefined ? u.y : existing.y,
+      width: u.width !== undefined ? u.width : existing.width,
+      height: u.height !== undefined ? u.height : existing.height,
+      scale: u.scale !== undefined ? u.scale : existing.scale,
+      rotation: u.rotation !== undefined ? u.rotation : existing.rotation,
+      opacity: u.opacity !== undefined ? u.opacity : existing.opacity,
+      zIndex: u.zIndex !== undefined ? u.zIndex : existing.zIndex,
+      locked: canManage && u.locked !== undefined ? Boolean(u.locked) : existing.locked,
+      updatedAt: Date.now(),
+    });
+    if (!merged) return;
+    const saved = saveCanvasReferenceBoard(data.canvasId, {
+      ...board,
+      items: board.items.map((it) => (it.id === existing.id ? merged : it)),
+      updatedAt: Date.now(),
+    });
+    this.io.to(`canvas_${data.canvasId}`).emit('room_ref_board_updated', {
+      canvasId: data.canvasId,
+      board: saved,
+    });
+  }
+
+  private handleRoomRefRemove(socket: Socket, data: { canvasId: string; itemId: string }): void {
+    const user = socket.data.user as UserPayload | undefined;
+    const role = this.getCollabActorRole(data.canvasId, socket);
+    const canManage = canManageRoomCollab(role);
+    if (!user?.id || !canEditRoomCollab(role)) {
+      socket.emit('collab_error', { code: 'PERMISSION_DENIED', scope: 'referenceBoard', message: '目前身分無法刪除共用參考圖' });
+      return;
+    }
+    const board = getCanvasCollabState(data.canvasId).referenceBoard;
+    if (board.lockedByAdmin && !canManage) {
+      socket.emit('collab_error', { code: 'BOARD_LOCKED', scope: 'referenceBoard', message: '管理員已鎖定共用參考圖板' });
+      return;
+    }
+    const existing = board.items.find((it) => it.id === data.itemId);
+    if (!existing) return;
+    if (existing.addedBy !== user.id && !canManage) {
+      socket.emit('collab_error', { code: 'FORBIDDEN', scope: 'referenceBoard', message: '僅新增者或管理員可刪除此參考圖' });
+      return;
+    }
+    const saved = saveCanvasReferenceBoard(data.canvasId, {
+      ...board,
+      items: board.items.filter((it) => it.id !== existing.id),
+      updatedAt: Date.now(),
+    });
+    this.io.to(`canvas_${data.canvasId}`).emit('room_ref_board_updated', {
+      canvasId: data.canvasId,
+      board: saved,
+    });
+  }
+
+  private handleRoomRefLock(socket: Socket, data: { canvasId: string; lockedByAdmin: boolean }): void {
+    const role = this.getCollabActorRole(data.canvasId, socket);
+    if (!canManageRoomCollab(role)) {
+      socket.emit('collab_error', { code: 'PERMISSION_DENIED', scope: 'referenceBoard', message: '僅房主或管理員可切換參考圖板鎖定' });
+      return;
+    }
+    const board = getCanvasCollabState(data.canvasId).referenceBoard;
+    const saved = saveCanvasReferenceBoard(data.canvasId, {
+      ...board,
+      lockedByAdmin: Boolean(data.lockedByAdmin),
+      updatedAt: Date.now(),
+    });
+    this.io.to(`canvas_${data.canvasId}`).emit('room_ref_board_updated', {
+      canvasId: data.canvasId,
+      board: saved,
+    });
   }
 
   public disconnectUser(userId: string): void {

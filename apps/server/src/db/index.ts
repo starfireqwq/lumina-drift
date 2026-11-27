@@ -294,4 +294,14 @@ export function initDatabase() {
       `).run(...DRAW_OP_TYPES, DRAW_TIME_MAX_GAP_MS);
     })();
   }
+
+  sqlite.exec(`
+    CREATE TABLE IF NOT EXISTS canvas_collab_state (
+      canvas_id      TEXT PRIMARY KEY REFERENCES canvases(id) ON DELETE CASCADE,
+      grid_json      TEXT,
+      swatches_json  TEXT,
+      ref_board_json TEXT,
+      updated_at     INTEGER NOT NULL
+    );
+  `);
 }

@@ -11,6 +11,7 @@ const tests = [
   'test-phase14-animation-mask-text-undo', 'test-phase15-timeline-groupmask-worker', 'test-phase16-parent-permissions',
   'test-phase17-timelapse-replay',
   'test-phase18-adjustment-layers',
+  'test-phase19-collab-v2',
 ];
 
 for (const test of tests) {
