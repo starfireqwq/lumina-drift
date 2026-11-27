@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react';
-import { Sprite, Texture } from 'pixi.js';
+import { RenderTexture, Sprite, Texture } from 'pixi.js';
 import type { LayerModel, SelectionSnapshot } from '@atelier/shared';
 import { findContentBounds } from '../../../utils/pixelBounds';
 import { DISTORT_MODES, type DistortMode } from '../../../utils/distortModes';
@@ -96,6 +96,7 @@ export function useTransformTool(ctx: ToolContext) {
           h: Math.min(canvas.height, (Math.max(...occupied.map((c) => c.row)) + 1) * ts) - y0,
         };
       }
+      if (!lm.allowFullCanvasTextures && box.w * box.h > (lm.deviceProfile.isConstrained ? 4_194_304 : 16_777_216)) return null;
       const [boxPixels] = await lm.readAsync(activeLayer.id, [box]);
       const content = findContentBounds(boxPixels, box.w, box.h);
       if (!content) return null;
@@ -108,7 +109,9 @@ export function useTransformTool(ctx: ToolContext) {
     const w = Math.min(canvas.width - x, Math.max(1, Math.ceil(b.maxX) - x + (sel ? 1 : 0)));
     const h = Math.min(canvas.height - y, Math.max(1, Math.ceil(b.maxY) - y + (sel ? 1 : 0)));
 
-    const [layerPixels] = await layerManagerRef.current!.readAsync(activeLayer.id, [{ x, y, w, h }]);
+    const lm = layerManagerRef.current;
+    if (!lm.allowFullCanvasTextures && w * h > (lm.deviceProfile.isConstrained ? 4_194_304 : 16_777_216)) return null;
+    const [layerPixels] = await lm.readAsync(activeLayer.id, [{ x, y, w, h }]);
     if (layerManagerRef.current?.getLayerItem(activeLayer.id) !== item) return null;
     // Straight-alpha copy for the floating preview
     const source = document.createElement('canvas');
@@ -162,7 +165,7 @@ export function useTransformTool(ctx: ToolContext) {
     } else {
       layerPixels.fill(0);
     }
-    te.writeRegion(item.renderTexture, x, y, w, h, layerPixels);
+    lm.writeRegion(activeLayer.id, x, y, w, h, layerPixels);
 
     return { source, x, y, w, h };
   };
@@ -270,24 +273,45 @@ export function useTransformTool(ctx: ToolContext) {
     if (!moved) selectionEngineRef.current?.clearSelection();
     const selAfter = selectionEngineRef.current?.exportSnapshot() ?? null;
 
-    // Sprite with transform matrix
-    const tex = Texture.from(transformSourceCanvasRef.current);
-    const spr = Sprite.from(tex);
-    spr.anchor.set(0.5, 0.5);
-    spr.x = curBox.x + curBox.width / 2;
-    spr.y = curBox.y + curBox.height / 2;
-    spr.rotation = curBox.rotation;
-    spr.scale.x = curBox.width / initBox.width;
-    spr.scale.y = curBox.height / initBox.height;
-
     // Only the tiles the box was lifted from or lands on change; the untouched layer is in ping-pong
     const lm = layerManagerRef.current;
+    const source = transformSourceCanvasRef.current;
     const coords = boxTiles(initBox, curBox);
     const renderer = pixiAppRef.current.renderer;
     const diff = diffTilesAsync(lm, layerId, coords, () => {
-      renderer.render({ container: spr, target: item.renderTexture, clear: false });
-      spr.destroy();
-      tex.destroy(true);
+      const cx = curBox.x + curBox.width / 2;
+      const cy = curBox.y + curBox.height / 2;
+      const scaleX = curBox.width / initBox.width;
+      const scaleY = curBox.height / initBox.height;
+      if (lm.allowFullCanvasTextures && source.width <= lm.maxTextureSize && source.height <= lm.maxTextureSize) {
+        const tex = Texture.from(source);
+        const spr = Sprite.from(tex);
+        spr.anchor.set(0.5);
+        spr.position.set(cx, cy);
+        spr.rotation = curBox.rotation;
+        spr.scale.set(scaleX, scaleY);
+        const target = lm.drawTarget(layerId, { whole: true });
+        if (target instanceof RenderTexture) renderer.render({ container: spr, target, clear: false });
+        spr.destroy();
+        tex.destroy(true);
+      } else {
+        const side = tileEngineRef.current!.tileSize;
+        const chunk = document.createElement('canvas');
+        chunk.width = chunk.height = side;
+        const paint = chunk.getContext('2d')!;
+        for (const { col, row } of boxTiles(null, curBox)) {
+          const x = col * side;
+          const y = row * side;
+          paint.resetTransform();
+          paint.clearRect(0, 0, side, side);
+          paint.translate(cx - x, cy - y);
+          paint.rotate(curBox.rotation);
+          paint.scale(scaleX, scaleY);
+          paint.drawImage(source, -source.width / 2, -source.height / 2);
+          lm.stampCanvasOnLayer(layerId, chunk, x, y);
+        }
+        chunk.width = chunk.height = 0;
+      }
       ctx.requestRender();
     }, 'before');
     lm.syncPingPong(layerId); // queued after the reads: the next edit's baseline
@@ -375,14 +399,13 @@ export function useTransformTool(ctx: ToolContext) {
 
     // Only the tiles the source was lifted from or the warp lands on change
     const lm = layerManagerRef.current;
-    const te = tileEngineRef.current;
     const lifted = meshWarpInitialBoundsRef.current;
     const coords = boxTiles(
       lifted ? { x: lifted.minX, y: lifted.minY, width: lifted.width, height: lifted.height, rotation: 0 } : null,
       { x: bounds.minX, y: bounds.minY, width: warpedCanvas.width, height: warpedCanvas.height, rotation: 0 },
     );
     const diff = diffTilesAsync(lm, layerId, coords, () => {
-      te.stampCanvas(item.renderTexture, warpedCanvas, Math.round(bounds.minX), Math.round(bounds.minY));
+      lm.stampCanvasOnLayer(layerId, warpedCanvas, Math.round(bounds.minX), Math.round(bounds.minY));
       ctx.requestRender();
     }, 'before');
     lm.syncPingPong(layerId); // queued after the reads: the next edit's baseline

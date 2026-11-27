@@ -14,6 +14,7 @@ import {
 } from '@atelier/shared';
 import { applyColorOutline, type OutlineSettings } from '../../../engine/colorOutline';
 import { calculateBucketMask } from '../../../engine/commitWorkers';
+import { tiledBucketFill } from '../../../engine/tiledBucketFill';
 import { wrapPoint } from '../../../engine/wrapAround';
 import { RulerManager } from '../../../engine/RulerManager';
 import type { AntiAliasLevel } from '../../../engine/BrushRenderer';
@@ -296,6 +297,7 @@ export function useFillTools(ctx: ToolContext) {
     if (!roi || opacity === 0) return true;
     const { minX: x, minY: y, maxX, maxY } = roi;
     const w = maxX - x + 1, h = maxY - y + 1;
+    if (lm.deviceProfile.isConstrained && w * h > 4_194_304) return true;
     const selection = selectionEngineRef.current;
     const selectionMask = selection?.hasSelection() ? selection.getMaskArray() : null;
     const rgb = hexToRgb(props.color);
@@ -308,7 +310,7 @@ export function useFillTools(ctx: ToolContext) {
       const refLayerId = reference === 'specific' && bucketRefLayerId && lm.getLayerItem(bucketRefLayerId)
         ? bucketRefLayerId : layerId;
       const readEdit = lm.readAsync(layerId, rects);
-      const readReference = reference === 'all' ? te.readRegionsAsync(lm.getCompositeTexture(false), rects)
+      const readReference = reference === 'all' ? lm.readCompositeRegionsAsync(rects, false)
         : refLayerId === layerId ? readEdit : lm.readAsync(refLayerId, rects);
       const [[refPixels], [editPixels]] = await Promise.all([readReference, readEdit]);
       if (!isTargetReady()) return null;
@@ -423,13 +425,14 @@ export function useFillTools(ctx: ToolContext) {
     const w = maxX - minX + 1;
     const h = maxY - minY + 1;
     if (w <= 0 || h <= 0) return;
+    if (lm.deviceProfile.isConstrained && w * h > 4_194_304) return;
 
     commitInOrder(async () => {
       if (layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== activeItem) return null;
       const rects = [{ x: minX, y: minY, w, h }];
       const [refPixels] = refLayerId
         ? await lm.readAsync(refLayerId, rects)
-        : await te.readRegionsAsync(lm.getCompositeTexture(true), rects);
+        : await lm.readCompositeRegionsAsync(rects, true);
       if (layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== activeItem) return null;
       const fill = computeSmartEncloseFillMask(
         pts.map((p) => ({ x: p.x - minX, y: p.y - minY })),
@@ -508,7 +511,9 @@ export function useFillTools(ctx: ToolContext) {
       const selectionMask = selection ? sel?.getMaskArray() : null;
       if (reference !== 'none' && selectionMask && !selectionMask[clickY * W + clickX]) return null;
       let maskArray: Uint8Array | null = null;
+      let tiledMask: Awaited<ReturnType<typeof tiledBucketFill>> = null;
       let bounds = { minX: 0, minY: 0, maxX: W - 1, maxY: H - 1 };
+      const tiled = !lm.allowFullCanvasTextures || W * H >= 16_000_000;
 
       // A sparse raster layer with no occupied tiles has a uniform reference.
       const emptyReference = (id: string) => lm.occupiedTiles(id)?.length === 0;
@@ -518,18 +523,28 @@ export function useFillTools(ctx: ToolContext) {
         : emptyReference(refLayerId));
 
       if (!uniform) {
-        const pixels = reference === 'all'
-          ? (await te.readRegionsAsync(lm.getCompositeTexture(false), [{ x: 0, y: 0, w: W, h: H }]))[0]
-          : (await lm.readAsync(refLayerId, [{ x: 0, y: 0, w: W, h: H }]))[0];
-        if (layerManagerRef.current !== lm) return null;
         const ruler = RulerManager.getInstance();
         const seeds = ruler.state.mode === 'symmetry'
           ? ruler.getSymmetryPoints({ x: clickX, y: clickY }).map(({ x, y }) => ({ x: Math.round(x), y: Math.round(y) }))
           : [{ x: clickX, y: clickY }];
-        const fill = await calculateBucketMask(pixels, W, H, seeds, bucketTolerance, bucketExpand, wrap);
-        if (!fill || layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== activeItem) return null;
-        maskArray = fill.data;
-        bounds = fill.bounds;
+        const read = (rects: Parameters<typeof lm.readAsync>[1]) => reference === 'all'
+          ? lm.readCompositeRegionsAsync(rects, false) : lm.readAsync(refLayerId, rects);
+        const version = reference === 'all' ? lm.getVisibleCompositeVersion() : lm.getLayerItem(refLayerId)?.version;
+        const current = () => layerManagerRef.current === lm && lm.getLayerItem(layerId) === activeItem &&
+          version === (reference === 'all' ? lm.getVisibleCompositeVersion() : lm.getLayerItem(refLayerId)?.version);
+        if (tiled) {
+          const fill = await tiledBucketFill(W, H, seeds, bucketTolerance, bucketExpand, wrap, async (rect) => (await read([rect]))[0], current);
+          if (!fill || !current()) return null;
+          bounds = fill.bounds;
+          if (!fill.coversCanvas) tiledMask = fill;
+        } else {
+          const [pixels] = await read([{ x: 0, y: 0, w: W, h: H }]);
+          if (!current()) return null;
+          const fill = await calculateBucketMask(pixels, W, H, seeds, bucketTolerance, bucketExpand, wrap);
+          if (!fill || !current()) return null;
+          maskArray = fill.data;
+          bounds = fill.bounds;
+        }
       }
 
       if (selection && selectionMask) {
@@ -542,7 +557,7 @@ export function useFillTools(ctx: ToolContext) {
       }
 
       const { minX, minY, maxX, maxY } = bounds;
-      if (confirmWholeCanvas && !maskArray && !selectionMask && opacity > 0) {
+      if (confirmWholeCanvas && !maskArray && !tiledMask && !selectionMask && opacity > 0) {
         if (ctx.currentToolRef.current !== 'bucket' || activeLayerRef.current?.id !== layerId) return null;
         const version = activeItem.version;
         const accepted = await new Promise<boolean>((resolve) => {
@@ -558,7 +573,7 @@ export function useFillTools(ctx: ToolContext) {
       if (patchW <= 0 || patchH <= 0) return null;
       const rgb = hexToRgb(color);
       const dirtyCoords = te.getDirtyTilesForBounds(minX, minY, maxX + 1, maxY + 1);
-      if (!maskArray && !selectionMask && opacity >= 1 && emptyReference(layerId)) {
+      if (!maskArray && !tiledMask && !selectionMask && opacity >= 1 && emptyReference(layerId)) {
         // The old layer is empty and the new pixels are known. Reuse the tile bytes
         // across the whole fill and skip both GPU readbacks.
         const bySize = new Map<string, { raw: Uint8Array; blank: ReturnType<typeof compressTileBuffer>; solid: ReturnType<typeof compressTileBuffer> }>();
@@ -589,6 +604,59 @@ export function useFillTools(ctx: ToolContext) {
         }
         lm.applyTiles(layerId, afterTiles, undefined, decoded);
         lm.syncPingPong(layerId);
+        return { beforeTiles, afterTiles };
+      }
+      if (tiled) {
+        const version = activeItem.version;
+        const current = () => layerManagerRef.current === lm && lm.getLayerItem(layerId) === activeItem &&
+          activeItem.version === version && canEditPixels(activeItem.model);
+        const beforeTiles: TileData[] = [];
+        const afterTiles: TileData[] = [];
+        let bytes = 0;
+        for (let start = 0; start < dirtyCoords.length; start += 8) {
+          const batch = dirtyCoords.slice(start, start + 8);
+          const rects = batch.map(({ col, row }) => {
+            const { width, height } = getTileBounds(col, row, te.tileSize, W, H);
+            return { x: col * te.tileSize, y: row * te.tileSize, w: width, h: height };
+          });
+          const source = await lm.readAsync(layerId, rects);
+          if (!current()) return null;
+          for (let index = 0; index < batch.length; index++) {
+            const rect = rects[index];
+            const coverage = tiledMask?.maskFor(rect);
+            const before = source[index];
+            const after = before.slice();
+            let changed = false;
+            for (let row = 0; row < rect.h; row++) {
+              for (let col = 0; col < rect.w; col++) {
+                const i = row * rect.w + col;
+                const pos = (rect.y + row) * W + rect.x + col;
+                const alpha = Math.min(coverage?.[i] ?? 255, selectionMask?.[pos] ?? 255) * opacity / 255;
+                if (alpha <= 0) continue;
+                const off = i * 4;
+                after[off] = Math.round(rgb.r * alpha + before[off] * (1 - alpha));
+                after[off + 1] = Math.round(rgb.g * alpha + before[off + 1] * (1 - alpha));
+                after[off + 2] = Math.round(rgb.b * alpha + before[off + 2] * (1 - alpha));
+                after[off + 3] = Math.round(255 * alpha + before[off + 3] * (1 - alpha));
+                changed ||= after[off] !== before[off] || after[off + 1] !== before[off + 1] ||
+                  after[off + 2] !== before[off + 2] || after[off + 3] !== before[off + 3];
+              }
+            }
+            if (!changed) continue;
+            const tile = { ...batch[index], width: rect.w, height: rect.h };
+            const old = compressTileBuffer(before);
+            const next = compressTileBuffer(after);
+            bytes += old.data.byteLength + next.data.byteLength;
+            if (bytes > (lm.deviceProfile.isConstrained ? 96 : 384) * 1048576) return null;
+            beforeTiles.push({ ...tile, ...old, byteLength: old.data.byteLength });
+            afterTiles.push({ ...tile, ...next, byteLength: next.data.byteLength });
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        }
+        if (!current() || !afterTiles.length) return null;
+        lm.applyTiles(layerId, afterTiles);
+        lm.syncPingPong(layerId);
+        ctx.requestRender();
         return { beforeTiles, afterTiles };
       }
       let patchTexture: Texture | undefined;

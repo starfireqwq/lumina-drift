@@ -29,11 +29,10 @@ import {
 } from '../plugins/pluginTools';
 import { startPluginToolSessionInWorker } from '../plugins/runPlugin';
 import { Application, Container, type Filter, Graphics, MaskFilter, Rectangle, RenderTexture, Sprite, Texture } from 'pixi.js';
+import { computeSafeDisplayResolution, computeSafeTextureScale, detectConstrainedDevice, queryMaxTextureSize } from '../engine/gpuProfile';
 
-function getTargetDisplayResolution(): number {
-  if (typeof window === 'undefined') return 1;
-  const dpr = window.devicePixelRatio;
-  return Number.isFinite(dpr) && dpr > 0 ? Math.min(dpr, 2) : 1;
+function getTargetDisplayResolution(canvasWidth = 0, canvasHeight = 0): number {
+  return computeSafeDisplayResolution(canvasWidth, canvasHeight, globalThis.devicePixelRatio, detectConstrainedDevice());
 }
 
 function parseWorkspaceBgColor(cssColor: string, fallback = 0x0d0e12): number {
@@ -118,6 +117,7 @@ import { useSocket } from '../context/SocketContext';
 import { useI18n } from '../context/I18nContext';
 import { CanvasViewport, ViewportState } from '../engine/Viewport';
 import { LayerManager, type TileConcurrencyContext } from '../engine/LayerManager';
+import { buildTiledFilterPatch, filterUsesLocalPixels, readFilterMask, scaleFilterJob } from '../engine/tiledLayerFilter';
 import { compressTiles, decodeTiles, warmUpCommitWorkers } from '../engine/commitWorkers';
 import { commitInOrder, diffTilesAsync, tilesAsync, whenToolCommitsDone } from './workspace/tools/asyncTiles';
 import { BrushProperties, BrushRenderer } from '../engine/BrushRenderer';
@@ -1510,7 +1510,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     viewportStateRef.current = next;
     viewportSubsRef.current.forEach((cb) => cb());
     const prevZ = viewportZoomStateRef.current;
-    const curDisplayScale = viewportRef.current?.getDisplayScale() ?? getTargetDisplayResolution();
+    const curDisplayScale = viewportRef.current?.getDisplayScale() ?? getTargetDisplayResolution(canvas?.width, canvas?.height);
     if (
       Math.abs(prevZ.zoom - next.zoom) > 1e-6 ||
       Math.abs(prevZ.rotation - next.rotation) > 1e-6 ||
@@ -1886,13 +1886,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               flat[off + 5] = 0;
               flat[off + 6] = 0;
             }
-            brushRendererRef.current.stampDabs(
-              layerManager.drawTarget(op.layerId) ?? layerItem.renderTexture,
+            const target = layerManager.drawTarget(op.layerId);
+            if (target) brushRendererRef.current.stampDabs(
+              target,
               flat,
               pts.length,
               op.payload.color,
               op.payload.isEraser
             );
+            if (target) layerManager.syncPingPong(op.layerId);
           }
 
           // Replay the vector stroke list changes too (erased strokes must stay erased)
@@ -2018,6 +2020,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       let viewWidth = Math.max(1, rect.width);
       let viewHeight = Math.max(1, rect.height);
       const initialBgColor = parseWorkspaceBgColor(getComputedStyle(container).getPropertyValue('--workspace-bg'));
+      const displayResolution = (w: number, h: number, maxSide: number) =>
+        Math.min(getTargetDisplayResolution(canvas.width, canvas.height), maxSide / Math.ceil(w), maxSide / Math.ceil(h));
 
       try {
         await app.init({
@@ -2030,7 +2034,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           // the back buffer (Pixi turns screen MSAA off with it; layers are render textures anyway)
           useBackBuffer: true,
           antialias: false,
-          resolution: getTargetDisplayResolution(),
+          resolution: displayResolution(viewWidth, viewHeight, queryMaxTextureSize()),
           autoDensity: true,
           eventMode: 'none',
           eventFeatures: { move: false, globalMove: false, click: false, wheel: false },
@@ -2046,7 +2050,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           backgroundColor: initialBgColor,
           backgroundAlpha: 1,
           useBackBuffer: true,
-          resolution: getTargetDisplayResolution(),
+          resolution: displayResolution(viewWidth, viewHeight, queryMaxTextureSize()),
           autoDensity: true,
           eventMode: 'none',
           eventFeatures: { move: false, globalMove: false, click: false, wheel: false },
@@ -2083,12 +2087,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       const currentRect = container.getBoundingClientRect();
       viewWidth = Math.max(1, currentRect.width);
       viewHeight = Math.max(1, currentRect.height);
-      app.renderer.resize(viewWidth, viewHeight, getTargetDisplayResolution());
+      const maxTextureSize = queryMaxTextureSize(app.renderer);
+      app.renderer.resize(viewWidth, viewHeight, displayResolution(viewWidth, viewHeight, maxTextureSize));
       let editingResolution = app.renderer.resolution;
       let playbackReduced = false;
       setPlaybackResolutionRef.current = (reduced) => {
         playbackReduced = reduced;
-        const resolution = reduced ? Math.max(0.75, editingResolution * 0.75) : editingResolution;
+        const resolution = reduced ? Math.min(editingResolution, Math.max(0.75, editingResolution * 0.75)) : editingResolution;
         if (destroyed || Math.abs(resolution - app.renderer.resolution) <= 1e-4) return;
         app.renderer.resize(viewWidth, viewHeight, resolution);
         scheduleRender();
@@ -2319,7 +2324,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         if (destroyed) return;
         const w = Math.max(1, nextWidth);
         const h = Math.max(1, nextHeight);
-        const nextEditingRes = getTargetDisplayResolution();
+        const nextEditingRes = displayResolution(w, h, maxTextureSize);
         const resChanged = Math.abs(nextEditingRes - editingResolution) > 1e-4;
         const sizeChanged = Math.abs(w - viewWidth) > 1e-4 || Math.abs(h - viewHeight) > 1e-4;
         if (!resChanged && !sizeChanged) return;
@@ -2332,7 +2337,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         viewWidth = w;
         viewHeight = h;
 
-        const targetRendererRes = playbackReduced ? Math.max(0.75, editingResolution * 0.75) : editingResolution;
+        const targetRendererRes = playbackReduced ? Math.min(editingResolution, Math.max(0.75, editingResolution * 0.75)) : editingResolution;
         app.renderer.resize(viewWidth, viewHeight, targetRendererRes);
         if (resChanged) {
           viewport.setDisplayScale(editingResolution);
@@ -3347,6 +3352,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if (!item) return;
 
     const lm = layerManagerRef.current;
+    if (!lm.allowFullCanvasTextures) {
+      void applyFilterToLayer(layerId, {
+        id: 'halftone',
+        values: { density: params.density, angle: params.angleRad * 180 / Math.PI, dotSize: params.dotScale },
+      });
+      return;
+    }
     const occupied = lm.occupiedTiles(layerId) ?? tileEngineRef.current.getAllTileCoords();
     const beforePromise = tilesAsync(lm, layerId, occupied);
 
@@ -3387,21 +3399,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const item = layerManagerRef.current.getLayerItem(activeLayer.id);
     if (!item) return false;
 
-    const texture = Texture.from(comicCanvas);
-    const sprite = new Sprite(texture);
-
     const lm = layerManagerRef.current;
     const targetLayerId = activeLayer.id;
-    const renderer = pixiAppRef.current.renderer;
     const dirtyCoords = tileEngineRef.current.getDirtyTilesForBounds(0, 0, comicCanvas.width, comicCanvas.height);
     const diff = diffTilesAsync(lm, targetLayerId, dirtyCoords, () => {
-      renderer.render({
-        container: sprite,
-        target: item.renderTexture,
-        clear: false,
-      });
-      sprite.destroy();
-      texture.destroy(true);
+      lm.stampCanvasOnLayer(targetLayerId, comicCanvas, 0, 0);
       requestRenderRef.current();
     });
     lm.syncPingPong(targetLayerId);
@@ -3544,10 +3546,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const canCreateFilterLayer = Boolean(onCreateLayer && !isGuest && !isCanvasViewer && canvas && isEngineReady && !transformLayerIdRef.current);
   const filterCanvasSizeKey = canvas ? `${canvas.id}:${canvas.width}x${canvas.height}` : '';
   const filterMemoryPlan = useMemo(
-    () => canvas
-      ? assessFilterCompositeMemory(canvas.width, canvas.height, coarsePointer())
-      : assessFilterCompositeMemory(0, 0, false),
-    [canvas?.width, canvas?.height],
+    () => {
+      if (!canvas) return assessFilterCompositeMemory(0, 0, false);
+      const lm = layerManagerRef.current;
+      const size = lm && !lm.allowFullCanvasTextures
+        ? computeSafeTextureScale(canvas.width, canvas.height, Math.min(lm.maxTextureSize, 1536))
+        : canvas;
+      return assessFilterCompositeMemory(size.width, size.height, coarsePointer());
+    },
+    [canvas?.width, canvas?.height, isEngineReady],
   );
 
   const openFilterUI = (id?: 'curves' | 'gradient') => {
@@ -3654,6 +3661,51 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     return client.run(filter.id, new Uint8Array(source), width, height, values, mask, options);
   };
 
+  const computeLargeFilterPatch = async (
+    lm: LayerManager, filter: FilterJob, layerId: string | null, includeBg: boolean, current: () => boolean,
+    mask: Uint8Array | null | undefined, alphaLocked: boolean,
+  ) => {
+    if (!canvas) return null;
+    const { width, height } = canvas;
+    const bounds = selectionEngineRef.current?.getSelection()?.bounds;
+    const options = { draft: 0, previewOnly: false, histogram: false };
+    const local = filterUsesLocalPixels(filter.id);
+    const sample = local ? null : await lm.readFilterThumbnailPixels(layerId, includeBg, lm.deviceProfile.isConstrained ? 1536 : 2048);
+    if (!current() || (!local && !sample)) return null;
+    const overview = sample && await computeLayerFilter(
+      scaleFilterJob(filter, width, height, sample.width / width, sample.height / height),
+      sample.pixels, sample.width, sample.height, null, options,
+    );
+    if (!current() || (sample && !overview)) return null;
+    return buildTiledFilterPatch({
+      filter, width, height, newLayer: layerId === null, current, bounds,
+      budget: (lm.deviceProfile.isConstrained ? 96 : 384) * 1048576,
+      read: async (rect) => (layerId ? await lm.readAsync(layerId, [rect]) : await lm.readCompositeRegionsAsync([rect], includeBg))[0],
+      compute: async (source, rect) => {
+        const localMask = readFilterMask(mask, width, rect);
+        if (sample && overview) {
+          const output = new Uint8Array(source.length);
+          for (let y = 0; y < rect.h; y++) {
+            const sy = Math.floor((rect.y + y) * sample.height / height);
+            for (let x = 0; x < rect.w; x++) {
+              const sx = Math.floor((rect.x + x) * sample.width / width);
+              const from = (sy * sample.width + sx) * 4;
+              const to = (y * rect.w + x) * 4;
+              const coverage = alphaLocked ? 1 : (localMask?.[to / 4] ?? 255) / 255;
+              for (let c = 0; c < 4; c++) output[to + c] = Math.round(source[to + c] * (1 - coverage) + overview.output[from + c] * coverage);
+            }
+          }
+          if (alphaLocked) preserveFilteredAlpha(source, output, localMask);
+          return output;
+        }
+        const result = await computeLayerFilter(filter, source, rect.w, rect.h, alphaLocked ? undefined : localMask, options);
+        if (!result) return null;
+        if (alphaLocked) preserveFilteredAlpha(source, result.output, localMask);
+        return result.output;
+      },
+    });
+  };
+
   const applyFilterToLayer = async (
     layerId: string, filter: FilterJob, isCurrent = () => true,
   ): Promise<'ok' | 'unchanged' | AutoActionErrorCode> => {
@@ -3671,6 +3723,25 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const mask = engineSelection?.getMaskArray();
     const isStale = () => !isCurrent() || layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== item ||
       engineSelection !== selectionEngineRef.current || mask !== engineSelection?.getMaskArray();
+    if (!lm.allowFullCanvasTextures) {
+      const version = item.version;
+      const current = () => !isStale() && item.version === version && canEditPixels(item.model) &&
+        Boolean(item.model.alphaLocked) === Boolean(layer.alphaLocked);
+      const patch = await computeLargeFilterPatch(lm, filter, layerId, false, current, mask, Boolean(layer.alphaLocked));
+      if (!patch || !current()) return 'filter_failed';
+      if (!patch.afterTiles.length) return 'unchanged';
+      const label = filterLabel(def, t, language);
+      lm.applyTiles(layerId, patch.afterTiles);
+      scopedUndoRef.current.push({
+        opId: `op_filter_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        userId: userRef.current?.id || user?.id || 'guest',
+        layerId, opType: 'FILTER', ...patch, timestamp: Date.now(), desc: label,
+      });
+      updateUndoRedoState();
+      commitTilePatch(layerId, patch.afterTiles, false, label);
+      requestRenderRef.current();
+      return 'ok';
+    }
     const rect = [{ x: 0, y: 0, w: width, h: height }];
     const [source] = await lm.readAsync(layerId, rect);
     if (isStale()) return 'filter_failed';
@@ -3733,7 +3804,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     if ((!toNewLayer && !item) || !engine || !canvas) return false;
     if (toNewLayer && (!onCreateLayer || isGuest || isCanvasViewer || !isEngineReady || transformLayerIdRef.current)) return false;
     const { width, height } = canvas;
-    const memoryPlan = toNewLayer ? assessFilterCompositeMemory(width, height, coarsePointer()) : null;
+    const memoryPlan = toNewLayer && layerManagerRef.current?.allowFullCanvasTextures
+      ? assessFilterCompositeMemory(width, height, coarsePointer()) : null;
     if (toNewLayer && memoryPlan?.tier === 'block') return false;
     if (!previewOnly) {
       setFilterBusy(true);
@@ -3757,6 +3829,53 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         return result === 'ok' || result === 'unchanged';
       }
       const mask = selectionEngineRef.current?.getMaskArray();
+      if (!lm.allowFullCanvasTextures) {
+        const compVersion = lm.getVisibleCompositeVersion();
+        const layerVersion = item?.version;
+        const current = () => request === filterRequestRef.current && layerManagerRef.current === lm &&
+          filterApplyNewLayerRef.current === toNewLayer && mask === selectionEngineRef.current?.getMaskArray() &&
+          (toNewLayer ? filterIncludeBgRef.current === includeBg && lm.getVisibleCompositeVersion() === compVersion :
+            getFilterLayer() === item && item?.version === layerVersion);
+        const def = getFilter(filter.id);
+        if (!def) return false;
+        if (previewOnly) {
+          const sample = await lm.readFilterThumbnailPixels(item?.model.id ?? null, includeBg, lm.deviceProfile.isConstrained ? 1280 : 2048);
+          if (!sample || !current()) return false;
+          const sx = sample.width / width;
+          const sy = sample.height / height;
+          const localMask = readFilterMask(mask, width, { x: 0, y: 0, w: sample.width, h: sample.height }, sx, sy);
+          const result = await computeLayerFilter(scaleFilterJob(filter, width, height, sx, sy), sample.pixels, sample.width, sample.height,
+            item?.model.alphaLocked ? undefined : localMask, { draft: 0, previewOnly: true, histogram: Boolean(def.histogram) && !filterHistogramRef.current });
+          if (!result || !current()) return false;
+          if (result.histogram) {
+            filterHistogramRef.current = result.histogram;
+            setFilterHistogram(result.histogram);
+          }
+          if (item?.model.alphaLocked) preserveFilteredAlpha(sample.pixels, result.output, localMask);
+          const existing = filterPreviewRef.current;
+          const texture = existing?.kind === 'overlay' && existing.texture.width === sample.width && existing.texture.height === sample.height
+            ? existing.texture : RenderTexture.create({ width: sample.width, height: sample.height, resolution: 1 });
+          if (texture !== existing?.texture) clearFilterPreview();
+          filterPreviewRef.current = { kind: 'overlay', texture };
+          engine.writeRegion(texture, 0, 0, sample.width, sample.height, result.output);
+          const placement = filterNewLayerPlacement(activeLayerRef.current, layersRef.current);
+          lm.setFilterOverlay(texture, placement.overlayZIndex, item?.model.id);
+          requestRenderRef.current();
+          return true;
+        }
+        clearFilterPreview();
+        const patch = await computeLargeFilterPatch(lm, filter, null, includeBg, current, mask, false);
+        if (!patch || !current()) return false;
+        const label = filterLabel(def, t, language);
+        const placement = filterNewLayerPlacement(activeLayerRef.current, layersRef.current);
+        const baseName = activeLayerRef.current?.name;
+        const created = await onCreateLayer!(baseName ? `${baseName} · ${label}` : label, 'normal', 'raster', placement.afterLayerId, placement.parentId);
+        if (!created || !(await waitForLayerItem(created.id)) || layerManagerRef.current !== lm) return false;
+        lm.applyTiles(created.id, patch.afterTiles);
+        recordLayerCreation(created, patch.afterTiles, { desc: `${label} (${t.filters.newLayerBadge})` });
+        if (patch.afterTiles.length) commitTilePatch(created.id, patch.afterTiles, false, label);
+        return true;
+      }
       const cached = filterSourceRef.current;
       let sourceVersion: number | null = item ? item.version : null;
       let compVersion = '';
@@ -5082,13 +5201,17 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           flat[off + 5] = 0;
           flat[off + 6] = 0;
         }
-        brushRendererRef.current.stampDabs(
-          layerManagerRef.current.drawTarget(latestBroadcastOp.layerId) ?? layerItem.renderTexture,
+        const lm = layerManagerRef.current;
+        const hasLocalEdit = Boolean(lm.editedSparseTiles(latestBroadcastOp.layerId)?.length);
+        const target = lm.drawTarget(latestBroadcastOp.layerId);
+        if (target) brushRendererRef.current.stampDabs(
+          target,
           flat,
           pts.length,
           payload.color,
           payload.isEraser
         );
+        if (target && !hasLocalEdit && !(target instanceof RenderTexture)) lm.syncPingPong(latestBroadcastOp.layerId);
       }
 
       // Crucial: keep pingPongTexture and thumbnail strictly in sync after remote op is applied!
@@ -5230,7 +5353,8 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const engine = animationEngine;
     if (!engine || !isEngineReady) return;
     const solo = OfflineSessionStore.isOfflineCanvas(canvas?.id);
-    const adaptiveResolution = solo && Boolean(canvas && canvas.width * canvas.height >= 2048 * 2048);
+    const adaptiveResolution = Boolean(canvas && canvas.width * canvas.height >= 2048 * 2048 &&
+      (solo || detectConstrainedDevice().isConstrained));
     const playbackFrames = new Map<number, ReturnType<typeof displayLayersFor>>();
     let frameLayers = layersRef.current;
     let frameVisibility = localVisibilityRef.current;
@@ -6331,32 +6455,42 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const [beforeTiles, removed] = await Promise.all([tilesAsync(lm, below.id, coords), snapshotLayerContent(top)]);
     if (layerManagerRef.current !== lm || topItem.version !== topVersion || belowItem.version !== belowVersion) return false;
     if (top.isVisible) {
-      lm.syncPingPong(below.id); // clipping samples this copy, never the texture being drawn into
-      const holder = new Container();
-      const sprite = new Sprite(topItem.renderTexture);
-      sprite.alpha = Math.max(0, Math.min(1, top.opacity));
       const mode = lm.mapPixiBlendMode(top.blendMode);
-      sprite.blendMode = mode;
-      const filters: Filter[] = [];
-      const helper = (texture: Texture) => {
-        const s = new Sprite(texture);
-        s.renderable = false;
-        holder.addChild(s);
-        return s;
+      const render = (source: RenderTexture, target: RenderTexture, mask?: RenderTexture, clip?: RenderTexture) => {
+        const holder = new Container();
+        const sprite = new Sprite(source);
+        sprite.alpha = Math.max(0, Math.min(1, top.opacity));
+        sprite.blendMode = mode;
+        const filters: Filter[] = [];
+        const helper = (texture: Texture) => {
+          const s = new Sprite(texture);
+          s.renderable = false;
+          holder.addChild(s);
+          return s;
+        };
+        if (mask && topMask?.isVisible) filters.push(new MaskFilter({ sprite: helper(mask), inverse: Boolean(topMask.meta?.maskInverted) }));
+        if (clip && top.clipToBelow) filters.push(new MaskFilter({ sprite: helper(clip), channel: 'alpha' }));
+        if (filters.length && mode !== 'normal') {
+          filters.push(lm.createBlendFilter(mode));
+          sprite.blendMode = 'normal';
+        }
+        if (filters.length) sprite.filters = filters;
+        holder.addChild(sprite);
+        try {
+          renderer.render({ container: holder, target, clear: false });
+        } finally {
+          filters.forEach((filter) => filter.destroy());
+          holder.destroy({ children: true });
+        }
       };
-      // As drawn on screen: its mask (inverted or not), and clipped to the layer it merges into
-      if (topMask?.isVisible && topMaskItem) filters.push(new MaskFilter({ sprite: helper(topMaskItem.renderTexture), inverse: Boolean(topMask.meta?.maskInverted) }));
-      if (top.clipToBelow) filters.push(new MaskFilter({ sprite: helper(belowItem.pingPongTexture), channel: 'alpha' }));
-      // With filters the blend must act on their output (else multiply + mask merged as black)
-      if (filters.length && mode !== 'normal') {
-        filters.push(lm.createBlendFilter(mode));
-        sprite.blendMode = 'normal';
+      if (lm.allowFullCanvasTextures) {
+        lm.syncPingPong(below.id);
+        render(topItem.renderTexture, belowItem.renderTexture,
+          topMask?.isVisible ? topMaskItem?.renderTexture : undefined, top.clipToBelow ? belowItem.pingPongTexture : undefined);
+      } else {
+        if (!await lm.mergeSparseLayerTiles(top.id, below.id, coords, render,
+          topMask?.isVisible ? topMask.id : undefined, Boolean(top.clipToBelow))) return false;
       }
-      if (filters.length) sprite.filters = filters;
-      holder.addChild(sprite);
-      renderer.render({ container: holder, target: belowItem.renderTexture, clear: false });
-      filters.forEach((f) => f.destroy());
-      holder.destroy({ children: true });
       requestRenderRef.current();
     }
     lm.syncPingPong(below.id); // queued after the reads: the next edit's baseline
@@ -6541,8 +6675,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         const item = m.layerType === 'adjustment' ? null : await waitForLayerItem(created.id);
         if (duplicateAnchor && !item && m.layerType !== 'adjustment') throw new AutoActionStepError('not_editable');
         if (item && tiles.length) {
-          if (duplicateAnchor) layerManagerRef.current?.applyTiles(created.id, tiles);
-          else te.applyTileBatch(item.renderTexture, tiles);
+          layerManagerRef.current?.applyTiles(created.id, tiles);
           if (strokes?.length) {
             const payload = { tiles, vectorRemovedIds: [], vectorAdded: strokes };
             applyVectorPayload(created.id, payload);
@@ -6570,7 +6703,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         const mk = await onCreateLayer(c.mask.model.name, 'normal', 'mask', created.id, created.id, { meta: c.mask.model.meta ?? null, select: false });
         const mItem = mk && (await waitForLayerItem(mk.id));
         if (mk && mItem) {
-          te.applyTileBatch(mItem.renderTexture, fits(c.mask.tiles));
+          layerManagerRef.current?.applyTiles(mk.id, fits(c.mask.tiles));
           commitTilePatch(mk.id, fits(c.mask.tiles), false, '貼上圖層蒙版');
           if (!c.mask.model.isVisible) onUpdateLayerProps?.(mk.id, { isVisible: false });
         }
@@ -6657,11 +6790,11 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   };
 
   /** Draws the picture into its new layer; the undo step takes the whole layer away (redo brings it back with the picture) */
-  const stampImportedImage = (layer: LayerModel, item: NonNullable<Awaited<ReturnType<typeof waitForLayerItem>>>, source: HTMLCanvasElement, x: number, y: number) => {
+  const stampImportedImage = (layer: LayerModel, source: HTMLCanvasElement, x: number, y: number) => {
     const te = tileEngineRef.current!;
     const lm = layerManagerRef.current!;
     const coords = te.getDirtyTilesForBounds(x, y, x + source.width, y + source.height);
-    const diff = diffTilesAsync(lm, layer.id, coords, () => te.stampCanvas(item.renderTexture, source, x, y));
+    const diff = diffTilesAsync(lm, layer.id, coords, () => lm.stampCanvasOnLayer(layer.id, source, x, y));
     lm.syncPingPong(layer.id);
     const userId = userRef.current?.id || user?.id || 'guest';
     commitInOrder(diff, ({ beforeTiles, afterTiles }) => {
@@ -6729,7 +6862,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         }
         const x = Math.max(0, Math.min(canvas.width - source.width, Math.round(c.x - source.width / 2)));
         const y = Math.max(0, Math.min(canvas.height - source.height, Math.round(c.y - source.height / 2)));
-        last = { layer: created, stamped: stampImportedImage(undoModel, item, source, x, y) };
+        last = { layer: created, stamped: stampImportedImage(undoModel, source, x, y) };
         // The next picture goes right on top of this one, in the same group
         aboveId = created.id;
         parentId = created.parentId ?? null;
@@ -6787,7 +6920,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     const layer = await onCreateLayer(action.name, 'normal', 'raster');
     const item = layer && await waitForLayerItem(layer.id);
     if (!layer || !item || layerManagerRef.current !== manager) return false;
-    await stampImportedImage(layer, item, source, Math.floor((canvas.width - source.width) / 2), Math.floor((canvas.height - source.height) / 2));
+    await stampImportedImage(layer, source, Math.floor((canvas.width - source.width) / 2), Math.floor((canvas.height - source.height) / 2));
     return true;
   };
   const pluginActionRef = useRef(applyPluginAction);
@@ -6987,8 +7120,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         return buf ?? new Uint8Array(rect.width * rect.height * 4);
       },
       readCompositeRect: async (rect, includeBackground) => {
-        const tex = manager.getCompositeTexture(includeBackground);
-        const [buf] = await tileEngine.readRegionsAsync(tex, [{ x: rect.x, y: rect.y, w: rect.width, h: rect.height }]);
+        const [buf] = await manager.readCompositeRegionsAsync([{ x: rect.x, y: rect.y, w: rect.width, h: rect.height }], includeBackground);
         return buf ?? new Uint8Array(rect.width * rect.height * 4);
       },
       applyLayerTiles: (layerId, tiles) => {
@@ -7398,9 +7530,9 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         const y0 = Math.max(0, r.y);
         const x1 = Math.min(canvas.width, r.x + r.w);
         const y1 = Math.min(canvas.height, r.y + r.h);
-        if (x1 > x0 && y1 > y0) te.clearRegion(item.renderTexture, x0, y0, x1 - x0, y1 - y0);
+        if (x1 > x0 && y1 > y0) lm.clearLayerRegion(layer.id, x0, y0, x1 - x0, y1 - y0);
       }
-      te.stampCanvas(item.renderTexture, next.canvas, next.x, next.y);
+      lm.stampCanvasOnLayer(layer.id, next.canvas, next.x, next.y);
     });
     lm.syncPingPong(layer.id);
     const createdFlag = editing.layerId ? undefined : { model: layer };
@@ -8072,7 +8204,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         <ViewportConsumer subscribe={subscribeViewport} getSnapshot={getViewportSnapshot}>
           {(viewportState) => {
             const view = viewportRef.current;
-            const displayScale = view?.getDisplayScale() ?? getTargetDisplayResolution();
+            const displayScale = view?.getDisplayScale() ?? getTargetDisplayResolution(canvas?.width, canvas?.height);
             // At actual size Pixi can align the rendered position to the physical pixel grid.
             const position = view?.canvasContainer.position;
             return (
@@ -9276,7 +9408,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
               {(viewportState) => (
                 <ViewportToolbar
                   viewportState={viewportState}
-                  displayScale={viewportRef.current?.getDisplayScale() ?? getTargetDisplayResolution()}
+                  displayScale={viewportRef.current?.getDisplayScale() ?? getTargetDisplayResolution(canvas?.width, canvas?.height)}
                   width={canvas.width}
                   height={canvas.height}
                   onZoomIn={() => zoomAtViewCenter(1.25)}

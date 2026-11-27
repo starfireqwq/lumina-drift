@@ -6705,7 +6705,8 @@ console.log('ui-logic checks passed');
 {
   assert.equal(adjustmentScopeRenderResolution(4000, 3000), 1);
   const big = adjustmentScopeRenderResolution(10000, 8000);
-  assert.ok(big < 1 && Math.abs(10000 * 8000 * big * big - MAX_SCOPE_PIXELS) < 1);
+  assert.ok(big < 1 && 10000 * 8000 * big * big <= MAX_SCOPE_PIXELS);
+  assert.ok(Math.ceil(10000 * big) <= 4096 && Math.ceil(8000 * big) <= 4096);
   // A composite for the whole canvas also serves the view; a view composite only that same view
   assert.equal(adjustmentScopeIsFresh('k', 'full', 'k', 'view:1'), true);
   assert.equal(adjustmentScopeIsFresh('k', 'view:1', 'k', 'view:1'), true);

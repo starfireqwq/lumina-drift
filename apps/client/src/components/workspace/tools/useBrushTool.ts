@@ -436,7 +436,11 @@ export function useBrushTool(ctx: ToolContext) {
       const afterVersion = lm.getLayerVersion(layerId);
       const after = lm.readTilesAsync(layerId, dirtyCoords, 'after').then(compressTiles);
       lm.syncPingPong(layerId); // queued after the reads: the next stroke's baseline (frees the backups)
-      const compressed = Promise.all([before, after, ink?.then((tiles) => tiles && compressTiles(tiles))]);
+      const compressed = Promise.all([before, after, ink?.then(async (tiles) => {
+        if (!tiles) return undefined;
+        const packed = tiles.filter((tile) => tile.compression !== 'raw');
+        return packed.concat(await compressTiles(tiles.filter((tile) => tile.compression === 'raw')));
+      })]);
       unsentRef.current++;
       notifyStrokeSettled();
       emitChainRef.current = emitChainRef.current
@@ -536,14 +540,13 @@ export function useBrushTool(ctx: ToolContext) {
 
   /** Sample the visible composite canvas at a point without changing tool state; returns #RRGGBB or null if transparent. */
   const sampleColorAt = async (local: Point): Promise<string | null> => {
-    const { canvas, layerManagerRef, tileEngineRef } = ctx;
+    const { canvas, layerManagerRef } = ctx;
     const lm = layerManagerRef.current;
-    const te = tileEngineRef.current;
-    if (!canvas || !lm || !te) return null;
+    if (!canvas || !lm) return null;
     const ix = Math.max(0, Math.min(canvas.width - 1, Math.round(local.x)));
     const iy = Math.max(0, Math.min(canvas.height - 1, Math.round(local.y)));
     try {
-      const [px] = await te.readRegionsAsync(lm.getCompositeTexture(true), [{ x: ix, y: iy, w: 1, h: 1 }]);
+      const [px] = await lm.readCompositeRegionsAsync([{ x: ix, y: iy, w: 1, h: 1 }], true);
       const [pr, pg, pb, a] = px;
       if (!a) return null;
       return '#' + [pr, pg, pb].map((c) => Math.min(255, Math.round((c * 255) / a)).toString(16).padStart(2, '0')).join('').toUpperCase();
@@ -554,14 +557,12 @@ export function useBrushTool(ctx: ToolContext) {
 
   /** Sample the visible canvas, including layers underneath an empty active layer. */
   const pickColor = (local: Point, layer: LayerModel) => {
-    const { canvas, layerManagerRef, tileEngineRef } = ctx;
+    const { canvas, layerManagerRef } = ctx;
     const lm = layerManagerRef.current;
     if (!canvas || !lm?.getLayerItem(layer.id)) return;
     const ix = Math.max(0, Math.min(canvas.width - 1, Math.round(local.x)));
     const iy = Math.max(0, Math.min(canvas.height - 1, Math.round(local.y)));
-    const te = tileEngineRef.current;
-    if (!te) return;
-    void te.readRegionsAsync(lm.getCompositeTexture(true), [{ x: ix, y: iy, w: 1, h: 1 }]).then(([px]) => applyPick(px)).catch(() => {
+    void lm.readCompositeRegionsAsync([{ x: ix, y: iy, w: 1, h: 1 }], true).then(([px]) => { if (px) applyPick(px); }).catch(() => {
       // unreadable texture (context lost): keep the colour
     });
   };

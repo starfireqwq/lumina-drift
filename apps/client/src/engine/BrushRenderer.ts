@@ -38,6 +38,7 @@ import {
 } from '@atelier/shared';
 import { RulerManager } from './RulerManager';
 import { wrapCoord } from './wrapAround';
+import { detectConstrainedDevice, queryMaxTextureSize } from './gpuProfile';
 
 export type AntiAliasLevel = 'none' | 'weak' | 'medium' | 'strong';
 export type EraserMode = 'hard' | 'soft';
@@ -294,6 +295,7 @@ export class BrushRenderer {
   private scratchRT: RenderTexture | null = null;
   private airbrushRT: RenderTexture | null = null;
   private readonly supportsFloatColorBuffer: boolean;
+  private readonly scratchLimit: number;
   private dualRT: RenderTexture | null = null;
   private dualBatch = new Container();
   private dualSpritePool: Sprite[] = [];
@@ -308,6 +310,7 @@ export class BrushRenderer {
 
   constructor(renderer: Renderer) {
     this.renderer = renderer;
+    this.scratchLimit = Math.min(queryMaxTextureSize(renderer), detectConstrainedDevice().isConstrained ? 1024 : AIRBRUSH_SCRATCH_LIMIT);
     const gl = (renderer as { gl?: WebGLRenderingContext | WebGL2RenderingContext }).gl;
     this.supportsFloatColorBuffer = !!gl?.getExtension('EXT_color_buffer_float');
     this.getOrCreateProceduralTipTexture(0.8);
@@ -379,8 +382,8 @@ export class BrushRenderer {
 
   /** A render texture at least w×h, reused between batches */
   private ensureRT(rt: RenderTexture | null, w: number, h: number, format: 'rgba8unorm' | 'rgba16float' = 'rgba8unorm'): RenderTexture {
-    const W = Math.ceil(w / 128) * 128;
-    const H = Math.ceil(h / 128) * 128;
+    const W = Math.min(this.scratchLimit, Math.ceil(w / 128) * 128);
+    const H = Math.min(this.scratchLimit, Math.ceil(h / 128) * 128);
     if (!rt) return RenderTexture.create({ width: W, height: H, resolution: 1, format });
     if (rt.width < w || rt.height < h) rt.resize(Math.max(rt.width, W), Math.max(rt.height, H));
     return rt;
@@ -1147,12 +1150,12 @@ export class BrushRenderer {
     if (this.stampBatch.children.length > 0) {
       // The box of what was really stamped (symmetry adds mirrored dabs outside the input's box)
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      const regions: Rect[] | undefined = wrappedPoints || (isSymmetry && useScratch) ? [] : undefined;
+      const regions: Rect[] = [];
       for (const c of this.stampBatch.children as Sprite[]) {
         const r = Math.max(c.width, c.height) * 0.75 + 2; // covers any rotation
         const x = c.roundPixels ? c.x + c.width / 2 : c.x;
         const y = c.roundPixels ? c.y + c.height / 2 : c.y;
-        regions?.push({ x: x - r, y: y - r, w: 2 * r, h: 2 * r });
+        regions.push({ x: x - r, y: y - r, w: 2 * r, h: 2 * r });
         x0 = Math.min(x0, x - r); x1 = Math.max(x1, x + r);
         y0 = Math.min(y0, y - r); y1 = Math.max(y1, y + r);
       }
@@ -1162,16 +1165,15 @@ export class BrushRenderer {
       const sbh = Math.max(1, Math.min(this.canvasHeight, Math.ceil(y1)) - sby);
       // Accumulate faint dabs before rounding to the layer's 8-bit channels. Repeatedly rounding
       // each dab cuts off its tail and creates visible bands where overlapping dabs cross a byte boundary.
-      const scratchFits = sbw <= AIRBRUSH_SCRATCH_LIMIT && sbh <= AIRBRUSH_SCRATCH_LIMIT;
-      const precise = explicitAirbrush && this.supportsFloatColorBuffer && (!isAlphaLocked || useScratch) &&
-        (scratchFits || Boolean(regions));
+      const scratchFits = sbw <= this.scratchLimit && sbh <= this.scratchLimit;
+      const precise = explicitAirbrush && this.supportsFloatColorBuffer && (!isAlphaLocked || useScratch);
       if (useScratch || precise) {
         const renderRegion = ({ x, y, w, h }: Rect) =>
           this.renderShaped(targetRT, x, y, w, h, textureDensity, dual, isEraser,
             Boolean(isAlphaLocked), needsSelectionClip, precise, wetEdges, regions);
-        if (regions && !scratchFits) {
+        if (!scratchFits) {
           // Opposite-edge copies can make the combined bounds cover the entire canvas.
-          const size = AIRBRUSH_SCRATCH_LIMIT;
+          const size = this.scratchLimit;
           const chunks = new Map<string, Rect>();
           for (const region of regions) {
             const right = Math.min(sbx + sbw, Math.ceil(region.x + region.w));

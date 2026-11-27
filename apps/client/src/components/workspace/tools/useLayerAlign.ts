@@ -226,7 +226,7 @@ export function useLayerAlign(ctx: ToolContext, deps: AlignDeps) {
 
           const removedIds = moved.map((m) => m.stroke.id);
           const shifted = moved.map((m) => shiftVectorStroke(m.stroke, m.dx, m.dy));
-          const res = ve.replaceStrokes(item.renderTexture, layer.id, removedIds, shifted);
+          const res = ve.replaceStrokes(ve.targetForLayer(lm, layer.id), layer.id, removedIds, shifted);
           lm.syncPingPong(layer.id);
 
           const now = Date.now();

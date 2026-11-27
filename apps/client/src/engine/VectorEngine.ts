@@ -1,6 +1,7 @@
 import { RenderTexture } from 'pixi.js';
 import {
   adjustVectorStrokeWidth,
+  compressTileBuffer,
   computeStrokeBounds,
   eraseStrokePartial,
   eraseStrokeToIntersection,
@@ -14,6 +15,9 @@ import {
   VectorStroke,
 } from '@atelier/shared';
 import { TileEngine } from './TileEngine';
+import type { LayerManager } from './LayerManager';
+
+type VectorTarget = RenderTexture | { manager: LayerManager; layerId: string };
 
 /** What a vector edit changed: strokes taken out, strokes put in, and the layer tiles before/after. */
 export interface VectorEditResult {
@@ -107,6 +111,42 @@ export class VectorEngine {
     this.canvasHeight = height;
   }
 
+  public targetForLayer(manager: LayerManager, layerId: string): VectorTarget {
+    return manager.allowFullCanvasTextures ? manager.getLayerItem(layerId)!.renderTexture : { manager, layerId };
+  }
+
+  private extractTiles(target: VectorTarget, coords: TileCoord[]): TileData[] {
+    if (target instanceof RenderTexture) return this.tileEngine.extractTilesBatch(target, coords, 'lz4');
+    const { tileSize } = this.tileEngine;
+    return coords.map(({ col, row }) => {
+      const width = Math.min(tileSize, this.canvasWidth - col * tileSize);
+      const height = Math.min(tileSize, this.canvasHeight - row * tileSize);
+      const pixels = target.manager.readTileSync(target.layerId, col, row, 'after') ?? new Uint8Array(width * height * 4);
+      const data = compressTileBuffer(pixels);
+      return { col, row, width, height, ...data, byteLength: data.data.byteLength };
+    });
+  }
+
+  private readRegion(target: VectorTarget, x: number, y: number, w: number, h: number): Uint8Array {
+    if (target instanceof RenderTexture) return this.tileEngine.readRegion(target, x, y, w, h);
+    const result = new Uint8Array(w * h * 4);
+    const { tileSize } = this.tileEngine;
+    for (const { col, row } of this.tileEngine.getDirtyTilesForBounds(x, y, x + w, y + h)) {
+      const pixels = target.manager.readTileSync(target.layerId, col, row, 'after');
+      if (!pixels) continue;
+      const left = col * tileSize;
+      const top = row * tileSize;
+      const width = Math.min(tileSize, this.canvasWidth - left);
+      const x0 = Math.max(x, left);
+      const right = Math.min(x + w, left + width);
+      for (let py = Math.max(y, top); py < Math.min(y + h, top + tileSize); py++) {
+        const offset = ((py - top) * width + x0 - left) * 4;
+        result.set(pixels.subarray(offset, offset + (right - x0) * 4), ((py - y) * w + x0 - x) * 4);
+      }
+    }
+    return result;
+  }
+
   public getStrokes(layerId: string): VectorStroke[] {
     return this.layerStrokes.get(layerId) || [];
   }
@@ -139,7 +179,7 @@ export class VectorEngine {
    * adds to layer, rasterizes to target RenderTexture and extracts LZ4 dirty tiles
    */
   public commitVectorStroke(
-    targetRT: RenderTexture,
+    targetRT: VectorTarget,
     layerId: string,
     points: Array<{ x: number; y: number; pressure?: number }>,
     props: {
@@ -171,13 +211,13 @@ export class VectorEngine {
    * composited: rebuilding tiles from the vector list alone wiped raster paint in them.
    */
   public addPreparedStroke(
-    targetRT: RenderTexture,
+    targetRT: VectorTarget,
     layerId: string,
     stroke: VectorStroke
   ): { stroke: VectorStroke; beforeTiles: TileData[]; dirtyTiles: TileData[]; bounds: VectorBoundingBox } {
     const { bounds } = stroke;
     const coords = this.tileEngine.getDirtyTilesForBounds(bounds.minX, bounds.minY, bounds.maxX, bounds.maxY);
-    const beforeTiles = this.tileEngine.extractTilesBatch(targetRT, coords, 'lz4');
+    const beforeTiles = this.extractTiles(targetRT, coords);
     this.addStroke(layerId, stroke);
     const dirtyTiles = this.stampStrokeAndExtractTiles(targetRT, stroke, coords);
     return { stroke, beforeTiles, dirtyTiles, bounds };
@@ -185,7 +225,7 @@ export class VectorEngine {
 
   /** Vector Eraser 'entire' (整條線段消除): removes every stroke the eraser circle touches. */
   public eraseEntireStrokes(
-    targetRT: RenderTexture,
+    targetRT: VectorTarget,
     layerId: string,
     eraserX: number,
     eraserY: number,
@@ -198,7 +238,7 @@ export class VectorEngine {
   }
 
   public erasePartialStrokes(
-    targetRT: RenderTexture,
+    targetRT: VectorTarget,
     layerId: string,
     eraserX: number,
     eraserY: number,
@@ -224,7 +264,7 @@ export class VectorEngine {
 
   /** Vector Eraser 'intersect' (交點消除): erases the touched segment up to its intersections. */
   public eraseToIntersections(
-    targetRT: RenderTexture,
+    targetRT: VectorTarget,
     layerId: string,
     eraserX: number,
     eraserY: number,
@@ -250,7 +290,7 @@ export class VectorEngine {
 
   /** 修線工具: 捏線 (Pinch & Reshape) */
   public pinchStrokes(
-    targetRT: RenderTexture,
+    targetRT: VectorTarget,
     layerId: string,
     center: { x: number; y: number },
     dragDelta: { x: number; y: number },
@@ -261,7 +301,7 @@ export class VectorEngine {
 
   /** 修線工具: 線寬調整 (加粗 / 變細) */
   public adjustStrokesWidth(
-    targetRT: RenderTexture,
+    targetRT: VectorTarget,
     layerId: string,
     center: { x: number; y: number },
     brushRadius: number = 32,
@@ -271,7 +311,7 @@ export class VectorEngine {
   }
 
   /** Node editing / pen tool: swaps whole strokes (by id) for new versions. */
-  public replaceStrokes(targetRT: RenderTexture, layerId: string, removedIds: string[], added: VectorStroke[]): VectorEditResult {
+  public replaceStrokes(targetRT: VectorTarget, layerId: string, removedIds: string[], added: VectorStroke[]): VectorEditResult {
     const list = this.getStrokes(layerId);
     const removed = list.filter((s) => removedIds.includes(s.id));
     if (removed.length === 0 && added.length === 0) return EMPTY_EDIT;
@@ -280,7 +320,7 @@ export class VectorEngine {
   }
 
   private mapStrokes(
-    targetRT: RenderTexture,
+    targetRT: VectorTarget,
     layerId: string,
     center: { x: number; y: number },
     radius: number,
@@ -311,7 +351,7 @@ export class VectorEngine {
    * tiles here used to erase the colour next to the line along with it.
    */
   private applyEdit(
-    targetRT: RenderTexture,
+    targetRT: VectorTarget,
     layerId: string,
     nextList: VectorStroke[],
     removed: VectorStroke[],
@@ -333,37 +373,56 @@ export class VectorEngine {
     if (!(w > 0 && h > 0)) return { ...EMPTY_EDIT, removed, added };
 
     const coords = this.tileEngine.getDirtyTilesForBounds(x, y, x + w, y + h);
-    const beforeTiles = this.tileEngine.extractTilesBatch(targetRT, coords, 'lz4');
-
     // 1. Where the edited lines were / will be (opaque, slightly wider for the AA fringe)
-    const mask = this.paint(w, h, x, y, footprint.map((s) => ({
+    const maskStrokes = footprint.map((s) => ({
       ...s,
       color: '#ffffff',
       opacity: 1,
       anchors: s.anchors.map((a) => ({ ...a, width: a.width + FOOTPRINT_PAD * 2 })),
-    })));
-    // 2. Every vector that is still on the layer, drawn over that area
-    const redraw = this.paint(w, h, x, y, nextList.filter((s) =>
-      s.bounds.maxX >= x && s.bounds.minX <= x + w && s.bounds.maxY >= y && s.bounds.minY <= y + h));
-
-    // 3. Layer pixels (premultiplied). What was under the old line is unknown, so it is healed
-    // from the surrounding base pixels: a fill under an erased line closes up, empty stays empty.
-    const px = this.tileEngine.readRegion(targetRT, x, y, w, h);
-    const healed = healUnderMask(px, mask, redraw, w, h);
-    for (let i = 0; i < px.length; i += 4) {
-      const m = mask[i + 3] / 255;
-      if (m === 0) continue;
-      const sa = (redraw[i + 3] / 255) * m;
-      for (let c = 0; c < 4; c++) {
-        const base = healed[i + c] * m + px[i + c] * (1 - m);
-        const top = c === 3 ? 255 : redraw[i + c];
-        px[i + c] = Math.round(top * sa + base * (1 - sa));
+    }));
+    const edit = (left: number, top: number, width: number, height: number) => {
+      const mask = this.paint(width, height, left, top, maskStrokes);
+      const redraw = this.paint(width, height, left, top, nextList.filter((s) =>
+        s.bounds.maxX >= left && s.bounds.minX <= left + width && s.bounds.maxY >= top && s.bounds.minY <= top + height));
+      const pixels = this.readRegion(targetRT, left, top, width, height);
+      const healed = healUnderMask(pixels, mask, redraw, width, height);
+      for (let i = 0; i < pixels.length; i += 4) {
+        const m = mask[i + 3] / 255;
+        if (m === 0) continue;
+        const sa = (redraw[i + 3] / 255) * m;
+        for (let c = 0; c < 4; c++) {
+          const base = healed[i + c] * m + pixels[i + c] * (1 - m);
+          const top = c === 3 ? 255 : redraw[i + c];
+          pixels[i + c] = Math.round(top * sa + base * (1 - sa));
+        }
       }
+      return pixels;
+    };
+    const beforeTiles = this.extractTiles(targetRT, coords);
+    const bounds = { minX: x, minY: y, maxX: x + w, maxY: y + h };
+    if (targetRT instanceof RenderTexture) {
+      this.tileEngine.writeRegion(targetRT, x, y, w, h, edit(x, y, w, h));
+      return { removed, added, beforeTiles, dirtyTiles: this.extractTiles(targetRT, coords), bounds };
     }
-    this.tileEngine.writeRegion(targetRT, x, y, w, h, px);
-
-    const dirtyTiles = this.tileEngine.extractTilesBatch(targetRT, coords, 'lz4');
-    return { removed, added, beforeTiles, dirtyTiles, bounds: { minX: x, minY: y, maxX: x + w, maxY: y + h } };
+    const dirtyTiles = beforeTiles.map((tile) => {
+      const tx = tile.col * this.tileEngine.tileSize;
+      const ty = tile.row * this.tileEngine.tileSize;
+      const pad = 96; // healUnderMask grows at most 96 pixels from the mask edge
+      const left = Math.max(0, tx - pad);
+      const top = Math.max(0, ty - pad);
+      const width = Math.min(this.canvasWidth, tx + tile.width + pad) - left;
+      const height = Math.min(this.canvasHeight, ty + tile.height + pad) - top;
+      const pixels = edit(left, top, width, height);
+      const raw = new Uint8Array(tile.width * tile.height * 4);
+      for (let row = 0; row < tile.height; row++) {
+        const from = ((ty - top + row) * width + tx - left) * 4;
+        raw.set(pixels.subarray(from, from + tile.width * 4), row * tile.width * 4);
+      }
+      const packed = compressTileBuffer(raw);
+      return { ...tile, ...packed, byteLength: packed.data.byteLength };
+    });
+    targetRT.manager.applyTiles(targetRT.layerId, dirtyTiles);
+    return { removed, added, beforeTiles, dirtyTiles, bounds };
   }
 
   /** Rasterizes strokes into a w×h patch at (x, y); returns straight-alpha RGBA. */
@@ -381,7 +440,7 @@ export class VectorEngine {
    * Draws one stroke on top of the layer's existing pixels and returns the resulting tiles
    */
   private stampStrokeAndExtractTiles(
-    targetRT: RenderTexture,
+    targetRT: VectorTarget,
     stroke: VectorStroke,
     coords: TileCoord[]
   ): TileData[] {
@@ -392,6 +451,21 @@ export class VectorEngine {
     if (w <= 0 || h <= 0) return [];
 
     const patch = document.createElement('canvas');
+    if (!(targetRT instanceof RenderTexture)) {
+      const size = 512;
+      for (let py = y; py < y + h; py += size) {
+        for (let px = x; px < x + w; px += size) {
+          patch.width = Math.min(size, x + w - px);
+          patch.height = Math.min(size, y + h - py);
+          const ctx = patch.getContext('2d')!;
+          ctx.translate(-px, -py);
+          renderVectorStrokeToCanvas(ctx, stroke);
+          targetRT.manager.stampCanvasOnLayer(targetRT.layerId, patch, px, py);
+        }
+      }
+      patch.width = patch.height = 0;
+      return this.extractTiles(targetRT, coords);
+    }
     patch.width = w;
     patch.height = h;
     const ctx = patch.getContext('2d')!;
@@ -399,6 +473,6 @@ export class VectorEngine {
     renderVectorStrokeToCanvas(ctx, stroke);
 
     this.tileEngine.stampCanvas(targetRT, patch, x, y);
-    return this.tileEngine.extractTilesBatch(targetRT, coords, 'lz4');
+    return this.extractTiles(targetRT, coords);
   }
 }

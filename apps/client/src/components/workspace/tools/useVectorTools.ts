@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { evaluatePressureCurve, hitTestVectorStroke, LayerModel, TileData, ToolType, VectorEraserMode, VectorStroke, VectorWidthMode } from '@atelier/shared';
 import { VectorEditResult } from '../../../engine/VectorEngine';
-import type { PixiLayerItem } from '../../../engine/LayerManager';
 import { RulerManager } from '../../../engine/RulerManager';
 import { startTabletStroke, type TabletStroke } from '../../../engine/tabletInput';
 import { buildPenStroke, deleteAnchor, hitTestNodes, moveAnchor, moveHandle, PenPoint, toggleCorner, VectorHit } from '../../../engine/vectorEditing';
@@ -162,7 +161,7 @@ export function useVectorTools(ctx: ToolContext) {
     const props = brushPropsRef.current || brushProps;
     const stroke = buildPenStroke(layer.id, points, bezierMode, { color: props.color, width: props.size, opacity: props.opacity }, closed);
     if (!stroke) return;
-    const res = vectorEngineRef.current!.addPreparedStroke(item.renderTexture, layer.id, stroke);
+    const res = vectorEngineRef.current!.addPreparedStroke(vectorEngineRef.current!.targetForLayer(layerManagerRef.current!, layer.id), layer.id, stroke);
     scopedUndoRef.current.push({
       opId: `op_vecpen_${Date.now()}`,
       userId: userRef.current?.id || 'guest',
@@ -226,7 +225,7 @@ export function useVectorTools(ctx: ToolContext) {
   const replaceVectorStroke = (layer: LayerModel, oldId: string, next: VectorStroke | null, desc: string) => {
     const item = editableVectorTarget(layer);
     if (!item) return;
-    const res = vectorEngineRef.current!.replaceStrokes(item.renderTexture, layer.id, [oldId], next ? [next] : []);
+    const res = vectorEngineRef.current!.replaceStrokes(vectorEngineRef.current!.targetForLayer(layerManagerRef.current!, layer.id), layer.id, [oldId], next ? [next] : []);
     commitVectorEditResult(layer.id, res, desc);
     finishVectorGesture();
   };
@@ -369,9 +368,9 @@ export function useVectorTools(ctx: ToolContext) {
   const erasesVectors = (tool: ToolType, layer: LayerModel) =>
     tool === 'vector_eraser' || (layer.layerType === 'vector' && (tool === 'eraser' || brushProps.isEraser));
 
-  const eraseAt = (item: PixiLayerItem, layer: LayerModel, local: Point, size = brushProps.size) => {
+  const eraseAt = (layer: LayerModel, local: Point, size = brushProps.size) => {
     const engine = vectorEngineRef.current!;
-    const args = [item.renderTexture, layer.id, local.x, local.y, size] as const;
+    const args = [engine.targetForLayer(layerManagerRef.current!, layer.id), layer.id, local.x, local.y, size] as const;
     let res: VectorEditResult;
     switch (vectorEraserMode) {
       case 'intersect': res = engine.eraseToIntersections(...args); break;
@@ -390,10 +389,10 @@ export function useVectorTools(ctx: ToolContext) {
     lastVectorPointerPosRef.current = { x: local.x, y: local.y };
     const tool = ctx.currentTool;
     if (tailSize !== undefined || erasesVectors(tool, layer)) {
-      eraseAt(item, layer, local, tailSize);
+      eraseAt(layer, local, tailSize);
     } else if (tool === 'vector_width') {
       const delta = vectorWidthMode === 'thicken' ? 2.0 : -2.0;
-      commitVectorEditResult(layer.id, engine.adjustStrokesWidth(item.renderTexture, layer.id, local, brushProps.size, delta), '向量線寬微調');
+      commitVectorEditResult(layer.id, engine.adjustStrokesWidth(engine.targetForLayer(layerManagerRef.current!, layer.id), layer.id, local, brushProps.size, delta), '向量線寬微調');
     } else if (tool !== 'vector_reshape') {
       tabletStrokeRef.current?.finish();
       const tablet = startTabletStroke(e, false);
@@ -427,18 +426,18 @@ export function useVectorTools(ctx: ToolContext) {
     if (!item) return true;
     const tool = ctx.currentTool;
     if (tailSize !== undefined || erasesVectors(tool, layer)) {
-      eraseAt(item, layer, local, tailSize);
+      eraseAt(layer, local, tailSize);
     } else if (tool === 'vector_reshape') {
       const last = lastVectorPointerPosRef.current;
       if (last) {
-        const res = engine.pinchStrokes(item.renderTexture, layer.id, local, { x: local.x - last.x, y: local.y - last.y }, brushProps.size);
+        const res = engine.pinchStrokes(engine.targetForLayer(layerManagerRef.current!, layer.id), layer.id, local, { x: local.x - last.x, y: local.y - last.y }, brushProps.size);
         commitVectorEditResult(layer.id, res, '向量修線捏線');
         ctx.requestRender();
       }
       lastVectorPointerPosRef.current = { x: local.x, y: local.y };
     } else if (tool === 'vector_width') {
       const delta = vectorWidthMode === 'thicken' ? 1.5 : -1.5;
-      commitVectorEditResult(layer.id, engine.adjustStrokesWidth(item.renderTexture, layer.id, local, brushProps.size, delta), '向量線寬微調');
+      commitVectorEditResult(layer.id, engine.adjustStrokesWidth(engine.targetForLayer(layerManagerRef.current!, layer.id), layer.id, local, brushProps.size, delta), '向量線寬微調');
       ctx.requestRender();
     } else {
       // Vector pen: snapped to the active ruler (parallel, perspective, concentric)
@@ -468,7 +467,7 @@ export function useVectorTools(ctx: ToolContext) {
       const allBeforeTilesMap = new Map<string, TileData>();
       const createdStrokes: VectorStroke[] = [];
       for (const traj of symmetryTrajectories(currentVectorPointsRef.current)) {
-        const res = engine.commitVectorStroke(item.renderTexture, layer.id, traj, { color: brushProps.color, baseWidth: brushProps.size, opacity: brushProps.opacity });
+        const res = engine.commitVectorStroke(engine.targetForLayer(layerManagerRef.current!, layer.id), layer.id, traj, { color: brushProps.color, baseWidth: brushProps.size, opacity: brushProps.opacity });
         if (res && res.dirtyTiles.length > 0) {
           createdStrokes.push(res.stroke);
           for (const bt of res.beforeTiles) {

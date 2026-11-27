@@ -408,6 +408,8 @@ export class TileAtlas {
     return {
       pages,
       slots,
+      capacitySlots,
+      pageBytes,
       bytes: pages * pageBytes + pooledBytes,
       activeBytes: pages * pageBytes,
       pooledPages,

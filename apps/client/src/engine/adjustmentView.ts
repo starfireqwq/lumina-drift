@@ -1,6 +1,7 @@
 import type { RenderTexture, Sprite } from 'pixi.js';
 import type { AdjustmentScope } from '@atelier/shared';
 import type { AdjustmentFilter } from './adjustmentFilter';
+import { computeSafeTextureScale } from './gpuProfile';
 
 /** LayerManager's live state of one adjustment layer (see AdjustmentFilter) */
 export interface AdjustmentView {
@@ -23,9 +24,10 @@ export interface AdjustmentView {
 /** Scope composites of bigger canvases are rendered at a lower resolution (≈ 64 MB per texture at most) */
 export const MAX_SCOPE_PIXELS = 16_777_216;
 
-export function adjustmentScopeRenderResolution(width: number, height: number): number {
-  const pixels = width * height;
-  return pixels > MAX_SCOPE_PIXELS ? Math.sqrt(MAX_SCOPE_PIXELS / pixels) : 1;
+export function adjustmentScopeRenderResolution(width: number, height: number, maxTextureSize = 4096, maxPixels = MAX_SCOPE_PIXELS): number {
+  const { scale } = computeSafeTextureScale(width, height, maxTextureSize, maxPixels);
+  return Math.ceil(width * scale) <= maxTextureSize && Math.ceil(height * scale) <= maxTextureSize
+    ? scale : scale * (1 - Number.EPSILON);
 }
 
 /**
