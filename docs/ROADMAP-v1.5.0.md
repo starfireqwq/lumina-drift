@@ -18,7 +18,7 @@
 | **Phase 3** | **P0-C** | 筆刷引擎 v3（雙筆刷、色彩動態、濕邊／顏料混色、多筆尖輪播與 `.sut`/`.brushset` 深度還原） | `v1.5.0-beta.1` | `/teamwork` | `已完成` | 2026-11-27 / `a1c2283`, `e140c1a` |
 | **Phase 4** | **P1-A** | 非破壞性圖層樣式（Layer Effects：邊界／水彩邊界／陰影／發光）＋快速遮色片（Quick Mask）與進階色域選取 | `v1.5.0-beta.2` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-27 / `b128801`, `4767853`, `80b33bb` |
 | **Phase 5** | **P1-B** | 多人繪茶 2.0（跟隨繪師視角、分格認領／接龍格線、房間共用色票盤與參考圖同步） | `v1.5.0-rc.1` | `/teamwork` | `已完成` | 2026-11-27 / `488335e`, `6d582ea`, `d9a19e2` |
-| **Phase 6** | **P2** | 專業製作與效能收尾（動畫時間軸音訊波形＋混音匯出、真 CMYK 4 通道分色匯出、大畫布 Tile LRU 效能優化） | `v1.5.0` | `/teamwork` 或 `/swarm` | `待啟動` | — |
+| **Phase 6** | **P2** | 專業製作與效能收尾（動畫時間軸音訊波形＋混音匯出、真 CMYK 4 通道分色匯出、大畫布 Tile LRU 效能優化） | `v1.5.0` | `/teamwork` 或 `/swarm` | `已完成` | 2026-11-27 / `87d11bc`, `e4f6bed` |
 
 ---
 
@@ -247,7 +247,30 @@
 > **目標**：補齊動畫音訊混音輸出、商業印刷真 CMYK 分色與超大畫布穩定度。
 
 #### 任務清單
-- [ ] **6.1 動畫時間軸音訊波形渲染與 MP4/WebM 音軌混音匯出**
-- [ ] **6.2 真 CMYK 4 通道分色匯出（TIFF / PSD）＋GCR/UCR 黑版設定與總墨量警告**
-- [ ] **6.3 大畫布（4K～8K+）Tile GPU 紋理 LRU 池化與提交管線效能壓測優化**
-- [ ] **6.4 `v1.5.0` 全功能回歸測試與發布文件整理**
+- [x] **6.1 動畫時間軸音訊波形渲染與 MP4/WebM 音軌混音匯出**
+  - 於 `packages/shared/src/animation/audio.ts` 補齊 `sliceWaveformPeaksForClip`（精準對應 `trimStartSec`、`endFrame`、音量縮放與靜音幽靈波形）、`planExportAudioMix`（匯出區間多軌排程與靜音／範圍過濾）與確定性立體聲取樣率重取樣混音器 `mixPcmChannels`（具 `tanh` 軟限幅保護）。
+  - 新增 `apps/client/src/components/AudioWaveformCanvas.tsx`（高 DPI `<canvas>` 真實波形繪製、中心基準線、音量衰減與靜音殘影、播放頭進度高亮），整合至 `AnimationTimelineBar.tsx` 並支援時間軸上直接橫向拖曳音軌調整 `startFrame` 偏移、行內音量顯示與靜音切換。
+  - 於 `AudioTrackEngine.ts`、`videoExport.ts`、`ExportEngine.ts` 與 `AnimationExportModal.tsx` 實作離線立體聲 PCM 混音與 WebCodecs `AudioEncoder` + `mp4-muxer`（AAC／Opus）／`webm-muxer`（Opus `A_OPUS`）音軌封裝，同時補齊 MediaRecorder 相容備援、MP4/WebM 容器切換、包含音軌開關，以及無音軌／未關聯／裝置不支援編碼器時之自動降級純影像匯出。
+- [x] **6.2 真 CMYK 4 通道分色匯出（TIFF / PSD）＋GCR/UCR 黑版設定與總墨量警告**
+  - 新增 `packages/shared/src/color/cmyk-separation.ts`：實作真 CMYK 4 通道分色演算法（支援 Japan Color 2001 Coated 300%、FOGRA39 330%、US Web Coated SWOP 300% 與自訂參數）、**GCR（灰成分替換）與 UCR（底色去除）**黑版生成模式、黑版強度／起始點／最大 K 值控制，以及**總墨量（TAC）分析、超限自動縮放與超限熱點預覽遮罩**。
+  - 新增 `packages/shared/src/color/cmyk-export.ts`：實作無損 PackBits RLE 壓縮的 **Baseline TIFF 6.0 真 4 通道 CMYK 編碼器**（`PhotometricInterpretation = 5`、`SamplesPerPixel = 4`、`BitsPerSample = [8,8,8,8]`、`InkSet = 1`、DPI 與可選 ICC Tag `34675`）與 **Adobe Photoshop 真 4 通道 CMYK PSD 編碼器**（`8BPS`、`ColorMode = 4`、Adobe 反相墨量慣例、保留各點陣圖層與混合模式、DPI `0x03ED` 與可選 ICC `0x040F`，並通過第三方 `ag-psd` `readPsd` 交叉驗證）。
+  - 於 `ExportEngine.ts` 與 `ExportModal.tsx` 新增 `cmyk_tiff`（`.tif`）與 `cmyk_psd`（`.psd`）匯出格式及即時 TAC 超限預覽畫布與警告橫幅，並補齊四語系翻譯。
+- [x] **6.3 大畫布（4K～8K+）Tile GPU 紋理 LRU 池化與提交管線效能壓測優化**
+  - 新增 `packages/shared/src/tiles/tile-lru-pool.ts`：實作確定性 O(1) `TileGpuLruPool`（雙指標上限：Tile 數量 + VRAM 位元組、85% 低水位遲滯防抖動、優先淘汰零 `readPixels` 的 Clean 離屏 Tile 再依自適應批次上限淘汰 Dirty Tile，且嚴格保護視窗內與釘選 Tile）及依畫布解析度（4K / 8K+）與記憶體動態計算預算的 `computeRecommendedGpuTileBudget`。
+  - 升級 `TileAtlas.ts` 新增閒置 Atlas 頁面溫熱重用池（`pagePool`、`setMaxPooledPages`、`trimPool` 與碎片率／命中率統計），避免 4K～8K+ 縮放平移期間反覆銷毀／重建 17.8 MB WebGL 紋理頁。
+  - 升級 `LayerManager.ts` 與 `TileEngine.ts`：整合動態 4K/8K 紋理與位元組上限、Clean-first LRU 淘汰與 `setGpuTileBudget` / `enforceTileLruBudgetNow`、自適應 PBO 池上限（4K+ 提升至 96）與 `getTextureStats()` / `getPipelineStats()` 監控指標。
+- [x] **6.4 `v1.5.0` 全功能回歸測試與發布文件整理**
+  - 補齊四語系（`zh-TW` / `zh-CN` / `en-US` / `ja-JP`）新增 25 個 Phase 6 翻譯鍵並通過 `i18n-coverage.check.ts`（各 2514 keys 100% 齊全）。
+  - 撰寫 `apps/client/scripts/v15-phase6-pro-perf.checks.ts` 掛載進 `ui-logic.check.ts`，以及雙 Session 隔離式桌面煙霧測試 `apps/client/scripts/v15-phase6-pro-perf-electron-smoke.check.cjs`。
+  - 整理 [docs/CHANGELOG.md](./CHANGELOG.md) 與 [docs/CHANGELOG-v1.4.0-to-v1.5.0.md](./CHANGELOG-v1.4.0-to-v1.5.0.md) 完整發布說明。
+
+#### 實作完成紀錄（2026-11-27）
+- **Commit**：`87d11bc`（`@atelier/shared` 音訊波形／PCM 混音、真 CMYK 分色與 TIFF/PSD 編碼器、Tile GPU LRU 池核心）、`e4f6bed`（`@atelier/client` 時間軸波形畫布與 MP4/WebM 混音匯出、CMYK 匯出對話框與即時 TAC 警告、TileAtlas 頁面池與 LayerManager/TileEngine 優化、四語系與測試腳本），另含本筆 `docs(release)` 紀錄提交。
+- **實際驗證結果**：
+  - `i18n-coverage.check.ts`：通過（四語系 `zh-TW` / `zh-CN` / `en-US` / `ja-JP` 各 2514 keys 100% 齊全）。
+  - `ui-logic.check.ts`：通過（含 `v15-phase6-pro-perf.checks.ts` 的波形裁剪／立體聲重取樣混音／軟限幅、GCR vs UCR 分色、TAC 警告熱圖、TIFF 6.0 CMYK 無損 round-trip、CMYK PSD `ag-psd` 交叉解析驗證、以及 8K 5 圖層 50 波次 Tile LRU 壓測）。
+  - `pnpm -r build` 與 `pnpm --filter @atelier/client build:electron`：全數通過。
+  - `pnpm --filter @atelier/server test`：19 項後端整合測試全數通過。
+  - 隔離式 Electron 煙霧測試 `node apps/client/scripts/v15-phase6-pro-perf-electron-smoke.check.cjs`：通過（`0 console errors, 0 page errors`；Session 1 實測 6.1 音訊 WAV 匯入、68 柱 4340 px 真實波形畫布渲染、靜音切換、WebM 含音軌匯出 `18,999 B`，以及 6.2 CMYK TAC 215% 超限警告觸發、真 4 通道 CMYK TIFF `300,014 B` `Photometric=5/4ch` 與 CMYK PSD `126,026 B` `ColorMode=4/4ch` 匯出；Session 2 實測 6.3 4K `4096×4096` 畫布多筆刷繪製與視窗縮放後的 GPU Tile LRU 淘汰 `tiles 62 -> 30`, `coldTiles=28`, `lruEvictions=32`, `pboHits=71`）。
+- **備註**：本次執行期間 Codex CLI 達額度上限（至 2026-12-01 重置），已依交接指示由主代理直接完成實作、驗證與文件整理。
+- **下一步接續點**：`v1.5.0` 全數 6 個 Phase 皆已完成並於本地 `main` 分支驗證完畢；待使用者確認後，可進行版本號遞升（`1.4.0` → `1.5.0`）、建置多平台發布安裝包、建立 `v1.5.0` Git Tag 與推送至遠端發布。
