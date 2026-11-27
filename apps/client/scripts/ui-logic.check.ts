@@ -6787,6 +6787,7 @@ import { runDockPillChecks } from './dock-pill.checks';
 import { runV15Phase3BrushV3Checks } from './v15-phase3-brush-v3.checks';
 import { runV15Phase4EffectsSelectionChecks } from './v15-phase4-effects-selection.checks';
 import { runV15Phase5CollabV2Checks } from './v15-phase5-collab-v2.checks';
+import { runV15Phase6ProPerfChecks } from './v15-phase6-pro-perf.checks';
 
 {
   assert.deepEqual(Object.keys(ADJUSTMENT_KIND_ICONS), ADJUSTMENT_KINDS);
@@ -6846,3 +6847,6 @@ console.log('v1.5 Phase 4 layer effects, quick mask & color range checks passed'
 
 await runV15Phase5CollabV2Checks();
 console.log('v1.5 Phase 5 collab 2.0 (follow camera, grid slots, room swatches & reference board) checks passed');
+
+await runV15Phase6ProPerfChecks();
+console.log('v1.5 Phase 6 pro production & performance (audio waveform/mix, CMYK TIFF/PSD + TAC, 4K-8K tile LRU) checks passed');

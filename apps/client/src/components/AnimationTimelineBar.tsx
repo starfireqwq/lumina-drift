@@ -20,6 +20,7 @@ import {
   matchBezierPreset,
   normalizeAudioTrackMeta,
   resolveAudioClipFrameRange,
+  type AudioTrackMeta,
   type CelMark,
   type EvaluatedTransform,
   type KeyframeBezierPresetId,
@@ -34,6 +35,7 @@ import {
 } from 'lucide-react';
 import { AtelierModal, modalButton } from './AtelierModal';
 import { AnimationExportModal } from './AnimationExportModal';
+import { AudioWaveformCanvas } from './AudioWaveformCanvas';
 import { OverlayPresence } from './OverlayPresence';
 import { usePhoneLayout } from './workspace/dockStore';
 import { getUserColor } from '../utils/userColors';
@@ -179,6 +181,7 @@ interface AnimationTimelineBarProps {
   audioScrubEnabled?: boolean;
   onToggleAudioScrub?: () => void;
   onToggleAudioMute?: (layerId: string) => void;
+  onUpdateAudioTrack?: (layerId: string, patch: { name?: string; meta: AudioTrackMeta }) => void;
 }
 
 const TRACK_LABEL_WIDTH = 96;
@@ -227,7 +230,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
   liveKeyframeEval, showKeyframeHandles, onToggleKeyframeHandles, showMotionPath, onToggleMotionPath,
   cameraLayer = null, cameraWindowOpen = false, onToggleCameraWindow, cameraPreviewActive = false, onToggleCameraPreview,
   lightWindowOpen = false, onToggleLightWindow,
-  audioLayers = [], audioAssetSummaries = {}, audioWindowOpen = false, onToggleAudioWindow, audioScrubEnabled = false, onToggleAudioScrub, onToggleAudioMute,
+  audioLayers = [], audioAssetSummaries = {}, audioWindowOpen = false, onToggleAudioWindow, audioScrubEnabled = false, onToggleAudioScrub, onToggleAudioMute, onUpdateAudioTrack,
 }) => {
   const { t } = useI18n();
   const isPhone = usePhoneLayout();
@@ -1585,7 +1588,7 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 </div>
               )}
 
-              {/* Phase E3: Compact Audio waveform tracks */}
+              {/* Phase E3 / v1.5 Phase 6.1: Real-time Canvas Audio Waveform tracks with inline offset/volume/mute */}
               {audioLayers.map((audLayer) => {
                 const meta = normalizeAudioTrackMeta(audLayer.meta?.audio);
                 const clipRange = resolveAudioClipFrameRange(meta, fps);
@@ -1594,13 +1597,46 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                 const peaks = summary?.peaks ?? [];
                 const leftPx = clipRange.startFrame * CELL + 1;
                 const widthPx = Math.max(CELL - 2, clipRange.frameCount * CELL - 2);
-                const barCount = Math.max(8, Math.min(peaks.length || 24, Math.floor(widthPx / 3)));
+                const playheadProgress =
+                  time >= clipRange.startFrame && time <= clipRange.endFrame && clipRange.frameCount > 0
+                    ? (time - clipRange.startFrame + 0.5) / clipRange.frameCount
+                    : -1;
+
+                const startClipDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+                  if (!onUpdateAudioTrack || e.button !== 0) return;
+                  e.stopPropagation();
+                  const startX = e.clientX;
+                  const origStart = clipRange.startFrame;
+                  const origEnd = meta.endFrame;
+                  let dragged = false;
+                  const onMove = (ev: PointerEvent) => {
+                    const deltaFrames = Math.round((ev.clientX - startX) / CELL);
+                    if (deltaFrames === 0) return;
+                    dragged = true;
+                    const nextStart = Math.max(0, origStart + deltaFrames);
+                    const appliedDelta = nextStart - origStart;
+                    onUpdateAudioTrack(audLayer.id, {
+                      meta: normalizeAudioTrackMeta({
+                        ...meta,
+                        startFrame: nextStart,
+                        ...(origEnd !== undefined ? { endFrame: Math.max(nextStart, origEnd + appliedDelta) } : {}),
+                      }),
+                    });
+                  };
+                  const onUp = () => {
+                    window.removeEventListener('pointermove', onMove);
+                    window.removeEventListener('pointerup', onUp);
+                    if (!dragged) onToggleAudioWindow?.();
+                  };
+                  window.addEventListener('pointermove', onMove);
+                  window.addEventListener('pointerup', onUp);
+                };
 
                 return (
                   <div
                     key={audLayer.id}
                     className="flex border-b border-neutral-800/80 bg-emerald-950/15"
-                    style={{ height: 34 }}
+                    style={{ height: 38 }}
                     data-testid={`timeline-audio-row-${audLayer.id}`}
                   >
                     <div
@@ -1611,16 +1647,20 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                         type="button"
                         onClick={() => onToggleAudioWindow?.()}
                         className="flex min-w-0 flex-1 items-center gap-1 text-left hover:text-emerald-200"
-                        title={audLayer.name}
+                        title={`${audLayer.name} (${Math.round(meta.volume * 100)}%)`}
                       >
                         <Music className="h-3 w-3 shrink-0" />
                         <span className="truncate">{audLayer.name}</span>
                       </button>
+                      <span className="shrink-0 font-mono text-[9px] text-emerald-400/75">
+                        {meta.muted ? '0%' : `${Math.round(meta.volume * 100)}%`}
+                      </span>
                       {onToggleAudioMute && (
                         <button
                           type="button"
                           onClick={() => onToggleAudioMute(audLayer.id)}
                           aria-pressed={meta.muted}
+                          data-testid={`timeline-audio-mute-${audLayer.id}`}
                           title={meta.muted ? t.animation.audioUnmute : t.animation.audioMute}
                           className={`shrink-0 rounded p-0.5 ${meta.muted ? 'text-red-400' : 'text-emerald-300 hover:text-emerald-100'}`}
                         >
@@ -1637,14 +1677,18 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                       }}
                     >
                       <div
+                        onPointerDown={startClipDrag}
                         onClick={(e) => {
                           e.stopPropagation();
-                          onToggleAudioWindow?.();
+                          if (!onUpdateAudioTrack) onToggleAudioWindow?.();
                         }}
                         data-testid={`timeline-audio-clip-${audLayer.id}`}
-                        className={`absolute top-1 bottom-1 flex items-center overflow-hidden rounded border px-1 transition ${
+                        title={`${meta.fileName} · F${clipRange.startFrame + 1}–F${clipRange.endFrame + 1} · ${Math.round(meta.volume * 100)}%`}
+                        className={`group/aud absolute top-1 bottom-1 flex items-center overflow-hidden rounded border px-1 transition ${
+                          onUpdateAudioTrack ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'
+                        } ${
                           meta.muted
-                            ? 'border-neutral-700 bg-neutral-900/70 opacity-50'
+                            ? 'border-neutral-700 bg-neutral-900/70 opacity-60'
                             : linked
                               ? 'border-emerald-500/60 bg-emerald-950/60'
                               : 'border-dashed border-amber-500/60 bg-amber-950/30'
@@ -1652,34 +1696,15 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
                         style={{ left: leftPx, width: widthPx }}
                       >
                         {linked && peaks.length > 0 ? (
-                          <svg
-                            viewBox={`0 0 ${barCount * 3} 24`}
-                            preserveAspectRatio="none"
-                            className="h-full w-full"
-                            data-testid={`timeline-audio-waveform-${audLayer.id}`}
-                          >
-                            {Array.from({ length: barCount }, (_, i) => {
-                              const peakIdx = Math.min(
-                                peaks.length - 1,
-                                Math.floor((i * peaks.length) / barCount)
-                              );
-                              const amp = Math.max(0.08, peaks[peakIdx] ?? 0);
-                              const h = Math.max(2, amp * 20);
-                              const y = (24 - h) / 2;
-                              return (
-                                <rect
-                                  key={i}
-                                  x={i * 3}
-                                  y={y}
-                                  width={2}
-                                  height={h}
-                                  rx={0.75}
-                                  fill={meta.muted ? '#737373' : '#34d399'}
-                                  opacity={0.85}
-                                />
-                              );
-                            })}
-                          </svg>
+                          <AudioWaveformCanvas
+                            peaks={peaks}
+                            meta={meta}
+                            fps={fps}
+                            widthPx={Math.max(20, widthPx - 8)}
+                            heightPx={26}
+                            playheadProgress={playheadProgress}
+                            testId={`timeline-audio-waveform-${audLayer.id}`}
+                          />
                         ) : (
                           <span className="truncate text-[9px] text-amber-200/90">
                             {t.animation.audioUnlinked} · {meta.fileName}
@@ -2171,6 +2196,8 @@ export const AnimationTimelineBar: React.FC<AnimationTimelineBarProps> = ({
         }
         planExport={planExport}
         planCelExport={planCelExport}
+        audioLayers={audioLayers}
+        audioAssetSummaries={audioAssetSummaries}
       />
     </div>
   );

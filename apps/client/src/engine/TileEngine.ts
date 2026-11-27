@@ -56,6 +56,20 @@ const PBO_TILE_BYTES = 256 * 256 * 4;
 const READ_WAVE_RECTS = 24;
 const READ_CHUNK_BYTES = 524288;
 const READ_BUDGET_MS = 3;
+const DEFAULT_PBO_POOL_CAP = 64;
+const LARGE_CANVAS_PBO_POOL_CAP = 96;
+
+export interface TileCommitPipelineStats {
+  pboPooled: number;
+  pboPoolCap: number;
+  pboPoolHits: number;
+  pboPoolMisses: number;
+  readWavesSubmitted: number;
+  totalRectsRead: number;
+  totalBytesRead: number;
+  pendingJobs: number;
+  activeWaves: number;
+}
 
 interface ReadJob {
   gl: WebGL2RenderingContext;
@@ -86,6 +100,12 @@ export class TileEngine {
   private scratchCanvas: HTMLCanvasElement;
   private scratchCtx: CanvasRenderingContext2D;
   private pboPool: WebGLBuffer[] = [];
+  private maxPboPoolSize = DEFAULT_PBO_POOL_CAP;
+  private pboPoolHits = 0;
+  private pboPoolMisses = 0;
+  private readWavesSubmitted = 0;
+  private totalRectsRead = 0;
+  private totalBytesRead = 0;
   private readJobs: ReadJob[] = [];
   private activeWaves: ActiveWave[] = [];
   private submitScheduled = false;
@@ -103,6 +123,8 @@ export class TileEngine {
     this.canvasWidth = canvasWidth;
     this.canvasHeight = canvasHeight;
     this.tileSize = tileSize;
+    this.maxPboPoolSize =
+      canvasWidth * canvasHeight >= 4096 * 4096 ? LARGE_CANVAS_PBO_POOL_CAP : DEFAULT_PBO_POOL_CAP;
 
     this.scratchCanvas = document.createElement('canvas');
     this.scratchCanvas.width = tileSize;
@@ -114,6 +136,22 @@ export class TileEngine {
     this.canvasWidth = width;
     this.canvasHeight = height;
     if (tileSize && tileSize > 0) this.tileSize = tileSize;
+    this.maxPboPoolSize =
+      width * height >= 4096 * 4096 ? LARGE_CANVAS_PBO_POOL_CAP : DEFAULT_PBO_POOL_CAP;
+  }
+
+  public getPipelineStats(): TileCommitPipelineStats {
+    return {
+      pboPooled: this.pboPool.length,
+      pboPoolCap: this.maxPboPoolSize,
+      pboPoolHits: this.pboPoolHits,
+      pboPoolMisses: this.pboPoolMisses,
+      readWavesSubmitted: this.readWavesSubmitted,
+      totalRectsRead: this.totalRectsRead,
+      totalBytesRead: this.totalBytesRead,
+      pendingJobs: this.readJobs.length,
+      activeWaves: this.activeWaves.length,
+    };
   }
 
   /**
@@ -351,8 +389,10 @@ export class TileEngine {
   private allocPbo(gl: WebGL2RenderingContext, bytes: number): { buf: WebGLBuffer; pooled: boolean } {
     const canPool = bytes <= PBO_TILE_BYTES;
     if (canPool && this.pboPool.length > 0) {
+      this.pboPoolHits++;
       return { buf: this.pboPool.pop()!, pooled: true };
     }
+    this.pboPoolMisses++;
     const buf = gl.createBuffer()!;
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buf);
     gl.bufferData(gl.PIXEL_PACK_BUFFER, canPool ? PBO_TILE_BYTES : bytes, gl.STREAM_READ);
@@ -360,7 +400,7 @@ export class TileEngine {
   }
 
   private releasePbo(gl: WebGL2RenderingContext, buf: WebGLBuffer, pooled: boolean) {
-    if (pooled && !this.destroyed && this.pboPool.length < 64 && !gl.isContextLost()) {
+    if (pooled && !this.destroyed && this.pboPool.length < this.maxPboPoolSize && !gl.isContextLost()) {
       this.pboPool.push(buf);
     } else if (!gl.isContextLost()) {
       gl.deleteBuffer(buf);
@@ -407,6 +447,8 @@ export class TileEngine {
     }
     gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
     if (!entries.length) return;
+    this.readWavesSubmitted++;
+    this.totalRectsRead += entries.length;
     const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)!;
     gl.flush();
     const wave: ActiveWave = { gl, sync, entries, readCursor: 0, ready: false };
@@ -459,6 +501,7 @@ export class TileEngine {
         this.releasePbo(gl, entry.buf, entry.pooled);
         entry.job.out[entry.idx] = px;
         bytes += px.byteLength;
+        this.totalBytesRead += px.byteLength;
         if (--entry.job.remaining === 0) entry.job.resolve(entry.job.out);
       }
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);

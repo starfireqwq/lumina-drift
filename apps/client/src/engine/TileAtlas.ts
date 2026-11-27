@@ -58,6 +58,11 @@ const AROUND: Array<[number, number]> = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1
  */
 export class TileAtlas {
   private pages: Array<Page | null> = [];
+  /** Phase 6.3: Warm pool of empty atlas pages to eliminate WebGL texture alloc/destroy stalls on 4K–8K+ pan/zoom */
+  private pagePool: Array<{ rt: RenderTexture; freedAtMs: number }> = [];
+  private maxPooledPages = 2;
+  private poolHits = 0;
+  private poolMisses = 0;
   private zero: Texture | null = null;
   private zeroGutter: Texture | null = null;
   private zeroGutterBytes: Uint8Array | null = null;
@@ -70,7 +75,32 @@ export class TileAtlas {
   private uploadHolder: Container | null = null;
   private magFilter: MagFilter = 'linear';
 
-  constructor(private renderer: Renderer, private mips?: MipmapView, private slotsPerRow = SLOTS_PER_ROW) {}
+  constructor(
+    private renderer: Renderer,
+    private mips?: MipmapView,
+    private slotsPerRow = SLOTS_PER_ROW,
+    maxPooledPages = 2
+  ) {
+    this.maxPooledPages = Math.max(0, Math.min(8, Math.round(maxPooledPages)));
+  }
+
+  public setMaxPooledPages(maxPages: number) {
+    this.maxPooledPages = Math.max(0, Math.min(8, Math.round(maxPages)));
+    this.trimPool(0, this.maxPooledPages);
+  }
+
+  /** Releases idle pooled atlas RenderTextures back to GPU VRAM */
+  public trimPool(maxIdleMs = 0, targetCount = 0): number {
+    const now = performance.now();
+    let freed = 0;
+    while (this.pagePool.length > targetCount) {
+      const oldest = this.pagePool[0];
+      if (maxIdleMs > 0 && now - oldest.freedAtMs < maxIdleMs) break;
+      this.pagePool.shift()!.rt.destroy(true);
+      freed++;
+    }
+    return freed;
+  }
 
   /** The pages in use (zoomed out, their mip levels are brought up to date before a frame) */
   *pageTextures(visible?: ReadonlySet<number>): Iterable<RenderTexture> {
@@ -85,6 +115,7 @@ export class TileAtlas {
     if (this.magFilter === mode) return;
     this.magFilter = mode;
     for (const p of this.pages) if (p) applyMagFilter(p.rt, mode);
+    for (const pooled of this.pagePool) applyMagFilter(pooled.rt, mode);
   }
 
   /** A free slot, from one of `prefer` (the layer's pages) if any has room */
@@ -102,7 +133,15 @@ export class TileAtlas {
       if (pageIndex < 0) pageIndex = this.pages.length;
       const size = PITCH * this.slotsPerRow;
       const slots = this.slotsPerRow ** 2;
-      const rt = RenderTexture.create({ width: size, height: size, resolution: 1 });
+      let rt: RenderTexture;
+      const pooled = this.pagePool.pop();
+      if (pooled && !pooled.rt.destroyed) {
+        rt = pooled.rt;
+        this.poolHits++;
+      } else {
+        rt = RenderTexture.create({ width: size, height: size, resolution: 1 });
+        this.poolMisses++;
+      }
       if (this.magFilter !== 'linear') applyMagFilter(rt, this.magFilter);
       this.pages[pageIndex] = { rt, free: Array.from({ length: slots }, (_, i) => slots - 1 - i), used: 0 };
     }
@@ -112,15 +151,19 @@ export class TileAtlas {
     return { page: pageIndex, index, x: (index % this.slotsPerRow) * PITCH + GUTTER, y: Math.floor(index / this.slotsPerRow) * PITCH + GUTTER };
   }
 
-  /** The slot goes back to its page; an empty page is freed (the GPU memory goes with it) */
+  /** The slot goes back to its page; an empty page is returned to the warm reuse pool or freed */
   free(slot: Slot) {
     const page = this.pages[slot.page];
     if (!page) return;
     page.free.push(slot.index);
     page.used--;
     if (page.used <= 0) {
-      page.rt.destroy(true);
       this.pages[slot.page] = null;
+      if (this.maxPooledPages > 0 && this.pagePool.length < this.maxPooledPages && !page.rt.destroyed) {
+        this.pagePool.push({ rt: page.rt, freedAtMs: performance.now() });
+      } else {
+        page.rt.destroy(true);
+      }
     }
   }
 
@@ -346,7 +389,7 @@ export class TileAtlas {
     return this.zero;
   }
 
-  /** Pages allocated / slots in use, for getTextureStats */
+  /** Pages allocated / slots in use / warm pool metrics, for getTextureStats */
   stats() {
     let pages = 0;
     let slots = 0;
@@ -355,12 +398,31 @@ export class TileAtlas {
       pages++;
       slots += p.used;
     }
-    return { pages, slots, bytes: pages * (PITCH * this.slotsPerRow) ** 2 * 4 };
+    const slotsPerPage = this.slotsPerRow ** 2;
+    const pageBytes = (PITCH * this.slotsPerRow) ** 2 * 4;
+    const pooledPages = this.pagePool.length;
+    const pooledBytes = pooledPages * pageBytes;
+    const capacitySlots = pages * slotsPerPage;
+    const fragmentationRatio =
+      capacitySlots > 0 ? Math.round((1 - slots / capacitySlots) * 1000) / 1000 : 0;
+    return {
+      pages,
+      slots,
+      bytes: pages * pageBytes + pooledBytes,
+      activeBytes: pages * pageBytes,
+      pooledPages,
+      pooledBytes,
+      poolHits: this.poolHits,
+      poolMisses: this.poolMisses,
+      fragmentationRatio,
+    };
   }
 
   destroy() {
     for (const p of this.pages) p?.rt.destroy(true);
     this.pages = [];
+    for (const pooled of this.pagePool) pooled.rt.destroy(true);
+    this.pagePool = [];
     this.zero?.destroy(true);
     this.zeroGutter?.destroy(true);
     this.paddedTex?.destroy(true);

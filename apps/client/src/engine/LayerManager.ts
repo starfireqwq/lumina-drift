@@ -32,7 +32,17 @@ import {
   SoftLightBlend,
   SubtractBlend,
 } from 'pixi.js';
-import { compressTileBuffer, decompressTileBuffer, DEFAULT_TILE_SIZE, type Affine2D, type BlendMode, type LayerModel, type TileCoord, type TileData } from '@atelier/shared';
+import {
+  compressTileBuffer,
+  computeRecommendedGpuTileBudget,
+  decompressTileBuffer,
+  DEFAULT_TILE_SIZE,
+  type Affine2D,
+  type BlendMode,
+  type LayerModel,
+  type TileCoord,
+  type TileData,
+} from '@atelier/shared';
 import { compileAdjustment, normalizeAdjustment, resolveAdjustmentScope, type LayerAdjustment } from '@atelier/shared';
 import { DEFAULT_LAYER_SUB_COLOR, resolveEffectiveLayerColor, type LayerColorMeta } from '@atelier/shared';
 import { hasActiveLayerEffects, layerEffectsKey, type LayerEffectsMeta } from '@atelier/shared';
@@ -374,7 +384,11 @@ export class LayerManager {
   private thumbsPaused = false;
   private destroyed = false;
   private readonly hiddenTileBudget: number;
-  private readonly softGpuTileLimit: number;
+  private softGpuTileLimit: number;
+  private softGpuByteLimit: number;
+  private lruCleanEvictions = 0;
+  private lruDirtyEvictions = 0;
+  private lruReheatHits = 0;
   private readonly viewThawThreshold: number;
   private readonly prefetchLayers: number;
   private readonly scratchIdleMs: number;
@@ -392,12 +406,21 @@ export class LayerManager {
     const phone = screen && Math.min(screen.width, screen.height) < 600;
     const constrained = solo && (phone || memory <= 4);
     const hiddenMiB = constrained ? Math.max(12, Math.min(memory * 8, 32)) : 48;
+    const recBudget = computeRecommendedGpuTileBudget(width, height, memory, Boolean(phone));
     this.hiddenTileBudget = solo ? Math.min(HIDDEN_TILE_BUDGET, hiddenMiB * 1048576) : HIDDEN_TILE_BUDGET;
-    this.softGpuTileLimit = constrained ? Math.max(128, Math.min(512, memory * 96)) : SOFT_GPU_TILE_LIMIT;
+    this.softGpuTileLimit = constrained
+      ? Math.max(128, Math.min(512, memory * 96))
+      : Math.min(SOFT_GPU_TILE_LIMIT, recBudget.maxTiles);
+    this.softGpuByteLimit = constrained ? Math.min(160 * 1048576, recBudget.maxBytes) : recBudget.maxBytes;
     this.viewThawThreshold = constrained ? 16 : solo ? 64 : VIEW_THAW_TILE_THRESHOLD;
     this.prefetchLayers = constrained ? 1 : solo ? 2 : Infinity;
     this.mips = new MipmapView(renderer);
-    this.atlas = new TileAtlas(renderer, this.mips, constrained ? 4 : undefined);
+    this.atlas = new TileAtlas(
+      renderer,
+      this.mips,
+      constrained ? 4 : undefined,
+      constrained ? 1 : recBudget.maxPooledAtlasPages
+    );
     this.scratchIdleMs = constrained ? 3000 : SCRATCH_IDLE_MS;
 
     this.rootContainer = new Container();
@@ -1474,6 +1497,7 @@ export class LayerManager {
     gpu.set(key, tile);
     item.cleanCache.set(key, cpu);
     item.display.addChildAt(tile.sprite, 0);
+    this.lruReheatHits++;
     return tile;
   }
 
@@ -2593,33 +2617,83 @@ export class LayerManager {
       return;
     }
 
-    // Active visible layers exceeding the soft GPU tile limit spill oldest offscreen tiles to CPU LRU
+    // Active visible layers exceeding the soft GPU tile/VRAM limit spill oldest offscreen tiles to CPU LRU
     if (!this.wrapAroundEnabled && !this.evictingOffscreen && this.viewBounds && !this.isActivelyDrawing()) {
-      let totalGpuTiles = 0;
-      for (const item of this.layersMap.values()) totalGpuTiles += item.gpu?.size ?? 0;
-      if (totalGpuTiles > this.softGpuTileLimit) {
-        this.evictOffscreenGpuTiles(totalGpuTiles - this.softGpuTileLimit);
-      }
+      this.enforceTileLruBudgetNow(false);
     }
+    // Trim idle pooled atlas pages after 15s so VRAM stays bounded when zoomed in or idle
+    this.atlas.trimPool(15000, 1);
   };
 
+  /** Phase 6.3: Dynamically updates GPU tile/VRAM LRU ceiling and atlas pool retention */
+  public setGpuTileBudget(patch: { maxTiles?: number; maxMegabytes?: number; maxPooledAtlasPages?: number }) {
+    if (patch.maxTiles !== undefined && Number.isFinite(patch.maxTiles)) {
+      this.softGpuTileLimit = Math.max(16, Math.round(patch.maxTiles));
+    }
+    if (patch.maxMegabytes !== undefined && Number.isFinite(patch.maxMegabytes)) {
+      this.softGpuByteLimit = Math.max(8, patch.maxMegabytes) * 1048576;
+    }
+    if (patch.maxPooledAtlasPages !== undefined && Number.isFinite(patch.maxPooledAtlasPages)) {
+      this.atlas.setMaxPooledPages(patch.maxPooledAtlasPages);
+    }
+  }
+
+  /**
+   * Phase 6.3: Evaluates GPU tile count & atlas VRAM byte budget and evicts least-recently-viewed
+   * offscreen tiles down to 85% low-water target (clean-first, zero-readPixels prioritized).
+   */
+  public enforceTileLruBudgetNow(trimAllPooledPages = true): number {
+    if (this.destroyed || this.wrapAroundEnabled || this.evictingOffscreen || !this.viewBounds) return 0;
+    let totalGpuTiles = 0;
+    for (const item of this.layersMap.values()) totalGpuTiles += item.gpu?.size ?? 0;
+    const atlasBytes = this.atlas.stats().activeBytes;
+    const overTiles = totalGpuTiles > this.softGpuTileLimit;
+    const overBytes = atlasBytes > this.softGpuByteLimit;
+    if (!overTiles && !overBytes) {
+      if (trimAllPooledPages) this.atlas.trimPool(0, 0);
+      return 0;
+    }
+    // Hysteresis low-water target (85%) avoids evicting 1-2 tiles every frame during continuous panning
+    const targetTiles = Math.floor(this.softGpuTileLimit * 0.85);
+    const excessByTiles = Math.max(0, totalGpuTiles - targetTiles);
+    const excessByBytes = overBytes
+      ? Math.ceil((atlasBytes - this.softGpuByteLimit * 0.85) / (TS * TS * 4))
+      : 0;
+    const excess = Math.max(excessByTiles, excessByBytes);
+    const evictedClean = this.evictOffscreenGpuTiles(excess);
+    if (trimAllPooledPages) this.atlas.trimPool(0, 0);
+    return evictedClean;
+  }
+
   /** Evicts least-recently-viewed offscreen tiles from warm layers into `coldTiles` without blocking */
-  private evictOffscreenGpuTiles(excess: number) {
-    if (excess <= 0 || !this.viewBounds) return;
-    const candidates: Array<{ item: LayerItem; key: string; tile: GpuTile; lastSeen: number }> = [];
+  private evictOffscreenGpuTiles(excess: number): number {
+    if (excess <= 0 || !this.viewBounds) return 0;
+    const candidates: Array<{ item: LayerItem; key: string; tile: GpuTile; lastSeen: number; clean: boolean }> = [];
     for (const item of this.layersMap.values()) {
       if (!item.gpu || item.rt || this.isPinned(item) || (this.pendingBakReads.get(item.model.id) ?? 0) > 0) continue;
       const pendingAfter = this.pendingAfterSlots.get(item.model.id);
       for (const [key, tile] of item.gpu) {
         if (item.bak?.has(key) || pendingAfter?.has(tile.slot)) continue;
         if (this.isTileInView(tile.col, tile.row)) continue;
-        candidates.push({ item, key, tile, lastSeen: tile.lastSeenMs ?? 0 });
+        candidates.push({
+          item,
+          key,
+          tile,
+          lastSeen: tile.lastSeenMs ?? 0,
+          clean: item.cleanCache.has(key),
+        });
       }
     }
-    if (!candidates.length) return;
-    candidates.sort((a, b) => a.lastSeen - b.lastSeen);
+    if (!candidates.length) return 0;
+    // Prioritize clean tiles (zero GPU readPixels stall) before dirty tiles, both in LRU order
+    candidates.sort((a, b) => {
+      if (a.clean !== b.clean) return a.clean ? -1 : 1;
+      return a.lastSeen - b.lastSeen;
+    });
 
+    const dirtyBatchCap = excess > this.softGpuTileLimit * 0.25 ? 16 : 12;
     let remaining = excess;
+    let evictedClean = 0;
     const dirtyBatch: Array<{ item: LayerItem; version: number; key: string; tile: GpuTile; slot: Slot }> = [];
     for (const c of candidates) {
       if (remaining <= 0) break;
@@ -2630,11 +2704,13 @@ export class LayerManager {
         this.freeTile(c.tile);
         c.item.gpu!.delete(c.key);
         remaining--;
-      } else if (dirtyBatch.length < 8) {
+        evictedClean++;
+        this.lruCleanEvictions++;
+      } else if (dirtyBatch.length < dirtyBatchCap) {
         dirtyBatch.push({ item: c.item, version: c.item.version, key: c.key, tile: c.tile, slot: c.tile.slot });
       }
     }
-    if (!dirtyBatch.length || !this.reader) return;
+    if (!dirtyBatch.length || !this.reader) return evictedClean;
 
     this.evictingOffscreen = true;
     const byTex = new Map<RenderTexture, Array<(typeof dirtyBatch)[number] & { rect: Rect }>>();
@@ -2677,6 +2753,7 @@ export class LayerManager {
             p.item.cleanCache.delete(p.key);
             this.freeTile(p.tile);
             p.item.gpu.delete(p.key);
+            this.lruDirtyEvictions++;
           });
         }
       })
@@ -2686,6 +2763,7 @@ export class LayerManager {
         }
         this.evictingOffscreen = false;
       });
+    return evictedClean;
   }
 
   private pump = () => {
@@ -2997,6 +3075,7 @@ export class LayerManager {
     let warm = 0;
     let tiles = 0;
     let cold = 0;
+    let coldTiles = 0;
     let backups = 0;
     let cpuBytes = 0;
     for (const item of this.layersMap.values()) {
@@ -3006,6 +3085,7 @@ export class LayerManager {
         warm++;
         tiles += item.gpu.size;
       } else if (!item.rt) cold++;
+      coldTiles += item.coldTiles.size;
       for (const s of item.bak?.values() ?? []) if (s) backups++;
       for (const t of item.cpu?.values() ?? []) cpuBytes += t.data.byteLength;
       for (const t of item.coldTiles.values()) cpuBytes += t.data.byteLength;
@@ -3025,16 +3105,28 @@ export class LayerManager {
       warm,
       tiles,
       cold,
+      coldTiles,
       scratch,
       /** atlas pages (64 tiles each, 17 MB) holding warm tiles, backups and previews */
       atlasPages: atlas.pages,
-      atlasMegabytes: mb(atlas.bytes),
+      atlasMegabytes: mb(atlas.activeBytes),
+      atlasPooledPages: atlas.pooledPages,
+      atlasPooledMegabytes: mb(atlas.pooledBytes),
+      atlasPoolHits: atlas.poolHits,
+      atlasPoolMisses: atlas.poolMisses,
+      atlasFragmentation: atlas.fragmentationRatio,
       /** mip levels of layer textures shown zoomed out (freed a few seconds after zooming back in) */
       mipMegabytes: mb(mipBytes),
       /** tiles copied before their first write in the stroke being drawn */
       backups,
       previewTiles: this.preview.gpu?.size ?? 0,
       cpuMegabytes: mb(cpuBytes),
+      lruBudgetTiles: this.softGpuTileLimit,
+      lruBudgetMegabytes: mb(this.softGpuByteLimit),
+      lruEvictions: this.lruCleanEvictions + this.lruDirtyEvictions,
+      lruCleanEvictions: this.lruCleanEvictions,
+      lruDirtyEvictions: this.lruDirtyEvictions,
+      lruReheatHits: this.lruReheatHits,
     };
   }
 

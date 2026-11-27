@@ -455,3 +455,148 @@ export function buildWebCodecsCandidates(
 
   return out;
 }
+
+export type AudioMuxFallbackReason =
+  | 'none'
+  | 'disabled'
+  | 'no-tracks'
+  | 'unlinked'
+  | 'encoder-unsupported'
+  | 'encode-failed';
+
+export interface MixedAudioPcm {
+  left: Float32Array;
+  right: Float32Array;
+  sampleRate: number;
+  frameCount: number;
+  durationSec: number;
+  mixedTrackCount: number;
+  missingAssetIds: string[];
+  peakAmplitude: number;
+  clippedSamples: number;
+}
+
+export interface WebCodecsAudioCandidate {
+  container: 'mp4' | 'webm';
+  muxerCodec: 'aac' | 'opus' | 'A_OPUS';
+  webCodecsCodec: string;
+  sampleRate: number;
+  numberOfChannels: number;
+  bitrate: number;
+}
+
+export function isWebCodecsAudioEncoderAvailable(): boolean {
+  return (
+    typeof AudioEncoder === 'function' &&
+    typeof AudioData === 'function' &&
+    typeof AudioEncoder.isConfigSupported === 'function'
+  );
+}
+
+/**
+ * Builds ordered WebCodecs AudioEncoder candidates compatible with the target video container.
+ * MP4 prefers AAC-LC (`mp4a.40.2`) and falls back to Opus (`opus`); WebM uses Opus (`A_OPUS`).
+ */
+export function buildWebCodecsAudioCandidates(
+  container: 'mp4' | 'webm',
+  sampleRate: number = 48000,
+  numberOfChannels: number = 2
+): WebCodecsAudioCandidate[] {
+  const ch = Math.max(1, Math.min(2, Math.round(numberOfChannels) || 2));
+  const preferredRate = sampleRate === 44100 ? 44100 : 48000;
+  if (container === 'webm') {
+    return [
+      {
+        container: 'webm',
+        muxerCodec: 'A_OPUS',
+        webCodecsCodec: 'opus',
+        sampleRate: 48000,
+        numberOfChannels: ch,
+        bitrate: 128_000,
+      },
+    ];
+  }
+  const out: WebCodecsAudioCandidate[] = [
+    {
+      container: 'mp4',
+      muxerCodec: 'aac',
+      webCodecsCodec: 'mp4a.40.2',
+      sampleRate: preferredRate,
+      numberOfChannels: ch,
+      bitrate: 128_000,
+    },
+  ];
+  if (preferredRate !== 44100) {
+    out.push({
+      container: 'mp4',
+      muxerCodec: 'aac',
+      webCodecsCodec: 'mp4a.40.2',
+      sampleRate: 44100,
+      numberOfChannels: ch,
+      bitrate: 128_000,
+    });
+  }
+  out.push({
+    container: 'mp4',
+    muxerCodec: 'opus',
+    webCodecsCodec: 'opus',
+    sampleRate: 48000,
+    numberOfChannels: ch,
+    bitrate: 128_000,
+  });
+  return out;
+}
+
+export async function probeWebCodecsAudioCandidate(
+  container: 'mp4' | 'webm',
+  sampleRate: number = 48000,
+  numberOfChannels: number = 2
+): Promise<{ candidate: WebCodecsAudioCandidate; config: AudioEncoderConfig } | null> {
+  if (!isWebCodecsAudioEncoderAvailable()) return null;
+  const candidates = buildWebCodecsAudioCandidates(container, sampleRate, numberOfChannels);
+  for (const candidate of candidates) {
+    const config: AudioEncoderConfig = {
+      codec: candidate.webCodecsCodec,
+      sampleRate: candidate.sampleRate,
+      numberOfChannels: candidate.numberOfChannels,
+      bitrate: candidate.bitrate,
+    };
+    try {
+      const res = await AudioEncoder.isConfigSupported(config);
+      if (res.supported) {
+        return { candidate, config: res.config ?? config };
+      }
+    } catch {
+      // Ignore unsupported audio codec probe
+    }
+  }
+  return null;
+}
+
+/**
+ * Resamples planar stereo PCM if the selected AudioEncoder requires a different sample rate.
+ */
+export function resampleStereoPcm(
+  left: Float32Array,
+  right: Float32Array,
+  srcSampleRate: number,
+  dstSampleRate: number
+): { left: Float32Array; right: Float32Array; sampleRate: number } {
+  if (srcSampleRate === dstSampleRate || left.length === 0) {
+    return { left, right, sampleRate: srcSampleRate };
+  }
+  const ratio = srcSampleRate / dstSampleRate;
+  const dstLen = Math.max(1, Math.round(left.length / ratio));
+  const outL = new Float32Array(dstLen);
+  const outR = new Float32Array(dstLen);
+  const maxIdx = Math.min(left.length, right.length) - 1;
+  for (let i = 0; i < dstLen; i++) {
+    const pos = i * ratio;
+    const i0 = Math.min(maxIdx, Math.floor(pos));
+    const i1 = Math.min(maxIdx, i0 + 1);
+    const f = pos - i0;
+    outL[i] = left[i0] * (1 - f) + left[i1] * f;
+    outR[i] = right[i0] * (1 - f) + right[i1] * f;
+  }
+  return { left: outL, right: outR, sampleRate: dstSampleRate };
+}

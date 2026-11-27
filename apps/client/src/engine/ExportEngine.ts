@@ -1,4 +1,18 @@
-import { LayerModel, BlendMode, hasActiveLayerEffects, hexToRgb01, normalizeAdjustment, type LayerEffectsMeta } from '@atelier/shared';
+import {
+  LayerModel,
+  BlendMode,
+  encodeCmykPsd,
+  encodeCmykTiff,
+  hasActiveLayerEffects,
+  hexToRgb01,
+  normalizeAdjustment,
+  separateRgbaToCmykBuffer,
+  type CmykPsdLayerInput,
+  type CmykSeparationOptions,
+  type CmykSeparationResult,
+  type CmykTacStats,
+  type LayerEffectsMeta,
+} from '@atelier/shared';
 import JSZip from 'jszip';
 import { writePsd, Psd, Layer as PsdLayer, type LayerEffectsInfo } from 'ag-psd';
 
@@ -30,8 +44,12 @@ import {
   createMediaRecorderForStream,
   getVideoBitrateForResolution,
   isWebCodecsVideoEncoderAvailable,
+  probeWebCodecsAudioCandidate,
+  resampleStereoPcm,
   stopMediaStream,
   unwrapMediaRecorderError,
+  type AudioMuxFallbackReason,
+  type MixedAudioPcm,
   type VideoExportResolution,
   type VideoRecorderCandidate,
   type WebCodecsVideoCandidate,
@@ -47,6 +65,14 @@ export interface AnimationVideoExportOptions {
     backend: 'webcodecs' | 'mediarecorder';
   }) => void;
   forceBackend?: 'auto' | 'mediarecorder';
+  /** Phase 6.1: Pre-mixed stereo PCM audio track for MP4/WebM muxing */
+  audioMix?: MixedAudioPcm | null;
+  /** Phase 6.1: Set false to export video-only even if audioMix is provided */
+  includeAudio?: boolean;
+  /** Phase 6.1: Called when audio track muxing degrades to video-only */
+  onAudioFallback?: (reason: AudioMuxFallbackReason) => void;
+  /** Phase 6.1: Called when audio track is successfully muxed */
+  onAudioMuxed?: (info: { codec: string; sampleRate: number; channels: number; tracks: number }) => void;
 }
 
 function isAbortError(err: unknown): boolean {
@@ -123,7 +149,18 @@ function greyMaskCanvas(mask: HTMLCanvasElement, inverted = false): HTMLCanvasEl
   return out;
 }
 
-export type ExportFormat = 'lumina' | 'merged_png' | 'transparent_png' | 'jpeg' | 'webp' | 'psd' | 'ora' | 'kra' | 'layers_zip';
+export type ExportFormat =
+  | 'lumina'
+  | 'merged_png'
+  | 'transparent_png'
+  | 'jpeg'
+  | 'webp'
+  | 'psd'
+  | 'cmyk_tiff'
+  | 'cmyk_psd'
+  | 'ora'
+  | 'kra'
+  | 'layers_zip';
 
 export class ExportEngine {
   /**
@@ -361,7 +398,27 @@ export class ExportEngine {
     if (!selectedConfig) return null;
 
     let addVideoChunk: (chunk: EncodedVideoChunk, meta?: EncodedVideoChunkMetadata) => void;
+    let addAudioChunk: ((chunk: EncodedAudioChunk, meta?: EncodedAudioChunkMetadata) => void) | null = null;
     let finalizeMuxer: () => ArrayBuffer;
+
+    const wantsAudio = options?.includeAudio !== false;
+    const rawAudioMix = wantsAudio ? (options?.audioMix ?? null) : null;
+    const hasMixedAudio = Boolean(rawAudioMix && rawAudioMix.mixedTrackCount > 0 && rawAudioMix.frameCount > 0);
+    let probedAudio: Awaited<ReturnType<typeof probeWebCodecsAudioCandidate>> = null;
+    let audioFallbackReason: AudioMuxFallbackReason = 'none';
+
+    if (!wantsAudio) {
+      audioFallbackReason = 'disabled';
+    } else if (!rawAudioMix) {
+      audioFallbackReason = 'no-tracks';
+    } else if (!hasMixedAudio) {
+      audioFallbackReason = rawAudioMix.missingAssetIds.length > 0 ? 'unlinked' : 'no-tracks';
+    } else {
+      probedAudio = await probeWebCodecsAudioCandidate(candidate.container, rawAudioMix.sampleRate, 2);
+      if (!probedAudio) {
+        audioFallbackReason = 'encoder-unsupported';
+      }
+    }
 
     if (candidate.container === 'mp4') {
       const { Muxer, ArrayBufferTarget } = await import('mp4-muxer');
@@ -374,10 +431,22 @@ export class ExportEngine {
           height: candidate.height,
           frameRate: safeFps,
         },
+        ...(probedAudio
+          ? {
+              audio: {
+                codec: probedAudio.candidate.muxerCodec === 'opus' ? 'opus' : 'aac',
+                numberOfChannels: probedAudio.candidate.numberOfChannels,
+                sampleRate: probedAudio.candidate.sampleRate,
+              },
+            }
+          : {}),
         fastStart: 'in-memory',
         firstTimestampBehavior: 'offset',
       });
       addVideoChunk = (chunk, meta) => muxer.addVideoChunk(chunk, meta);
+      if (probedAudio) {
+        addAudioChunk = (chunk, meta) => muxer.addAudioChunk(chunk, meta);
+      }
       finalizeMuxer = () => {
         muxer.finalize();
         return target.buffer;
@@ -393,9 +462,21 @@ export class ExportEngine {
           height: candidate.height,
           frameRate: safeFps,
         },
+        ...(probedAudio
+          ? {
+              audio: {
+                codec: 'A_OPUS',
+                numberOfChannels: probedAudio.candidate.numberOfChannels,
+                sampleRate: probedAudio.candidate.sampleRate,
+              },
+            }
+          : {}),
         firstTimestampBehavior: 'offset',
       });
       addVideoChunk = (chunk, meta) => muxer.addVideoChunk(chunk, meta);
+      if (probedAudio) {
+        addAudioChunk = (chunk, meta) => muxer.addAudioChunk(chunk, meta);
+      }
       finalizeMuxer = () => {
         muxer.finalize();
         return target.buffer;
@@ -484,6 +565,99 @@ export class ExportEngine {
       if (options?.signal?.aborted) throw createAbortError();
       await encoder.flush();
       if (encoderError) throw encoderError;
+
+      // Phase 6.1: Encode and mux stereo audio track when supported; degrade gracefully on error
+      if (probedAudio && addAudioChunk && rawAudioMix && hasMixedAudio) {
+        let audioEncoder: AudioEncoder | null = null;
+        let audioError: Error | null = null;
+        let encodedAudioChunks = 0;
+        try {
+          const pcm = resampleStereoPcm(
+            rawAudioMix.left,
+            rawAudioMix.right,
+            rawAudioMix.sampleRate,
+            probedAudio.candidate.sampleRate
+          );
+          const totalVideoDurationSec = logicalFrame / safeFps;
+          const targetFrames = Math.min(
+            pcm.left.length,
+            Math.max(1, Math.round(totalVideoDurationSec * pcm.sampleRate))
+          );
+
+          audioEncoder = new AudioEncoder({
+            output: (chunk, meta) => {
+              try {
+                addAudioChunk!(chunk, meta);
+                encodedAudioChunks++;
+              } catch (err) {
+                audioError = unwrapMediaRecorderError(err);
+              }
+            },
+            error: (err) => {
+              audioError = unwrapMediaRecorderError(err);
+            },
+          });
+          audioEncoder.configure(probedAudio.config);
+
+          const chunkSize = 1024;
+          const channels = probedAudio.candidate.numberOfChannels;
+          for (let offset = 0; offset < targetFrames; offset += chunkSize) {
+            if (options?.signal?.aborted) throw createAbortError();
+            if (audioError) throw audioError;
+            const len = Math.min(chunkSize, targetFrames - offset);
+            const planar = new Float32Array(len * channels);
+            planar.set(pcm.left.subarray(offset, offset + len), 0);
+            if (channels > 1) {
+              planar.set(pcm.right.subarray(offset, offset + len), len);
+            }
+            const timestamp = Math.round((offset * 1_000_000) / pcm.sampleRate);
+            const audioData = new AudioData({
+              format: 'f32-planar',
+              sampleRate: pcm.sampleRate,
+              numberOfFrames: len,
+              numberOfChannels: channels,
+              timestamp,
+              data: planar,
+            });
+            try {
+              audioEncoder.encode(audioData);
+            } finally {
+              audioData.close();
+            }
+          }
+          await audioEncoder.flush();
+          if (audioError) throw audioError;
+          if (encodedAudioChunks > 0) {
+            options?.onAudioMuxed?.({
+              codec: probedAudio.candidate.webCodecsCodec,
+              sampleRate: pcm.sampleRate,
+              channels,
+              tracks: rawAudioMix.mixedTrackCount,
+            });
+          } else {
+            options?.onAudioFallback?.('encode-failed');
+          }
+        } catch (err) {
+          if (isAbortError(err)) throw err;
+          console.warn('[ExportEngine] Audio track encoding failed, retrying video-only:', unwrapMediaRecorderError(err).message);
+          options?.onAudioFallback?.('encode-failed');
+          // Re-run current candidate cleanly without audio so muxer header doesn't declare an empty audio track
+          return this.encodeVideoOfflineWebCodecs(candidate, nextFrame, frameCount, region, fps, {
+            ...options,
+            includeAudio: false,
+            audioMix: null,
+          });
+        } finally {
+          try {
+            if (audioEncoder && audioEncoder.state !== 'closed') audioEncoder.close();
+          } catch {
+            // ignore
+          }
+        }
+      } else if (audioFallbackReason !== 'none' && options?.includeAudio !== false && rawAudioMix !== undefined) {
+        options?.onAudioFallback?.(audioFallbackReason);
+      }
+
       const buffer = finalizeMuxer();
       if (buffer.byteLength === 0) {
         throw new Error(`Offline encoder produced empty output (${candidate.mimeType})`);
@@ -517,6 +691,46 @@ export class ExportEngine {
     ctx.imageSmoothingQuality = 'high';
 
     const stream = animCanvas.captureStream(fps);
+    let audioCtxForRecord: AudioContext | null = null;
+    let audioSourceForRecord: AudioBufferSourceNode | null = null;
+    const wantsAudio = options?.includeAudio !== false;
+    const rawAudioMix = wantsAudio ? (options?.audioMix ?? null) : null;
+    const hasMixedAudio = Boolean(rawAudioMix && rawAudioMix.mixedTrackCount > 0 && rawAudioMix.frameCount > 0);
+    if (hasMixedAudio && rawAudioMix) {
+      try {
+        const AudioCtxCtor =
+          typeof window !== 'undefined'
+            ? window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+            : undefined;
+        if (AudioCtxCtor) {
+          audioCtxForRecord = new AudioCtxCtor({ sampleRate: rawAudioMix.sampleRate });
+          const dest = audioCtxForRecord.createMediaStreamDestination();
+          const audioBuf = audioCtxForRecord.createBuffer(2, rawAudioMix.frameCount, rawAudioMix.sampleRate);
+          audioBuf.copyToChannel(new Float32Array(rawAudioMix.left), 0);
+          audioBuf.copyToChannel(new Float32Array(rawAudioMix.right), 1);
+          const src = audioCtxForRecord.createBufferSource();
+          src.buffer = audioBuf;
+          src.connect(dest);
+          audioSourceForRecord = src;
+          for (const track of dest.stream.getAudioTracks()) {
+            stream.addTrack(track);
+          }
+          options?.onAudioMuxed?.({
+            codec: 'mediarecorder-audio',
+            sampleRate: rawAudioMix.sampleRate,
+            channels: 2,
+            tracks: rawAudioMix.mixedTrackCount,
+          });
+        } else {
+          options?.onAudioFallback?.('encoder-unsupported');
+        }
+      } catch {
+        options?.onAudioFallback?.('encode-failed');
+      }
+    } else if (wantsAudio && rawAudioMix !== undefined) {
+      options?.onAudioFallback?.(rawAudioMix && rawAudioMix.missingAssetIds.length > 0 ? 'unlinked' : 'no-tracks');
+    }
+
     const recordedChunks: Blob[] = [];
     let recorder: MediaRecorder;
     try {
@@ -528,6 +742,8 @@ export class ExportEngine {
     } catch (err) {
       animCanvas.width = 0;
       animCanvas.height = 0;
+      try { audioSourceForRecord?.stop(); } catch {}
+      try { void audioCtxForRecord?.close(); } catch {}
       stopMediaStream(stream);
       throw unwrapMediaRecorderError(err);
     }
@@ -540,6 +756,8 @@ export class ExportEngine {
       let aborted = false;
       let settled = false;
       const cleanupSurface = () => {
+        try { audioSourceForRecord?.stop(); } catch {}
+        try { void audioCtxForRecord?.close(); } catch {}
         stopMediaStream(stream);
         animCanvas.width = 0;
         animCanvas.height = 0;
@@ -591,6 +809,14 @@ export class ExportEngine {
           drawCroppedToContext(ctx, first.canvas, region, candidate.width, candidate.height, '#FFFFFF');
           options?.onProgress?.({ currentFrame: 1, totalFrames: frameCount, backend: 'mediarecorder' });
           recorder.start(200);
+          if (audioSourceForRecord && audioCtxForRecord) {
+            try {
+              if (audioCtxForRecord.state === 'suspended') await audioCtxForRecord.resume();
+              audioSourceForRecord.start(0);
+            } catch {
+              // ignore live audio playback start errors
+            }
+          }
           const startTime = performance.now();
           let logicalFrames = Math.max(1, first.hold);
           const firstDeadline = startTime + logicalFrames * frameDelay;
@@ -1111,6 +1337,167 @@ ${await stackXml(null, '    ')}  </stack>
 
     const psdBuffer = writePsd(psdDoc);
     return new Blob([psdBuffer], { type: 'image/vnd.adobe.photoshop' });
+  }
+
+  /**
+   * Phase 6.2: Fast downsampled CMYK TAC preview analysis for the Export dialog.
+   */
+  public static analyzeCmykTacPreview(
+    layerItems: LayerCanvasItem[],
+    width: number,
+    height: number,
+    bgColor: string | null = '#FFFFFF',
+    separation?: Partial<CmykSeparationOptions>,
+    maxPreviewDim: number = 320
+  ): { result: CmykSeparationResult; previewWidth: number; previewHeight: number } {
+    const compositeCanvas = this.compositeLayers(layerItems, width, height, bgColor || '#FFFFFF');
+    const scale = Math.min(1, maxPreviewDim / Math.max(1, width, height));
+    const previewWidth = Math.max(1, Math.round(width * scale));
+    const previewHeight = Math.max(1, Math.round(height * scale));
+    const previewCanvas = document.createElement('canvas');
+    previewCanvas.width = previewWidth;
+    previewCanvas.height = previewHeight;
+    const ctx = previewCanvas.getContext('2d', { willReadFrequently: true })!;
+    ctx.fillStyle = bgColor || '#FFFFFF';
+    ctx.fillRect(0, 0, previewWidth, previewHeight);
+    ctx.drawImage(compositeCanvas, 0, 0, previewWidth, previewHeight);
+    const imgData = ctx.getImageData(0, 0, previewWidth, previewHeight);
+    const result = separateRgbaToCmykBuffer(
+      imgData.data,
+      previewWidth,
+      previewHeight,
+      separation,
+      true
+    );
+    previewCanvas.width = 0;
+    previewCanvas.height = 0;
+    return { result, previewWidth, previewHeight };
+  }
+
+  /**
+   * Phase 6.2: Export true 4-channel CMYK Baseline TIFF 6.0 (.tif) with GCR/UCR + TAC control.
+   */
+  public static async exportCmykTiff(
+    layerItems: LayerCanvasItem[],
+    width: number,
+    height: number,
+    bgColor: string | null = '#FFFFFF',
+    options: {
+      separation?: Partial<CmykSeparationOptions>;
+      dpi?: number;
+      compression?: 'packbits' | 'none';
+      iccProfile?: Uint8Array | null;
+    } = {}
+  ): Promise<{ blob: Blob; stats: CmykTacStats }> {
+    const compositeCanvas = this.compositeLayers(layerItems, width, height, bgColor || '#FFFFFF');
+    const ctx = compositeCanvas.getContext('2d', { willReadFrequently: true })!;
+    const imgData = ctx.getImageData(0, 0, width, height);
+    const separated = separateRgbaToCmykBuffer(
+      imgData.data,
+      width,
+      height,
+      options.separation,
+      false
+    );
+    const tiffBytes = encodeCmykTiff(separated.cmyk, width, height, {
+      dpi: options.dpi ?? 300,
+      compression: options.compression ?? 'packbits',
+      iccProfile: options.iccProfile ?? null,
+    });
+    return {
+      blob: new Blob([tiffBytes.buffer as ArrayBuffer], { type: 'image/tiff' }),
+      stats: separated.stats,
+    };
+  }
+
+  /**
+   * Phase 6.2: Export true 4-channel CMYK Adobe Photoshop PSD (.psd, ColorMode=4)
+   * preserving exact GCR/UCR separation, TAC clamping, and raster layers.
+   */
+  public static async exportCmykPsd(
+    layerItems: LayerCanvasItem[],
+    width: number,
+    height: number,
+    bgColor: string | null = '#FFFFFF',
+    options: {
+      separation?: Partial<CmykSeparationOptions>;
+      dpi?: number;
+      compression?: 'rle' | 'raw';
+      iccProfile?: Uint8Array | null;
+      includeLayers?: boolean;
+    } = {}
+  ): Promise<{ blob: Blob; stats: CmykTacStats }> {
+    const compositeCanvas = this.compositeLayers(layerItems, width, height, bgColor || '#FFFFFF');
+    const compCtx = compositeCanvas.getContext('2d', { willReadFrequently: true })!;
+    const compData = compCtx.getImageData(0, 0, width, height);
+    const separatedComposite = separateRgbaToCmykBuffer(
+      compData.data,
+      width,
+      height,
+      options.separation,
+      false
+    );
+
+    const psdLayers: CmykPsdLayerInput[] = [];
+    if (options.includeLayers !== false) {
+      for (const item of layerItems) {
+        if (item.layer.layerType === 'group' || isAdjustmentItem(item) || !item.canvas) continue;
+        const lCanvas = document.createElement('canvas');
+        lCanvas.width = width;
+        lCanvas.height = height;
+        const lCtx = lCanvas.getContext('2d', { willReadFrequently: true })!;
+        lCtx.drawImage(item.canvas, 0, 0, width, height);
+        const lData = lCtx.getImageData(0, 0, width, height).data;
+        const sepLayer = separateRgbaToCmykBuffer(lData, width, height, options.separation, false);
+        const alpha = new Uint8Array(width * height);
+        for (let i = 0; i < alpha.length; i++) alpha[i] = lData[i * 4 + 3];
+        psdLayers.push({
+          name: item.layer.name || 'Layer',
+          cmyk: sepLayer.cmyk,
+          alpha,
+          width,
+          height,
+          opacity: item.layer.opacity,
+          visible: item.layer.isVisible,
+          blendModeKey: this.mapToPsdBlendModeKey(item.layer.blendMode),
+        });
+        lCanvas.width = 0;
+        lCanvas.height = 0;
+      }
+    }
+
+    const psdBytes = encodeCmykPsd(separatedComposite.cmyk, width, height, {
+      dpi: options.dpi ?? 300,
+      compression: options.compression ?? 'rle',
+      iccProfile: options.iccProfile ?? null,
+      layers: psdLayers,
+    });
+    return {
+      blob: new Blob([psdBytes.buffer as ArrayBuffer], { type: 'image/vnd.adobe.photoshop' }),
+      stats: separatedComposite.stats,
+    };
+  }
+
+  private static mapToPsdBlendModeKey(mode: BlendMode): string {
+    const map: Record<string, string> = {
+      normal: 'norm',
+      multiply: 'mul ',
+      screen: 'scrn',
+      overlay: 'over',
+      darken: 'dark',
+      lighten: 'lite',
+      'color-dodge': 'div ',
+      'color-burn': 'idiv',
+      'hard-light': 'hLit',
+      'soft-light': 'sLit',
+      difference: 'diff',
+      exclusion: 'smud',
+      hue: 'hue ',
+      saturation: 'sat ',
+      color: 'colr',
+      luminosity: 'lum ',
+    };
+    return map[mode] || 'norm';
   }
 
   private static mapToOraCompositeOp(mode: BlendMode): string {

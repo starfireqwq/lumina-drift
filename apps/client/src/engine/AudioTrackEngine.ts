@@ -3,8 +3,12 @@ import {
   DEFAULT_WAVEFORM_PEAKS,
   computeAudioPlaybackWindow,
   computeWaveformPeaks,
+  mixPcmChannels,
+  planExportAudioMix,
   resolveAudioClipFrameRange,
+  type PcmClipInput,
 } from '@atelier/shared';
+import type { MixedAudioPcm } from './videoExport';
 
 /**
  * Phase E3: Local-only IndexedDB audio storage + Web Audio playback & scrubbing engine.
@@ -249,16 +253,85 @@ export async function deleteLocalAudioAsset(id: string): Promise<void> {
   if (db) {
     await new Promise<void>((resolve) => {
       try {
-        const tx = db.transaction(STORE_NAME, 'readwrite');
-        tx.objectStore(STORE_NAME).delete(id);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => resolve();
+        const rw = db.transaction(STORE_NAME, 'readwrite');
+        rw.objectStore(STORE_NAME).delete(id);
+        rw.oncomplete = () => resolve();
+        rw.onerror = () => resolve();
       } catch {
         resolve();
       }
     });
   }
   notifyAssetListeners();
+}
+
+export function getDecodedAudioBuffer(assetId: string): AudioBuffer | null {
+  return decodedBuffers.get(assetId) ?? null;
+}
+
+/**
+ * Offline stereo PCM renderer for animation MP4/WebM export.
+ * Loads decoded local buffers for all active audio tracks overlapping `[exportStartFrame, exportEndFrame]`,
+ * applies trim offset, timeline offset, volume, and mute, and returns mixed stereo Float32 PCM.
+ */
+export async function renderMixedAudioTrack(
+  tracks: ReadonlyArray<PlayableAudioTrackItem>,
+  exportStartFrame: number,
+  exportEndFrame: number,
+  fps: number,
+  targetSampleRate: number = 48000
+): Promise<MixedAudioPcm | null> {
+  const plan = planExportAudioMix(tracks, exportStartFrame, exportEndFrame, fps);
+  if (!plan.hasActiveAudio || plan.totalDurationSec <= 0) return null;
+
+  const missingAssetIds: string[] = [];
+  const pcmClips: PcmClipInput[] = [];
+
+  for (const clip of plan.clips) {
+    const buffer = await ensureAudioBufferLoaded(clip.localAssetId);
+    if (!buffer) {
+      missingAssetIds.push(clip.localAssetId);
+      continue;
+    }
+    const left = buffer.getChannelData(0);
+    const right = buffer.numberOfChannels > 1 ? buffer.getChannelData(1) : left;
+    pcmClips.push({
+      left,
+      right,
+      sampleRate: buffer.sampleRate,
+      sourceOffsetSec: clip.sourceOffsetSec,
+      timelineStartSec: clip.timelineStartSec,
+      playDurationSec: clip.playDurationSec,
+      gain: clip.gain,
+    });
+  }
+
+  if (pcmClips.length === 0) {
+    return {
+      left: new Float32Array(0),
+      right: new Float32Array(0),
+      sampleRate: targetSampleRate,
+      frameCount: 0,
+      durationSec: plan.totalDurationSec,
+      mixedTrackCount: 0,
+      missingAssetIds,
+      peakAmplitude: 0,
+      clippedSamples: 0,
+    };
+  }
+
+  const mixed = mixPcmChannels(targetSampleRate, plan.totalDurationSec, pcmClips);
+  return {
+    left: mixed.left,
+    right: mixed.right,
+    sampleRate: mixed.sampleRate,
+    frameCount: mixed.frameCount,
+    durationSec: mixed.durationSec,
+    mixedTrackCount: mixed.mixedClipCount,
+    missingAssetIds,
+    peakAmplitude: mixed.peakAmplitude,
+    clippedSamples: mixed.clippedSamples,
+  };
 }
 
 export class AudioTrackPlayer {

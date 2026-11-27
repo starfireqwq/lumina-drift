@@ -7,14 +7,28 @@ import {
   Images,
   Layers,
   Loader2,
+  Music,
   Plus,
   Sparkles,
   Trash2,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
+import {
+  isAudioLayer,
+  normalizeAudioTrackMeta,
+  planExportAudioMix,
+  type LayerModel,
+} from '@atelier/shared';
 import { AtelierModal, modalButton } from './AtelierModal';
 import { OverlayPresence } from './OverlayPresence';
 import { useI18n } from '../context/I18nContext';
 import { formatTimecode, type AnimationTrack, type TimecodeMode } from '../engine/AnimationEngine';
+import {
+  renderMixedAudioTrack,
+  type AudioAssetSummary,
+  type PlayableAudioTrackItem,
+} from '../engine/AudioTrackEngine';
 import {
   computeScaledExportDimensions,
   DEFAULT_LINE_COLOR_RULES,
@@ -33,8 +47,10 @@ import {
   buildVideoRecorderCandidates,
   computeVideoExportDimensionsForResolution,
   getVideoExtensionFromBlob,
+  isWebCodecsAudioEncoderAvailable,
   isWebCodecsVideoEncoderAvailable,
   unwrapMediaRecorderError,
+  type AudioMuxFallbackReason,
   type VideoExportResolution,
 } from '../engine/videoExport';
 import type {
@@ -75,6 +91,9 @@ export interface AnimationExportModalProps {
   cameraFrameSize?: { width: number; height: number } | null;
   planExport: (opts: AnimationExportPlanRequest) => AnimationExportPlan | null;
   planCelExport?: (opts: { folderIds: string[] }) => AnimationCelExportPlan | null;
+  /** Phase 6.1: Audio layers & local asset summaries for MP4/WebM audio mixing */
+  audioLayers?: LayerModel[];
+  audioAssetSummaries?: Record<string, AudioAssetSummary>;
 }
 
 export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
@@ -92,11 +111,14 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
   cameraFrameSize = null,
   planExport,
   planCelExport,
+  audioLayers = [],
+  audioAssetSummaries = {},
 }) => {
   const { t } = useI18n();
   const folderBridge = getDesktopExportFolder();
   const hasFolderBridge = Boolean(folderBridge);
   const webCodecsReady = useMemo(() => isWebCodecsVideoEncoderAvailable(), []);
+  const audioEncoderReady = useMemo(() => isWebCodecsAudioEncoderAvailable(), []);
   const canRecord = typeof MediaRecorder !== 'undefined';
   const mp4Supported = useMemo(
     () =>
@@ -106,6 +128,8 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
   );
 
   const [mode, setMode] = useState<AnimationExportMode>('mp4');
+  const [videoContainer, setVideoContainer] = useState<'mp4' | 'webm'>('mp4');
+  const [includeAudio, setIncludeAudio] = useState<boolean>(true);
   const [videoResolution, setVideoResolution] = useState<VideoExportResolution>('4k');
   const [scope, setScope] = useState<AnimationExportScope>('folder');
   const [useCameraFrame, setUseCameraFrame] = useState<boolean>(Boolean(cameraFrameSize));
@@ -310,17 +334,39 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
               cropRegion: effectiveCrop,
             });
           } else {
+            const playableAudioTracks: PlayableAudioTrackItem[] = audioLayers
+              .filter((layer) => isAudioLayer(layer) && layer.isVisible)
+              .map((layer) => ({
+                layerId: layer.id,
+                meta: normalizeAudioTrackMeta(layer.meta?.audio),
+              }));
+            const audioMix =
+              includeAudio && playableAudioTracks.length > 0
+                ? await renderMixedAudioTrack(
+                    playableAudioTracks,
+                    resolvedRange.start,
+                    resolvedRange.end,
+                    fps,
+                    48000
+                  )
+                : null;
+            const audioFallbackRef: { reason: AudioMuxFallbackReason } = { reason: 'none' };
             blob = await ExportEngine.exportVideoAnimation(
               next,
               total,
               plan.width,
               plan.height,
               fps,
-              'mp4',
+              videoContainer,
               videoResolution,
               {
                 signal: controller.signal,
                 cropRegion: effectiveCrop,
+                includeAudio,
+                audioMix,
+                onAudioFallback: (reason) => {
+                  audioFallbackRef.reason = reason;
+                },
                 onProgress: ({ currentFrame, totalFrames }) => {
                   setProgressText(
                     t.animation.exportEncodingFrame
@@ -330,8 +376,27 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
                 },
               }
             );
+            const ext = getVideoExtensionFromBlob(blob, videoContainer);
+            ExportEngine.downloadBlob(blob, `animation_${Date.now()}.${ext}`);
+            if (
+              includeAudio &&
+              audioMix &&
+              audioMix.mixedTrackCount > 0 &&
+              (audioFallbackRef.reason === 'encoder-unsupported' || audioFallbackRef.reason === 'encode-failed')
+            ) {
+              setStatusNotice({
+                kind: 'success',
+                text:
+                  audioFallbackRef.reason === 'encoder-unsupported'
+                    ? t.animation.exportAudioEncoderUnsupported
+                    : t.animation.exportAudioMixFallback,
+              });
+            } else {
+              onClose();
+            }
+            return;
           }
-          const ext = mode === 'gif' ? 'gif' : getVideoExtensionFromBlob(blob, 'mp4');
+          const ext = mode === 'gif' ? 'gif' : getVideoExtensionFromBlob(blob, videoContainer);
           ExportEngine.downloadBlob(blob, `animation_${Date.now()}.${ext}`);
           onClose();
         } finally {
@@ -598,40 +663,127 @@ export const AnimationExportModal: React.FC<AnimationExportModalProps> = ({
             </div>
           )}
 
-          {/* Mode: Video (D2) */}
-          {mode === 'mp4' && (
-            <div className="space-y-2.5 rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span className="text-xs text-neutral-300">{t.replay.resolution}</span>
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="rounded-full border border-indigo-500/40 bg-indigo-500/10 px-2 py-0.5 text-[10px] text-indigo-300">
-                    {webCodecsReady ? t.animation.exportOfflineEncoder : t.animation.exportFallbackRecorder}
-                  </span>
-                  <select
-                    aria-label={t.replay.resolution}
-                    value={videoResolution}
-                    onChange={(e) => setVideoResolution(e.target.value as VideoExportResolution)}
-                    disabled={busy}
-                    className="rounded-lg border border-neutral-700 bg-neutral-800 px-2 py-1 font-mono text-xs text-neutral-200 outline-none"
-                  >
-                    {(['1080p', '2k', '4k'] as const).map((tier) => {
-                      const dims = computeVideoExportDimensionsForResolution(
-                        exportRegion.width,
-                        exportRegion.height,
-                        tier
-                      );
-                      const label = tier === '1080p' ? '1080p' : tier.toUpperCase();
-                      return (
-                        <option key={tier} value={tier}>
-                          {label} ({dims.width}×{dims.height})
-                        </option>
-                      );
-                    })}
-                  </select>
+          {/* Mode: Video (D2 + Phase 6.1 Audio Mixing) */}
+          {mode === 'mp4' && (() => {
+            const playableAudioTracks: PlayableAudioTrackItem[] = audioLayers
+              .filter((layer) => isAudioLayer(layer) && layer.isVisible)
+              .map((layer) => ({
+                layerId: layer.id,
+                meta: normalizeAudioTrackMeta(layer.meta?.audio),
+              }));
+            const mixPlan = planExportAudioMix(
+              playableAudioTracks,
+              resolvedRange.start,
+              resolvedRange.end,
+              fps
+            );
+            const linkedActiveCount = mixPlan.clips.filter(
+              (c) => audioAssetSummaries[c.localAssetId]?.linked
+            ).length;
+            const unlinkedActiveCount = mixPlan.clips.length - linkedActiveCount;
+
+            return (
+              <div className="space-y-2.5 rounded-xl border border-neutral-800 bg-neutral-900/50 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs text-neutral-300">{t.animation.exportVideoContainer}</span>
+                  <div className="flex items-center gap-1" role="radiogroup" aria-label={t.animation.exportVideoContainer}>
+                    {(['mp4', 'webm'] as const).map((fmt) => (
+                      <button
+                        key={fmt}
+                        type="button"
+                        role="radio"
+                        aria-checked={videoContainer === fmt}
+                        data-testid={`anim-export-container-${fmt}`}
+                        disabled={busy}
+                        onClick={() => setVideoContainer(fmt)}
+                        className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium uppercase transition ${
+                          videoContainer === fmt
+                            ? 'border-indigo-400/80 bg-indigo-500/20 text-white'
+                            : 'border-neutral-700 bg-neutral-900/70 text-neutral-400 hover:text-neutral-200'
+                        }`}
+                      >
+                        {fmt}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs text-neutral-300">{t.replay.resolution}</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded-full border border-indigo-500/40 bg-indigo-500/10 px-2 py-0.5 text-[10px] text-indigo-300">
+                      {webCodecsReady ? t.animation.exportOfflineEncoder : t.animation.exportFallbackRecorder}
+                    </span>
+                    <select
+                      aria-label={t.replay.resolution}
+                      value={videoResolution}
+                      onChange={(e) => setVideoResolution(e.target.value as VideoExportResolution)}
+                      disabled={busy}
+                      className="rounded-lg border border-neutral-700 bg-neutral-800 px-2 py-1 font-mono text-xs text-neutral-200 outline-none"
+                    >
+                      {(['1080p', '2k', '4k'] as const).map((tier) => {
+                        const dims = computeVideoExportDimensionsForResolution(
+                          exportRegion.width,
+                          exportRegion.height,
+                          tier
+                        );
+                        const label = tier === '1080p' ? '1080p' : tier.toUpperCase();
+                        return (
+                          <option key={tier} value={tier}>
+                            {label} ({dims.width}×{dims.height})
+                          </option>
+                        );
+                      })}
+                    </select>
+                  </div>
+                </div>
+                <div className="border-t border-neutral-800/80 pt-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label className="flex cursor-pointer items-center gap-2 text-xs text-neutral-200">
+                      <input
+                        type="checkbox"
+                        data-testid="anim-export-include-audio"
+                        checked={includeAudio}
+                        onChange={(e) => setIncludeAudio(e.target.checked)}
+                        disabled={busy}
+                        className="h-3.5 w-3.5 rounded border-neutral-600 bg-neutral-800 accent-emerald-500"
+                      />
+                      <span className="flex items-center gap-1.5">
+                        {includeAudio ? (
+                          <Volume2 className="h-3.5 w-3.5 text-emerald-400" />
+                        ) : (
+                          <VolumeX className="h-3.5 w-3.5 text-neutral-500" />
+                        )}
+                        {t.animation.exportIncludeAudio}
+                      </span>
+                    </label>
+                    <span
+                      data-testid="anim-export-audio-status"
+                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] ${
+                        includeAudio && linkedActiveCount > 0
+                          ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                          : 'border-neutral-700 bg-neutral-800/60 text-neutral-400'
+                      }`}
+                    >
+                      <Music className="h-2.5 w-2.5" />
+                      {linkedActiveCount > 0
+                        ? t.animation.exportAudioTracksActive.replace('{count}', String(linkedActiveCount))
+                        : t.animation.exportAudioTracksNone}
+                    </span>
+                  </div>
+                  {includeAudio && unlinkedActiveCount > 0 && (
+                    <p className="mt-1 text-[10px] text-amber-300/90">
+                      {t.animation.exportAudioUnlinkedHint}
+                    </p>
+                  )}
+                  {includeAudio && linkedActiveCount > 0 && !audioEncoderReady && webCodecsReady && (
+                    <p className="mt-1 text-[10px] text-amber-300/90">
+                      {t.animation.exportAudioEncoderUnsupported}
+                    </p>
+                  )}
                 </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Phase E1: Camera framing region toggle when a visible camera layer exists */}
           {mode !== 'cels' && cameraFrameSize && (

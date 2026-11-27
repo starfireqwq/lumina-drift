@@ -8996,6 +8996,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                 audioScrubEnabled={audioScrubEnabled}
                 onToggleAudioScrub={() => setAudioScrubEnabled((v) => !v)}
                 onToggleAudioMute={toggleAudioTrackMute}
+                onUpdateAudioTrack={updateAudioTrack}
               />
             </Suspense>
           )}
