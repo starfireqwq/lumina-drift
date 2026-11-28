@@ -40,7 +40,8 @@
 - **工具列與輔助工具集重構**：折疊精簡主工具列獨立顯示文字、漫畫、動畫（共 14 大類）；統一輔助工具集面板、分隔線與精簡說明；整併單一油漆桶並同步上下參照屬性；智能填色整合「圍住塗抹」與「間隙補塗」；新增獨立 5 款橡皮擦工具集（硬邊、軟邊、感壓大小、定寬無感壓、感壓透明）並支援四段消除鋸齒與即時筆觸預覽；淺色主題下筆刷與橡皮擦預覽自動切換為深黑筆觸以維持清晰對比。
 - **操作細節與單機模式淨化**：變形工具綁定 `Ctrl+T`；支援 `Shift + 滾輪` 與 `Ctrl／⌘ + Shift + 滾輪` 旋轉畫布，並可於設定中自訂步進角度；單機／離線模式隱藏多人房間專屬的圖層協作控制項；修復調整圖層標題跳動與切換畫布時快速遮色片狀態重置。
 - **介面流暢度與六大材質升級**：移除炫彩玻璃導致卡頓掉幀的根因；升級「流光霓虹」雙流波動效果（支援彩色 RGB／單色／雙色、主副色與飽和度微調，低飽和度自然往純白發光過渡並排除相鄰／巢狀雙條重複流光）；全面強化六大介面表面材質質感。
-- **大型 PSD 串流匯入修復**：改以逐層延遲解碼並直接裁切為 256×256 LZ4 瓦片，解決從 Clip Studio Paint 等軟體匯出大型多圖層 PSD（如數百 MB、未壓縮超過 2 GB 像素）開啟時出現 `Exceeded memory limit` 錯誤的問題。
+- **大型 PSD 串流匯入與圖層組完整合成**：改以逐層延遲解碼直出 256×256 LZ4 瓦片，修復大型 CSP PSD 開啟時 `Exceeded memory limit` 問題；完整支援圖層組剪裁到下方圖層（含跨群組剪裁與群組基底）、圖層組混合模式（色彩增值／濾色／柔光等）與圖層效果整體套用、整個圖層組設為參考圖層，以及直接選取資料夾整組移動／變形（保留子層結構與整組原子復原）。
+- **流暢度、縮圖與視窗停靠體驗升級**：保存／另存專案即時顯示進度並移除重複壓縮卡頓；優化連續縮放 Mipmap 與切回視窗自動預載視口瓦片；圖層縮圖免點擊自動載入並仿 CSP 依畫布長寬比顯示不扭曲；色彩面板切換列移至最近使用色彩下方；修復合併懸浮視窗拖曳並支援左右側停靠面板直接合併為分頁。
 - **Windows 安裝精靈優化**：重編 `LuminaGlassUI.dll`，提升暗色流光玻璃背景下的 GroupBox 亮字可讀性。
 
 ---
@@ -81,7 +82,8 @@
 - **工具栏与辅助工具集重构**：折叠精简主工具栏独立显示文字、漫画、动画（共 14 大类）；统一辅助工具集面板、分隔线与精简说明；整合单一油漆桶并同步上下参照属性；智能填色整合“包围涂抹”与“间隙补涂”；新增独立 5 款橡皮擦工具集（硬边、软边、压感大小、定宽无压感、压感透明）并支持四段抗锯齿与实时笔触预览；浅色主题下笔刷与橡皮擦预览自动切换为深黑笔触。
 - **操作细节与单机模式净化**：变形工具绑定 `Ctrl+T`；支持 `Shift + 滚轮` 与 `Ctrl／⌘ + Shift + 滚轮` 旋转画布，并可在设置中自定义步进角度；单机／离线模式隐藏多人房间专属的图层协作控件；修复调整图层标题跳动与切换画布时快速蒙版状态重置。
 - **界面流畅度与六大材质升级**：移除炫彩玻璃导致卡顿掉帧的根因；升级“流光霓虹”双流波动效果（支持彩色 RGB／单色／双色、主副色与饱和度微调，低饱和度自然向纯白发光过渡并排除相邻／嵌套双条重复流光）；全面强化六大界面表面材质质感。
-- **大型 PSD 流式导入修复**：改为逐层延迟解码并直接裁切为 256×256 LZ4 瓦片，解决从 Clip Studio Paint 等软件导出大型多图层 PSD（未压缩像素超过 2 GB）打开时报 `Exceeded memory limit` 的问题。
+- **大型 PSD 流式导入与图层组完整合成**：改为逐层延迟解码直出 256×256 LZ4 瓦片，修复大型 CSP PSD 打开报 `Exceeded memory limit` 的问题；完整支持图层组剪贴蒙版（含跨分组与分组基底）、图层组混合模式（正片叠底／滤色／柔光等）与图层效果整体生效、将整个图层组设为参考图层，以及直接选中文件夹整组移动／变形（保留子层结构与整组原子撤销）。
+- **流畅度、缩略图与窗口停靠体验升级**：保存／另存项目实时显示进度并消除重复压缩卡顿；优化连续缩放 Mipmap 与切回窗口自动预载视口瓦片；图层缩略图免点击自动加载并按画布比例显示不拉伸；色彩面板模式切换移至最近使用颜色下方；修复合并悬浮窗拖拽并支持左右侧停靠面板合并为标签页。
 - **Windows 安装向导优化**：重编 `LuminaGlassUI.dll`，提升暗色流光玻璃背景下的 GroupBox 亮字可读性。
 
 ---
@@ -122,7 +124,8 @@
 - **Streamlined Toolbar, Unified Fill & Dedicated 5-Preset Eraser Toolset**: Expanded the compact toolbar to 14 categories so Text, Comic, and Animation are directly accessible; unified Sub Tool panel dividers and concise hints; consolidated Paint Bucket with synchronized top-bar and side-panel reference settings; unified Enclose & Fill and Gap Fill inside Smart Fill; added 5 dedicated Eraser presets (Hard, Soft, Pressure Size, Fixed Size, Pressure Opacity) with 4-level anti-aliasing and live stroke previews; automatically switched brush and eraser previews to dark ink on light themes for high legibility.
 - **Controls & Solo-Mode Polish**: Bound Transform to `Ctrl+T`; added `Shift + Wheel` and `Ctrl/⌘ + Shift + Wheel` canvas rotation with customizable step angles in Settings; hid multiplayer-only layer collaboration controls in solo/offline canvases; fixed adjustment-layer header jumping and Quick Mask reset on canvas switches.
 - **UI Performance & Six Surface Materials**: Eliminated the CSS stutter root cause in Chromatic Glass; upgraded Lumina Glow with dual-stream wave effects (RGB / Mono / Dual color modes, primary/secondary pickers, luminous white-light transition at low saturation, and deduplicated single-seam light streams); refined all six UI surface materials.
-- **Large PSD Streaming Import Fix**: Switched PSD decoding to layer-by-layer streaming straight into 256×256 LZ4 tiles, fixing `Exceeded memory limit` errors when opening large multi-layer PSDs exported from Clip Studio Paint or Photoshop (over 2 GB uncompressed pixel totals).
+- **Large PSD Streaming Import & Full Layer-Group Semantics**: Switched PSD decoding to layer-by-layer streaming straight into 256×256 LZ4 tiles (fixing `Exceeded memory limit` on huge CSP/Photoshop PSDs); added full support for Clip-to-Below on groups (including clipped group chains and group clip bases), group-wide blend modes (Multiply, Screen, Soft Light, etc.) and layer effects, setting an entire folder as a Reference Layer, and direct Move/Transform on folders with atomic undo.
+- **Save Progress, Viewport Responsiveness, Aspect Thumbnails & Docking**: Added live progress toasts and fast PNG `STORE` ZIP packaging for Save / Save As; reduced zoom mipmap hitches and automatically resumed viewport tile hydration on window focus/visibility return; auto-loaded layer panel thumbnails without clicking using CSP-style proportional aspect-ratio frames; moved Color Wheel/Mixing & HSV/HLS toggles below Recent Colors; fixed dragging merged floating windows and enabled tab merging inside Left/Right docks.
 - **Windows Installer Polish**: Rebuilt `LuminaGlassUI.dll` with brighter GroupBox text contrast against the dark glass installer background.
 
 ---
@@ -163,5 +166,6 @@
 - **ツールバー・塗りつぶし・独立消しゴムサブツール群の整備**：コンパクトツールバーを 14 カテゴリへ拡張しテキスト・漫画・アニメーションを直接表示。サブツールセットの区切り線と説明を統一整理し、単一バケツの上下参照設定を同期。スマート塗りに「囲って塗る」と「塗り残し補正」を統合し、4 段階アンチエイリアスとリアルタイムストロークプレビュー対応の 5 種消しゴムサブツール群（硬め・柔らかめ・筆圧サイズ・固定サイズ・筆圧不透明度）を独立搭載しました。ライトテーマではブラシ／消しゴムプレビューを黒インクへ自動切替します。
 - **操作性向上とオフライン UI の整理**：変形ツールを `Ctrl+T` に割り当て。`Shift + ホイール`／`Ctrl・⌘ + Shift + ホイール` のキャンバス回転と設定画面での角度カスタマイズを追加。オフライン／ソロ作画時は共同作画専用のレイヤー UI を非表示化し、色調補正レイヤーのヘッダー跳ねやキャンバス切替時のクイックマスク残留を修正しました。
 - **描画パフォーマンスと 6 種サーフェス質感の刷新**：クロマチックガラスで発生していたフレーム落ちの根本原因を除去。ルミナグローをデュアルストリーム発光（RGB／単色／2 色・低彩度時の白光発光・重複ストリーム排除）へ強化し、全 6 種の UI サーフェス質感を磨き上げました。
-- **大容量 PSD ストリーミング読み込み修正**：PSD デコードをレイヤー単位の遅延デコードと 256×256 LZ4 タイル直接切り出しへ刷新し、CLIP STUDIO PAINT 等から書き出した大容量・多レイヤー PSD（非圧縮合計 2 GB 超）を開く際の `Exceeded memory limit` エラーを解消しました。
+- **大容量 PSD ストリーミング読込＆フォルダー完全対応**：PSD をレイヤー単位で 256×256 LZ4 タイルへ直接デコードし `Exceeded memory limit` を解消。フォルダーへのクリッピング（フォルダー基底含む）、フォルダー全体の合成モード（乗算・スクリーン・ソフトライト等）とレイヤー効果、フォルダー全体の参照レイヤー指定、およびフォルダー単位での直接移動・変形（子レイヤー保持＋一括取り消し）に対応しました。
+- **保存進捗・描画応答性・サムネイル・ドッキング改善**：保存／別名保存の進捗表示と高速化（PNG 無再圧縮）、連続ズーム時の Mipmap 負荷軽減とウィンドウ復帰時の自動タイル再読込、クリック不要でキャンバス縦横比を保つ CSP 風レイヤーサムネイル自動表示、カラー切替ボタンの履歴下への配置、統合フローティングウィンドウのドラッグ修正、左右ドック内でのタブ結合を追加しました。
 - **Windows インストーラー改善**：`LuminaGlassUI.dll` を再ビルドし、暗色ガラス背景における GroupBox テキストの視認性を向上しました。

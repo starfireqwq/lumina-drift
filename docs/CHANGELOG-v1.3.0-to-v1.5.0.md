@@ -129,6 +129,10 @@
   - 升級**流光霓虹（Lumina Glow）**支援雙流波動效果，提供彩色 RGB／單色／雙色模式、自訂主副流光色與飽和度微調。
   - 全面打磨六大介面表面材質質感（經典霧面、磨砂玻璃、炫彩玻璃、啞光微粒、流光霓虹、紙感軟擬態）。
 - **大型多圖層 PSD 串流解碼修復**：改以 `ag-psd` 的 `useRawData` 逐層延遲解碼並直接裁切轉為 premultiplied 256×256 LZ4 瓦片，移除整檔複製與全畫布暫存，徹底修復從 CSP 等軟體匯出之大型多圖層 PSD（如 285 MB / 5100×8500 / 88 層 / 4.4 GB 未壓縮像素）開啟時觸發 `Exceeded memory limit` 的問題。
+- **圖層組完整合成、整組變形、視窗停靠與實機體驗升級**：
+  - 完整支援**圖層組剪裁到下方圖層**（含跨群組剪裁鏈與以群組輪廓為基底）、**圖層組混合模式**（色彩增值／濾色／柔光等）與**圖層組非破壞性效果**作用於整組內容，並支援將**整個圖層組設為參考圖層**（油漆桶／間隙補塗／智能圍住填色＋圖層面板快捷切換）。
+  - 支援直接選取**整個資料夾進行移動、縮放、旋轉與網格／透視／自由變形**（保留子層結構，支援 `Ctrl+Z` 整組原子復原與 `Esc` 取消）。
+  - 保存與另存專案顯示即時階段與封裝進度，且對 PNG 改採 ZIP `STORE` 大幅減輕停頓；改善連續縮放 Mipmap 卡頓並於切回視窗時自動預載視口瓦片；圖層預覽縮圖改為免點擊自動載入且仿 CSP 依畫布長寬比顯示不拉伸變形；色彩面板切換列移至最近使用色彩下方；修復合併懸浮視窗拖曳並支援左右側停靠面板合併分頁。
 - **Windows 安裝精靈介面優化**：新增流光玻璃風格安裝介面，並透過重編 `LuminaGlassUI.dll` 強化 NSIS `GroupBox` 文字亮度與暗色背景可讀性；同時補齊繁中、簡中、英文、日文四語系 README 與完整翻譯鍵覆蓋。
 
 ---
@@ -138,8 +142,8 @@
 - **自動化與實機回歸驗證**：全工作區建置（`pnpm -r build`）、Electron 主程式與內嵌伺服端建置（`build:electron`）、前端邏輯自檢（`ui-logic.check.ts`、`navigator-panel.checks.ts`）、四語系覆蓋率檢查（`i18n-coverage.check.ts`）、後端整合測試（`pnpm --filter @atelier/server test`）以及各階段隔離式 Electron 桌面端煙霧測試均已完成驗證。
 - **v1.5.0 最終版發佈產物（2026-11-28 實測建置驗證）**：
   - Windows 安裝精靈元件：`apps/client/resources/installer/LuminaGlassUI.dll`（`471,552 bytes` / `0.45 MB`，x86 PE32 DLL）
-  - Windows 安裝版：`Lumina-Drift-Paint-Setup-1.5.0.exe`（`139,734,604 bytes` / `133.26 MB`）
-  - Windows 免安裝可攜版：`Lumina-Drift-Paint-Portable-1.5.0.exe`（`127,479,118 bytes` / `121.57 MB`）
-  - Android 已簽章安裝包：`Lumina-Drift-Paint-Android-1.5.0.apk`（`2,571,247 bytes` / `2.45 MB`，已通過 `apksigner` v2／v3 簽章驗證）
-  - Web 靜態與自架部署包：`Lumina-Drift-Paint-Web-1.5.0.zip`（`5,425,434 bytes` / `5.17 MB`）
+  - Windows 安裝版：`Lumina-Drift-Paint-Setup-1.5.0.exe`（`139,735,947 bytes` / `133.26 MB`）
+  - Windows 免安裝可攜版：`Lumina-Drift-Paint-Portable-1.5.0.exe`（`127,485,826 bytes` / `121.58 MB`）
+  - Android 已簽章安裝包：`Lumina-Drift-Paint-Android-1.5.0.apk`（`2,583,535 bytes` / `2.46 MB`，已通過 `apksigner` v2／v3 簽章驗證）
+  - Web 靜態與自架部署包：`Lumina-Drift-Paint-Web-1.5.0.zip`（`5,451,281 bytes` / `5.20 MB`）
   - macOS 安裝包（Apple Silicon `arm64`／Intel `x64`）：由 GitHub Actions `macos-packages.yml` 隨 `v1.5.0` 標籤自動建置並附加至 Release。
