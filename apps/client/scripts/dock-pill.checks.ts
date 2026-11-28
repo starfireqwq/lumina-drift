@@ -245,6 +245,67 @@ function checkReopenAndHide() {
   assert.equal(Object.hasOwn(getDockLayout().floatGroups, 'layers'), false);
 }
 
+function checkDockTabGroups() {
+  const windowRect = { x: 130, y: 100, w: 320, h: 450 };
+  for (const [side, target] of [['left', 'navigator'], ['right', 'color'], ['bottom', 'oplog']] as const) {
+    dockActions.reset();
+    dockActions.moveTo(target, side);
+    dockActions.moveTo('subView', side);
+    dockActions.setCollapsed(target, true);
+    dockActions.mergePanelsInto(['subView'], target);
+    dockActions.floatAt('layers', windowRect);
+    dockActions.mergeInto('quickKeys', 'layers');
+    dockActions.activate('layers');
+    dockActions.minimizeFloatGroup('layers');
+
+    dockActions.setCollapsed(target, true);
+    dockActions.mergePanelsInto(['layers'], 'subView', { activeId: 'layers', keepTargetMinimized: true });
+    const merged = getDockLayout();
+    assert.equal(merged.panels[target].collapsed, false);
+    assert.equal(merged.activeTab[target], 'layers');
+    assert.equal(merged.activeTab.layers, 'quickKeys');
+    assert.equal(Object.hasOwn(merged.floatGroups, target), false);
+    assert.equal(getFloatGroupState(merged, 'layers').minimized, true);
+    assert.deepEqual(merged.order.filter((id) => merged.panels[id].place === side && merged.panels[id].group === target), [
+      target, 'subView', 'layers',
+    ]);
+
+    dockActions.mergePanelsInto(['quickKeys'], target);
+    assert.equal(Object.hasOwn(getDockLayout().floatGroups, 'layers'), false);
+    assert.equal(Object.hasOwn(getDockLayout().activeTab, 'layers'), false);
+
+    dockActions.activate('subView');
+    dockActions.dockAt([target], side, 99);
+    const detached = getDockLayout();
+    const remainingGroup = detached.panels.subView.group;
+    assert.equal(detached.panels[target].place, side);
+    assert.equal(detached.panels[target].group, target);
+    assert.notEqual(remainingGroup, target);
+    assert.equal(detached.activeTab[remainingGroup], 'subView');
+
+    const otherSide = side === 'left' ? 'right' : 'left';
+    dockActions.moveDockGroup('subView', { side: otherSide, index: 0 });
+    const moved = getDockLayout();
+    assert.deepEqual(moved.order.filter((id) => moved.panels[id].place === otherSide && moved.panels[id].group === remainingGroup), [
+      'subView', 'layers', 'quickKeys',
+    ]);
+    assert.equal(moved.activeTab[remainingGroup], 'subView');
+
+    dockActions.floatAt('quickKeys', windowRect);
+    assert.deepEqual(floatingTabs('quickKeys'), ['quickKeys']);
+    assert.equal(getDockLayout().activeTab[remainingGroup], 'subView');
+    dockActions.mergePanelsInto(['quickKeys'], 'subView', { activeId: 'subView' });
+    dockActions.moveDockGroup('subView', { rect: windowRect });
+    assert.deepEqual(floatingTabs(remainingGroup), ['subView', 'layers', 'quickKeys']);
+    assert.deepEqual(getDockLayout().panels.subView.float, windowRect);
+
+    dockActions.detach('layers');
+    assert.deepEqual(floatingTabs('layers'), ['layers']);
+    assert.deepEqual(floatingTabs(remainingGroup), ['subView', 'quickKeys']);
+    assert.equal(getDockLayout().activeTab[remainingGroup], 'subView');
+  }
+}
+
 function checkDetachGroupOwner() {
   dockActions.reset();
   const windowRect = { x: 192, y: 115, w: 351, h: 463 };
@@ -318,6 +379,7 @@ export function runDockPillChecks() {
     checkMinimizeAndDetach();
     checkMergeAndDock();
     checkReopenAndHide();
+    checkDockTabGroups();
     checkDetachGroupOwner();
     checkLocalesAndIcons();
   } finally {

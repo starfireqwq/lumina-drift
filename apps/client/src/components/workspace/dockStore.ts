@@ -34,7 +34,7 @@ export interface PanelLayout {
   /** Share of the dock's length (flex-grow) when several panels are expanded in one dock */
   weight: number;
   float: FloatRect;
-  /** Floating panels with the same group share one window, as tabs (CSP-style); the group's first panel holds the window rect */
+  /** Panels at the same place with this group share a tab strip; the first floating panel holds the window rect */
   group: string;
 }
 
@@ -195,8 +195,11 @@ const commit = (next: DockLayoutState) => {
 const patchPanel = (id: PanelId, patch: Partial<PanelLayout>) =>
   commit({ ...state, panels: { ...state.panels, [id]: { ...state.panels[id], ...patch } } });
 
+const isGroupMember = (panel: PanelLayout | undefined, place: PanelPlace, group: string) =>
+  panel?.place === place && panel.group === group;
+
 const isFloatMember = (panel: PanelLayout | undefined, group: string) =>
-  panel?.place === 'float' && panel.group === group;
+  isGroupMember(panel, 'float', group);
 
 const firstVisibleFloatMember = (panels: DockLayoutState['panels'], order: PanelId[], group: string) =>
   order.find((id) => panels[id].visible && isFloatMember(panels[id], group));
@@ -243,19 +246,18 @@ const movePanelToOwnGroup = (id: PanelId, patch: Partial<PanelLayout>, order = s
   const panel = { ...state.panels[id], ...patch, group: id };
   const panels = { ...state.panels, [id]: panel };
   const floatGroups = { ...state.floatGroups };
-  const remaining = panel.place === 'float'
-    ? order.filter((member) => member !== id && isFloatMember(panels[member], id))
-    : [];
+  const remaining = order.filter((member) => member !== id && panels[member].group === id);
   let remainingGroup: string | undefined;
   if (remaining.length) {
-    // Free the panel ID for its own window while keeping the existing group together.
+    // Free the panel ID while keeping the remaining tabs together.
     remainingGroup = unusedGroupKey(id);
     for (const member of remaining) panels[member] = { ...panels[member], group: remainingGroup };
     const groupState = ownValue(floatGroups, id);
     if (groupState) floatGroups[remainingGroup] = groupState;
     const oldLeader = firstVisibleFloatMember(state.panels, state.order, id);
-    const newLeader = firstVisibleFloatMember(panels, order, remainingGroup) ?? remaining[0];
-    if (oldLeader === id) panels[newLeader] = { ...panels[newLeader], float: state.panels[id].float };
+    const newLeader = firstVisibleFloatMember(panels, order, remainingGroup)
+      ?? remaining.find((member) => panels[member].place === 'float');
+    if (oldLeader === id && newLeader) panels[newLeader] = { ...panels[newLeader], float: state.panels[id].float };
   }
   if (panel.place === 'float') {
     const previous = remainingGroup ? DEFAULT_FLOAT_GROUP_STATE : getFloatGroupState(state, id);
@@ -264,9 +266,9 @@ const movePanelToOwnGroup = (id: PanelId, patch: Partial<PanelLayout>, order = s
   const activeTab = repairSourceActiveTabs(panels, order, [id, ...remaining]);
   if (remainingGroup) {
     const previous = ownValue(state.activeTab, id);
-    const active = previous && isFloatMember(panels[previous], remainingGroup)
+    const active = previous && panels[previous]?.group === remainingGroup
       ? previous
-      : firstVisibleFloatMember(panels, order, remainingGroup);
+      : remaining.find((member) => panels[member].visible);
     if (active) activeTab[remainingGroup] = active;
   }
   commit({ ...state, order, panels, activeTab, floatGroups: pruneFloatGroups(panels, floatGroups) });
@@ -305,28 +307,32 @@ const showPanel = (id: PanelId) => {
 };
 
 const mergePanelsInto = (ids: PanelId[], target: PanelId, options?: { keepTargetMinimized?: boolean; activeId?: PanelId }) => {
-  const group = state.panels[target].group;
+  const { place: targetPlace, group } = state.panels[target];
+  const isTargetMember = (panel: PanelLayout | undefined) => isGroupMember(panel, targetPlace, group);
   const uniqueIds = [...new Set(ids)];
-  const moved = uniqueIds.filter((id) => !isFloatMember(state.panels[id], group));
+  const moved = uniqueIds.filter((id) => !isTargetMember(state.panels[id]));
   const others = state.order.filter((id) => !moved.includes(id));
-  const lastTab = others.reduce((at, id, index) => isFloatMember(state.panels[id], group) ? index : at, -1);
+  const lastTab = others.reduce((at, id, index) => isTargetMember(state.panels[id]) ? index : at, -1);
   const order = [...others.slice(0, lastTab + 1), ...moved, ...others.slice(lastTab + 1)];
   const panels = { ...state.panels };
-  for (const id of moved) panels[id] = { ...panels[id], place: 'float', visible: true, collapsed: false, group };
+  for (const id of moved) panels[id] = { ...panels[id], place: targetPlace, visible: true, collapsed: false, group };
 
-  const current = getFloatGroupState(state, group);
-  const floatGroups = {
-    ...state.floatGroups,
-    [group]: { ...current, minimized: options?.keepTargetMinimized ?? current.minimized },
-  };
+  let floatGroups = state.floatGroups;
+  if (targetPlace === 'float') {
+    const current = getFloatGroupState(state, group);
+    floatGroups = { ...floatGroups, [group]: { ...current, minimized: options?.keepTargetMinimized ?? current.minimized } };
+  } else if (moved.length) {
+    const leader = others.find((id) => panels[id].visible && isTargetMember(panels[id]));
+    if (leader && panels[leader].collapsed) panels[leader] = { ...panels[leader], collapsed: false };
+  }
   const activeTab = repairSourceActiveTabs(panels, order, moved);
   const selected = options?.activeId ?? uniqueIds[0] ?? target;
   const previous = ownValue(activeTab, group);
-  const active = isFloatMember(panels[selected], group)
+  const active = isTargetMember(panels[selected])
     ? selected
-    : previous && isFloatMember(panels[previous], group)
+    : previous && isTargetMember(panels[previous])
       ? previous
-      : firstVisibleFloatMember(panels, order, group);
+      : order.find((id) => panels[id].visible && isTargetMember(panels[id]));
   commit({
     ...state,
     order,
@@ -334,6 +340,34 @@ const mergePanelsInto = (ids: PanelId[], target: PanelId, options?: { keepTarget
     activeTab: active ? { ...activeTab, [group]: active } : activeTab,
     floatGroups: pruneFloatGroups(panels, floatGroups),
   });
+};
+
+const insertIntoDock = (ids: PanelId[], side: DockSide, index: number, before?: PanelId | null) => {
+  const others = state.order.filter((id) => !ids.includes(id));
+  const inDock = others.filter((id) => state.panels[id].visible && state.panels[id].place === side);
+  const leaders = new Map<string, PanelId>();
+  for (const id of inDock) {
+    const { group } = state.panels[id];
+    if (!leaders.has(group)) leaders.set(group, id);
+  }
+  const anchor = before === undefined ? Array.from(leaders.values())[index] : before;
+  const at = anchor ? others.indexOf(anchor) : (inDock.length ? others.indexOf(inDock[inDock.length - 1]) + 1 : others.length);
+  return [...others.slice(0, at), ...ids, ...others.slice(at)];
+};
+
+const moveDockGroup = (id: PanelId, destination: { side: DockSide; index: number; before?: PanelId | null } | { rect: FloatRect }) => {
+  const { place, group } = state.panels[id];
+  const ids = state.order.filter((member) => isGroupMember(state.panels[member], place, group));
+  const order = 'side' in destination
+    ? insertIntoDock(ids, destination.side, destination.index, destination.before)
+    : [...state.order.filter((member) => !ids.includes(member)), ...ids];
+  const panels = { ...state.panels };
+  for (const member of ids) {
+    panels[member] = 'side' in destination
+      ? { ...panels[member], place: destination.side }
+      : { ...panels[member], place: 'float', float: destination.rect };
+  }
+  commit({ ...state, order, panels, floatGroups: pruneFloatGroups(panels, state.floatGroups) });
 };
 
 export const dockActions = {
@@ -363,11 +397,13 @@ export const dockActions = {
     const order = [...state.order.filter((p) => p !== id), id];
     movePanelToOwnGroup(id, { place, visible: true, collapsed: false }, order);
   },
-  /** Puts a panel into the floating window that holds `target`, as a tab, and shows it */
+  /** Puts a panel into the dock group or floating window that holds `target` and shows it */
   mergeInto: (id: PanelId, target: PanelId) => mergePanelsInto([id], target),
   mergePanelsInto,
-  /** Takes a tab out of its floating window into a window of its own, a little offset */
-  detach: (id: PanelId) => movePanelToOwnGroup(id, { float: offsetFloatRect(id) }),
+  /** Takes a tab out of its group into a window of its own, a little offset */
+  detach: (id: PanelId) => movePanelToOwnGroup(id, {
+    place: 'float', collapsed: state.panels[id].place === 'float' && state.panels[id].collapsed, float: offsetFloatRect(id),
+  }),
   detachToPill: (id: PanelId, pillPos: FloatPillPos, orientation?: FloatPillOrientation) => {
     movePanelToOwnGroup(id, { place: 'float', visible: true, collapsed: false, float: offsetFloatRect(id, true) }, state.order, {
       minimized: true,
@@ -377,18 +413,19 @@ export const dockActions = {
   },
   /**
    * Docks panels (a dragged panel, or every tab of a dragged window) into a dock, before the panel
-   * that is `index`-th among that dock's visible panels (past the end = at the bottom / right end).
+   * that is `index`-th among that dock's visible groups, or before a rendered panel when supplied.
    */
-  dockAt: (ids: PanelId[], side: DockSide, index: number) => {
-    const others = state.order.filter((p) => !ids.includes(p));
-    const inDock = others.filter((p) => state.panels[p].visible && state.panels[p].place === side);
-    const anchor = inDock[index];
-    const at = anchor ? others.indexOf(anchor) : (inDock.length ? others.indexOf(inDock[inDock.length - 1]) + 1 : others.length);
-    const order = [...others.slice(0, at), ...ids, ...others.slice(at)];
+  dockAt: (ids: PanelId[], side: DockSide, index: number, before?: PanelId | null) => {
+    const order = insertIntoDock(ids, side, index, before);
+    if (ids.length === 1) {
+      movePanelToOwnGroup(ids[0], { place: side, visible: true, collapsed: false }, order);
+      return;
+    }
     const panels = { ...state.panels };
     for (const id of ids) panels[id] = { ...panels[id], place: side, visible: true, collapsed: false, group: id };
     commit({ ...state, order, panels, activeTab: repairSourceActiveTabs(panels, order, ids), floatGroups: pruneFloatGroups(panels, state.floatGroups) });
   },
+  moveDockGroup,
   /** Takes a panel out (of a dock or a tabbed window) into a floating window of its own at `rect` */
   floatAt: (id: PanelId, rect: FloatRect) => {
     const order = [...state.order.filter((p) => p !== id), id];

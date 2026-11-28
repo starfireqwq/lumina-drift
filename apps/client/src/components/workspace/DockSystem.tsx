@@ -71,13 +71,13 @@ export const startDrag = (
 
 type DragSource =
   | { kind: 'panel'; id: PanelId }
-  | { kind: 'group'; group: string; ids: PanelId[] }
+  | { kind: 'group'; group: string; ids: PanelId[]; fromDock?: true }
   | { kind: 'pill-group'; group: string; ids: PanelId[] }
   | { kind: 'pill-item'; id: PanelId; fromGroup: string; orientation: FloatPillOrientation }
   | { kind: 'rail' };
 
 type DropTarget =
-  | { kind: 'dock'; side: DockSide; index: number; zone: DOMRect; line?: { x: number; y: number; w: number; h: number } }
+  | { kind: 'dock'; side: DockSide; index: number; before?: PanelId | null; zone: DOMRect; line?: { x: number; y: number; w: number; h: number } }
   | { kind: 'tab'; group: string; leader: PanelId; zone: DOMRect }
   | { kind: 'pill-merge'; group: string; leader: PanelId; zone: DOMRect }
   | { kind: 'pill-detach'; pos: FloatPillPos; zone: DOMRect }
@@ -153,9 +153,9 @@ const findTarget = (x: number, y: number, source: DragSource, floats: boolean, e
   }
   const layout = getDockLayout();
   const moving = draggedPanels(source);
-  const dockableTool = source.kind === 'panel' && isToolDockPanel(source.id);
+  const dockableTool = moving.some(isToolDockPanel);
   const myGroup = 'group' in source ? source.group : source.kind === 'pill-item' ? source.fromGroup
-    : layout.panels[source.id].place === 'float' ? layout.panels[source.id].group : null;
+    : layout.panels[source.id].group;
   if (floats && !dockableTool) {
     const pill = findMagneticPillTarget(x, y, myGroup, exclude);
     if (pill) return pill;
@@ -179,25 +179,53 @@ const findTarget = (x: number, y: number, source: DragSource, floats: boolean, e
     if (leader) return { kind: 'tab', group: winGroup, leader, zone: win.getBoundingClientRect() };
   }
 
-  // 2. An existing dock: insert between its panels
+  // 2. An existing dock: merge over a group's header or center, or insert at an edge
   const dockEl = hit?.closest<HTMLElement>('[data-dock-side]');
   const dockSide = dockEl?.getAttribute('data-dock-side') as DockSide | null;
   if (dockEl && dockSide && (!dockableTool || dockSide !== 'bottom')) {
     const vertical = dockSide !== 'bottom';
-    const sections = Array.from(dockEl.querySelectorAll<HTMLElement>('[data-panel]')).filter((s) => !moving.includes(s.dataset.panel as PanelId));
+    const hovered = hit?.closest<HTMLElement>('[data-dock-leader]');
+    if (hovered?.dataset.dockGroup === myGroup) return null;
+    const sections = Array.from(dockEl.querySelectorAll<HTMLElement>('[data-dock-leader]')).flatMap((section) => {
+      const leader = section.dataset.dockLeader as PanelId;
+      const anchor = moving.includes(leader)
+        ? Array.from(section.querySelectorAll<HTMLElement>('[data-dock-tab]'))
+          .map((tab) => tab.dataset.dockTab as PanelId).find((id) => !moving.includes(id))
+        : leader;
+      return anchor ? [{ section, leader, anchor }] : [];
+    });
     let index = sections.length;
-    for (let i = 0; i < sections.length; i++) {
-      const r = sections[i].getBoundingClientRect();
-      if (vertical ? y < r.top + r.height / 2 : x < r.left + r.width / 2) { index = i; break; }
+    let edge: number | undefined;
+    for (const [i, { section, leader }] of sections.entries()) {
+      const r = section.getBoundingClientRect();
+      const start = vertical ? r.top : r.left;
+      const end = vertical ? r.bottom : r.right;
+      const position = ((vertical ? y : x) - start) / (end - start);
+      if (section === hovered) {
+        const group = section.dataset.dockGroup;
+        const header = hit?.closest('[data-dock-header], [role="tablist"]');
+        const overHeader = header?.closest('[data-dock-leader]') === section && section.firstElementChild?.contains(header);
+        const canMerge = layout.panels[leader].place === dockSide || (!dockableTool && !isToolDockPanel(leader));
+        if (group && canMerge && (overHeader || (position >= 0.24 && position <= 0.76))) {
+          return { kind: 'tab', group, leader, zone: r };
+        }
+        index = position < 0.5 ? i : i + 1;
+        edge = position < 0.5 ? start : end;
+        break;
+      }
+      if (position < 0.5) {
+        index = i;
+        edge = start;
+        break;
+      }
+      edge = end;
     }
     const zone = dockEl.getBoundingClientRect();
     let line: { x: number; y: number; w: number; h: number } | undefined;
-    if (sections.length) {
-      const r = (sections[index] ?? sections[sections.length - 1]).getBoundingClientRect();
-      const edge = sections[index] ? (vertical ? r.top : r.left) : (vertical ? r.bottom : r.right);
+    if (edge !== undefined) {
       line = vertical ? { x: zone.left + 4, y: edge - 1.5, w: zone.width - 8, h: 3 } : { x: edge - 1.5, y: zone.top + 4, w: 3, h: zone.height - 8 };
     }
-    return { kind: 'dock', side: dockSide, index, zone, line };
+    return { kind: 'dock', side: dockSide, index, before: sections[index]?.anchor ?? null, zone, line };
   }
 
   // 3. A screen edge next to the canvas: opens a dock there
@@ -209,13 +237,13 @@ const findTarget = (x: number, y: number, source: DragSource, floats: boolean, e
     if (!dockableTool && y > center.bottom - EDGE) return { kind: 'dock', side: 'bottom', index: 99, zone: box(center.left, center.bottom - layout.dockSize.bottom, center.width, layout.dockSize.bottom) };
   }
 
-  if (!floats || source.kind === 'group' || source.kind === 'pill-group') return null;
+  if (!floats || (source.kind === 'group' && (!source.fromDock || dockableTool)) || source.kind === 'pill-group') return null;
   if (source.kind === 'pill-item') {
     const size = getPillSizePx(getUiScale());
     const pos = clampPillPos({ x: Math.round(x - size / 2), y: Math.round(y - size / 2) }, size, size);
     return { kind: 'pill-detach', pos, zone: box(pos.x, pos.y, size, size) };
   }
-  const f = layout.panels[source.id].float;
+  const f = layout.panels[moving[0]].float;
   return { kind: 'float', rect: { x: Math.round(x - 60), y: Math.round(y - 14), w: f.w, h: f.h } };
 };
 
@@ -226,18 +254,23 @@ const applyDrop = (source: DragSource, target: DropTarget | null) => {
     return;
   }
   const ids = draggedPanels(source);
-  if (target.kind === 'dock') dockActions.dockAt(ids, target.side, target.index);
-  else if (target.kind === 'pill-merge' || target.kind === 'tab') {
+  if (target.kind === 'dock') {
+    if (source.kind === 'group' && source.fromDock) dockActions.moveDockGroup(ids[0], target);
+    else dockActions.dockAt(ids, target.side, target.index, target.before);
+  } else if (target.kind === 'pill-merge' || target.kind === 'tab') {
     dockActions.mergePanelsInto(ids, target.leader, { keepTargetMinimized: target.kind === 'pill-merge', activeId: ids[0] });
   } else if (target.kind === 'pill-detach' && source.kind === 'pill-item') {
     dockActions.detachToPill(source.id, target.pos, source.orientation);
-  } else if (target.kind === 'float' && source.kind === 'panel') dockActions.floatAt(source.id, target.rect);
+  } else if (target.kind === 'float') {
+    if (source.kind === 'group' && source.fromDock) dockActions.moveDockGroup(ids[0], target);
+    else if (source.kind === 'panel') dockActions.floatAt(source.id, target.rect);
+  }
 };
 
 export function dragDockableTool(id: ToolDockPanelId, label: string, e: PointerEvent, windowEl: HTMLElement | null, done: boolean) {
   const source = { kind: 'panel', id } as const;
   const hit = e.type === 'pointercancel' ? null : findTarget(e.clientX, e.clientY, source, true, windowEl);
-  const target = hit?.kind === 'dock' ? hit : null;
+  const target = hit?.kind === 'dock' || hit?.kind === 'tab' ? hit : null;
   setDrag(done ? null : { source, label, x: e.clientX, y: e.clientY, target });
   if (done) applyDrop(source, target);
 }
@@ -469,6 +502,7 @@ const PanelHeader: React.FC<{
       title={place === 'float' ? t.dock.dragFloatHeaderHint : t.dock.dragPanelHint}
       className="flex h-8 shrink-0 cursor-grab items-center gap-1 border-b border-neutral-700/70 bg-neutral-800/60 pl-1 pr-1 text-xs active:cursor-grabbing"
       data-float-header={place === 'float' ? '' : undefined}
+      data-dock-header={place !== 'float' ? '' : undefined}
     >
       <button type="button" aria-expanded={!collapsed} aria-label={(collapsed ? t.dock.expandPanel : t.dock.collapsePanel).replace('{title}', def.title)}
         onClick={() => dockActions.setCollapsed(def.id, !collapsed)} onPointerDown={(e) => e.stopPropagation()}
@@ -529,18 +563,22 @@ const Splitter: React.FC<{ a: PanelId; b: PanelId; vertical: boolean; containerR
   );
 };
 
-const DockedPanels: React.FC<{ list: PanelDef[]; vertical: boolean; place: DockSide }> = ({ list, vertical, place }) => {
-  const layout = useDockLayout();
-  const floats = useFloatsAllowed();
-  const ref = useRef<HTMLDivElement>(null);
+const groupDockPanels = (panels: PanelDef[], layout: ReturnType<typeof useDockLayout>) => {
   const groups = new Map<string, PanelDef[]>();
-  for (const def of list) {
+  for (const def of panels) {
     const group = layout.panels[def.id].group;
     const tabs = groups.get(group);
     if (tabs) tabs.push(def);
     else groups.set(group, [def]);
   }
-  const stacks = Array.from(groups);
+  return Array.from(groups);
+};
+
+const DockedPanels: React.FC<{ stacks: ReturnType<typeof groupDockPanels>; vertical: boolean; place: DockSide }> = ({ stacks, vertical, place }) => {
+  const { t } = useI18n();
+  const layout = useDockLayout();
+  const floats = useFloatsAllowed();
+  const ref = useRef<HTMLDivElement>(null);
   return (
     <div ref={ref} className={`flex min-h-0 min-w-0 flex-1 ${vertical ? 'flex-col' : 'flex-row'}`}>
       {stacks.map(([group, tabs], i) => {
@@ -550,29 +588,48 @@ const DockedPanels: React.FC<{ list: PanelDef[]; vertical: boolean; place: DockS
         const prev = stacks[i - 1]?.[1][0];
         const showSplitter = prev && !layout.panels[prev.id].collapsed && !p.collapsed;
         return (
-          <React.Fragment key={def.id}>
+          <React.Fragment key={group}>
             {showSplitter && <Splitter a={prev.id} b={def.id} vertical={vertical} containerRef={ref} />}
             {!showSplitter && i > 0 && <div className={vertical ? 'h-px shrink-0 bg-neutral-700/70' : 'w-px shrink-0 bg-neutral-700/70'} />}
             <section
               data-panel={def.id}
+              data-dock-group={group}
+              data-dock-leader={def.id}
               aria-label={active.title}
               className="flex min-h-0 min-w-0 flex-col overflow-hidden"
               style={p.collapsed ? { flex: '0 0 auto' } : { flex: `${p.weight} 1 0px`, minHeight: vertical ? 70 : undefined, minWidth: vertical ? undefined : 160 }}
             >
               {tabs.length === 1 ? <PanelHeader def={def} place={place} collapsed={p.collapsed}
                 onPointerDown={(e) => beginPanelDrag(e, { kind: 'panel', id: def.id }, def.title, floats)} /> : (
-                <div className="flex h-8 shrink-0 items-center border-b border-neutral-700/70 bg-neutral-800/60 px-1">
-                  <div className="flex min-w-0 flex-1 items-stretch self-stretch overflow-x-auto no-scrollbar" role="tablist" aria-label={active.title}>
+                <div data-dock-header="" title={t.dock.dragPanelHint} style={{ touchAction: 'none' }}
+                  onPointerDown={(e) => beginPanelDrag(e, { kind: 'group', group, ids: tabs.map((tab) => tab.id), fromDock: true }, active.title, floats)}
+                  onDoubleClick={() => dockActions.setCollapsed(def.id, !p.collapsed)}
+                  className="flex h-8 shrink-0 cursor-grab items-center border-b border-neutral-700/70 bg-neutral-800/60 px-1 active:cursor-grabbing">
+                  <span data-dock-drag-handle="" className="grid h-7 w-7 shrink-0 place-items-center text-neutral-400">
+                    <GripHorizontal aria-hidden className="h-4 w-4" />
+                  </span>
+                  <div className="flex min-w-0 flex-1 items-stretch self-stretch overflow-x-auto no-scrollbar" role="tablist" aria-label={t.dock.windowTabsAria}>
                     {tabs.map((tab) => (
                       <button key={tab.id} type="button" role="tab" aria-selected={tab.id === active.id && !p.collapsed}
+                        data-dock-tab={tab.id} title={t.dock.dragTabDetachHint} style={{ touchAction: 'none' }}
                         className={`flex shrink-0 cursor-grab items-center gap-1 px-1.5 text-xs [&>svg]:h-3.5 [&>svg]:w-3.5 ${tab.id === active.id && !p.collapsed ? 'border-b border-indigo-400 bg-indigo-600/20 text-neutral-100' : 'text-neutral-300 hover:bg-neutral-700'}`}
                         onClick={() => dockActions.activate(tab.id)}
-                        onPointerDown={(e) => beginPanelDrag(e, { kind: 'panel', id: tab.id }, tab.title, floats)}>
+                        onDoubleClick={(e) => e.stopPropagation()}
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          beginPanelDrag(e, { kind: 'panel', id: tab.id }, tab.title, floats);
+                        }}>
                         {tab.icon}{tab.title}
                       </button>
                     ))}
                   </div>
-                  <PanelMenu id={active.id} place={place} />
+                  <div className="flex shrink-0 items-center" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
+                    <button type="button" aria-expanded={!p.collapsed} aria-label={(p.collapsed ? t.dock.expandPanel : t.dock.collapsePanel).replace('{title}', active.title)}
+                      onClick={() => dockActions.setCollapsed(def.id, !p.collapsed)} className="atelier-icon-btn h-6 w-6">
+                      {p.collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                    </button>
+                    <PanelMenu id={active.id} place={place} onClose={active.onClose} />
+                  </div>
                 </div>
               )}
               {!p.collapsed && <div role={tabs.length > 1 ? 'tabpanel' : undefined} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">{active.render()}</div>}
@@ -610,7 +667,7 @@ export const DockColumn: React.FC<{ side: 'left' | 'right'; panels: PanelDef[] }
       >
         <div className="mx-auto h-full w-0.5 bg-indigo-500/0 transition group-hover:bg-indigo-500/60" />
       </div>
-      <DockedPanels list={list} vertical place={side} />
+      <DockedPanels stacks={groupDockPanels(list, layout)} vertical place={side} />
     </aside>
   );
 };
@@ -622,7 +679,8 @@ export const DockRow: React.FC<{ panels: PanelDef[] }> = ({ panels }) => {
   const ui = useUiScale();
   const list = visiblePanels(panels, 'bottom', layout, floats);
   if (list.length === 0) return null;
-  const allCollapsed = list.every((p) => layout.panels[p.id].collapsed);
+  const stacks = groupDockPanels(list, layout);
+  const allCollapsed = stacks.every(([, [leader]]) => layout.panels[leader.id].collapsed);
   const height = layout.dockSize.bottom;
   return (
     <div aria-label="下方面板" data-dock-side="bottom" style={allCollapsed ? undefined : { height }}
@@ -642,7 +700,7 @@ export const DockRow: React.FC<{ panels: PanelDef[] }> = ({ panels }) => {
           <div className="my-auto mt-0.5 h-0.5 w-full bg-indigo-500/0 transition group-hover:bg-indigo-500/60" />
         </div>
       )}
-      <DockedPanels list={list} vertical={false} place="bottom" />
+      <DockedPanels stacks={stacks} vertical={false} place="bottom" />
     </div>
   );
 };
@@ -888,11 +946,18 @@ const FloatingGroup: React.FC<FloatingGroupProps> = ({ group, defs, zIndex, onFo
             data-float-header=""
             title={t.dock.dragFloatHeaderHint}
             className="flex h-8 shrink-0 cursor-grab items-end gap-0.5 border-b border-neutral-700/70 bg-neutral-800/60 px-1 text-xs active:cursor-grabbing">
-            <div role="tablist" aria-label={t.dock.windowTabsAria} className="flex min-w-0 flex-1 items-end gap-0.5 overflow-x-auto no-scrollbar" onPointerDown={(e) => e.stopPropagation()}>
+            <span data-float-drag-handle="" title={t.dock.dragFloatHeaderHint} className="grid h-7 w-7 shrink-0 place-items-center text-neutral-400">
+              <GripHorizontal aria-hidden className="h-4 w-4" />
+            </span>
+            <div role="tablist" aria-label={t.dock.windowTabsAria} className="flex min-w-0 flex-1 items-end gap-0.5 overflow-x-auto no-scrollbar">
               {defs.map((d) => (
                 <button key={d.id} type="button" role="tab" aria-selected={d.id === active.id}
                   onClick={() => dockActions.setActiveTab(group, d.id)}
-                  onPointerDown={(e) => beginPanelDrag(e, { kind: 'panel', id: d.id }, d.title, floats)}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    beginPanelDrag(e, { kind: 'panel', id: d.id }, d.title, floats);
+                  }}
                   style={{ touchAction: 'none' }}
                   title={t.dock.dragTabDetachHint}
                   className={`flex h-7 shrink-0 items-center gap-1 rounded-t-md px-2 ${d.id === active.id ? 'bg-neutral-900 text-white' : 'text-neutral-400 hover:text-neutral-100'}`}>

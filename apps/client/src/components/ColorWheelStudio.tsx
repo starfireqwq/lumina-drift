@@ -650,6 +650,48 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
           </div>
         )}
 
+        {showWheel ? (
+          <div className={`flex items-center justify-center ${compactEmbedded ? 'py-0' : 'py-1'} overflow-hidden w-full`}>
+            <canvas
+              ref={wheelCanvasRef}
+              width={WHEEL_SIZE}
+              height={WHEEL_SIZE}
+              onPointerDown={handleCanvasPointerDown}
+              onPointerMove={handleCanvasPointerMove}
+              onPointerUp={handleCanvasPointerUp}
+              onPointerCancel={handleCanvasPointerUp}
+              style={{
+                width: `${(WHEEL_SIZE / 16).toFixed(5)}rem`,
+                height: 'auto',
+                maxWidth: '100%',
+                aspectRatio: '1 / 1',
+                touchAction: 'none',
+              }}
+              className="cursor-crosshair touch-none rounded-full shadow-inner block mx-auto shrink-0 select-none"
+            />
+          </div>
+        ) : (
+          <ColorMixingPad currentColor={currentColor} onPickColor={applyColor} compact={compactEmbedded} />
+        )}
+
+        {single || !showWheel ? recentColors : (
+          <section aria-label={studio.recentColors} className="flex flex-col gap-1">
+            <div className="flex items-center gap-1">
+              <h3 className="mr-auto text-[11px] font-medium text-neutral-200">{studio.recentColors}</h3>
+              <button type="button" data-testid="color-pin-current" onClick={() => colorHistoryStore.pinColorToActiveSet(currentColor)}
+                disabled={!normalizedCurrentColor || activeSet.colors.some((swatch) => swatch.hex === normalizedCurrentColor)}
+                title={studio.pinCurrentColor} aria-label={studio.pinCurrentColor} className="atelier-icon-btn h-7 w-7 disabled:opacity-40">
+                <Pin className="h-3.5 w-3.5" />
+              </button>
+              <button type="button" data-testid="color-clear-history" onClick={() => colorHistoryStore.clearHistory()}
+                disabled={!history.length} title={studio.clearHistory} aria-label={studio.clearHistory} className="atelier-icon-btn h-7 w-7 disabled:opacity-40">
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            {recentColors}
+          </section>
+        )}
+
         {!single && (
           <div role="group" aria-label={studio.colorPalette} className="grid grid-cols-2 gap-1 rounded-lg border border-neutral-800 bg-neutral-900/60 p-0.5">
             {([['wheel', studio.tabWheel], ['mixing', studio.tabMixingPad]] as const).map(([id, label]) => (
@@ -661,70 +703,34 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
           </div>
         )}
 
-        {showWheel ? <>
-        {/* Color Wheel Geometry Switcher (HSV Square / HLS Triangle) */}
-        <div className="grid grid-cols-2 gap-1 bg-neutral-900/60 p-0.5 rounded-lg border border-neutral-800/80">
-          {([
-            { id: 'hsv-square', label: t.studio.wheelHsvSquare },
-            { id: 'hls-triangle', label: t.studio.wheelHlsTriangle },
-          ] as const).map((m) => (
-            <button
-              key={m.id}
-              type="button"
-              onClick={() => {
-                setWheelMode(m.id);
-                try { localStorage.setItem(WHEEL_MODE_STORAGE_KEY, m.id); } catch {}
-              }}
-              aria-pressed={wheelMode === m.id}
-              className={`py-1 px-1.5 rounded-md text-[10px] font-medium transition cursor-pointer truncate ${
-                wheelMode === m.id
-                  ? 'bg-indigo-600 text-white shadow'
-                  : 'text-neutral-300 hover:bg-neutral-800'
-              }`}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
+        {showWheel && (
+          <div className="grid grid-cols-2 gap-1 bg-neutral-900/60 p-0.5 rounded-lg border border-neutral-800/80">
+            {([
+              { id: 'hsv-square', label: t.studio.wheelHsvSquare },
+              { id: 'hls-triangle', label: t.studio.wheelHlsTriangle },
+            ] as const).map((m) => (
+              <button
+                key={m.id}
+                type="button"
+                onClick={() => {
+                  setWheelMode(m.id);
+                  try { localStorage.setItem(WHEEL_MODE_STORAGE_KEY, m.id); } catch {}
+                }}
+                aria-pressed={wheelMode === m.id}
+                className={`py-1 px-1.5 rounded-md text-[10px] font-medium transition cursor-pointer truncate ${
+                  wheelMode === m.id
+                    ? 'bg-indigo-600 text-white shadow'
+                    : 'text-neutral-300 hover:bg-neutral-800'
+                }`}
+              >
+                {m.label}
+              </button>
+            ))}
+          </div>
+        )}
 
-        <div className={`flex items-center justify-center ${compactEmbedded ? 'py-0' : 'py-1'} overflow-hidden w-full`}>
-          <canvas
-            ref={wheelCanvasRef}
-            width={WHEEL_SIZE}
-            height={WHEEL_SIZE}
-            onPointerDown={handleCanvasPointerDown}
-            onPointerMove={handleCanvasPointerMove}
-            onPointerUp={handleCanvasPointerUp}
-            onPointerCancel={handleCanvasPointerUp}
-            style={{
-              width: `${(WHEEL_SIZE / 16).toFixed(5)}rem`,
-              height: 'auto',
-              maxWidth: '100%',
-              aspectRatio: '1 / 1',
-              touchAction: 'none',
-            }}
-            className="cursor-crosshair touch-none rounded-full shadow-inner block mx-auto shrink-0 select-none"
-          />
-        </div>
-
-        {single ? recentColors : (
+        {showWheel && !single && (
           <>
-            <section aria-label={studio.recentColors} className="flex flex-col gap-1">
-              <div className="flex items-center gap-1">
-                <h3 className="mr-auto text-[11px] font-medium text-neutral-200">{studio.recentColors}</h3>
-                <button type="button" data-testid="color-pin-current" onClick={() => colorHistoryStore.pinColorToActiveSet(currentColor)}
-                  disabled={!normalizedCurrentColor || activeSet.colors.some((swatch) => swatch.hex === normalizedCurrentColor)}
-                  title={studio.pinCurrentColor} aria-label={studio.pinCurrentColor} className="atelier-icon-btn h-7 w-7 disabled:opacity-40">
-                  <Pin className="h-3.5 w-3.5" />
-                </button>
-                <button type="button" data-testid="color-clear-history" onClick={() => colorHistoryStore.clearHistory()}
-                  disabled={!history.length} title={studio.clearHistory} aria-label={studio.clearHistory} className="atelier-icon-btn h-7 w-7 disabled:opacity-40">
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
-              </div>
-              {recentColors}
-            </section>
-
             <section data-testid="color-pinned-section" aria-label={studio.pinnedSwatches} className="flex flex-col gap-1 border-t border-neutral-800 pt-2">
               <h3 className="text-[11px] font-medium text-neutral-200">{studio.pinnedSwatches}</h3>
               <div className="flex items-center gap-1">
@@ -844,12 +850,6 @@ export const ColorWheelStudio: React.FC<ColorWheelStudioProps> = ({
                 </div>
               )}
             </section>
-          </>
-        )}
-        </> : (
-          <>
-            <ColorMixingPad currentColor={currentColor} onPickColor={applyColor} compact={compactEmbedded} />
-            {recentColors}
           </>
         )}
     </div>
