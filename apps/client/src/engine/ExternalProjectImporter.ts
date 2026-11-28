@@ -275,7 +275,7 @@ export async function unpackPsdProject(
             isVisible: !node.hidden,
             isLocked: Boolean(node.protected?.composite),
             alphaLocked: Boolean(node.protected?.transparency),
-            clipToBelow: false,
+            clipToBelow: Boolean(node.clipping),
             sortOrder: sortCounter,
             now,
           })

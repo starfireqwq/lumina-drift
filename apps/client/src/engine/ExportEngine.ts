@@ -1301,11 +1301,10 @@ ${await stackXml(null, '    ')}  </stack>
       const layer: PsdLayer = {
         name: item.layer.name,
         opacity: item.layer.opacity,
-        // Groups here never isolate their blending, which is Photoshop's pass through — except a
-        // group whose adjustment layers act on it alone (Lumina's group scope = an isolated group)
-        blendMode: (isGroup && blend === 'normal' && !isolatedGroups.has(item.layer.id) ? 'pass through' : blend) as any,
+        blendMode: (isGroup && blend === 'normal' &&
+          !isolatedGroups.has(item.layer.id) && !tree.isolatedGroups.has(item.layer.id) ? 'pass through' : blend) as any,
         hidden: !item.layer.isVisible,
-        clipping: Boolean(item.layer.clipToBelow) && !isGroup,
+        clipping: Boolean(item.layer.clipToBelow),
         ...(psdEffects ? { effects: psdEffects } : {}),
         ...(item.mask ? {
           mask: { canvas: greyMaskCanvas(item.mask.canvas, item.mask.inverted), top: 0, left: 0, bottom: height, right: width, defaultColor: 0, disabled: !item.mask.enabled },

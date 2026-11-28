@@ -511,6 +511,16 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     let targetLayer = activeLayer;
     if (!isReadOnlyTool && ctx.rejectAdjustmentPixels(targetLayer)) return;
     if (targetLayer?.layerType === 'group') {
+      if (currentTool === 'transform') {
+        const point = viewportRef.current?.screenToCanvas(e.clientX, e.clientY);
+        if (point) transform.startGroupDrag(targetLayer, e.pointerId, point);
+        else void transform.startTransformMode('transform', targetLayer);
+        return;
+      }
+      if (currentTool === 'mesh_warp') {
+        void transform.startTransformMode('mesh', targetLayer);
+        return;
+      }
       warn('圖層組是資料夾。請選取組內的圖層再作畫。', 3000);
       return;
     }
@@ -815,6 +825,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
     // Broadcast cursor with 35ms throttle to eliminate websocket flooding
     if (viewportRef.current) {
       const local = viewportRef.current.screenToCanvas(e.clientX, e.clientY);
+      if (activePointersRef.current.has(e.pointerId) && transform.moveGroupDrag(e.pointerId, local)) return;
       const now = performance.now();
       if (now - lastCursorEmitTimeRef.current > 35) {
         lastCursorEmitTimeRef.current = now;
@@ -911,6 +922,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
       pendingTouchDownRef.current = null;
       if (!cancelled) startCanvasTool(touchDown);
     }
+    transform.endGroupDrag(e.pointerId);
     const prevCount = activePointersRef.current.size;
     activePointersRef.current.delete(e.pointerId);
     if (radialTouchRef.current === e.pointerId) {
@@ -1066,6 +1078,7 @@ export function useCanvasPointer(ctx: ToolContext, tools: CanvasTools, deps: Poi
 
   const handleLostPointerCapture = (e: React.PointerEvent<HTMLDivElement>) => {
     if (finishTail(e.pointerId)) return;
+    transform.endGroupDrag(e.pointerId);
     if (paintUnfilledPointerRef.current === e.pointerId) cancelPaintUnfilled();
     if (marqueePointerRef.current === e.pointerId) cancelMarquee();
     if (activePointersRef.current.has(e.pointerId)) brush.interrupt(e.pointerId);

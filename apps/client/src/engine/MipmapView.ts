@@ -3,8 +3,10 @@ import type { Renderer, TextureSource } from 'pixi.js';
 interface MipState {
   /** Levels kept, level 0 included */
   levels: number;
-  /** Levels 1… sampled (TEXTURE_MAX_LEVEL > 0) and matching level 0 */
+  /** Levels 1… match level 0 */
   fresh: boolean;
+  /** Levels 1… are available for sampling (TEXTURE_MAX_LEVEL > 0) */
+  enabled: boolean;
   sharp: boolean;
   /** Source-level tile atlas slot pitch in texels (0 = single image without slot isolation) */
   slotPitch: number;
@@ -200,7 +202,7 @@ export class MipmapView {
   readonly supported: boolean;
   private gl: WebGL2RenderingContext | null = null;
   private states = new Map<TextureSource, MipState>();
-  /** Written while fresh: falls back to level 0 before the next render */
+  /** Written while fresh: invalidate the mip chain before the next render */
   private dirty = new Set<TextureSource>();
   private unhook: (() => void) | null = null;
   private lastUsed = 0;
@@ -241,13 +243,22 @@ export class MipmapView {
     if (s?.fresh) this.dirty.add(source);
   }
 
-  /** `source` is about to be shown zoomed out: its levels exist and match level 0 */
-  ensure(source: TextureSource, levels: number, slotPitch = 0, fastMode = false) {
-    if (!this.supported || source.destroyed || levels < 2) return;
+  /** Prepares zoomed-out sampling, returning false when the frame budget defers this source. */
+  ensure(source: TextureSource, levels: number, slotPitch = 0, fastMode = false, deadline = Infinity): boolean {
+    if (!this.supported || source.destroyed || levels < 2) return true;
     this.lastUsed = performance.now();
-    let s = this.states.get(source);
-    if (s && s.fresh && !this.dirty.has(source) && s.slotPitch === slotPitch && (fastMode || s.sharp)) return;
     const gl = this.gl!;
+    let s = this.states.get(source);
+    if (s?.fresh && !this.dirty.has(source) && s.slotPitch === slotPitch && (fastMode || s.sharp)) {
+      if (!s.enabled) {
+        if (this.lastUsed >= deadline) return false;
+        const info = this.bindForEdit(source);
+        gl.texParameteri(info.target, gl.TEXTURE_MAX_LEVEL, s.levels - 1);
+        s.enabled = true;
+      }
+      return true;
+    }
+    if (this.lastUsed >= deadline) return false;
     const info = this.bindForEdit(source);
     if (!s) {
       let w = source.pixelWidth;
@@ -258,7 +269,7 @@ export class MipmapView {
         gl.texImage2D(info.target, level, info.internalFormat, w, h, 0, info.format, info.type, null);
       }
       const onDestroy = () => this.forget(source);
-      s = { levels, fresh: false, sharp: false, slotPitch, onDestroy };
+      s = { levels, fresh: false, enabled: false, sharp: false, slotPitch, onDestroy };
       this.states.set(source, s);
       source.once('destroy', onDestroy);
       // Pixi picks a mipmapped minFilter from mipLevelCount; style.update() pushes it to the GPU
@@ -277,7 +288,9 @@ export class MipmapView {
     }
     s.sharp = !fastMode;
     s.fresh = true;
+    s.enabled = true;
     this.dirty.delete(source);
+    return true;
   }
 
   /** Temporarily clamp sampling to mip level 0 without freeing mip storage (sharp 85%–100% view) */
@@ -285,12 +298,11 @@ export class MipmapView {
     if (!this.gl || !this.states.size) return;
     const gl = this.gl;
     for (const [source, s] of this.states) {
-      if (!s.fresh || source.destroyed) continue;
+      if (!s.enabled || source.destroyed) continue;
       const info = this.bindForEdit(source);
       gl.texParameteri(info.target, gl.TEXTURE_MAX_LEVEL, 0);
-      s.fresh = false;
+      s.enabled = false;
     }
-    this.dirty.clear();
   }
 
   /** Zoomed in again for `idleMs`: the levels' memory is given back */
@@ -349,9 +361,12 @@ export class MipmapView {
     const gl = this.gl!;
     for (const source of this.dirty) {
       const s = this.states.get(source);
-      if (!s?.fresh || source.destroyed) continue;
-      const info = this.bindForEdit(source);
-      gl.texParameteri(info.target, gl.TEXTURE_MAX_LEVEL, 0);
+      if (!s || source.destroyed) continue;
+      if (s.enabled) {
+        const info = this.bindForEdit(source);
+        gl.texParameteri(info.target, gl.TEXTURE_MAX_LEVEL, 0);
+        s.enabled = false;
+      }
       s.fresh = false;
     }
     this.dirty.clear();

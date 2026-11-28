@@ -1,5 +1,6 @@
 import {
   AlphaFilter,
+  BlendModeFilter,
   BufferImageSource,
   CanvasSource,
   Container,
@@ -43,12 +44,14 @@ import {
   type TileCoord,
   type TileData,
 } from '@atelier/shared';
-import { compileAdjustment, normalizeAdjustment, resolveAdjustmentScope, type LayerAdjustment } from '@atelier/shared';
+import { compileAdjustment, normalizeAdjustment, type LayerAdjustment } from '@atelier/shared';
 import { DEFAULT_LAYER_SUB_COLOR, resolveEffectiveLayerColor, type LayerColorMeta } from '@atelier/shared';
-import { hasActiveLayerEffects, layerEffectsKey, type LayerEffectsMeta } from '@atelier/shared';
+import { computeLayerEffectsPadding, hasActiveLayerEffects, layerEffectsKey, type LayerEffectsMeta } from '@atelier/shared';
 import { AdjustmentFilter } from './adjustmentFilter';
 import { LayerColorFilter } from './layerColorFilter';
 import { LayerEffectsFilter } from './layerEffectsFilter';
+import { LayerHierarchy } from './layerHierarchy';
+import { canvasCompositeOp } from './layerComposite';
 import {
   adjustmentScopeIsFresh,
   adjustmentScopeKey,
@@ -58,6 +61,7 @@ import {
 } from './adjustmentView';
 import { normalizeTileBytes } from './TileEngine';
 import { applyMagFilter, ATLAS_MIP_LEVELS, GUTTER, PITCH, TileAtlas, type MagFilter, type Slot } from './TileAtlas';
+import { computeProportionalThumbSize } from './layerThumb';
 import { fullMipLevels, MipmapView } from './MipmapView';
 import { compressTiles, decodeTiles } from './commitWorkers';
 import { canAllocateFullCanvasTexture, computeSafeTextureScale, detectConstrainedDevice, queryMaxTextureSize } from './gpuProfile';
@@ -100,6 +104,105 @@ export interface DrawTarget {
 export type BrushTarget = RenderTexture | DrawTarget;
 export type StrokeInk = Map<string, { col: number; row: number; slot?: Slot; cpu?: CpuTile }>;
 export type Rect = { x: number; y: number; w: number; h: number };
+
+type GroupSample = { target: RenderTexture; sprite: Sprite; key: string };
+type GroupView = {
+  container: Container;
+  opacity: AlphaFilter;
+  masks: Map<string, MaskFilter>;
+  effects?: LayerEffectsFilter;
+  effectsKey?: string;
+  blend?: { mode: string; filter: Filter };
+  sample?: GroupSample;
+};
+
+function putPremultipliedPixels(ctx: CanvasRenderingContext2D, rect: Rect, pixels: Uint8Array) {
+  const image = ctx.createImageData(rect.w, rect.h);
+  for (let i = 0; i < pixels.length; i += 4) {
+    const alpha = pixels[i + 3];
+    if (!alpha) continue;
+    const unpremultiply = 255 / alpha;
+    image.data[i] = pixels[i] * unpremultiply;
+    image.data[i + 1] = pixels[i + 1] * unpremultiply;
+    image.data[i + 2] = pixels[i + 2] * unpremultiply;
+    image.data[i + 3] = alpha;
+  }
+  ctx.putImageData(image, rect.x, rect.y);
+}
+
+function createGroupBlendFilter(mode: string): Filter | undefined {
+  const shared: Record<string, string> = {
+    multiply: 'b * s',
+    overlay: 'mix(2.0 * b * s, vec3(1.0) - 2.0 * (vec3(1.0) - b) * (vec3(1.0) - s), step(vec3(0.5), b))',
+    'hard-light': 'mix(2.0 * b * s, vec3(1.0) - 2.0 * (vec3(1.0) - b) * (vec3(1.0) - s), step(vec3(0.5), s))',
+    'soft-light': 'mix(b - (vec3(1.0) - 2.0 * s) * b * (vec3(1.0) - b), b + (2.0 * s - vec3(1.0)) * (softCurve(b) - b), step(vec3(0.5), s))',
+    darken: 'min(b, s)',
+    lighten: 'max(b, s)',
+    'color-dodge': 'mix(min(vec3(1.0), b / max(vec3(0.00001), vec3(1.0) - s)), vec3(0.0), step(b, vec3(0.0)))',
+    'color-burn': 'mix(vec3(1.0) - min(vec3(1.0), (vec3(1.0) - b) / max(vec3(0.00001), s)), vec3(1.0), step(vec3(1.0), b))',
+    difference: 'abs(b - s)',
+    exclusion: 'b + s - 2.0 * b * s',
+    hue: 'setLum(setSat(s, sat(b)), lum(b))',
+    saturation: 'setLum(setSat(b, sat(s)), lum(b))',
+    color: 'setLum(s, lum(b))',
+    luminosity: 'setLum(b, lum(s))',
+  };
+  const expression = shared[mode];
+  if (!expression) return;
+  const glFunctions = `
+    vec3 softCurve(vec3 b) {
+      return mix(((16.0 * b - 12.0) * b + 4.0) * b, sqrt(b), step(vec3(0.25), b));
+    }
+    float lum(vec3 c) { return dot(c, vec3(0.3, 0.59, 0.11)); }
+    float lo(vec3 c) { return min(c.r, min(c.g, c.b)); }
+    float hi(vec3 c) { return max(c.r, max(c.g, c.b)); }
+    float sat(vec3 c) { return hi(c) - lo(c); }
+    vec3 setSat(vec3 c, float s) { return (c - lo(c)) * (s / max(sat(c), 0.00001)); }
+    vec3 setLum(vec3 c, float l) {
+      c += l - lum(c);
+      float n = lo(c), x = hi(c);
+      if (n < 0.0) c = l + (c - l) * l / max(l - n, 0.00001);
+      if (x > 1.0) c = l + (c - l) * (1.0 - l) / max(x - l, 0.00001);
+      return c;
+    }`;
+  const gpuFunctions = `
+    fn softCurve(b: vec3<f32>) -> vec3<f32> {
+      return mix(((16.0 * b - vec3<f32>(12.0)) * b + vec3<f32>(4.0)) * b, sqrt(b), step(vec3<f32>(0.25), b));
+    }
+    fn lum(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.3, 0.59, 0.11)); }
+    fn lo(c: vec3<f32>) -> f32 { return min(c.r, min(c.g, c.b)); }
+    fn hi(c: vec3<f32>) -> f32 { return max(c.r, max(c.g, c.b)); }
+    fn sat(c: vec3<f32>) -> f32 { return hi(c) - lo(c); }
+    fn setSat(c: vec3<f32>, s: f32) -> vec3<f32> { return (c - vec3<f32>(lo(c))) * (s / max(sat(c), 0.00001)); }
+    fn setLum(color: vec3<f32>, l: f32) -> vec3<f32> {
+      let grey = vec3<f32>(l);
+      var c = color + vec3<f32>(l - lum(color));
+      let n = lo(c);
+      let x = hi(c);
+      if (n < 0.0) { c = grey + (c - grey) * (l / max(l - n, 0.00001)); }
+      if (x > 1.0) { c = grey + (c - grey) * ((1.0 - l) / max(x - l, 0.00001)); }
+      return c;
+    }`;
+  // Emit the source contribution only. Normal source-over adds the remaining backdrop.
+  return new BlendModeFilter({
+    gl: {
+      functions: glFunctions,
+      main: `
+        vec3 b = clamp(back.rgb / max(back.a, 0.00001), 0.0, 1.0);
+        vec3 s = clamp(front.rgb / max(front.a, 0.00001), 0.0, 1.0);
+        finalColor = vec4(front.rgb * (1.0 - back.a) + (${expression}) * (front.a * back.a), front.a);
+      `,
+    },
+    gpu: {
+      functions: gpuFunctions,
+      main: `
+        let b = clamp(back.rgb / max(back.a, 0.00001), vec3<f32>(0.0), vec3<f32>(1.0));
+        let s = clamp(front.rgb / max(front.a, 0.00001), vec3<f32>(0.0), vec3<f32>(1.0));
+        out = vec4<f32>(front.rgb * (1.0 - back.a) + (${expression.replaceAll('vec3(', 'vec3<f32>(')}) * (front.a * back.a), front.a);
+      `,
+    },
+  });
+}
 /** GPU read-back (TileEngine.readRegionsAsync): the copies are queued in order with the drawing */
 export type RegionReader = (texture: RenderTexture, rects: Rect[]) => Promise<Uint8Array[]>;
 /** Context passed when applying remote tiles concurrently with recent/active local edits on the same layer */
@@ -119,13 +222,18 @@ const BIG_CANVAS_PX = 4096 * 4096;
 /** The composite texture (canvas-sized, for fills and exports) is freed after this long unused */
 const SCRATCH_IDLE_MS = 10000;
 /** Zoomed back to 100 % or more for this long: the zoomed-out mip levels' memory is freed */
-const MIP_IDLE_MS = 5000;
+const MIP_IDLE_MS = 30000;
+const SHARP_MIP_IDLE_MS = 180;
+const MIP_FRAME_BUDGET_MS = 4;
 /** Main-thread time one background step (parking / freezing a layer) may take */
 const STEP_BUDGET_MS = 6;
 const HYDRATE_BATCH_SIZE = 48;
 const HYDRATE_DRAW_DELAY_MS = 250;
+const HYDRATE_STALL_MS = 1500;
 const FULL_COMPOSITE_COLD_LIMIT = 2400;
 const TILE_LABEL = 'layer-tile';
+const LOCAL_THUMB_INTERVAL_MS = 20;
+const REMOTE_THUMB_INTERVAL_MS = 6000;
 
 /** GPU memory for tiles of layers that are not on screen (animation frames, hidden layers): over it, the least recently shown go to the CPU */
 const HIDDEN_TILE_BUDGET = (() => {
@@ -137,12 +245,7 @@ const HIDDEN_TILE_BUDGET = (() => {
 })();
 
 /** Soft budget of active GPU tiles across visible warm layers before offscreen tiles spill to CPU LRU */
-const SOFT_GPU_TILE_LIMIT = (() => {
-  if (typeof navigator === 'undefined') return 1536;
-  const gb = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
-  const coarse = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
-  return coarse || (gb !== undefined && gb <= 4) ? 768 : 1536;
-})();
+const SOFT_GPU_TILE_LIMIT = { constrained: 768, moderate: 2048, desktop: 4096 };
 
 /** Large cold layer tile count threshold above which thaw only uploads tiles intersecting the viewport */
 const VIEW_THAW_TILE_THRESHOLD = 192;
@@ -266,6 +369,9 @@ function overlayActivePixels(beforeStroke: Uint8Array, curr: Uint8Array, mergedB
  * Reading `renderTexture` / `pingPongTexture` makes it resident; layers nobody pinned or touched
  * for PARK_AFTER_MS go back to warm in the background.
  */
+type ThumbSize = ReturnType<typeof computeProportionalThumbSize>;
+type ThumbVersion = ThumbSize & { version: number };
+
 class LayerItem implements PixiLayerItem {
   readonly display = new Container();
   readonly sprite = new Sprite();
@@ -296,7 +402,8 @@ class LayerItem implements PixiLayerItem {
   shown = false;
   hasAnimatedTransform = false;
   destroyed = false;
-  thumb: { version: number; url: string } | null = null;
+  thumb: (ThumbVersion & { url: string }) | null = null;
+  thumbPending: ThumbVersion | null = null;
   screentoneFilter?: Filter | null;
   layerColorFilter?: LayerColorFilter | null;
   layerColorKey?: string;
@@ -390,15 +497,16 @@ export class LayerManager {
   /** The layer being edited: kept warm (never frozen to the CPU), drawn into tile by tile */
   private activeId: string | null = null;
   /** Layers that must stay resident: a transform in progress, … (reason → id) */
-  private pins = new Map<string, string | null>();
+  private pins = new Map<string, { ids: readonly string[]; whole: boolean }>();
   /** Masks, clipping bases and screentone layers: sampled by filters as one whole texture */
   private structuralPins = new Set<string>();
   private job: Job | null = null;
   private jobTimer: ReturnType<typeof setTimeout> | null = null;
   private tickTimer: ReturnType<typeof setInterval>;
-  private thumbQueue = new Map<string, { w: number; h: number; local: boolean }>();
+  private thumbQueue = new Map<string, ThumbSize & { local: boolean }>();
   private thumbTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastRemoteThumbExtractAt = 0;
+  private thumbTimerLocal = false;
+  private lastRemoteThumbExtractAt = -Infinity;
   private lastLocalDrawAt = 0;
   private lastInteractionAt = 0;
 
@@ -423,6 +531,9 @@ export class LayerManager {
   private lastViewGridKey = '';
   private hydrateEpoch = 0;
   private hydrateInFlight = false;
+  private hydrateProgressAt = 0;
+  private hydrateUpload: (() => void) | null = null;
+  private hydrateLayerOffset = 0;
   private hydrateRaf = 0;
   private hydrateTimer: ReturnType<typeof setTimeout> | null = null;
   private cleanWritebackInFlight = false;
@@ -471,18 +582,22 @@ export class LayerManager {
     const is8K = width * height >= 64_000_000;
     const hiddenMiB = constrained ? Math.max(12, Math.min(memory * 8, 32)) : 48;
     const recBudget = computeRecommendedGpuTileBudget(width, height, memory, this.deviceProfile.isMobileOrTablet);
+    const slotsPerRow = Math.max(1, Math.min(constrained ? 4 : 8, Math.floor(this.maxTextureSize / PITCH)));
     this.hiddenTileBudget = Math.min(HIDDEN_TILE_BUDGET, hiddenMiB * 1048576);
     this.softGpuTileLimit = constrained
-      ? Math.min(recBudget.maxTiles, Math.max(128, Math.min(512, Math.floor(memory * 96))))
-      : Math.min(SOFT_GPU_TILE_LIMIT, recBudget.maxTiles);
-    this.softGpuByteLimit = constrained ? Math.min((is8K ? 128 : 160) * 1048576, recBudget.maxBytes) : recBudget.maxBytes;
+      ? Math.min(SOFT_GPU_TILE_LIMIT.constrained, recBudget.maxTiles, Math.max(128, Math.min(512, Math.floor(memory * 96))))
+      : memory >= 8 ? SOFT_GPU_TILE_LIMIT.desktop : SOFT_GPU_TILE_LIMIT.moderate;
+    const atlasBytes = Math.ceil(this.softGpuTileLimit / slotsPerRow ** 2) * (PITCH * slotsPerRow) ** 2 * 4;
+    this.softGpuByteLimit = constrained
+      ? Math.min((is8K ? 128 : 160) * 1048576, recBudget.maxBytes)
+      : Math.max(recBudget.maxBytes, atlasBytes);
     this.viewThawThreshold = constrained ? 16 : solo ? 64 : is8K ? 96 : VIEW_THAW_TILE_THRESHOLD;
     this.prefetchLayers = constrained ? 1 : solo ? 2 : is8K ? 3 : Infinity;
     this.mips = new MipmapView(renderer);
     this.atlas = new TileAtlas(
       renderer,
       this.mips,
-      Math.max(1, Math.min(constrained ? 4 : 8, Math.floor(this.maxTextureSize / PITCH))),
+      slotsPerRow,
       constrained ? 1 : recBudget.maxPooledAtlasPages
     );
     this.scratchIdleMs = constrained ? 3000 : SCRATCH_IDLE_MS;
@@ -594,14 +709,11 @@ export class LayerManager {
 
   /** Live Layer Effects preview map (shown on this screen only while dragging sliders in the fx popover) */
   private layerEffectsPreviews = new Map<string, LayerEffectsMeta>();
-  /** Isolated containers for folder/group layers that have active Layer Effects */
-  private groupEffectContainers = new Map<string, {
-    container: Container;
-    filter: LayerEffectsFilter;
-    blendFilter: { mode: string; filter: Filter } | null;
-    effectsKey: string;
-    minSortOrder: number;
-  }>();
+  private hierarchy = new LayerHierarchy([]);
+  private isolatedGroups = new Map<string, GroupView>();
+  private groupSampleOrder: string[] = [];
+  private groupDependencyCache = new Map<string, ReadonlySet<string>>();
+  private activeMasks = new Map<string, LayerModel>();
 
   public setLayerEffectsPreview(layerId: string, effects: LayerEffectsMeta | null): void {
     if (effects) this.layerEffectsPreviews.set(layerId, effects);
@@ -617,6 +729,53 @@ export class LayerManager {
     const sorted = Array.from(new Map(layers.map((layer) => [layer.id, layer])).values())
       .sort((a, b) => a.sortOrder - b.sortOrder);
     const byId = new Map(sorted.map((l) => [l.id, l]));
+    const hierarchy = this.hierarchy = new LayerHierarchy(sorted);
+    this.groupDependencyCache.clear();
+    const maskOf = this.activeMasks = new Map<string, LayerModel>();
+    for (const layer of sorted) {
+      if (layer.layerType === 'mask' && layer.parentId && layer.isVisible) maskOf.set(layer.parentId, layer);
+    }
+    const effectsFor = (group: LayerModel) => this.layerEffectsPreviews.get(group.id) ?? group.meta?.effects;
+    const isolatedIds = hierarchy.isolatedGroups(new Set(maskOf.keys()), (group) => hasActiveLayerEffects(effectsFor(group)));
+    const layerPlacement = (model: LayerModel): { parent: Container; alpha: number; masks: LayerModel[] } => {
+      let alpha = Math.max(0, Math.min(1, model.opacity));
+      const own = maskOf.get(model.id);
+      const masks = own ? [own] : [];
+      for (const ancestor of hierarchy.ancestors(model)) {
+        const isolated = this.isolatedGroups.get(ancestor.id);
+        if (isolated && isolatedIds.has(ancestor.id)) return { parent: isolated.container, alpha, masks };
+        alpha *= Math.max(0, Math.min(1, ancestor.opacity));
+        const mask = maskOf.get(ancestor.id);
+        if (mask) masks.push(mask);
+      }
+      return { parent: this.layersContainer, alpha, masks };
+    };
+    const order = new Map<string, number>();
+    this.groupSampleOrder = [];
+    const visit = (parentId: string | null) => {
+      for (const model of hierarchy.childrenOf(parentId)) {
+        order.set(model.id, order.size);
+        if (model.layerType !== 'group') continue;
+        if (isolatedIds.has(model.id)) {
+          let entry = this.isolatedGroups.get(model.id);
+          if (!entry) {
+            const container = new Container({ label: 'group:' + model.id, sortableChildren: true });
+            entry = { container, opacity: new AlphaFilter({ alpha: 1 }), masks: new Map() };
+            this.isolatedGroups.set(model.id, entry);
+          }
+          const { parent, alpha } = layerPlacement(model);
+          if (entry.container.parent !== parent) parent.addChild(entry.container);
+          entry.container.visible = hierarchy.visible(model);
+          entry.container.zIndex = order.get(model.id)!;
+          // Pixi propagates Container.alpha to every child. Apply folder opacity to the combined pixels.
+          entry.opacity.alpha = alpha;
+          if (hierarchy.baseIds.has(model.id)) this.ensureGroupSample(entry);
+        }
+        visit(model.id);
+        if (hierarchy.baseIds.has(model.id)) this.groupSampleOrder.push(model.id);
+      }
+    };
+    visit(null);
     const drawable = sorted.filter((layer) => layer.layerType !== 'group');
     const incomingIds = new Set(drawable.map((l) => l.id));
 
@@ -673,49 +832,11 @@ export class LayerManager {
         item.layerEffectsKey = undefined;
       }
 
-      // Find nearest enclosing folder/group with active Layer Effects (so the folder composites as one silhouette)
-      let styledGroupModel: LayerModel | null = null;
-      let effectiveVisible = model.isVisible;
-      let effectiveAlpha = Math.max(0, Math.min(1, model.opacity));
-      let parentId = model.layerType === 'mask' ? null : model.parentId;
-      for (let depth = 0; parentId && depth < 16; depth++) {
-        const parentModel = byId.get(parentId);
-        if (!parentModel) break;
-        if (!parentModel.isVisible) effectiveVisible = false;
-        const gFx = parentModel.layerType === 'group'
-          ? (this.layerEffectsPreviews.get(parentModel.id) ?? parentModel.meta?.effects ?? null)
-          : null;
-        if (!styledGroupModel && hasActiveLayerEffects(gFx)) {
-          styledGroupModel = parentModel;
-        } else {
-          effectiveAlpha *= Math.max(0, Math.min(1, parentModel.opacity));
-        }
-        parentId = parentModel.parentId;
-      }
-
-      if (styledGroupModel && model.layerType !== 'mask') {
-        const gFx = (this.layerEffectsPreviews.get(styledGroupModel.id) ?? styledGroupModel.meta?.effects)!;
-        const gFxKey = layerEffectsKey(gFx);
-        let entry = this.groupEffectContainers.get(styledGroupModel.id);
-        if (!entry) {
-          const container = new Container();
-          container.sortableChildren = true;
-          container.label = `group-effects:${styledGroupModel.id}`;
-          const filter = new LayerEffectsFilter(gFx, this.layersContainer);
-          this.layersContainer.addChild(container);
-          entry = { container, filter, blendFilter: null, effectsKey: gFxKey, minSortOrder: model.sortOrder };
-          this.groupEffectContainers.set(styledGroupModel.id, entry);
-        } else if (entry.effectsKey !== gFxKey) {
-          entry.filter.setEffects(gFx);
-          entry.effectsKey = gFxKey;
-        }
-        entry.minSortOrder = Math.min(entry.minSortOrder, model.sortOrder);
-        if (item.display.parent !== entry.container) {
-          entry.container.addChild(item.display);
-        }
-      } else if (item.display.parent !== this.layersContainer) {
-        this.layersContainer.addChild(item.display);
-      }
+      const isMask = model.layerType === 'mask';
+      const effectiveVisible = !isMask && hierarchy.visible(model);
+      const { parent, alpha: effectiveAlpha } = isMask
+        ? { parent: this.layersContainer, alpha: 1 } : layerPlacement(model);
+      if (item.display.parent !== parent) parent.addChild(item.display);
 
       // Onion skin (display only): the neighbouring frame in one flat colour, or shaded by its own lights and darks
       const { onionTint, onionMode } = model as LayerModel & { onionTint?: number; onionMode?: 'shade' };
@@ -725,7 +846,7 @@ export class LayerManager {
       if (item.shown) item.lastShown = now;
       item.display.visible = effectiveVisible;
       item.display.alpha = effectiveAlpha;
-      item.display.zIndex = model.sortOrder;
+      item.display.zIndex = order.get(model.id) ?? -1;
       item.sprite.visible = true;
       if (model.layerType === 'adjustment' && !item.adjust) this.createAdjustmentView(item);
       // An adjustment layer acts on the canvas as it is: it never moves
@@ -742,118 +863,31 @@ export class LayerManager {
       }
     }
 
-    // Reconcile folder/group effect containers (update filters/opacity/zIndex and remove unused ones)
-    const activeGroupIds = new Set<string>();
-    for (const [gid, entry] of this.groupEffectContainers) {
-      const gModel = byId.get(gid);
-      const gFx = gModel ? (this.layerEffectsPreviews.get(gid) ?? gModel.meta?.effects ?? null) : null;
-      if (!gModel || !hasActiveLayerEffects(gFx) || entry.container.children.length === 0) {
-        while (entry.container.children.length > 0) {
-          this.layersContainer.addChild(entry.container.children[0]);
-        }
-        this.layersContainer.removeChild(entry.container);
-        entry.container.filters = null;
-        entry.filter.destroy();
-        entry.blendFilter?.filter.destroy();
-        entry.container.destroy();
-        this.groupEffectContainers.delete(gid);
-        continue;
-      }
-      activeGroupIds.add(gid);
-      let gVisible = gModel.isVisible;
-      let gp = gModel.parentId ? byId.get(gModel.parentId) : undefined;
-      for (let d = 0; gp && d < 16; d++) {
-        if (!gp.isVisible) gVisible = false;
-        gp = gp.parentId ? byId.get(gp.parentId) : undefined;
-      }
-      entry.container.visible = gVisible;
-      entry.container.alpha = Math.max(0, Math.min(1, gModel.opacity));
-      entry.container.zIndex = entry.minSortOrder;
-      entry.minSortOrder = Number.POSITIVE_INFINITY;
-      const gMode = this.mapPixiBlendMode(gModel.blendMode);
-      const gFilters: Filter[] = [entry.filter];
-      if (gMode !== 'normal') {
-        let bf = entry.blendFilter;
-        if (!bf || bf.mode !== gMode) {
-          bf?.filter.destroy();
-          bf = { mode: gMode, filter: this.createBlendFilter(gMode) };
-          entry.blendFilter = bf;
-        }
-        gFilters.push(bf.filter);
-      } else if (entry.blendFilter) {
-        entry.blendFilter.filter.destroy();
-        entry.blendFilter = null;
-      }
-      const prevG = entry.container.filters;
-      const sameG = prevG && prevG.length === gFilters.length && gFilters.every((f, idx) => prevG[idx] === f);
-      if (!sameG) entry.container.filters = gFilters;
-      entry.container.sortChildren();
-    }
-
-    // Re-index children only when display stacking order actually changed (avoids dirtying Pixi every anim frame)
-    if (activeGroupIds.size > 0) {
-      this.layersContainer.sortChildren();
-    } else {
-      let inOrder = this.layersContainer.children.length === drawable.length;
-      if (inOrder) {
-        for (let i = 0; i < drawable.length; i++) {
-          const item = this.layersMap.get(drawable[i].id);
-          if (!item || this.layersContainer.children[i] !== item.display) {
-            inOrder = false;
-            break;
-          }
-        }
-      }
-      if (!inOrder) {
-        for (let i = 0; i < drawable.length; i++) {
-          const item = this.layersMap.get(drawable[i].id);
-          if (item && item.display.parent === this.layersContainer) {
-            this.layersContainer.setChildIndex(item.display, i);
-          }
-        }
-        this.layersContainer.sortChildren();
+    for (const [id, entry] of this.isolatedGroups) {
+      if (!isolatedIds.has(id)) {
+        this.destroyGroupView(entry);
+        this.isolatedGroups.delete(id);
+      } else if (!hierarchy.baseIds.has(id)) {
+        this.dropGroupSample(entry);
       }
     }
-
-    // Layer masks (on layers and on groups) are never drawn: they mask through MaskFilters,
-    // which sample the mask sprite in its own space (white shows, black or empty hides; inverted
-    // masks the other way round). A mask's eye switches it on and off.
-    const maskOf = new Map<string, LayerModel>();
-    for (const m of drawable) if (m.layerType === 'mask' && m.parentId && m.isVisible) maskOf.set(m.parentId, m);
-    /** The masks that apply to a layer: its own, then every enclosing group's */
-    const masksFor = (model: LayerModel): LayerModel[] => {
-      const out: LayerModel[] = [];
-      const own = maskOf.get(model.id);
-      if (own) out.push(own);
-      let parentId = model.parentId;
-      for (let depth = 0; parentId && depth < 16; depth++) {
-        const g = maskOf.get(parentId);
-        if (g) out.push(g);
-        parentId = byId.get(parentId)?.parentId ?? null;
-      }
-      return out;
-    };
-    const clipBaseOf = (i: number) => {
-      let baseIndex = i - 1;
-      while (baseIndex > 0 && (drawable[baseIndex].clipToBelow || drawable[baseIndex].layerType === 'mask')) baseIndex--;
-      return drawable[baseIndex];
-    };
-    const drawableIndex = new Map(drawable.map((m, i) => [m.id, i]));
+    const masksFor = (model: LayerModel) => layerPlacement(model).masks;
     /** A scope composite is drawn from its members, their masks, and the clip bases (with masks) they use */
     const adjustmentDependencies = (memberIds: readonly string[]): string[] => {
       const ids = new Set<string>();
       for (const id of memberIds) {
         const member = byId.get(id);
-        const i = drawableIndex.get(id);
-        if (!member || i === undefined) continue;
+        if (!member) continue;
         ids.add(id);
         for (const m of masksFor(member)) ids.add(m.id);
-        if (member.clipToBelow && i > 0) {
-          const base = clipBaseOf(i);
-          ids.add(base.id);
-          const own = maskOf.get(base.id);
-          if (own) ids.add(own.id);
+        const base = hierarchy.clipBase(member);
+        if (!base) continue;
+        ids.add(base.id);
+        if (base.layerType === 'group') {
+          for (const child of hierarchy.visibleGroupLayers(base.id)) ids.add(child.id);
         }
+        const own = maskOf.get(base.id);
+        if (own) ids.add(own.id);
       }
       return [...ids];
     };
@@ -864,13 +898,13 @@ export class LayerManager {
     // pixels: those stay resident. On-screen layers (and the one being edited) get their tiles on the GPU.
     // shortcut: every mask is resident (fine for a few masks), park masks of hidden cels if animations use many
     this.structuralPins.clear();
-    for (let i = 0; i < drawable.length; i++) {
-      const model = drawable[i];
-      const item = this.layersMap.get(model.id)!;
-      if (model.layerType === 'mask') this.structuralPins.add(model.id);
-      if (item.shown && model.screentoneEnabled && !item.adjust) this.structuralPins.add(model.id);
-      // An adjustment base is clipped to through its mask only (it has no pixels to keep resident)
-      if (item.shown && model.clipToBelow && i > 0 && clipBaseOf(i).layerType !== 'adjustment') this.structuralPins.add(clipBaseOf(i).id);
+    for (const model of sorted) {
+      const item = this.layersMap.get(model.id);
+      if (model.layerType === 'mask' || (item?.shown && model.screentoneEnabled && !item.adjust)) {
+        this.structuralPins.add(model.id);
+      }
+      const base = hierarchy.clipBase(model);
+      if (base && base.layerType !== 'adjustment' && hierarchy.visible(model)) this.structuralPins.add(base.id);
     }
     if (!this.allowFullCanvasTextures) this.refreshSparseMaskSamples();
     let pendingThaw = 0;
@@ -880,7 +914,7 @@ export class LayerManager {
       }
     }
     for (const item of this.layersMap.values()) {
-      if (this.isPinned(item)) this.makeResident(item);
+      if (this.isPinned(item, true)) this.makeResident(item);
       else if ((item.shown || this.keepWarm(item)) && !item.rt && !item.gpu) {
         if (pendingThaw > 256 || (item.cpu?.size ?? 0) > this.viewThawThreshold) this.stageColdLayer(item);
         else this.thaw(item);
@@ -896,36 +930,50 @@ export class LayerManager {
       maskItem.display.filters = null;
     }
 
-    for (let i = 0; i < drawable.length; i++) {
-      const model = drawable[i];
-      const item = this.layersMap.get(model.id);
-      if (!item || model.layerType === 'mask') continue;
+    const makeMaskFilters = (existing: Map<string, MaskFilter> | undefined, used: Map<string, MaskFilter>) =>
+      (key: string, sprite: Sprite, inverse = false, channel: 'red' | 'alpha' = 'red') => {
+        let filter = existing?.get(key);
+        if (!filter) filter = new MaskFilter({ sprite, inverse, channel, resolution: 'inherit' });
+        else if (filter.sprite !== sprite) filter.setSprite(sprite);
+        filter.inverse = inverse;
+        filter.clipToViewport = true;
+        used.set(key, filter);
+        return filter;
+      };
+    const maskFiltersOf = (masks: LayerModel[], create: ReturnType<typeof makeMaskFilters>) => masks.flatMap((mask) => {
+      const item = this.layersMap.get(mask.id);
+      return item ? [create('mask:' + mask.id, this.maskSample(item), Boolean(mask.meta?.maskInverted))] : [];
+    });
+    const clipFiltersOf = (model: LayerModel, create: ReturnType<typeof makeMaskFilters>): Filter[] => {
+      const base = hierarchy.clipBase(model);
+      if (!base) return [];
+      const group = this.isolatedGroups.get(base.id)?.sample;
+      if (group) return [create('clip:' + base.id, group.sprite, false, 'alpha')];
+      const item = this.layersMap.get(base.id);
+      if (!item) return [];
+      const own = maskOf.get(base.id);
+      const ownItem = own && this.layersMap.get(own.id);
+      return [
+        ...(item.adjust ? [] : [create('clip:' + base.id, this.maskSample(item), false, 'alpha')]),
+        ...(ownItem ? [create('clipmask:' + own!.id, this.maskSample(ownItem), Boolean(own!.meta?.maskInverted))] : []),
+      ];
+    };
+
+    for (const model of drawable) {
+      const item = this.layersMap.get(model.id)!;
+      if (model.layerType === 'mask') continue;
       item.sprite.renderable = true;
       item.sprite.mask = null;
+      const used = new Map<string, MaskFilter>();
+      const maskFilter = makeMaskFilters(item.maskFilters, used);
       const masks = masksFor(model);
-      const hasClip = Boolean(model.clipToBelow && i > 0);
-      const used: Map<string, MaskFilter> | undefined = masks.length || hasClip ? new Map() : undefined;
-      const maskFilter = (key: string, sprite: Sprite, opts: { inverse?: boolean; alpha?: boolean }) => {
-        let f = item.maskFilters?.get(key);
-        if (!f) f = new MaskFilter({ sprite, inverse: opts.inverse, channel: opts.alpha ? 'alpha' : 'red' });
-        else if (f.sprite !== sprite) f.setSprite(sprite);
-        f.inverse = Boolean(opts.inverse);
-        used!.set(key, f);
-        return f;
-      };
-      const maskFiltersOf = () =>
-        masks.flatMap((m) => {
-          const dependency = this.layersMap.get(m.id);
-          const s = dependency && this.maskSample(dependency);
-          return s ? [maskFilter(`mask:${m.id}`, s, { inverse: Boolean(m.meta?.maskInverted) })] : [];
-        });
 
       // Adjustment layer: its quad through its own / group masks (the coverage), then the adjustment
       if (item.adjust) {
         const view = item.adjust;
         const adjustment = normalizeAdjustment(this.adjustmentPreviews.get(model.id) ?? model.meta?.adjustment);
         const compiled = adjustment ? compileAdjustment(adjustment) : null;
-        const scope = resolveAdjustmentScope(sorted, model.id);
+        const scope = hierarchy.adjustmentScope(model);
         const active = Boolean(compiled && !compiled.identity && scope.kind !== 'none');
         view.scope = scope;
         view.dependencyIds = active && (scope.kind === 'clip' || scope.kind === 'group') ? adjustmentDependencies(scope.memberIds) : [];
@@ -940,7 +988,7 @@ export class LayerManager {
           view.paramsKey = '';
         }
         if (!active || scope.kind === 'root') this.releaseAdjustmentScope(view);
-        const maskList = active ? maskFiltersOf() : [];
+        const maskList = active ? maskFiltersOf(masks, maskFilter) : [];
         // Everything below is redrawn through this layer: masks at screen resolution, cut to the view
         for (const f of maskList) {
           f.resolution = 'inherit';
@@ -949,7 +997,7 @@ export class LayerManager {
         if (item.maskFilters?.size) {
           for (const [key, f] of item.maskFilters) if (!used?.has(key)) f.destroy();
         }
-        item.maskFilters = used;
+        item.maskFilters = used.size ? used : undefined;
         item.screentoneFilter = null;
         if (item.blendFilter) {
           item.blendFilter.filter.destroy();
@@ -968,25 +1016,7 @@ export class LayerManager {
         continue;
       }
 
-      // Clipping (不會塗出去): only where the base below shows, after the base's own mask
-      const clip: Filter[] = [];
-      if (hasClip) {
-        const base = clipBaseOf(i);
-        const baseItem = this.layersMap.get(base.id);
-        if (baseItem?.adjust) {
-          // Clipped onto an adjustment layer: it is opaque white where its own mask shows
-          const own = maskOf.get(base.id);
-          const ownItem = own && this.layersMap.get(own.id);
-          const ownSprite = ownItem && this.maskSample(ownItem);
-          if (own && ownSprite) clip.push(maskFilter(`clipmask:${own.id}`, ownSprite, { inverse: Boolean(own.meta?.maskInverted) }));
-        } else if (baseItem && base.layerType !== 'mask') {
-          clip.push(maskFilter(`clip:${base.id}`, this.maskSample(baseItem), { alpha: true }));
-          const own = maskOf.get(base.id);
-          const ownItem = own && this.layersMap.get(own.id);
-          const ownSprite = ownItem && this.maskSample(ownItem);
-          if (own && ownSprite) clip.push(maskFilter(`clipmask:${own.id}`, ownSprite, { inverse: Boolean(own.meta?.maskInverted) }));
-        }
-      }
+      const clip = clipFiltersOf(model, maskFilter);
 
       // Comic screentone
       if (model.screentoneEnabled) {
@@ -1012,8 +1042,8 @@ export class LayerManager {
         ? [
             ...(item.screentoneFilter ? [item.screentoneFilter] : []),
             ...(item.layerColorFilter ? [item.layerColorFilter] : []),
+            ...maskFiltersOf(masks, maskFilter),
             ...clip,
-            ...(masks.length ? maskFiltersOf() : []),
             ...(item.layerEffectsFilter ? [item.layerEffectsFilter] : []),
             ...(item.onionFilter ? [item.onionFilter] : []),
           ]
@@ -1021,7 +1051,7 @@ export class LayerManager {
       if (item.maskFilters?.size) {
         for (const [key, f] of item.maskFilters) if (!used?.has(key)) f.destroy();
       }
-      item.maskFilters = used;
+      item.maskFilters = used.size ? used : undefined;
 
       // A container's blend mode is applied to its children, and with filters those are drawn into
       // the filters' own empty buffer first: multiply over transparent = black (蒙版＋色彩增值變黑).
@@ -1046,6 +1076,47 @@ export class LayerManager {
       }
     }
     this.onStageChange?.();
+    for (const id of isolatedIds) {
+      const model = byId.get(id)!;
+      const entry = this.isolatedGroups.get(id)!;
+      const used = new Map<string, MaskFilter>();
+      const create = makeMaskFilters(entry.masks, used);
+      const filters: Filter[] = [...maskFiltersOf(masksFor(model), create), ...clipFiltersOf(model, create)];
+      for (const [key, filter] of entry.masks) if (!used.has(key)) filter.destroy();
+      entry.masks = used;
+      const effects = effectsFor(model);
+      if (effects && hasActiveLayerEffects(effects)) {
+        const key = layerEffectsKey(effects);
+        if (!entry.effects) entry.effects = new LayerEffectsFilter(effects, this.layersContainer);
+        else if (entry.effectsKey !== key) entry.effects.setEffects(effects);
+        entry.effectsKey = key;
+        filters.push(entry.effects);
+      } else if (entry.effects) {
+        entry.effects.destroy();
+        entry.effects = undefined;
+        entry.effectsKey = undefined;
+      }
+      filters.push(entry.opacity);
+      const compositeOp = canvasCompositeOp(model.blendMode);
+      const mode = compositeOp === 'source-over' ? 'normal' : compositeOp === 'lighter' ? 'add'
+        : compositeOp === 'destination-out' ? 'erase' : compositeOp;
+      if (entry.blend?.mode !== mode) {
+        entry.blend?.filter.destroy();
+        entry.blend = mode === 'normal' ? undefined : { mode, filter: this.createBlendFilter(mode, true) };
+      }
+      if (entry.blend) filters.push(entry.blend.filter);
+      for (const filter of filters) {
+        filter.clipToViewport = true;
+        filter.resolution = 'inherit';
+      }
+      const previous = entry.container.filters;
+      if (!previous || previous.length !== filters.length || filters.some((filter, i) => filter !== previous[i])) {
+        entry.container.filters = filters;
+      }
+      entry.container.sortChildren();
+    }
+    this.layersContainer.sortChildren();
+
   }
 
   /** The last filter of a filtered layer: composites the filtered pixels with the layer's blend mode */
@@ -1061,7 +1132,9 @@ export class LayerManager {
    * A filter that draws its input with blend mode `mode` (a mapPixiBlendMode result). Put it last in
    * a filter list instead of setting blendMode on something that has filters (merge-down does too).
    */
-  public createBlendFilter(mode: string): Filter {
+  public createBlendFilter(mode: string, isolate = false): Filter {
+    const groupFilter = isolate ? createGroupBlendFilter(mode) : undefined;
+    if (groupFilter) return groupFilter;
     const Advanced = ADVANCED_BLEND_FILTERS[mode];
     if (Advanced) return new Advanced(); // samples what is underneath, like Pixi's own advanced blend modes
     const filter = new AlphaFilter({ alpha: 1 }); // pass-through drawn with a GL blend (multiply, screen, add, erase)
@@ -1187,7 +1260,7 @@ export class LayerManager {
       const view = item?.adjust;
       if (!item || !view || !view.paramsKey || (view.scope.kind !== 'clip' && view.scope.kind !== 'group')) continue;
       if (!item.display.visible || !item.display.renderable) continue;
-      const key = this.adjustmentScopeFingerprint(view, drawing);
+      const key = `${this.stackFilterRevision}:${this.adjustmentScopeFingerprint(view, drawing)}`;
       if (adjustmentScopeIsFresh(view.scopeKey, view.scopeMode, key, mode)) continue;
       this.renderAdjustmentScope(item, view, view.scope.memberIds, full);
       view.scopeKey = key;
@@ -1223,10 +1296,15 @@ export class LayerManager {
     if (overlay) overlay.renderable = false;
     try {
       const draw = () => this.renderer.render({ container: this.layersContainer, target: view.scopeRT!, clear: true, clearColor: [0, 0, 0, 0] });
-      if (full && !this.allowFullCanvasTextures) {
-        this.renderCompositeChunk(view.scopeRT!, { x: 0, y: 0, w: this.canvasWidth, h: this.canvasHeight }, false);
-      } else if (full) this.withAllTilesVisible(draw, true);
-      else draw();
+      const renderScope = () => {
+        if (full && !this.allowFullCanvasTextures) {
+          this.renderCompositeChunk(view.scopeRT!, { x: 0, y: 0, w: this.canvasWidth, h: this.canvasHeight }, false, undefined, false);
+        } else if (full) this.withAllTilesVisible(draw, true);
+        else draw();
+      };
+      const boundary = [...this.hierarchy.ancestors(item.model)].find(({ id }) => this.isolatedGroups.has(id));
+      if (boundary) this.withGroupSource(boundary.id, renderScope, 'adjustment');
+      else renderScope();
     } finally {
       for (const d of left) d.renderable = true;
       if (overlay) overlay.renderable = overlayRenderable;
@@ -1248,14 +1326,14 @@ export class LayerManager {
    * Zoomed in far (CSP / Krita): canvas pixels shown as sharp squares instead of bilinear blur.
    * Applies to the atlas pages (warm tiles, previews, masks) and resident layer textures.
    */
-  public setPixelated(on: boolean) {
+  public setPixelated(on: boolean, notify = true) {
     const mode: MagFilter = on ? 'nearest' : 'linear';
     if (this.magFilter === mode) return;
     this.magFilter = mode;
     this.atlas.setMagFilter(mode);
     if (this.wrapRT) applyMagFilter(this.wrapRT, mode);
     for (const item of this.layersMap.values()) if (item.rt) applyMagFilter(item.rt, mode);
-    this.onStageChange?.();
+    if (notify) this.onStageChange?.();
   }
 
   /**
@@ -1268,11 +1346,18 @@ export class LayerManager {
     this.refreshSparsePreviews();
     if (this.filterOverlayLayerId) this.setFilterUnderlayVisible(false);
     this.refreshSparseMaskSamples();
-    this.updateAdjustmentScopes(false);
+    this.refreshViewGroupSamples();
+    if (this.updateAdjustmentScopes(false)) this.refreshViewGroupSamples(true);
     // Bilinear already covers all texels cleanly near 100%; enabling trilinear mip level 1 between
     // 85% and 99% needlessly blurs crisp lineart, so only activate mipmaps below 85%.
     const useMips = this.mips.supported && scale < 0.85 && this.magFilter !== 'nearest';
-    const fastMip = this.isActivelyDrawing(0) || performance.now() - this.lastLocalDrawAt < 160;
+    const now = performance.now();
+    const drawing = this.isActivelyDrawing(0);
+    const sharpDelay = Math.max(
+      SHARP_MIP_IDLE_MS - (now - this.lastInteractionAt),
+      SHARP_MIP_IDLE_MS - (now - this.lastLocalDrawAt),
+    );
+    const fastMip = drawing || sharpDelay > 0;
     if (this.sharpMipTimer) {
       clearTimeout(this.sharpMipTimer);
       this.sharpMipTimer = null;
@@ -1281,32 +1366,42 @@ export class LayerManager {
       this.sharpMipTimer = setTimeout(() => {
         this.sharpMipTimer = null;
         if (!this.destroyed) this.onStageChange?.();
-      }, 180);
+      }, drawing ? SHARP_MIP_IDLE_MS : sharpDelay);
     } else if (!useMips) {
       this.mips.suspend();
       this.mips.releaseIdle(MIP_IDLE_MS);
     }
-    this.syncStackCache(useMips, fastMip);
     if (useMips) {
-      const live = [...this.layersMap.values()].filter((item) => item.shown && item.display.renderable);
+      const live = [...this.layersMap.values()].filter((item) => item.shown);
       if (this.previewContainer.visible) live.push(this.preview);
-      this.ensureViewMips(live, fastMip);
+      if (!this.ensureViewMips(live, fastMip)) {
+        this.deactivateStackCache();
+        this.onStageChange?.(); // The workspace schedules the next animation frame.
+        return;
+      }
     }
+    this.syncStackCache(useMips, fastMip);
   }
 
-  private ensureViewMips(items: readonly LayerItem[], fastMip: boolean) {
+  private ensureViewMips(items: readonly LayerItem[], fastMip: boolean): boolean {
     const pages = this.visiblePages;
     pages.clear();
     for (const item of items) {
       for (const tile of item.gpu?.values() ?? []) {
         if (tile.sprite.visible && this.isTileInView(tile.col, tile.row)) pages.add(tile.slot.page);
       }
+    }
+    const deadline = performance.now() + MIP_FRAME_BUDGET_MS;
+    for (const item of items) {
       if (item.rt && item.sprite.parent === item.display && item.sprite.visible && item.display.visible) {
         const source = item.sprite.texture.source;
-        this.mips.ensure(source, fullMipLevels(source.pixelWidth, source.pixelHeight), 0, fastMip);
+        if (!this.mips.ensure(source, fullMipLevels(source.pixelWidth, source.pixelHeight), 0, fastMip, deadline)) return false;
       }
     }
-    for (const rt of this.atlas.pageTextures(pages)) this.mips.ensure(rt.source, ATLAS_MIP_LEVELS, PITCH, fastMip);
+    for (const rt of this.atlas.pageTextures(pages)) {
+      if (!this.mips.ensure(rt.source, ATLAS_MIP_LEVELS, PITCH, fastMip, deadline)) return false;
+    }
+    return true;
   }
 
   private deactivateStackCache() {
@@ -1358,7 +1453,7 @@ export class LayerManager {
     const active = this.activeId ? this.layersMap.get(this.activeId) : undefined;
     if (
       this.destroyed || this.wrapAroundEnabled || this.stackCacheSuspended || this.adjustmentOrder.length ||
-      this.filterOverlaySprite || this.groupEffectContainers.size ||
+      this.filterOverlaySprite || this.isolatedGroups.size ||
       !active?.shown || active.adjust || active.display.parent !== this.layersContainer || active.model.clipToBelow ||
       this.rootContainer.getGlobalAlpha() !== 1 || this.rootContainer.getGlobalTint() !== 0xffffff
     ) return this.deactivateStackCache();
@@ -1415,12 +1510,10 @@ export class LayerManager {
       const transform = world.clone().scale(cache.scaleX, cache.scaleY);
       try {
         if (rebuildBelow) {
-          if (useMips) this.ensureViewMips(below, fastMip);
           this.bakeStackSegment(below, true, transform);
           this.stackBelowSharp = !fastMip;
         }
         if (rebuildAbove) {
-          if (useMips) this.ensureViewMips(above, fastMip);
           this.bakeStackSegment(above, false, transform);
           this.stackAboveSharp = !fastMip;
         }
@@ -1498,16 +1591,28 @@ export class LayerManager {
     if (item?.coldTiles.size) this.scheduleHydrate();
   }
 
-  /** Keeps a layer resident for a reason ('transform', …) until pinned to null */
-  public pin(reason: string, layerId: string | null) {
-    this.pins.set(reason, layerId);
-    const item = layerId ? this.layersMap.get(layerId) : undefined;
-    if (item && !item.adjust) this.makeResident(item);
+  /** Keeps layers in GPU storage until pinned to null. A single ID also requests a whole texture. */
+  public pin(reason: string, ids: string | readonly string[] | null) {
+    if (ids === null) {
+      this.pins.delete(reason);
+      return;
+    }
+    const whole = typeof ids === 'string';
+    const layerIds = whole ? [ids] : ids;
+    this.pins.set(reason, { ids: layerIds, whole });
+    for (const id of layerIds) {
+      const item = this.layersMap.get(id);
+      if (!item || item.adjust) continue;
+      if (whole) this.makeResident(item);
+      else if (!item.rt && !item.gpu) this.stageColdLayer(item);
+    }
   }
 
-  private isPinned(item: LayerItem) {
+  private isPinned(item: LayerItem, whole = false) {
     if (this.allowFullCanvasTextures && this.structuralPins.has(item.model.id)) return true;
-    for (const id of this.pins.values()) if (id === item.model.id) return true;
+    for (const pin of this.pins.values()) {
+      if ((!whole || pin.whole) && pin.ids.includes(item.model.id)) return true;
+    }
     return false;
   }
 
@@ -1570,7 +1675,17 @@ export class LayerManager {
     const r0 = bounds ? Math.max(0, Math.floor((bounds.y0 - TS) / TS)) : 0;
     const r1 = bounds ? Math.min(this.rows - 1, Math.floor((bounds.y1 + TS) / TS)) : this.rows - 1;
     const gridKey = bounds ? `${c0},${r0},${c1},${r1}:${this.cullSuspended}:${this.tileStructureVersion}` : `all:${this.cullSuspended}:${this.tileStructureVersion}`;
-    if (this.lastViewGridKey === gridKey) return;
+    if (this.lastViewGridKey === gridKey) {
+      if (!this.hydrateInFlight && !this.hydrateRaf && this.hydrateTimer === null) {
+        for (const item of this.layersMap.values()) {
+          if (item.shown && item.gpu && !this.coldTilesInView(item, TS).next().done) {
+            this.scheduleHydrate();
+            break;
+          }
+        }
+      }
+      return;
+    }
     this.lastViewGridKey = gridKey;
     let anyColdInView = false;
     for (const item of this.layersMap.values()) {
@@ -1691,6 +1806,28 @@ export class LayerManager {
     this.scheduleHydrate();
   }
 
+  public resumeViewHydration() {
+    if (this.destroyed) return;
+    this.clearHydrateSchedule();
+    if (this.hydrateInFlight && performance.now() - this.hydrateProgressAt >= HYDRATE_STALL_MS) {
+      this.hydrateEpoch++;
+      this.hydrateInFlight = false;
+      this.hydrateUpload = null;
+    }
+    if (this.hydrateUpload) this.hydrateRaf = requestAnimationFrame(this.hydrateUpload);
+    this.lastViewGridKey = '';
+    this.setViewportBounds(this.viewportBounds);
+    this.startProgressiveHydrate();
+    this.onStageChange?.();
+  }
+
+  private clearHydrateSchedule() {
+    if (this.hydrateRaf) cancelAnimationFrame(this.hydrateRaf);
+    if (this.hydrateTimer !== null) clearTimeout(this.hydrateTimer);
+    this.hydrateRaf = 0;
+    this.hydrateTimer = null;
+  }
+
   private stageColdLayer(item: LayerItem) {
     // Transfer ownership of the compressed map without walking its entries.
     item.coldTiles = item.cpu ?? new Map();
@@ -1719,68 +1856,100 @@ export class LayerManager {
     return true;
   }
 
-  private collectHydrateBatch(): HydrateTile[] {
-    const batch: HydrateTile[] = [];
-    const items = [...this.layersMap.values()].filter((item) =>
-      item.gpu && item.coldTiles.size && (item.shown || this.keepWarm(item)));
-    const active = items.findIndex((item) => item.model.id === this.activeId);
-    if (active > 0) items.unshift(...items.splice(active, 1));
+  private *coldTilesInView(item: LayerItem, margin: number): Generator<HydrateTile> {
+    if (!item.coldTiles.size) return;
     const bounds = this.viewBounds;
-    for (const margin of bounds ? [0, TS] : [0]) {
-      const c0 = bounds ? Math.max(0, Math.ceil((bounds.x0 - margin) / TS) - 1) : 0;
-      const c1 = bounds ? Math.min(this.cols - 1, Math.floor((bounds.x1 + margin) / TS)) : this.cols - 1;
-      const r0 = bounds ? Math.max(0, Math.ceil((bounds.y0 - margin) / TS) - 1) : 0;
-      const r1 = bounds ? Math.min(this.rows - 1, Math.floor((bounds.y1 + margin) / TS)) : this.rows - 1;
-      const area = Math.max(0, c1 - c0 + 1) * Math.max(0, r1 - r0 + 1);
-      for (const item of items) {
-        if (item.coldTiles.size <= area) {
-          for (const [key, cpu] of item.coldTiles) {
-            const [col, row] = key.split('_').map(Number);
-            if (col < c0 || col > c1 || row < r0 || row > r1) continue;
-            batch.push({ item, key, cpu, col, row });
-            if (batch.length === HYDRATE_BATCH_SIZE) return batch;
-          }
-        } else {
-          for (let row = r0; row <= r1; row++) {
-            for (let col = c0; col <= c1; col++) {
-              const key = keyOf(col, row);
-              const cpu = item.coldTiles.get(key);
-              if (!cpu) continue;
-              batch.push({ item, key, cpu, col, row });
-              if (batch.length === HYDRATE_BATCH_SIZE) return batch;
-            }
-          }
+    const c0 = bounds ? Math.max(0, Math.ceil((bounds.x0 - margin) / TS) - 1) : 0;
+    const c1 = bounds ? Math.min(this.cols - 1, Math.floor((bounds.x1 + margin) / TS)) : this.cols - 1;
+    const r0 = bounds ? Math.max(0, Math.ceil((bounds.y0 - margin) / TS) - 1) : 0;
+    const r1 = bounds ? Math.min(this.rows - 1, Math.floor((bounds.y1 + margin) / TS)) : this.rows - 1;
+    if (c0 > c1 || r0 > r1) return;
+    const area = (c1 - c0 + 1) * (r1 - r0 + 1);
+    if (item.coldTiles.size <= area) {
+      for (const [key, cpu] of item.coldTiles) {
+        const [col, row] = key.split('_').map(Number);
+        if (col >= c0 && col <= c1 && row >= r0 && row <= r1) yield { item, key, cpu, col, row };
+      }
+    } else {
+      for (let row = r0; row <= r1; row++) {
+        for (let col = c0; col <= c1; col++) {
+          const key = keyOf(col, row);
+          const cpu = item.coldTiles.get(key);
+          if (cpu) yield { item, key, cpu, col, row };
         }
       }
-      if (batch.length) break;
+    }
+  }
+
+  private collectHydrateBatch(): HydrateTile[] {
+    const batch: HydrateTile[] = [];
+    const items = [...this.layersMap.values()].filter((item) => item.gpu && item.coldTiles.size);
+    const visible = items.filter((item) => item.shown).sort((a, b) => b.display.zIndex - a.display.zIndex);
+    const hidden = items.filter((item) => !item.shown && this.keepWarm(item));
+    for (const layers of [visible, hidden]) {
+      if (!layers.length) continue;
+      const start = this.hydrateLayerOffset % layers.length;
+      const order = [...layers.slice(start), ...layers.slice(0, start)];
+      for (const margin of this.viewBounds ? [0, TS] : [0]) {
+        let pending = order.map((item, index) => ({ index, tiles: this.coldTilesInView(item, margin) }));
+        while (pending.length) {
+          const nextRound: typeof pending = [];
+          for (const entry of pending) {
+            const tile = entry.tiles.next();
+            if (tile.done) continue;
+            batch.push(tile.value);
+            if (batch.length === HYDRATE_BATCH_SIZE) {
+              this.hydrateLayerOffset = (start + entry.index + 1) % layers.length;
+              return batch;
+            }
+            nextRound.push(entry);
+          }
+          pending = nextRound;
+        }
+        if (batch.length) return batch;
+      }
     }
     return batch;
+  }
+
+  private hasHydrateBudget() {
+    return this.allowFullCanvasTextures || this.hasTileBudget(this.deviceProfile.isConstrained ? 0.8 : 1);
   }
 
   private pumpHydrate = () => {
     this.hydrateRaf = 0;
     if (this.destroyed || this.deferHydrateWhileDrawing(this.pumpHydrate)) return;
-    if (!this.allowFullCanvasTextures && !this.hasTileBudget(0.8)) {
-      this.evictOffscreenGpuTiles(16);
-      if (!this.hasTileBudget(0.8)) return;
+    if (!this.hasHydrateBudget()) {
+      if (!this.evictingOffscreen) this.evictOffscreenGpuTiles(16);
+      if (!this.hasHydrateBudget()) return;
     }
     const batch = this.collectHydrateBatch();
     if (!batch.length) return;
     const epoch = ++this.hydrateEpoch;
     const current = () => !this.destroyed && epoch === this.hydrateEpoch;
     this.hydrateInFlight = true;
+    this.hydrateProgressAt = performance.now();
+    const finishBatch = () => {
+      this.hydrateInFlight = false;
+      this.hydrateUpload = null;
+    };
     void decodeTiles(batch.map(({ cpu }) => cpu)).then((raws) => {
+      if (!current()) return;
+      this.hydrateProgressAt = performance.now();
       let index = 0;
       const upload = () => {
+        if (!current()) return;
         this.hydrateRaf = 0;
-        if (!current() || this.deferHydrateWhileDrawing(upload)) return;
-        const deadline = performance.now() + STEP_BUDGET_MS;
+        if (this.deferHydrateWhileDrawing(upload)) return;
+        this.hydrateProgressAt = performance.now();
+        const deadline = this.hydrateProgressAt + STEP_BUDGET_MS;
         let changed = false;
         do {
           const { item, key, cpu, col, row } = batch[index];
           const raw = raws[index++];
-          if (!this.allowFullCanvasTextures && !this.hasTileBudget(0.8)) {
-            this.hydrateInFlight = false;
+          if (!this.hasHydrateBudget()) {
+            finishBatch();
+            this.scheduleHydrate();
             if (changed) this.onStageChange?.();
             return;
           }
@@ -1798,15 +1967,16 @@ export class LayerManager {
         if (index < batch.length) {
           this.hydrateRaf = requestAnimationFrame(upload);
         } else {
-          this.hydrateInFlight = false;
+          finishBatch();
           this.scheduleHydrate();
         }
         if (changed || index === batch.length) this.onStageChange?.();
       };
-      if (current()) this.hydrateRaf = requestAnimationFrame(upload);
+      this.hydrateUpload = upload;
+      this.hydrateRaf = requestAnimationFrame(upload);
     }).catch((error) => {
       if (current()) {
-        this.hydrateInFlight = false;
+        finishBatch();
         console.warn('[LayerManager] Cold tile decode failed:', error);
       }
     });
@@ -1949,7 +2119,8 @@ export class LayerManager {
   private hasTileBudget(ratio = 1) {
     const atlas = this.atlas.stats();
     return atlas.slots < this.softGpuTileLimit * ratio &&
-      (atlas.slots < atlas.capacitySlots || atlas.bytes + atlas.pageBytes <= this.softGpuByteLimit * ratio);
+      (atlas.slots < atlas.capacitySlots ||
+        atlas.bytes + (atlas.pooledPages > 0 ? 0 : atlas.pageBytes) <= this.softGpuByteLimit * ratio);
   }
 
   private spillDrawnTile(item: LayerItem, key: string, tile: GpuTile) {
@@ -3348,7 +3519,7 @@ export class LayerManager {
           this.releaseAfterSlots(b.item.model.id, [b.slot]);
         }
         this.evictingOffscreen = false;
-        if (!this.allowFullCanvasTextures && this.hasTileBudget(0.8)) this.scheduleHydrate();
+        if (!this.allowFullCanvasTextures && this.hasHydrateBudget()) this.scheduleHydrate();
       });
     return evictedClean;
   }
@@ -4016,6 +4187,111 @@ export class LayerManager {
     return this.sparseMaskSamples.get(item)?.sprite ?? item.sprite;
   }
 
+  private ensureGroupSample(entry: GroupView): GroupSample {
+    if (!entry.sample) {
+      const target = RenderTexture.create({ width: 1, height: 1, resolution: 1 });
+      const sprite = new Sprite(target);
+      sprite.renderable = false;
+      this.layersContainer.addChild(sprite);
+      entry.sample = { target, sprite, key: '' };
+    }
+    return entry.sample;
+  }
+
+  private dropGroupSample(entry: GroupView) {
+    entry.sample?.sprite.destroy();
+    entry.sample?.target.destroy(true);
+    entry.sample = undefined;
+  }
+
+  private destroyGroupView(entry: GroupView) {
+    entry.container.filters = null;
+    entry.opacity.destroy();
+    entry.effects?.destroy();
+    entry.blend?.filter.destroy();
+    for (const filter of entry.masks.values()) filter.destroy();
+    this.dropGroupSample(entry);
+    entry.container.destroy();
+  }
+
+  private withGroupSource<T>(id: string, draw: () => T, mode: 'reference' | 'silhouette' | 'adjustment' = 'reference'): T {
+    const group = this.hierarchy.byId.get(id)!;
+    const body = this.isolatedGroups.get(id);
+    const ancestors = new Set([...this.hierarchy.ancestors(group)].map((layer) => layer.id));
+    const restore: (() => void)[] = [];
+    // Draw in canvas space so the mask sprites of clipped siblings retain their transforms.
+    for (const [groupId, entry] of this.isolatedGroups) {
+      const filters = entry.container.filters;
+      if (filters?.length && (ancestors.has(groupId) || (mode === 'adjustment' && groupId === id))) {
+        entry.container.filters = null;
+        restore.push(() => { entry.container.filters = [...filters]; });
+      } else if (mode === 'silhouette' && groupId === id && body?.blend && filters) {
+        entry.container.filters = filters.filter((filter) => filter !== body.blend!.filter);
+        restore.push(() => { entry.container.filters = [...filters]; });
+      }
+    }
+    const members = new Set([...this.hierarchy.descendants(id)].map((layer) => layer.id));
+    for (const [layerId, item] of this.layersMap) {
+      if (members.has(layerId) || item.model.layerType === 'mask' || !item.display.renderable) continue;
+      item.display.renderable = false;
+      restore.push(() => { item.display.renderable = true; });
+    }
+    const overlay = this.filterOverlaySprite;
+    if (overlay?.renderable) {
+      overlay.renderable = false;
+      restore.push(() => { overlay.renderable = true; });
+    }
+    try {
+      return draw();
+    } finally {
+      for (const reset of restore.reverse()) reset();
+    }
+  }
+
+  private refreshGroupSamples(rect?: Rect, scale = 1, force = false, only?: ReadonlySet<string>) {
+    if (!this.groupSampleOrder.length) return;
+    const region = rect ?? { x: 0, y: 0, w: this.canvasWidth, h: this.canvasHeight };
+    if (!rect) {
+      const side = this.deviceProfile.isConstrained ? 1024 : this.allowFullCanvasTextures ? this.maxTextureSize : 2048;
+      scale = computeSafeTextureScale(region.w, region.h, Math.min(side, this.maxTextureSize), this.maxScopePixels).scale;
+    }
+    const width = Math.max(1, Math.round(region.w * scale));
+    const height = Math.max(1, Math.round(region.h * scale));
+    const transform = new Matrix().translate(-region.x, -region.y).scale(width / region.w, height / region.h);
+    const view = rect ? 'offscreen' : this.lastViewGridKey;
+    for (const id of this.groupSampleOrder) {
+      const entry = this.isolatedGroups.get(id)!;
+      if ((only && !only.has(id)) || !entry.container.visible || !this.structuralPins.has(id)) continue;
+      const sample = entry.sample!;
+      const key = force ? '' : `${view}:${region.x},${region.y},${width},${height}:${this.getGroupCompositeVersion(id, true)}`;
+      if (!force && sample.key === key) continue;
+      if (sample.target.width !== width || sample.target.height !== height) sample.target.resize(width, height);
+      sample.sprite.position.set(region.x, region.y);
+      sample.sprite.width = region.w;
+      sample.sprite.height = region.h;
+      this.withGroupSource(id, () => {
+        this.renderer.render({ container: this.layersContainer, target: sample.target, clear: true, clearColor: [0, 0, 0, 0], transform });
+      }, 'silhouette');
+      sample.key = key;
+    }
+  }
+
+  private refreshViewGroupSamples(force = false) {
+    const bounds = this.viewBounds;
+    if (!this.groupSampleOrder.length || !bounds) {
+      this.refreshGroupSamples(undefined, 1, force);
+      return;
+    }
+    const x = Math.floor(bounds.x0 / TS) * TS - TS;
+    const y = Math.floor(bounds.y0 / TS) * TS - TS;
+    const rect = this.clipCompositeRect({
+      x, y, w: Math.ceil(bounds.x1 / TS) * TS + TS - x, h: Math.ceil(bounds.y1 / TS) * TS + TS - y,
+    });
+    if (rect.w === 0 || rect.h === 0) return;
+    const { scale } = computeSafeTextureScale(rect.w, rect.h, this.maxTextureSize, this.maxScopePixels);
+    this.refreshGroupSamples(rect, scale, force);
+  }
+
   private dropSparseMaskSample(item: LayerItem) {
     const entry = this.sparseMaskSamples.get(item);
     if (!entry) return;
@@ -4135,7 +4411,7 @@ export class LayerManager {
 
   /** Lightweight fingerprint of all visible layers' pixel versions & display props, for filter source caching */
   public getVisibleCompositeVersion(): string {
-    let acc = this.lastBgColor;
+    let acc = `${this.lastBgColor}:${this.stackFilterRevision}`;
     for (const item of this.layersMap.values()) {
       if (!item.shown && item.model.layerType !== 'mask') continue;
       acc += `|${item.model.id}:${item.version}:${item.model.sortOrder}:${item.display.alpha}:${item.model.blendMode}`;
@@ -4143,10 +4419,55 @@ export class LayerManager {
       if (item.layerColorKey) acc += `:${item.layerColorKey}`;
       if (item.layerEffectsKey) acc += `:fx=${item.layerEffectsKey}`;
     }
-    for (const [gid, entry] of this.groupEffectContainers) {
+    for (const [gid, entry] of this.isolatedGroups) {
       acc += `|gfx:${gid}:${entry.effectsKey}`;
     }
     return acc;
+  }
+
+  public isGroup(layerId: string): boolean {
+    return this.hierarchy.byId.get(layerId)?.layerType === 'group';
+  }
+
+  public isGroupEmpty(groupId: string): boolean {
+    return this.hierarchy.visibleGroupLayers(groupId).every(({ id }) => this.occupiedTiles(id)?.length === 0);
+  }
+
+  private groupDependencies(group: LayerModel): ReadonlySet<string> {
+    const cached = this.groupDependencyCache.get(group.id);
+    if (cached) return cached;
+    const ids = new Set([group.id, ...[...this.hierarchy.ancestors(group)].map((parent) => parent.id)]);
+    const include = (layer: LayerModel) => {
+      ids.add(layer.id);
+      const base = this.hierarchy.clipBase(layer);
+      if (!base) return;
+      ids.add(base.id);
+      if (base.layerType === 'group') {
+        for (const child of this.hierarchy.descendants(base.id)) ids.add(child.id);
+      }
+    };
+    for (const id of [...ids]) include(this.hierarchy.byId.get(id)!);
+    for (const child of this.hierarchy.descendants(group.id)) include(child);
+    for (const id of [...ids]) {
+      const mask = this.activeMasks.get(id);
+      if (mask) ids.add(mask.id);
+    }
+    this.groupDependencyCache.set(group.id, ids);
+    return ids;
+  }
+
+  public getGroupCompositeVersion(groupId: string, includeResidency = false): string {
+    const group = this.hierarchy.byId.get(groupId);
+    if (group?.layerType !== 'group') return '';
+    const ids = this.groupDependencies(group);
+    let version = `${groupId}:${this.stackFilterRevision}`;
+    for (const id of ids) {
+      const item = this.layersMap.get(id);
+      if (!item) continue;
+      version += `|${id}:${item.version}`;
+      if (includeResidency) version += `:${item.stackRevision}`;
+    }
+    return version;
   }
 
   private parseCssColorRgba(color: string): [number, number, number, number] {
@@ -4169,88 +4490,34 @@ export class LayerManager {
    * creating redundant full-size 2D canvas copies when WebGL PBO readback is available.
    */
   public async readVisibleCompositeAsync(includeBackground = false, releaseCompositeAfter = false): Promise<Uint8Array> {
-    if (!this.allowFullCanvasTextures) {
-      const [pixels] = await this.readCompositeRegionsAsync([{ x: 0, y: 0, w: this.canvasWidth, h: this.canvasHeight }], includeBackground);
+    const canReadWhole = this.allowFullCanvasTextures && !this.isolatedGroups.size && this.reader &&
+      [...this.layersMap.values()].reduce((total, item) =>
+        total + (item.shown || item.model.layerType === 'mask' ? item.coldTiles.size : 0), 0) <= FULL_COMPOSITE_COLD_LIMIT;
+    const rect = { x: 0, y: 0, w: this.canvasWidth, h: this.canvasHeight };
+    if (!canReadWhole) {
+      const [pixels] = await this.readCompositeRegionsAsync([rect], includeBackground);
       return pixels;
     }
-    this.updateAdjustmentScopes(true); // whole-canvas scope composites for adjustment layers
-    const w = this.canvasWidth;
-    const h = this.canvasHeight;
-    let totalCold = 0;
-    for (const item of this.layersMap.values()) {
-      if (item.shown || item.model.layerType === 'mask') totalCold += item.coldTiles.size;
-    }
-
-    const overlayPrev = this.filterOverlaySprite?.visible ?? false;
-    if (this.filterOverlaySprite) this.filterOverlaySprite.visible = false;
-    const previewVisible = this.previewContainer.visible;
-    this.previewContainer.visible = false;
-
+    this.updateAdjustmentScopes(true);
+    const rt = this.ensureComposite();
+    const overlay = this.filterOverlaySprite;
+    const overlayVisible = overlay?.visible ?? false;
+    if (overlay) overlay.visible = false;
+    this.pendingReadCount++;
     try {
-      if (totalCold <= 2400 && this.reader) {
-        const rt = this.ensureComposite();
-        const clearColor = includeBackground ? this.parseCssColorRgba(this.lastBgColor) : [0, 0, 0, 0];
-        this.withAllTilesVisible(() => {
-          this.renderer.render({ container: this.layersContainer, target: rt, clear: true, clearColor });
-        }, true);
-        this.pendingReadCount++;
-        try {
-          const [pixels] = await this.reader(rt, [{ x: 0, y: 0, w, h }]);
-          return pixels;
-        } finally {
-          this.pendingReadCount = Math.max(0, this.pendingReadCount - 1);
-          if (releaseCompositeAfter && this.compositeRT === rt) {
-            this.compositeRT.destroy(true);
-            this.compositeRT = null;
-          }
-        }
-      }
-
-      // Massive multi-layer fallback: 2D offscreen composite, premultiply straight RGBA, and immediately free canvas
-      const out = document.createElement('canvas');
-      out.width = w;
-      out.height = h;
-      const ctx = out.getContext('2d')!;
-      if (includeBackground) {
-        ctx.fillStyle = this.lastBgColor;
-        ctx.fillRect(0, 0, w, h);
-      }
-      const ordered = [...this.layersMap.values()]
-        .filter((i) => i.shown && i.model.layerType !== 'group' && i.model.layerType !== 'mask')
-        .sort((a, b) => a.model.sortOrder - b.model.sortOrder);
-      for (const item of ordered) {
-        const lc = this.layerToCanvas(item.model.id);
-        if (!lc) continue;
-        ctx.save();
-        ctx.globalAlpha = Math.max(0, Math.min(1, item.display.alpha));
-        const rt = (item.model as LayerModel & { renderTransform?: Affine2D }).renderTransform;
-        if (rt && !rt.isIdentity) ctx.transform(rt.a, rt.b, rt.c, rt.d, rt.tx, rt.ty);
-        ctx.drawImage(lc, 0, 0);
-        ctx.restore();
-      }
-      const raw = ctx.getImageData(0, 0, w, h).data;
-      out.width = 0;
-      out.height = 0;
-      const premul = new Uint8Array(raw.length);
-      for (let i = 0; i < raw.length; i += 4) {
-        const a = raw[i + 3];
-        if (!a) continue;
-        if (a === 255) {
-          premul[i] = raw[i];
-          premul[i + 1] = raw[i + 1];
-          premul[i + 2] = raw[i + 2];
-          premul[i + 3] = 255;
-        } else {
-          premul[i] = ((raw[i] * a + 127) / 255) | 0;
-          premul[i + 1] = ((raw[i + 1] * a + 127) / 255) | 0;
-          premul[i + 2] = ((raw[i + 2] * a + 127) / 255) | 0;
-          premul[i + 3] = a;
-        }
-      }
-      return premul;
+      const clearColor = includeBackground ? this.parseCssColorRgba(this.lastBgColor) : [0, 0, 0, 0];
+      this.withAllTilesVisible(() => {
+        this.renderer.render({ container: this.layersContainer, target: rt, clear: true, clearColor });
+      }, true);
+      const [pixels] = await this.reader!(rt, [rect]);
+      return pixels;
     } finally {
-      this.previewContainer.visible = previewVisible;
-      if (this.filterOverlaySprite) this.filterOverlaySprite.visible = overlayPrev;
+      if (overlay) overlay.visible = overlayVisible;
+      this.pendingReadCount = Math.max(0, this.pendingReadCount - 1);
+      if (releaseCompositeAfter && this.compositeRT === rt) {
+        rt.destroy(true);
+        this.compositeRT = null;
+      }
     }
   }
 
@@ -4274,7 +4541,7 @@ export class LayerManager {
   public getCompositeTexture(includeBackground = false): RenderTexture {
     this.updateAdjustmentScopes(true); // whole-canvas scope composites for adjustment layers
     const target = this.ensureComposite();
-    if (this.compositeScale < 1) {
+    if (this.compositeScale < 1 || this.isolatedGroups.size) {
       this.renderCompositeChunk(target, { x: 0, y: 0, w: this.canvasWidth, h: this.canvasHeight }, includeBackground);
       return target;
     }
@@ -4285,7 +4552,7 @@ export class LayerManager {
     let totalCold = 0;
     for (const item of this.layersMap.values()) if (item.shown) totalCold += item.coldTiles.size;
     try {
-      if (totalCold > FULL_COMPOSITE_COLD_LIMIT && !this.adjustmentOrder.length && !this.groupEffectContainers.size) {
+      if (totalCold > FULL_COMPOSITE_COLD_LIMIT && !this.adjustmentOrder.length && !this.isolatedGroups.size) {
         this.withAllTilesVisible(() => this.renderLargeComposite(target, includeBackground));
       } else {
         this.withAllTilesVisible(() => {
@@ -4320,7 +4587,92 @@ export class LayerManager {
     }
   }
 
-  private renderCompositeChunk(target: RenderTexture, rect: Rect, includeBackground: boolean) {
+  /** Temporarily sample the loaded tiles at the same resolution as an offscreen composite. */
+  private sampleSparseMaskRegion(item: LayerItem, rect: Rect, width: number, height: number): () => void {
+    const sample = this.sparseMaskSamples.get(item)!;
+    const { sprite } = sample;
+    const texture = sprite.texture;
+    const size = { width: sprite.width, height: sprite.height };
+    const target = RenderTexture.create({ width, height, resolution: 1 });
+    const holder = new Container();
+    item.display.updateLocalTransform();
+    holder.setFromMatrix(item.display.localTransform);
+    try {
+      for (const child of item.display.children) {
+        if (!(child instanceof Sprite) || !child.visible || (child !== item.sprite && child.label !== TILE_LABEL)) continue;
+        if (child.texture === Texture.EMPTY) continue;
+        const tile = new Sprite(child.texture);
+        child.updateLocalTransform();
+        tile.setFromMatrix(child.localTransform);
+        holder.addChild(tile);
+      }
+      const transform = new Matrix().translate(-rect.x, -rect.y).scale(width / rect.w, height / rect.h);
+      // Keep the layer transform on a child since render() supplies the root transform.
+      const root = new Container();
+      root.addChild(holder);
+      try {
+        this.renderer.render({ container: root, target, clear: true, clearColor: [0, 0, 0, 0], transform });
+      } finally {
+        root.destroy({ children: true });
+      }
+    } catch (error) {
+      if (!holder.destroyed) holder.destroy({ children: true });
+      target.destroy(true);
+      throw error;
+    }
+    this.layersContainer.addChild(sprite);
+    sprite.texture = target;
+    sprite.position.set(rect.x, rect.y);
+    sprite.width = rect.w;
+    sprite.height = rect.h;
+    return () => {
+      sprite.texture = texture;
+      sprite.position.set(0, 0);
+      sprite.width = size.width;
+      sprite.height = size.height;
+      item.display.addChild(sprite);
+      target.destroy(true);
+    };
+  }
+
+  private renderCompositeChunk(target: RenderTexture, rect: Rect, includeBackground: boolean, groupId?: string, refreshGroups = true) {
+    // Screen-space effects need adjoining pixels when a full-resolution read crosses chunk edges.
+    const effects = (model: LayerModel) => computeLayerEffectsPadding(this.layerEffectsPreviews.get(model.id) ?? model.meta?.effects);
+    let padding = 0;
+    if (this.isolatedGroups.size && target.width === rect.w && target.height === rect.h) {
+      for (const layer of this.hierarchy.byId.values()) {
+        let total = effects(layer);
+        for (const ancestor of this.hierarchy.ancestors(layer)) total += effects(ancestor);
+        padding = Math.max(padding, total);
+      }
+      padding = Math.max(0, Math.min(Math.ceil(padding), Math.floor((this.maxTextureSize - Math.max(rect.w, rect.h)) / 2)));
+    }
+    const expanded = this.clipCompositeRect({
+      x: rect.x - padding, y: rect.y - padding, w: rect.w + 2 * padding, h: rect.h + 2 * padding,
+    });
+    if (expanded.w === rect.w && expanded.h === rect.h) {
+      this.renderCompositeRegion(target, rect, includeBackground, groupId, refreshGroups);
+      return;
+    }
+    const padded = RenderTexture.create({ width: expanded.w, height: expanded.h, resolution: 1 });
+    const holder = new Container();
+    const sprite = new Sprite(padded);
+    holder.addChild(sprite);
+    sprite.position.set(expanded.x - rect.x, expanded.y - rect.y);
+    try {
+      this.renderCompositeRegion(padded, expanded, includeBackground, groupId, refreshGroups);
+      this.renderer.render({ container: holder, target, clear: true, clearColor: [0, 0, 0, 0] });
+    } finally {
+      holder.destroy({ children: true });
+      padded.destroy(true);
+    }
+  }
+
+  private renderCompositeRegion(target: RenderTexture, rect: Rect, includeBackground: boolean, groupId: string | undefined, refreshGroups: boolean) {
+    if (groupId && !this.isGroup(groupId)) {
+      this.clearTexture(target);
+      return;
+    }
     this.deactivateStackCache();
     this.refreshSparseMaskSamples();
     const clearColor = includeBackground ? this.parseCssColorRgba(this.lastBgColor) : [0, 0, 0, 0];
@@ -4331,7 +4683,13 @@ export class LayerManager {
       overlay!.visible = false;
       this.setFilterUnderlayVisible(true);
     }
-    const items = [...this.layersMap.values()];
+    const dependencies = groupId ? this.groupDependencies(this.hierarchy.byId.get(groupId)!) : undefined;
+    const items = dependencies
+      ? [...dependencies].flatMap((id) => {
+        const item = this.layersMap.get(id);
+        return item ? [item] : [];
+      })
+      : [...this.layersMap.values()];
     const proxies = [...this.sparsePreviews.values()].filter(({ sprite }) => sprite.visible);
     for (const { sprite } of proxies) sprite.visible = false;
     const layers = items.filter((item) => item.shown && item.display.renderable);
@@ -4388,6 +4746,7 @@ export class LayerManager {
             const slot = this.atlas.alloc();
             this.atlas.writePixels(slot, raw, 0, 0, cpu.w, cpu.h);
             const sprite = new Sprite(this.atlas.view(slot, cpu.w, cpu.h));
+            sprite.label = TILE_LABEL;
             sprite.position.set(col * TS, row * TS);
             sprite.renderable = item.model.layerType !== 'mask';
             item.display.addChild(sprite);
@@ -4403,7 +4762,7 @@ export class LayerManager {
     };
     try {
       // Normal layers can stream over the same framebuffer without keeping every cold tile uploaded.
-      if (!this.groupEffectContainers.size && layers.every((item) => !item.adjust && !item.maskFilters?.size &&
+      if (!groupId && !this.isolatedGroups.size && layers.every((item) => !item.adjust && !item.maskFilters?.size &&
           !item.display.filters?.length && item.display.blendMode === 'normal')) {
         for (const item of layers) item.display.renderable = false;
         render(true);
@@ -4414,7 +4773,16 @@ export class LayerManager {
         }
       } else {
         for (const item of [...layers, ...masks]) load(item);
-        render(true);
+        if (!this.allowFullCanvasTextures && (target.width >= rect.w || groupId)) {
+          for (const item of [...layers, ...masks]) {
+            if (this.sparseMaskSamples.has(item)) {
+              temporary.push(this.sampleSparseMaskRegion(item, rect, target.width, target.height));
+            }
+          }
+        }
+        if (refreshGroups) this.refreshGroupSamples(rect, target.width / rect.w, true, dependencies);
+        if (groupId) this.withGroupSource(groupId, () => render(true));
+        else render(true);
       }
     } finally {
       while (temporary.length) temporary.pop()!();
@@ -4427,12 +4795,24 @@ export class LayerManager {
     }
   }
 
-  public async readCompositeRegionsAsync(rects: readonly Rect[], includeBackground = false): Promise<Uint8Array[]> {
+  public readGroupRegionsAsync(groupId: string, rects: readonly Rect[]): Promise<Uint8Array[]> {
+    return this.readStackRegions(rects, false, groupId);
+  }
+
+  public readCompositeRegionsAsync(rects: readonly Rect[], includeBackground = false): Promise<Uint8Array[]> {
+    return this.readStackRegions(rects, includeBackground);
+  }
+
+  private async readStackRegions(rects: readonly Rect[], includeBackground: boolean, groupId?: string): Promise<Uint8Array[]> {
     const clipped = rects.map((rect) => this.clipCompositeRect(rect));
     const bytes = clipped.reduce((sum, rect) => sum + rect.w * rect.h * 4, 0);
     if (bytes > (this.deviceProfile.isConstrained ? 64 : 512) * 1048576) {
       throw new RangeError('Composite read exceeds the pixel buffer budget; request smaller regions');
     }
+    if (groupId && this.isGroupEmpty(groupId)) {
+      return clipped.map(({ w, h }) => new Uint8Array(w * h * 4));
+    }
+    this.refreshGroupSamples();
     this.updateAdjustmentScopes(true);
     const result: Uint8Array[] = [];
     for (const rect of clipped) {
@@ -4447,7 +4827,7 @@ export class LayerManager {
         for (const part of chunks) {
           if (this.destroyed) break;
           if (target.width !== part.w || target.height !== part.h) target.resize(part.w, part.h);
-          this.renderCompositeChunk(target, part, includeBackground);
+          this.renderCompositeChunk(target, part, includeBackground, groupId);
           const local = { x: 0, y: 0, w: part.w, h: part.h };
           const pixels = this.reader ? (await this.reader(target, [local]))[0] : this.read(target, 0, 0, part.w, part.h);
           if (!output) { result.push(pixels); break; }
@@ -4518,39 +4898,32 @@ export class LayerManager {
    * A small preview of one layer as a data URL. Cached until the layer's pixels change; a cold
    * layer (tiles only on the CPU) is decoded when the page is idle and reported via onThumbnail.
    */
-  public getLayerThumbnail(layerId: string, thumbWidth = 48, thumbHeight = 48, fromRemote = false): string | null {
+  public getLayerThumbnail(layerId: string, maxSide = 64, fromRemote = false): string | null {
     const item = this.layersMap.get(layerId);
     // Adjustment layers have no pixels: the layer panel shows their kind's icon
     if (!item || item.adjust) return null;
-    if (item.thumb?.version === item.version) return item.thumb.url;
-    if (!item.rt && !item.gpu && !item.cpu?.size && !item.coldTiles.size) {
-      item.thumb = { version: item.version, url: '' };
+    const size = computeProportionalThumbSize(this.canvasWidth, this.canvasHeight, maxSide);
+    const thumb = item.thumb;
+    if (thumb?.version === item.version && thumb.width === size.width && thumb.height === size.height) return thumb.url;
+    if (!item.rt && !item.gpu?.size && !item.cpu?.size && !item.coldTiles.size) {
+      this.publishThumb(layerId, item, { ...size, version: item.version }, '');
       return null;
     }
-    const local = !fromRemote || layerId === this.activeId;
+    const pending = item.thumbPending;
+    if (pending?.version === item.version && pending.width === size.width && pending.height === size.height) {
+      return thumb?.url || null;
+    }
     const prev = this.thumbQueue.get(layerId);
     // Always render thumbnails asynchronously on the queue so WebSocket/op handlers and active drawing never block
-    this.thumbQueue.set(layerId, { w: thumbWidth, h: thumbHeight, local: Boolean(prev?.local || local) });
-    if (!this.thumbTimer && !this.thumbsPaused) {
-      const elapsed = this.lastLocalDrawAt > 0 ? performance.now() - this.lastLocalDrawAt : Infinity;
-      const waitMs = local
-        ? (elapsed < 650 ? Math.max(250, 650 - elapsed) : 60)
-        : Math.max(45, 450 - (performance.now() - this.lastRemoteThumbExtractAt));
-      this.thumbTimer = setTimeout(this.drainThumbs, waitMs);
-    }
-    return item.thumb?.url || null;
+    const local = Boolean(prev?.local || !fromRemote);
+    this.thumbQueue.set(layerId, { ...size, local });
+    this.scheduleThumbDrain(local);
+    return thumb?.url || null;
   }
 
-  private publishThumb(id: string, item: LayerItem, version: number, url: string) {
-    if (item.thumb && item.thumb.version > version) {
-      if (url.startsWith('blob:')) {
-        URL.revokeObjectURL(url);
-        this.thumbBlobUrls.delete(url);
-      }
-      return;
-    }
+  private publishThumb(id: string, item: LayerItem, thumb: ThumbVersion, url: string) {
     const old = item.thumb?.url;
-    item.thumb = { version, url };
+    item.thumb = { ...thumb, url };
     this.onThumbnail?.(id, url);
     if (old && old.startsWith('blob:') && old !== url) {
       setTimeout(() => {
@@ -4567,9 +4940,22 @@ export class LayerManager {
       clearTimeout(this.thumbTimer);
       this.thumbTimer = null;
     }
-    if (!paused && this.thumbQueue.size > 0 && !this.thumbTimer && !this.destroyed) {
-      this.thumbTimer = setTimeout(this.drainThumbs, 60);
+    if (!paused && this.thumbQueue.size) this.scheduleThumbDrain(this.hasLocalThumbsQueued());
+  }
+
+  private hasLocalThumbsQueued() {
+    for (const entry of this.thumbQueue.values()) if (entry.local) return true;
+    return false;
+  }
+
+  private scheduleThumbDrain(local: boolean, delay = LOCAL_THUMB_INTERVAL_MS) {
+    if (this.thumbsPaused || this.destroyed) return;
+    if (this.thumbTimer) {
+      if (this.thumbTimerLocal || !local) return;
+      clearTimeout(this.thumbTimer);
     }
+    this.thumbTimerLocal = local;
+    this.thumbTimer = setTimeout(this.drainThumbs, delay);
   }
 
   private drainThumbs = () => {
@@ -4578,7 +4964,7 @@ export class LayerManager {
     if (this.thumbsPaused) return;
     const now = performance.now();
     // Pick a local/active item first so user feedback stays snappy while remote thumbs yield
-    let picked: [string, { w: number; h: number; local: boolean }] | undefined;
+    let picked: [string, ThumbSize & { local: boolean }] | undefined;
     for (const entry of this.thumbQueue) {
       if (entry[1].local) {
         picked = entry;
@@ -4593,45 +4979,50 @@ export class LayerManager {
           now - this.lastInteractionAt < 900 ||
           this.pendingReadCount > 0 ||
           [...this.layersMap.values()].some((l) => (l.bak?.size ?? 0) > 0);
-        const cooldown = busy ? 600 : 6000 - (now - this.lastRemoteThumbExtractAt);
+        const cooldown = busy ? 600 : REMOTE_THUMB_INTERVAL_MS - (now - this.lastRemoteThumbExtractAt);
         if (cooldown > 10) {
-          this.thumbTimer = setTimeout(this.drainThumbs, cooldown);
+          this.scheduleThumbDrain(false, cooldown);
           return;
         }
-      } else if (this.isActivelyDrawing() || now - this.lastInteractionAt < 900 || this.pendingReadCount > 0) {
-        this.thumbTimer = setTimeout(this.drainThumbs, 350);
+      } else if (this.isActivelyDrawing(0)) {
+        this.scheduleThumbDrain(true, 100);
         return;
       }
       const [id, size] = picked;
       this.thumbQueue.delete(id);
       const item = this.layersMap.get(id);
-      if (item && item.thumb?.version !== item.version) {
-        const version = item.version;
+      if (item && (item.thumb?.version !== item.version || item.thumb.width !== size.width || item.thumb.height !== size.height)) {
         if (!size.local) this.lastRemoteThumbExtractAt = now;
-        void this.renderThumbAsync(item, size.w, size.h).then((canvas) => {
-          if (!canvas || this.destroyed || this.layersMap.get(id) !== item) return;
-          if (typeof canvas.toBlob === 'function') {
-            canvas.toBlob((blob) => {
-              if (this.destroyed || !blob || this.layersMap.get(id) !== item) return;
-              const url = URL.createObjectURL(blob);
-              this.thumbBlobUrls.add(url);
-              this.publishThumb(id, item, version, url);
-            }, 'image/webp', 0.8);
-          } else {
-            const url = canvas.toDataURL('image/webp', 0.8) || canvas.toDataURL('image/png');
-            if (url) this.publishThumb(id, item, version, url);
-          }
-        });
+        void this.generateThumbnail(id, item, { width: size.width, height: size.height, version: item.version });
       }
     }
-    if (this.thumbQueue.size) {
-      let hasLocal = false;
-      for (const v of this.thumbQueue.values()) {
-        if (v.local) { hasLocal = true; break; }
-      }
-      this.thumbTimer = setTimeout(this.drainThumbs, hasLocal ? 20 : 6000);
-    }
+    if (this.thumbQueue.size) this.scheduleThumbDrain(this.hasLocalThumbsQueued());
   };
+
+  private async generateThumbnail(id: string, item: LayerItem, thumb: ThumbVersion) {
+    item.thumbPending = thumb;
+    const current = () =>
+      !this.destroyed && this.layersMap.get(id) === item && item.thumbPending === thumb &&
+      (item.thumb?.version ?? -1) <= thumb.version;
+    try {
+      const canvas = await this.renderThumbAsync(item, thumb.width, thumb.height);
+      if (!canvas || !current()) return;
+      if (typeof canvas.toBlob === 'function') {
+        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/webp', 0.8));
+        if (!blob || !current()) return;
+        const url = URL.createObjectURL(blob);
+        this.thumbBlobUrls.add(url);
+        this.publishThumb(id, item, thumb, url);
+      } else {
+        const url = canvas.toDataURL('image/webp', 0.8) || canvas.toDataURL('image/png');
+        if (url) this.publishThumb(id, item, thumb, url);
+      }
+    } catch (error) {
+      console.warn('[LayerManager] Thumbnail encoding failed:', error);
+    } finally {
+      if (item.thumbPending === thumb) item.thumbPending = null;
+    }
+  }
 
   /** Populates a scaled container with all active/cold tiles of `item` for thumbnail generation */
   private populateThumbContainer(
@@ -4641,58 +5032,52 @@ export class LayerManager {
     thumbWidth: number,
     thumbHeight: number
   ) {
-    holder.scale.set(thumbWidth / this.canvasWidth, thumbHeight / this.canvasHeight);
+    const { scale, x, y } = this.getThumbPlacement(thumbWidth, thumbHeight);
+    const scaled = new Container();
+    scaled.scale.set(scale);
+    scaled.position.set(x, y);
     if (item.rt) {
-      holder.addChild(new Sprite(item.rt));
+      scaled.addChild(new Sprite(item.rt));
+      holder.addChild(scaled);
       return;
     }
-    const pushCpuTiles = (entries: Iterable<[string, CpuTile]>, count: number) => {
-      if (count <= 0) return;
-      if (count > 64 && typeof document !== 'undefined') {
-        // Rasterize large offscreen CPU tile sets into one 2D canvas to avoid creating hundreds of GPU textures
-        const c = this.rasterizeCpuTilesToCanvas(entries, thumbWidth, thumbHeight);
-        if (c) {
-          const tex = new Texture({ source: new CanvasSource({ resource: c }) });
-          temporary.push(tex);
-          const sp = new Sprite(tex);
-          sp.scale.set(this.canvasWidth / thumbWidth, this.canvasHeight / thumbHeight);
-          holder.addChild(sp);
-          return;
-        }
+    const cold = item.cpu?.size ? item.cpu : item.coldTiles;
+    if (cold.size) {
+      const canvas = this.rasterizeCpuTilesToCanvas(cold, thumbWidth, thumbHeight, true);
+      if (canvas) {
+        const texture = new Texture({ source: new CanvasSource({ resource: canvas }) });
+        temporary.push(texture);
+        holder.addChild(new Sprite(texture));
       }
-      for (const [key, t] of entries) {
-        const raw = decodeTile(t);
-        if (!raw || isEmpty(raw)) continue;
-        const [col, row] = key.split('_').map(Number);
-        const tex = new Texture({
-          source: new BufferImageSource({ resource: raw, width: t.w, height: t.h, format: 'rgba8unorm', alphaMode: 'premultiplied-alpha' }),
-        });
-        temporary.push(tex);
-        const s = new Sprite(tex);
-        s.position.set(col * TS, row * TS);
-        holder.addChild(s);
-      }
-    };
-    if (item.gpu) {
-      if (item.coldTiles.size > 0) pushCpuTiles(item.coldTiles, item.coldTiles.size);
-      for (const t of item.gpu.values()) {
-        const s = new Sprite(t.sprite.texture);
-        s.position.copyFrom(t.sprite.position);
-        holder.addChild(s);
-      }
-    } else if (item.cpu) {
-      pushCpuTiles(item.cpu, item.cpu.size);
     }
+    for (const tile of item.gpu?.values() ?? []) {
+      const sprite = new Sprite(tile.sprite.texture);
+      sprite.position.copyFrom(tile.sprite.position);
+      scaled.addChild(sprite);
+    }
+    holder.addChild(scaled);
+  }
+
+  private getThumbPlacement(width: number, height: number) {
+    const scale = Math.min(width / this.canvasWidth, height / this.canvasHeight);
+    return {
+      scale,
+      x: (width - this.canvasWidth * scale) / 2,
+      y: (height - this.canvasHeight * scale) / 2,
+    };
   }
 
   /** The layer drawn at thumbnail size into `target` (whichever form the layer is in) */
   private drawThumb(item: LayerItem, target: RenderTexture, thumbWidth: number, thumbHeight: number) {
     const holder = new Container();
     const temporary: Texture[] = [];
-    this.populateThumbContainer(item, holder, temporary, thumbWidth, thumbHeight);
-    this.renderer.render({ container: holder, target, clear: true, clearColor: [0, 0, 0, 0] });
-    holder.destroy({ children: true });
-    temporary.forEach((t) => t.destroy(true));
+    try {
+      this.populateThumbContainer(item, holder, temporary, thumbWidth, thumbHeight);
+      this.renderer.render({ container: holder, target, clear: true, clearColor: [0, 0, 0, 0] });
+    } finally {
+      holder.destroy({ children: true });
+      temporary.forEach((t) => t.destroy(true));
+    }
   }
 
   /**
@@ -4704,7 +5089,8 @@ export class LayerManager {
   private rasterizeCpuTilesToCanvas(
     entries: Iterable<[string, CpuTile]>,
     thumbWidth: number,
-    thumbHeight: number
+    thumbHeight: number,
+    fit = false,
   ): HTMLCanvasElement | null {
     if (typeof document === 'undefined') return null;
     const c = document.createElement('canvas');
@@ -4714,24 +5100,27 @@ export class LayerManager {
     if (!ctx) return c;
     const img = ctx.createImageData(thumbWidth, thumbHeight);
     const dst = img.data;
-    const sx = thumbWidth / this.canvasWidth;
-    const sy = thumbHeight / this.canvasHeight;
+    const placement = fit ? this.getThumbPlacement(thumbWidth, thumbHeight) : null;
+    const sx = placement?.scale ?? thumbWidth / this.canvasWidth;
+    const sy = placement?.scale ?? thumbHeight / this.canvasHeight;
+    const x = placement?.x ?? 0;
+    const y = placement?.y ?? 0;
     const stepY = Math.max(1, Math.floor(1 / sy));
     const stepX = Math.max(1, Math.floor(1 / sx));
     for (const [key, t] of entries) {
       const raw = decodeTile(t, SCRATCH);
-      if (!raw || isEmpty(raw)) continue;
+      if (!raw) continue;
       const [col, row] = key.split('_').map(Number);
       const tx = col * TS;
       const ty = row * TS;
-      const px0 = Math.max(0, Math.floor(tx * sx));
-      const py0 = Math.max(0, Math.floor(ty * sy));
-      const px1 = Math.min(thumbWidth, Math.ceil((tx + t.w) * sx));
-      const py1 = Math.min(thumbHeight, Math.ceil((ty + t.h) * sy));
+      const px0 = Math.max(0, Math.floor(x + tx * sx));
+      const py0 = Math.max(0, Math.floor(y + ty * sy));
+      const px1 = Math.min(thumbWidth, Math.ceil(x + (tx + t.w) * sx));
+      const py1 = Math.min(thumbHeight, Math.ceil(y + (ty + t.h) * sy));
       for (let py = py0; py < py1; py++) {
-        const ly = Math.min(t.h - 1, Math.max(0, Math.floor(py / sy - ty + stepY * 0.25)));
+        const ly = Math.min(t.h - 1, Math.max(0, Math.floor((py - y) / sy - ty + stepY * 0.25)));
         for (let px = px0; px < px1; px++) {
-          const lx = Math.min(t.w - 1, Math.max(0, Math.floor(px / sx - tx + stepX * 0.25)));
+          const lx = Math.min(t.w - 1, Math.max(0, Math.floor((px - x) / sx - tx + stepX * 0.25)));
           const si = (ly * t.w + lx) * 4;
           const a = raw[si + 3];
           if (!a) continue;
@@ -4749,9 +5138,9 @@ export class LayerManager {
   }
 
   private renderThumbAsync(item: LayerItem, thumbWidth: number, thumbHeight: number): Promise<HTMLCanvasElement | null> {
-    this.deactivateStackCache();
-    if (!item.rt && !item.gpu && item.cpu) {
-      return Promise.resolve(this.rasterizeCpuTilesToCanvas(item.cpu, thumbWidth, thumbHeight));
+    const cold = item.cpu?.size ? item.cpu : item.coldTiles;
+    if (!item.rt && !item.gpu?.size && cold.size) {
+      return Promise.resolve(this.rasterizeCpuTilesToCanvas(cold, thumbWidth, thumbHeight, true));
     }
     const reader = this.reader;
     if (!reader) return Promise.resolve(this.renderThumbCanvas(item, thumbWidth, thumbHeight));
@@ -4795,15 +5184,11 @@ export class LayerManager {
   /** Fast WebGL downsample of the layer (whichever form it is in) straight to the thumbnail size */
   private renderThumbCanvas(item: LayerItem, thumbWidth: number, thumbHeight: number): HTMLCanvasElement | null {
     try {
-      if (!this.thumbRT) {
-        this.thumbRT = RenderTexture.create({ width: thumbWidth, height: thumbHeight });
+      if (!this.thumbRT || this.thumbRT.width !== thumbWidth || this.thumbRT.height !== thumbHeight) {
+        this.thumbRT?.destroy(true);
+        this.thumbRT = RenderTexture.create({ width: thumbWidth, height: thumbHeight, resolution: 1 });
       }
-      const holder = new Container();
-      const temporary: Texture[] = [];
-      this.populateThumbContainer(item, holder, temporary, thumbWidth, thumbHeight);
-      this.renderer.render({ container: holder, target: this.thumbRT, clear: true, clearColor: [0, 0, 0, 0] });
-      holder.destroy({ children: true });
-      temporary.forEach((t) => t.destroy(true));
+      this.drawThumb(item, this.thumbRT, thumbWidth, thumbHeight);
 
       const extracted = this.renderer.extract.canvas({
         target: this.thumbRT,
@@ -4840,20 +5225,8 @@ export class LayerManager {
     canvas.width = this.canvasWidth;
     canvas.height = this.canvasHeight;
     const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
-    const put = (x: number, y: number, w: number, h: number, px: Uint8Array) => {
-      const img = ctx.createImageData(w, h);
-      const dst = img.data; // clamps and rounds the divisions
-      for (let i = 0; i < px.length; i += 4) {
-        const a = px[i + 3];
-        if (!a) continue;
-        const k = 255 / a;
-        dst[i] = px[i] * k;
-        dst[i + 1] = px[i + 1] * k;
-        dst[i + 2] = px[i + 2] * k;
-        dst[i + 3] = a;
-      }
-      ctx.putImageData(img, x, y);
-    };
+    const put = (x: number, y: number, w: number, h: number, px: Uint8Array) =>
+      putPremultipliedPixels(ctx, { x, y, w, h }, px);
     if (item.rt) {
       for (let y = 0; y < this.canvasHeight; y += TS) {
         const h = Math.min(TS, this.canvasHeight - y);
@@ -4915,6 +5288,7 @@ export class LayerManager {
       small = RenderTexture.create({ width: tw, height: th, resolution: 1 });
       this.previewContainer.visible = false;
       this.withAllTilesVisible(() => {
+        this.refreshGroupSamples({ x: 0, y: 0, w, h }, scale, true);
         this.renderer.render({ container: this.rootContainer, target: small!, clear: true, clearColor: [0, 0, 0, 0], transform: new Matrix().scale(scale, scale) });
       });
       const own = small;
@@ -4987,6 +5361,7 @@ export class LayerManager {
             sprite.visible = true;
           }
         }
+        this.refreshGroupSamples({ x: 0, y: 0, w: this.canvasWidth, h: this.canvasHeight }, scale, true);
         this.renderer.render({
           container: this.rootContainer, target: this.navigatorRT, clear: true,
           clearColor: [0, 0, 0, 0], transform: new Matrix().scale(scale, scale),
@@ -5023,6 +5398,7 @@ export class LayerManager {
       // Live remote-stroke previews are not part of the picture
       this.previewContainer.visible = false;
       this.withAllTilesVisible(() => {
+        this.refreshGroupSamples({ x: 0, y: 0, w, h }, scale, true);
         this.renderer.render({ container: this.rootContainer, target: small, clear: true, clearColor: [0, 0, 0, 0], transform: new Matrix().scale(scale, scale) });
       });
       const out = this.renderer.extract.canvas({ target: small }) as HTMLCanvasElement;
@@ -5107,6 +5483,7 @@ export class LayerManager {
     if (this.deviceProfile.isConstrained && w * h > 16_777_216) {
       throw new RangeError('Composite export exceeds the canvas pixel budget on this device');
     }
+    this.refreshGroupSamples();
     this.updateAdjustmentScopes(true); // whole-canvas scope composites for adjustment layers
     let totalCold = 0;
     for (const item of this.layersMap.values()) {
@@ -5116,55 +5493,37 @@ export class LayerManager {
     out.width = w;
     out.height = h;
     const ctx = out.getContext('2d')!;
-    if (!this.allowFullCanvasTextures) {
+    if (!this.allowFullCanvasTextures || this.isolatedGroups.size || totalCold > FULL_COMPOSITE_COLD_LIMIT) {
       const target = RenderTexture.create({ width: 1, height: 1, resolution: 1 });
       try {
         for (const part of this.compositeChunks({ x: 0, y: 0, w, h })) {
           target.resize(part.w, part.h);
           this.renderCompositeChunk(target, part, !options?.transparent);
-          const chunk = this.renderer.extract.canvas({ target }) as HTMLCanvasElement;
-          ctx.drawImage(chunk, part.x, part.y);
-          chunk.width = chunk.height = 0;
+          putPremultipliedPixels(ctx, part, this.read(target, 0, 0, part.w, part.h));
         }
       } finally {
         target.destroy(true);
       }
       return out;
     }
-    if (!options?.transparent) {
-      ctx.fillStyle = this.lastBgColor;
-      ctx.fillRect(0, 0, w, h);
-    }
-
-    if (totalCold > 2400) {
-      // Massive multi-layer offscreen fallback: composite visible layers via 2D canvas without overflowing GPU atlas
-      const ordered = [...this.layersMap.values()]
-        .filter((i) => i.shown && i.model.layerType !== 'group' && i.model.layerType !== 'mask')
-        .sort((a, b) => a.model.sortOrder - b.model.sortOrder);
-      for (const item of ordered) {
-        const lc = this.layerToCanvas(item.model.id);
-        if (!lc) continue;
-        ctx.save();
-        ctx.globalAlpha = Math.max(0, Math.min(1, item.display.alpha));
-        const rt = (item.model as LayerModel & { renderTransform?: Affine2D }).renderTransform;
-        if (rt && !rt.isIdentity) ctx.transform(rt.a, rt.b, rt.c, rt.d, rt.tx, rt.ty);
-        ctx.drawImage(lc, 0, 0);
-        ctx.restore();
-      }
-      return out;
-    }
 
     const rt = this.ensureComposite();
-    const overlayVisible = this.filterOverlaySprite?.visible ?? false;
-    if (this.filterOverlaySprite) this.filterOverlaySprite.visible = false;
-    // Layers only: the paper graphic carries a shadow and a border line that are not the picture
-    this.withAllTilesVisible(() => {
-      this.renderer.render({ container: this.layersContainer, target: rt, clear: true, clearColor: [0, 0, 0, 0] });
-    }, true);
-    if (this.filterOverlaySprite) this.filterOverlaySprite.visible = overlayVisible;
-    const layersCanvas = this.renderer.extract.canvas({ target: rt }) as HTMLCanvasElement;
-    ctx.drawImage(layersCanvas, 0, 0);
-    return out;
+    const overlay = this.filterOverlaySprite;
+    const overlayVisible = overlay?.visible ?? false;
+    if (overlay) overlay.visible = false;
+    try {
+      const clearColor = options?.transparent ? [0, 0, 0, 0] : this.parseCssColorRgba(this.lastBgColor);
+      this.withAllTilesVisible(() => {
+        this.renderer.render({ container: this.layersContainer, target: rt, clear: true, clearColor });
+      }, true);
+      for (let y = 0; y < h; y += TS) {
+        const rows = Math.min(TS, h - y);
+        putPremultipliedPixels(ctx, { x: 0, y, w, h: rows }, this.read(rt, 0, y, w, rows));
+      }
+      return out;
+    } finally {
+      if (overlay) overlay.visible = overlayVisible;
+    }
   }
 
   private destroyItem(item: LayerItem) {
@@ -5212,10 +5571,8 @@ export class LayerManager {
     this.flushPendingReads();
     this.destroyed = true;
     this.hydrateEpoch++;
-    if (this.hydrateRaf) cancelAnimationFrame(this.hydrateRaf);
-    this.hydrateRaf = 0;
-    if (this.hydrateTimer !== null) clearTimeout(this.hydrateTimer);
-    this.hydrateTimer = null;
+    this.clearHydrateSchedule();
+    this.hydrateUpload = null;
     this.hydrateInFlight = false;
     if (this.sharpMipTimer) clearTimeout(this.sharpMipTimer);
     this.releaseStackCache();
@@ -5233,6 +5590,8 @@ export class LayerManager {
     this.navigatorRT = null;
     for (const item of this.layersMap.values()) this.destroyItem(item);
     this.layersMap.clear();
+    for (const entry of this.isolatedGroups.values()) this.destroyGroupView(entry);
+    this.isolatedGroups.clear();
     this.previewParticlePool = [];
     for (const e of this.previewPainters.values()) {
       e.container.particleChildren.length = 0;

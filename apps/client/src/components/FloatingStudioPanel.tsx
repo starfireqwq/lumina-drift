@@ -659,7 +659,7 @@ export const FloatingStudioPanel: React.FC<FloatingStudioPanelProps> = ({
                       className="w-full bg-neutral-800 border border-neutral-700 rounded px-2 py-1 text-[11px] text-neutral-200 outline-none focus:border-amber-500"
                     >
                       <option value="">{t.toolOptions.selectLayer}</option>
-                      {layers.filter((layer) => !isPaintUnfilled || layer.layerType !== 'group').map((l) => (
+                      {layers.map((l) => (
                         <option key={l.id} value={l.id}>
                           {l.name}
                         </option>

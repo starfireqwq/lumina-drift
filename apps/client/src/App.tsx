@@ -340,11 +340,19 @@ export const App: React.FC = () => {
   const [storageInfo, setStorageInfo] = useState<{ desktopFolder?: string } | null>(null);
   const luminaInputRef = useRef<HTMLInputElement>(null);
   const [projectStatusMsg, setProjectStatusMsg] = useState<string | null>(null);
-  const showProjectToast = useCallback((msg: string) => {
+  const projectToastTimeout = useRef<number | null>(null);
+  const showProjectToast = useCallback((msg: string | null, persistent = false) => {
+    if (projectToastTimeout.current !== null) window.clearTimeout(projectToastTimeout.current);
+    projectToastTimeout.current = null;
     setProjectStatusMsg(msg);
-    window.setTimeout(() => {
-      setProjectStatusMsg((curr) => (curr === msg ? null : curr));
+    if (msg === null || persistent) return;
+    projectToastTimeout.current = window.setTimeout(() => {
+      projectToastTimeout.current = null;
+      setProjectStatusMsg(null);
     }, 3200);
+  }, []);
+  useEffect(() => () => {
+    if (projectToastTimeout.current !== null) window.clearTimeout(projectToastTimeout.current);
   }, []);
   const bakeScreentoneRef = useRef<
     | ((layerId: string, params: { density: number; angleRad: number; dotScale: number }) => void)
@@ -1273,6 +1281,10 @@ export const App: React.FC = () => {
       showProjectToast(t.navbar.projectLoading);
       return;
     }
+    const savingLabel = `⏳ 正在${saveAs ? '另存' : '儲存'}專案「${currentCanvas.title}」`;
+    showProjectToast(`${savingLabel}…`, true);
+    let lastStage = 'prepare';
+    let lastProgressAt = performance.now();
     const job = (async () => {
       const res = await LuminaProjectEngine.saveProject(
         currentCanvas,
@@ -1282,15 +1294,40 @@ export const App: React.FC = () => {
           if (projectAccessRef.current?.canvasId !== access.canvasId) throw new Error(t.navbar.projectLoading);
           return access.readLayers();
         },
-        { saveAs }
+        {
+          saveAs,
+          onProgress: ({ stage, done, total, percent }) => {
+            const now = performance.now();
+            if (stage === lastStage && now - lastProgressAt < 120) return;
+            lastStage = stage;
+            lastProgressAt = now;
+            switch (stage) {
+              case 'layers':
+                showProjectToast(`${savingLabel}（圖層 ${done}/${total}）…`, true);
+                break;
+              case 'preview':
+                showProjectToast('⏳ 正在產生專案預覽…', true);
+                break;
+              case 'zip':
+                showProjectToast(`⏳ 正在封裝專案檔（${percent}%）…`, true);
+                break;
+              case 'write':
+                showProjectToast('⏳ 正在寫入磁碟…', true);
+                break;
+            }
+          },
+        }
       );
       if (res.saved) {
         if (res.previewDataUrl) {
           handleCanvasThumbnail(currentCanvas.id, res.previewDataUrl);
         }
         showProjectToast(`✅ 已儲存專案：${res.filePath || res.filename || currentCanvas.title}`);
+      } else {
+        showProjectToast(null);
       }
     })().catch((error: unknown) => {
+      showProjectToast(null);
       alert(error instanceof Error ? error.message : t.navbar.projectSaveFailed);
     }).finally(() => { savingProjectRef.current = null; });
     savingProjectRef.current = job;

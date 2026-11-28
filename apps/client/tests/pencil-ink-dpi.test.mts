@@ -141,6 +141,7 @@ test('A1 MipmapView & LayerManager WebGL2 contract configures sharp resampler, s
   const mockFbo = { id: 'fbo' };
   const uniformLocs = new Map<object, string>();
   const mockGl = {
+    NO_ERROR: 0,
     TEXTURE_2D: 0x0de1,
     RGBA8: 0x8058,
     RGBA: 0x1908,
@@ -169,8 +170,13 @@ test('A1 MipmapView & LayerManager WebGL2 contract configures sharp resampler, s
     STENCIL_TEST: 0x0b90,
     CULL_FACE: 0x0b44,
     TRIANGLES: 0x0004,
+    getError: () => 0,
     activeTexture: () => {},
+    createTexture: () => ({}),
+    bindTexture: () => {},
+    deleteTexture: () => {},
     texImage2D: () => {},
+    copyTexSubImage2D: () => {},
     texParameteri: (_target: number, pname: number, param: number) => { texParams.set(pname, param); },
     getTexParameter: (_target: number, pname: number) => texParams.get(pname) ?? 0x2601,
     generateMipmap: () => { generateMipmapCalls++; },
@@ -254,44 +260,71 @@ test('A1 MipmapView & LayerManager WebGL2 contract configures sharp resampler, s
   const slotPitchUniforms = uniformCalls.filter((c) => c.name === 'uSlotPitch').map((c) => c.vals[0]);
   assert.deepEqual(slotPitchUniforms, [264, 132, 66]);
 
+  mips.suspend();
+  assert.equal(texParams.get(mockGl.TEXTURE_MAX_LEVEL), 0);
+  assert.equal(mips.ensure(source as never, ATLAS_MIP_LEVELS, PITCH, true), true);
+  assert.equal(texParams.get(mockGl.TEXTURE_MAX_LEVEL), ATLAS_MIP_LEVELS - 1);
+  assert.equal(generateMipmapCalls, 0, 'returning below 85% reuses the retained chain');
+  assert.equal(drawCalls, ATLAS_MIP_LEVELS - 1);
+
+  mips.markDirty(source as never);
+  assert.equal(mips.ensure(source as never, ATLAS_MIP_LEVELS, PITCH, true, 0), false);
+  mockRenderer.render();
+  assert.equal(texParams.get(mockGl.TEXTURE_MAX_LEVEL), 0);
+  assert.equal(mips.ensure(source as never, ATLAS_MIP_LEVELS, PITCH, true), true);
+  assert.equal(generateMipmapCalls, 1, 'after the deadline, the next frame builds the fast chain');
+
   // LayerManager.prepareView & setPixelated contract
   let suspended = false;
   let released = false;
-  const ensuredCalls: Array<{ levels: number; slotPitch?: number }> = [];
+  let stageChanges = 0;
+  const ensuredCalls: Array<{ levels: number; slotPitch: number; fast: boolean }> = [];
   let atlasMagFilter = 'linear';
-  const fakeLayerManager = {
+  const manager = Object.assign(Object.create(LayerManager.prototype) as LayerManager, {
     mips: {
       supported: true,
       suspend: () => { suspended = true; },
-      releaseIdle: () => { released = true; },
-      ensure: (_src: unknown, levels: number, slotPitch?: number) => { ensuredCalls.push({ levels, slotPitch }); },
+      releaseIdle: (idleMs: number) => { released = idleMs === 30000; },
+      ensure: (_src: unknown, levels: number, slotPitch: number, fast: boolean) => {
+        ensuredCalls.push({ levels, slotPitch, fast });
+        return true;
+      },
     },
     atlas: {
       setMagFilter: (mode: string) => { atlasMagFilter = mode; },
       pageTextures: () => [{ source }],
     },
     layersMap: new Map(),
-    preview: { rt: null, sprite: { parent: null }, display: { visible: false }, shown: false },
+    previewContainer: { visible: false },
     magFilter: 'linear',
-    solo: false,
+    lastInteractionAt: -Infinity,
+    lastLocalDrawAt: -Infinity,
     visiblePages: new Set<number>(),
-    ensureResidentMips: () => {},
-    onStageChange: () => {},
-  };
+    refreshSparsePreviews: () => {},
+    refreshSparseMaskSamples: () => {},
+    refreshViewGroupSamples: () => {},
+    updateAdjustmentScopes: () => false,
+    syncStackCache: () => {},
+    onStageChange: () => { stageChanges++; },
+  });
 
-  LayerManager.prototype.prepareView.call(fakeLayerManager, 0.5);
-  LayerManager.prototype.prepareView.call(fakeLayerManager, 0.84);
-  assert.equal(ensuredCalls.length, 2);
-  assert.deepEqual(ensuredCalls[0], { levels: ATLAS_MIP_LEVELS, slotPitch: PITCH });
+  manager.prepareView(0.5);
+  manager.markInteractive();
+  manager.prepareView(0.84);
+  assert.deepEqual(ensuredCalls, [
+    { levels: ATLAS_MIP_LEVELS, slotPitch: PITCH, fast: false },
+    { levels: ATLAS_MIP_LEVELS, slotPitch: PITCH, fast: true },
+  ]);
 
-  LayerManager.prototype.prepareView.call(fakeLayerManager, 0.85);
+  manager.prepareView(0.85);
   assert.equal(suspended, true);
   assert.equal(released, true);
 
-  LayerManager.prototype.setPixelated.call(fakeLayerManager, true);
+  manager.setPixelated(true, false);
   assert.equal(atlasMagFilter, 'nearest');
+  assert.equal(stageChanges, 0);
   suspended = false;
-  LayerManager.prototype.prepareView.call(fakeLayerManager, 1.0);
+  manager.prepareView(1.0);
   assert.equal(suspended, true);
 
   mips.destroy();

@@ -24,7 +24,8 @@ interface MeshWarpOverlayProps {
   canvasHeight: number;
   onApply: (
     warpedCanvas: HTMLCanvasElement,
-    bounds: { minX: number; minY: number; width: number; height: number }
+    bounds: { minX: number; minY: number; width: number; height: number },
+    warpSource: (source: HTMLCanvasElement) => HTMLCanvasElement,
   ) => void;
   onCancel: () => void;
   canvasToScreen: (cx: number, cy: number) => { x: number; y: number };
@@ -154,9 +155,9 @@ export const MeshWarpOverlay: React.FC<MeshWarpOverlayProps> = ({
 
   // Render the warped mesh into canvas
   const renderMesh = useCallback(
-    (targetCanvas: HTMLCanvasElement, project: (x: number, y: number) => { x: number; y: number }) => {
+    (targetCanvas: HTMLCanvasElement, project: (x: number, y: number) => { x: number; y: number }, source = sourceCanvas) => {
       const ctx = targetCanvas.getContext('2d');
-      if (!ctx || !sourceCanvas || nodes.length < gridSize * gridSize) return;
+      if (!ctx || !source || nodes.length < gridSize * gridSize) return;
 
       ctx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
 
@@ -217,7 +218,7 @@ export const MeshWarpOverlay: React.FC<MeshWarpOverlayProps> = ({
               // 2 Triangles per micro-cell
               drawTriangle(
                 ctx,
-                sourceCanvas,
+                source,
                 p00.x,
                 p00.y,
                 p10.x,
@@ -233,7 +234,7 @@ export const MeshWarpOverlay: React.FC<MeshWarpOverlayProps> = ({
               );
               drawTriangle(
                 ctx,
-                sourceCanvas,
+                source,
                 p00.x,
                 p00.y,
                 p11.x,
@@ -296,12 +297,14 @@ export const MeshWarpOverlay: React.FC<MeshWarpOverlayProps> = ({
     const w = Math.max(1, maxX - minX);
     const h = Math.max(1, maxY - minY);
 
-    const outputCanvas = document.createElement('canvas');
-    outputCanvas.width = w;
-    outputCanvas.height = h;
-
-    renderMesh(outputCanvas, (x, y) => ({ x: x - minX, y: y - minY }));
-    onApply(outputCanvas, { minX, minY, width: w, height: h });
+    const warpSource = (source: HTMLCanvasElement) => {
+      const outputCanvas = document.createElement('canvas');
+      outputCanvas.width = w;
+      outputCanvas.height = h;
+      renderMesh(outputCanvas, (x, y) => ({ x: x - minX, y: y - minY }), source);
+      return outputCanvas;
+    };
+    onApply(warpSource(sourceCanvas), { minX, minY, width: w, height: h }, warpSource);
   };
 
   const startDrag = (index: number, event: React.PointerEvent<SVGCircleElement>) => {

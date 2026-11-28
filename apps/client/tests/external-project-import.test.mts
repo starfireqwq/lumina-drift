@@ -395,6 +395,7 @@ test('layered PSD imports deferred raster and mask tiles, releasing shared raw d
     children: [{
       name: 'Group',
       blendMode: 'pass through',
+      clipping: true,
       mask: { left: 2, top: 0, defaultColor: 0, imageData: image([190, 190, 190, 255]) },
       children: [
         { name: 'Base', imageData: image([80, 90, 100, 255]) },
@@ -429,6 +430,7 @@ test('layered PSD imports deferred raster and mask tiles, releasing shared raw d
   const groupMask = project.layers.find((layer) => layer.parentId === group.id && layer.layerType === 'mask')!;
   const overflowMask = project.layers.find((layer) => layer.parentId === overflow.id && layer.layerType === 'mask')!;
   assert.equal(group.layerType, 'group');
+  assert.equal(group.clipToBelow, true);
   assert.equal(overflow.parentId, group.id);
   assert.equal(overflow.blendMode, 'multiply');
   assert.equal(overflow.opacity, 128 / 255);

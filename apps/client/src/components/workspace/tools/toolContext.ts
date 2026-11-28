@@ -22,6 +22,7 @@ export type Bounds = { minX: number; minY: number; maxX: number; maxY: number };
 export interface ToolContext {
   canvas: CanvasModel | null;
   layers: LayerModel[];
+  layersRef: MutableRefObject<LayerModel[]>;
   activeLayer: LayerModel | null;
   user: UserPayload | null;
   isAdmin: boolean;

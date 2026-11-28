@@ -633,6 +633,9 @@ export interface Translations {
     renameLayer: string;
     lockAlpha: string;
     clippingMask: string;
+    referenceLayer: string;
+    setReferenceLayer: string;
+    clearReferenceLayer: string;
     rasterLayer: string;
     vectorLayer: string;
     groupLayer: string;

@@ -307,13 +307,18 @@ export function useFillTools(ctx: ToolContext) {
     commitInOrder(async () => {
       if (!isTargetReady()) return null;
       const rects = [{ x, y, w, h }];
-      const refLayerId = reference === 'specific' && bucketRefLayerId && lm.getLayerItem(bucketRefLayerId)
+      const refLayerId = reference === 'specific' && bucketRefLayerId &&
+        (lm.isGroup(bucketRefLayerId) || lm.getLayerItem(bucketRefLayerId))
         ? bucketRefLayerId : layerId;
+      const groupReference = lm.isGroup(refLayerId);
+      if (groupReference && lm.isGroupEmpty(refLayerId)) return null;
+      const version = groupReference ? lm.getGroupCompositeVersion(refLayerId) : null;
       const readEdit = lm.readAsync(layerId, rects);
       const readReference = reference === 'all' ? lm.readCompositeRegionsAsync(rects, false)
-        : refLayerId === layerId ? readEdit : lm.readAsync(refLayerId, rects);
+        : groupReference ? lm.readGroupRegionsAsync(refLayerId, rects)
+          : refLayerId === layerId ? readEdit : lm.readAsync(refLayerId, rects);
       const [[refPixels], [editPixels]] = await Promise.all([readReference, readEdit]);
-      if (!isTargetReady()) return null;
+      if (!isTargetReady() || (groupReference && version !== lm.getGroupCompositeVersion(refLayerId))) return null;
       const mask = computePaintUnfilledAreaMask(points.map((p) => ({ x: p.x - x, y: p.y - y })), refPixels, w, h, {
         ...options, editPixels: reference === 'current' ? undefined : editPixels,
       });
@@ -412,7 +417,8 @@ export function useFillTools(ctx: ToolContext) {
 
     // Automatic reference follows the visible drawing rather than guessing a layer from its name.
     const targetRefLayer = referenceLayerId ? layers.find(l => l.id === referenceLayerId) : undefined;
-    const refItem = targetRefLayer ? layerManagerRef.current.getLayerItem(targetRefLayer.id) : true;
+    const groupReference = targetRefLayer?.layerType === 'group';
+    const refItem = !targetRefLayer || groupReference || layerManagerRef.current.getLayerItem(targetRefLayer.id);
     const activeItem = layerManagerRef.current.getLayerItem(activeLayer.id);
     if (!refItem || !activeItem) return;
 
@@ -436,10 +442,15 @@ export function useFillTools(ctx: ToolContext) {
     commitInOrder(async () => {
       if (layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== activeItem) return null;
       const rects = [{ x: minX, y: minY, w, h }];
+      const groupId = groupReference ? refLayerId : undefined;
+      if (groupId && lm.isGroupEmpty(groupId)) return null;
+      const version = groupId ? lm.getGroupCompositeVersion(groupId) : null;
       const [refPixels] = refLayerId
-        ? await lm.readAsync(refLayerId, rects)
+        ? await (groupId ? lm.readGroupRegionsAsync(groupId, rects) : lm.readAsync(refLayerId, rects))
         : await lm.readCompositeRegionsAsync(rects, true);
-      if (layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== activeItem) return null;
+      const current = () => layerManagerRef.current === lm && lm.getLayerItem(layerId) === activeItem &&
+        (!groupId || version === lm.getGroupCompositeVersion(groupId));
+      if (!current()) return null;
       const fill = computeSmartEncloseFillMask(
         pts.map((p) => ({ x: p.x - minX, y: p.y - minY })),
         refPixels, w, h, { gapClosingRadius, expandRadius, lineThreshold: 180, isWhiteBackgroundLineart: refLayerId ? undefined : true },
@@ -452,7 +463,7 @@ export function useFillTools(ctx: ToolContext) {
       const pw = bounds.maxX - bounds.minX + 1;
       const ph = bounds.maxY - bounds.minY + 1;
       const [pixels] = await lm.readAsync(layerId, [{ x: bounds.minX, y: bounds.minY, w: pw, h: ph }]);
-      if (layerManagerRef.current !== lm || lm.getLayerItem(layerId) !== activeItem) return null;
+      if (!current()) return null;
       for (let y = 0; y < ph; y++) {
         for (let x = 0; x < pw; x++) {
           if (!fill.data[(y + fill.bounds.minY) * w + x + fill.bounds.minX]) continue;
@@ -504,7 +515,9 @@ export function useFillTools(ctx: ToolContext) {
     const color = brushProps.color;
     const opacity = brushProps.opacity;
     const reference = bucketReference;
-    const refLayerId = bucketReference === 'specific' && bucketRefLayerId && lm.getLayerItem(bucketRefLayerId) ? bucketRefLayerId : layerId;
+    const refLayerId = reference === 'specific' && bucketRefLayerId &&
+      (lm.isGroup(bucketRefLayerId) || lm.getLayerItem(bucketRefLayerId)) ? bucketRefLayerId : layerId;
+    const groupReference = lm.isGroup(refLayerId);
     const sel = selectionEngineRef.current;
     const confirmWholeCanvas = !OfflineSessionStore.isOfflineCanvas(canvas.id) || confirmSoloFullFill;
 
@@ -526,7 +539,7 @@ export function useFillTools(ctx: ToolContext) {
       const uniform = reference === 'none' || (reference === 'all'
         ? layers.every((layer) => !layer.isVisible || layer.layerType === 'group' ||
           (layer.layerType === 'raster' && emptyReference(layer.id)))
-        : emptyReference(refLayerId));
+        : groupReference ? lm.isGroupEmpty(refLayerId) : emptyReference(refLayerId));
 
       if (!uniform) {
         const ruler = RulerManager.getInstance();
@@ -534,10 +547,13 @@ export function useFillTools(ctx: ToolContext) {
           ? ruler.getSymmetryPoints({ x: clickX, y: clickY }).map(({ x, y }) => ({ x: Math.round(x), y: Math.round(y) }))
           : [{ x: clickX, y: clickY }];
         const read = (rects: Parameters<typeof lm.readAsync>[1]) => reference === 'all'
-          ? lm.readCompositeRegionsAsync(rects, false) : lm.readAsync(refLayerId, rects);
-        const version = reference === 'all' ? lm.getVisibleCompositeVersion() : lm.getLayerItem(refLayerId)?.version;
+          ? lm.readCompositeRegionsAsync(rects, false)
+          : groupReference ? lm.readGroupRegionsAsync(refLayerId, rects) : lm.readAsync(refLayerId, rects);
+        const referenceVersion = () => reference === 'all' ? lm.getVisibleCompositeVersion()
+          : groupReference ? lm.getGroupCompositeVersion(refLayerId) : lm.getLayerVersion(refLayerId);
+        const version = referenceVersion();
         const current = () => layerManagerRef.current === lm && lm.getLayerItem(layerId) === activeItem &&
-          version === (reference === 'all' ? lm.getVisibleCompositeVersion() : lm.getLayerItem(refLayerId)?.version);
+          version === referenceVersion();
         if (tiled) {
           const fill = await tiledBucketFill(W, H, seeds, bucketTolerance, bucketExpand, wrap, async (rect) => (await read([rect]))[0], current);
           if (!fill || !current()) return null;

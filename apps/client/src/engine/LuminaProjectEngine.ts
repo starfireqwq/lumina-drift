@@ -180,6 +180,15 @@ export function normalizeLuminaLayers(layers: LayerModel[]): LayerModel[] {
   );
 }
 
+export interface LuminaProjectProgress {
+  stage: 'prepare' | 'layers' | 'preview' | 'zip' | 'write';
+  done: number;
+  total: number;
+  percent: number;
+}
+
+type OnProjectProgress = (progress: LuminaProjectProgress) => void;
+
 export class LuminaProjectEngine {
   /**
    * Packages the current canvas, layer hierarchy, layer pixels, masks, vectors, animation metadata,
@@ -188,7 +197,8 @@ export class LuminaProjectEngine {
   public static async packProject(
     canvas: CanvasModel,
     layers: LayerModel[],
-    getLayerCanvases: () => Promise<LayerCanvasItem[]>
+    getLayerCanvases: () => Promise<LayerCanvasItem[]>,
+    onProgress?: OnProjectProgress
   ): Promise<{
     blob: Blob;
     uint8: Uint8Array;
@@ -201,26 +211,36 @@ export class LuminaProjectEngine {
     // 1. Standard mimetype header first (uncompressed STORE, like OpenRaster / EPUB)
     zip.file('mimetype', LUMINA_MIMETYPE, { compression: 'STORE' });
 
+    onProgress?.({ stage: 'prepare', done: 0, total: 1, percent: 0 });
+    if (onProgress) await new Promise<void>((resolve) => setTimeout(resolve, 0));
     const layerCanvases = await getLayerCanvases();
     const vectorStrokes: Record<string, VectorStroke[]> = {};
     const layersFolder = zip.folder('layers')!;
 
     // 2. Save lossless PNGs for pixel layers and their masks
+    const pngLayers: { id: string; canvas: HTMLCanvasElement }[] = [];
     for (const item of layerCanvases) {
       if (item.layer.layerType !== 'group' && item.layer.layerType !== 'adjustment') {
-        const pngBlob = await canvasToBlob(item.canvas, 'image/png');
-        layersFolder.file(`layer_${item.layer.id}.png`, pngBlob, { compression: 'DEFLATE' });
+        pngLayers.push({ id: item.layer.id, canvas: item.canvas });
       }
       if (item.layer.layerType === 'vector' && item.vectorStrokes?.length) {
         vectorStrokes[item.layer.id] = item.vectorStrokes;
       }
-      if (item.mask?.id && item.mask.canvas) {
-        const maskBlob = await canvasToBlob(item.mask.canvas, 'image/png');
-        layersFolder.file(`layer_${item.mask.id}.png`, maskBlob, { compression: 'DEFLATE' });
-      }
+      if (item.mask?.id && item.mask.canvas) pngLayers.push({ id: item.mask.id, canvas: item.mask.canvas });
+    }
+    const total = pngLayers.length;
+    onProgress?.({ stage: 'layers', done: 0, total, percent: total ? 0 : 100 });
+    for (const [index, layer] of pngLayers.entries()) {
+      const pngBlob = await canvasToBlob(layer.canvas, 'image/png');
+      layersFolder.file(`layer_${layer.id}.png`, await pngBlob.arrayBuffer(), { compression: 'STORE' });
+      const done = index + 1;
+      onProgress?.({ stage: 'layers', done, total, percent: Math.round(100 * done / total) });
+      if (done % 2 === 0) await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
 
     // 3. Generate composite 512x512 max preview.png for Windows Explorer IThumbnailProvider & in-app cards
+    onProgress?.({ stage: 'preview', done: 0, total: 1, percent: 0 });
+    if (onProgress) await new Promise<void>((resolve) => setTimeout(resolve, 0));
     const maxThumbDim = 512;
     const scale = Math.min(1, maxThumbDim / Math.max(canvas.width, canvas.height));
     const thumbW = Math.max(1, Math.round(canvas.width * scale));
@@ -238,7 +258,7 @@ export class LuminaProjectEngine {
     thumbCtx.drawImage(fullComposite, 0, 0, thumbW, thumbH);
     const previewBlob = await canvasToBlob(thumbCanvas, 'image/png');
     const previewDataUrl = thumbCanvas.toDataURL('image/png');
-    zip.file('preview.png', previewBlob, { compression: 'STORE' });
+    zip.file('preview.png', await previewBlob.arrayBuffer(), { compression: 'STORE' });
 
     // 4. Hierarchy, vectors, and animation metadata
     const orderedLayers = [...layers].sort((a, b) => a.sortOrder - b.sortOrder);
@@ -287,8 +307,10 @@ export class LuminaProjectEngine {
 
     const uint8 = await zip.generateAsync({
       type: 'uint8array',
-      compression: 'DEFLATE',
       compressionOptions: { level: 6 },
+    }, (metadata) => {
+      const percent = Math.round(metadata.percent);
+      onProgress?.({ stage: 'zip', done: percent, total: 100, percent });
     });
     const blob = new Blob([uint8 as unknown as BlobPart], { type: LUMINA_MIMETYPE });
     return { blob, uint8, filename: projectFilename(canvas), previewDataUrl, meta };
@@ -524,14 +546,17 @@ export class LuminaProjectEngine {
     canvas: CanvasModel,
     layers: LayerModel[],
     getLayerCanvases: () => Promise<LayerCanvasItem[]>,
-    options?: { saveAs?: boolean; onlyExisting?: boolean }
+    options?: { saveAs?: boolean; onlyExisting?: boolean; onProgress?: OnProjectProgress }
   ): Promise<{ saved: boolean; filename?: string; filePath?: string; previewDataUrl?: string }> {
     const desktop = typeof window !== 'undefined' ? ((window as any).atelierDesktop ?? (window as any).atelierMobile) : undefined;
     const existingPath = options?.saveAs ? null : OfflineSessionStore.getCanvasFilePath(canvas.id);
     if (options?.onlyExisting && (!desktop?.saveLuminaFile || !existingPath)) return { saved: false };
+    const onProgress = options?.onProgress;
+    const reportWrite = () => onProgress?.({ stage: 'write', done: 0, total: 1, percent: 0 });
 
     if (desktop?.saveLuminaFile) {
-      const packed = await this.packProject(canvas, layers, getLayerCanvases);
+      const packed = await this.packProject(canvas, layers, getLayerCanvases, onProgress);
+      reportWrite();
       const res = await desktop.saveLuminaFile({
         defaultName: packed.filename,
         existingFilePath: existingPath || undefined,
@@ -563,14 +588,16 @@ export class LuminaProjectEngine {
         if (error instanceof DOMException && error.name === 'AbortError') return { saved: false };
         throw error;
       }
-      const packed = await this.packProject(canvas, layers, getLayerCanvases);
+      const packed = await this.packProject(canvas, layers, getLayerCanvases, onProgress);
+      reportWrite();
       await writeProjectFile(canvas.id, handle, packed.blob);
       OfflineSessionStore.setCanvasFilePath(canvas.id, handle.name);
       return { saved: true, filename: handle.name, previewDataUrl: packed.previewDataUrl };
     }
 
     // Web browser download fallback
-    const packed = await this.packProject(canvas, layers, getLayerCanvases);
+    const packed = await this.packProject(canvas, layers, getLayerCanvases, onProgress);
+    reportWrite();
     const url = URL.createObjectURL(packed.blob);
     const a = document.createElement('a');
     a.href = url;

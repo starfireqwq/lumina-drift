@@ -9,7 +9,6 @@ import {
   compileAdjustment,
   hasActiveLayerEffects,
   normalizeAdjustment,
-  resolveAdjustmentScope,
   resolveEffectiveLayerColor,
   type Affine2D,
   type BlendMode,
@@ -18,6 +17,7 @@ import {
   type LayerModel,
   type VectorStroke,
 } from '@atelier/shared';
+import { LayerHierarchy } from './layerHierarchy';
 
 /**
  * Layer pictures on 2D canvases, merged the way LayerManager draws them (groups, layer and group
@@ -121,7 +121,7 @@ export function maskedLayerCanvas(item: LayerCanvasItem, extra: MaskSource[] = [
   const img = ctx.getImageData(0, 0, width, height);
   if (color?.enabled) applyLayerColorToImageData(img.data, color.mainColor, color.subColor);
   for (const m of masks) {
-    const cov = maskCoverage(m.canvas, m.inverted);
+    const cov = maskCoverageSized(m, width, height);
     for (let i = 0; i < cov.length; i++) img.data[i * 4 + 3] = (img.data[i * 4 + 3] * cov[i]) / 255;
   }
   ctx.putImageData(img, 0, 0);
@@ -131,30 +131,29 @@ export function maskedLayerCanvas(item: LayerCanvasItem, extra: MaskSource[] = [
 /** The layer tree as the editor shows it */
 export class LayerTree {
   readonly byId: Map<string, LayerCanvasItem>;
-  private readonly layersById: ReadonlyMap<string, LayerModel>;
+  readonly hierarchy: LayerHierarchy;
+  readonly isolatedGroups: ReadonlySet<string>;
   constructor(readonly items: LayerCanvasItem[]) {
     this.byId = new Map(items.map((i) => [i.layer.id, i]));
-    this.layersById = new Map(items.map(({ layer }) => [layer.id, layer]));
+    this.hierarchy = new LayerHierarchy(items.map(({ layer }) => layer));
+    this.isolatedGroups = this.hierarchy.isolatedGroups(new Set(items.filter((i) => i.mask?.enabled).map((i) => i.layer.id)));
   }
   isGroup = (i: LayerCanvasItem) => i.layer.layerType === 'group';
   /** Children bottom first; the roots when parentId is null */
   childrenOf(parentId: string | null): LayerCanvasItem[] {
-    return this.items
-      .filter((i) => (i.layer.parentId && this.byId.has(i.layer.parentId) ? i.layer.parentId : null) === parentId)
-      .sort((a, b) => a.layer.sortOrder - b.layer.sortOrder);
+    return this.hierarchy.childrenOf(parentId).map((layer) => this.byId.get(layer.id)!);
   }
-  private ancestors(i: LayerCanvasItem): LayerCanvasItem[] {
+  private ancestors(i: LayerCanvasItem, boundary?: string): LayerCanvasItem[] {
     const out: LayerCanvasItem[] = [];
-    let p = i.layer.parentId ? this.byId.get(i.layer.parentId) : undefined;
-    for (let depth = 0; p && depth < 16; depth++) {
-      out.push(p);
-      p = p.layer.parentId ? this.byId.get(p.layer.parentId) : undefined;
+    for (const parent of this.hierarchy.ancestors(i.layer)) {
+      if (parent.id === boundary) break;
+      out.push(this.byId.get(parent.id)!);
     }
     return out;
   }
-  visible = (i: LayerCanvasItem) => i.layer.isVisible && this.ancestors(i).every((a) => a.layer.isVisible);
-  opacity = (i: LayerCanvasItem, frame = 0) => {
-    const chain = [...this.ancestors(i), i];
+  visible = (i: LayerCanvasItem) => this.hierarchy.visible(i.layer);
+  opacity = (i: LayerCanvasItem, frame = 0, boundary?: string) => {
+    const chain = [...this.ancestors(i, boundary), i];
     let acc = 1;
     for (const node of chain) {
       acc *= node.layer.opacity;
@@ -179,20 +178,25 @@ export class LayerTree {
     }
     return acc;
   };
-  groupMasks = (i: LayerCanvasItem): MaskSource[] => this.ancestors(i).flatMap((a) => (a.mask?.enabled ? [a.mask] : []));
+  groupMasks = (i: LayerCanvasItem, boundary?: string): MaskSource[] =>
+    this.ancestors(i, boundary).flatMap((a) => (a.mask?.enabled ? [a.mask] : []));
   /** Where an adjustment layer acts (0–255): its own mask × every enclosing group mask; null = everywhere */
-  adjustmentCoverage(item: LayerCanvasItem, width: number, height: number): Uint8ClampedArray | null {
-    const masks: MaskSource[] = [...(item.mask?.enabled ? [item.mask] : []), ...this.groupMasks(item)];
+  adjustmentCoverage(item: LayerCanvasItem, width: number, height: number, boundary?: string): Uint8ClampedArray | null {
+    const masks: MaskSource[] = [...(item.mask?.enabled ? [item.mask] : []), ...this.groupMasks(item, boundary)];
     return combineMaskCoverages(masks.map((m) => maskCoverageSized(m, width, height)), width * height);
   }
   /** Drawable layers bottom to top, each with the base it clips to (if any) */
   drawables(): Array<{ item: LayerCanvasItem; clipBase: LayerCanvasItem | null }> {
-    const flat = this.items.filter((i) => !this.isGroup(i)).sort((a, b) => a.layer.sortOrder - b.layer.sortOrder);
-    let base: LayerCanvasItem | null = null;
-    return flat.map((item) => {
-      if (!item.layer.clipToBelow) base = item;
-      return { item, clipBase: item.layer.clipToBelow ? base : null };
-    });
+    return [...this.hierarchy.descendants(null)].filter((layer) => layer.layerType !== 'group')
+      .map((layer) => ({ item: this.byId.get(layer.id)!, clipBase: this.clipBase(this.byId.get(layer.id)!) }));
+  }
+  clipBase(item: LayerCanvasItem): LayerCanvasItem | null {
+    const base = this.hierarchy.clipBase(item.layer);
+    return base ? this.byId.get(base.id)! : null;
+  }
+  coloredCanvas(item: LayerCanvasItem): HTMLCanvasElement {
+    const { config } = resolveEffectiveLayerColor(item.layer.id, this.hierarchy.byId);
+    return maskedLayerCanvas(item, [], config);
   }
   /** Final pixels of one layer: display colour, own and group masks, clipping, then own layer effects */
   flattened(item: LayerCanvasItem, clipBase: LayerCanvasItem | null, opts?: { skipGroupMasks?: boolean; skipEffects?: boolean }): HTMLCanvasElement {
@@ -203,7 +207,7 @@ export class LayerTree {
       empty.height = item.canvas.height;
       return empty;
     }
-    const { config } = resolveEffectiveLayerColor(item.layer.id, this.layersById);
+    const { config } = resolveEffectiveLayerColor(item.layer.id, this.hierarchy.byId);
     const src = maskedLayerCanvas(item, opts?.skipGroupMasks ? [] : this.groupMasks(item), config);
     let result = src;
     if (clipBase && clipBase !== item) {
@@ -213,8 +217,13 @@ export class LayerTree {
       const ctx = out.getContext('2d')!;
       ctx.drawImage(src, 0, 0);
       ctx.globalCompositeOperation = 'destination-in';
-      ctx.drawImage(isAdjustmentItem(clipBase) ? adjustmentBaseCanvas(clipBase, src.width, src.height) : maskedLayerCanvas(clipBase), 0, 0);
-      if (!this.visible(clipBase)) ctx.clearRect(0, 0, out.width, out.height);
+      if (this.visible(clipBase)) {
+        const base = clipBaseCanvas(this, clipBase, src.width, src.height);
+        ctx.drawImage(base, 0, 0);
+        base.width = base.height = 0;
+      } else {
+        ctx.clearRect(0, 0, out.width, out.height);
+      }
       result = out;
     }
     if (!opts?.skipEffects && hasActiveLayerEffects(item.layer.meta?.effects)) {
@@ -258,8 +267,11 @@ export function canvasCompositeOp(mode: BlendMode): GlobalCompositeOperation {
     case 'exclusion':
       return 'exclusion';
     case 'add':
+    case 'linear_dodge':
     case 'glow':
       return 'lighter';
+    case 'erase':
+      return 'destination-out';
     case 'hue':
       return 'hue';
     case 'saturation':
@@ -299,154 +311,181 @@ export function compositeLayers(
     ctx.clearRect(0, 0, width, height);
   }
   const tree = new LayerTree(layerItems);
-  const drawables = tree.drawables();
-  drawLayerList(ctx, tree, drawables, drawables, width, height);
+  drawLayerList(ctx, tree, null, width, height);
   ctx.restore();
   return merged;
 }
 
-type DrawableEntry = { item: LayerCanvasItem; clipBase: LayerCanvasItem | null };
+function scratchCanvas(width: number, height: number): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  return canvas;
+}
 
-/** Draws `list` (bottom to top) onto ctx; `all` is the whole stack, which adjustment scopes resolve against */
-function drawLayerList(
-  ctx: CanvasRenderingContext2D,
-  tree: LayerTree,
-  list: readonly DrawableEntry[],
-  all: readonly DrawableEntry[],
-  width: number,
-  height: number,
-  activeGroupScopeId?: string,
+function drawTransformed(ctx: CanvasRenderingContext2D, tree: LayerTree, item: LayerCanvasItem, source: HTMLCanvasElement) {
+  if (!source.width || !source.height) return;
+  ctx.save();
+  const m = tree.transformMatrix(item, ctx.canvas.width, ctx.canvas.height);
+  if (!m.isIdentity) ctx.transform(m.a, m.b, m.c, m.d, m.tx, m.ty);
+  ctx.drawImage(source, 0, 0);
+  ctx.restore();
+}
+
+function applyMasks(ctx: CanvasRenderingContext2D, masks: MaskSource[]) {
+  if (masks.length === 0) return;
+  const { width, height } = ctx.canvas;
+  const img = ctx.getImageData(0, 0, width, height);
+  for (const mask of masks) {
+    const coverage = maskCoverageSized(mask, width, height);
+    for (let i = 0; i < coverage.length; i++) img.data[4 * i + 3] *= coverage[i] / 255;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function clipBaseCanvas(tree: LayerTree, base: LayerCanvasItem, width: number, height: number, boundary?: string): HTMLCanvasElement {
+  if (isAdjustmentItem(base)) return adjustmentBaseCanvas(base, width, height);
+  const canvas = scratchCanvas(width, height);
+  if (!tree.visible(base)) return canvas;
+  const ctx = canvas.getContext('2d')!;
+  if (tree.isGroup(base)) {
+    const body = isolatedGroupCanvas(tree, base, width, height, boundary, new Map());
+    ctx.globalAlpha = tree.opacity(base, 0, boundary);
+    ctx.drawImage(body, 0, 0);
+    body.width = body.height = 0;
+  } else {
+    const source = maskedLayerCanvas(base);
+    drawTransformed(ctx, tree, base, source);
+    if (source !== base.canvas) source.width = source.height = 0;
+  }
+  return canvas;
+}
+
+function applyClip(
+  ctx: CanvasRenderingContext2D, tree: LayerTree, item: LayerCanvasItem,
+  samples: Map<string, HTMLCanvasElement>, boundary?: string,
 ) {
-  const nearestStyledGroup = (item: LayerCanvasItem): LayerCanvasItem | null => {
-    let p = item.layer.parentId ? tree.byId.get(item.layer.parentId) : undefined;
-    for (let depth = 0; p && depth < 16; depth++) {
-      if (p.layer.id === activeGroupScopeId) return null;
-      if (tree.isGroup(p) && hasActiveLayerEffects(p.layer.meta?.effects)) return p;
-      p = p.layer.parentId ? tree.byId.get(p.layer.parentId) : undefined;
-    }
-    return null;
-  };
+  const base = tree.clipBase(item);
+  if (!base) return;
+  let sample = samples.get(base.layer.id);
+  if (!sample) {
+    sample = clipBaseCanvas(tree, base, ctx.canvas.width, ctx.canvas.height, boundary);
+    samples.set(base.layer.id, sample);
+  }
+  ctx.save();
+  ctx.globalCompositeOperation = 'destination-in';
+  ctx.drawImage(sample, 0, 0);
+  ctx.restore();
+}
 
-  let idx = 0;
-  while (idx < list.length) {
-    const { item, clipBase } = list[idx];
-    if (!tree.visible(item)) {
-      idx++;
-      continue;
-    }
+function applyEffects(source: HTMLCanvasElement, item: LayerCanvasItem): HTMLCanvasElement {
+  const styled = applyLayerEffectsToCanvas(source, item.layer.meta?.effects);
+  if (styled !== source) source.width = source.height = 0;
+  return styled;
+}
 
-    // If this drawable sits inside a folder with active Layer Effects, composite that folder's
-    // contiguous slice into an isolated canvas, apply the folder's effects, and draw it as one unit.
-    const styledGroup = nearestStyledGroup(item);
-    if (styledGroup) {
-      const groupId = styledGroup.layer.id;
-      const isInGroup = (entry: DrawableEntry): boolean => {
-        let p = entry.item.layer.parentId ? tree.byId.get(entry.item.layer.parentId) : undefined;
-        for (let d = 0; p && d < 16; d++) {
-          if (p.layer.id === groupId) return true;
-          p = p.layer.parentId ? tree.byId.get(p.layer.parentId) : undefined;
+function isolatedGroupCanvas(
+  tree: LayerTree, group: LayerCanvasItem, width: number, height: number, boundary: string | undefined,
+  samples: Map<string, HTMLCanvasElement>, members?: ReadonlySet<string>,
+): HTMLCanvasElement {
+  const body = scratchCanvas(width, height);
+  const ctx = body.getContext('2d')!;
+  drawLayerList(ctx, tree, group.layer.id, width, height, group.layer.id, members);
+  const masks = tree.groupMasks(group, boundary);
+  if (group.mask?.enabled) masks.unshift(group.mask);
+  applyMasks(ctx, masks);
+  applyClip(ctx, tree, group, samples, boundary);
+  return applyEffects(body, group);
+}
+
+/** Render pass-through folders in the current scope and isolate styled folders as one source. */
+function drawLayerList(
+  ctx: CanvasRenderingContext2D, tree: LayerTree, parentId: string | null, width: number, height: number,
+  boundary?: string, members?: ReadonlySet<string>, samples = new Map<string, HTMLCanvasElement>(),
+) {
+  const ownsSamples = parentId === (boundary ?? null);
+  try {
+    for (const item of tree.childrenOf(parentId)) {
+      const { id, blendMode } = item.layer;
+      if (!tree.visible(item)) continue;
+      if (tree.isGroup(item)) {
+        if (members && ![...tree.hierarchy.descendants(id)].some((layer) => members.has(layer.id))) continue;
+        if (!tree.isolatedGroups.has(id)) {
+          drawLayerList(ctx, tree, id, width, height, boundary, members, samples);
+          continue;
         }
-        return false;
-      };
-      const slice: DrawableEntry[] = [];
-      while (idx < list.length && isInGroup(list[idx])) {
-        slice.push(list[idx]);
-        idx++;
-      }
-      const scratch = document.createElement('canvas');
-      scratch.width = width;
-      scratch.height = height;
-      const sctx = scratch.getContext('2d');
-      if (sctx) {
-        drawLayerList(sctx, tree, slice, all, width, height, groupId);
-        // Apply folder's own mask if enabled
-        if (styledGroup.mask?.enabled) {
-          const img = sctx.getImageData(0, 0, width, height);
-          const cov = maskCoverageSized(styledGroup.mask, width, height);
-          for (let p = 0; p < cov.length; p++) img.data[p * 4 + 3] = (img.data[p * 4 + 3] * cov[p]) / 255;
-          sctx.putImageData(img, 0, 0);
-        }
-        const styled = applyLayerEffectsToCanvas(scratch, styledGroup.layer.meta!.effects);
+        const source = isolatedGroupCanvas(tree, item, width, height, boundary, samples, members);
         ctx.save();
-        ctx.globalAlpha = Math.max(0, Math.min(1, styledGroup.layer.opacity));
-        ctx.globalCompositeOperation = canvasCompositeOp(styledGroup.layer.blendMode);
-        ctx.drawImage(styled, 0, 0);
+        ctx.globalAlpha = tree.opacity(item, 0, boundary);
+        ctx.globalCompositeOperation = canvasCompositeOp(blendMode);
+        ctx.drawImage(source, 0, 0);
         ctx.restore();
+        if (tree.hierarchy.baseIds.has(id) && !members) {
+          const sample = scratchCanvas(width, height);
+          const sampleCtx = sample.getContext('2d')!;
+          sampleCtx.globalAlpha = tree.opacity(item, 0, boundary);
+          sampleCtx.drawImage(source, 0, 0);
+          samples.set(id, sample);
+        }
+        source.width = source.height = 0;
+        continue;
       }
-      scratch.width = 0;
-      scratch.height = 0;
-      continue;
+      if (members && !members.has(id)) continue;
+      if (isAdjustmentItem(item)) {
+        applyAdjustmentItem(ctx, tree, item, width, height, boundary);
+        continue;
+      }
+      const colored = tree.coloredCanvas(item);
+      const outerMasks = tree.groupMasks(item, boundary);
+      ctx.save();
+      ctx.globalAlpha = tree.opacity(item, 0, boundary);
+      ctx.globalCompositeOperation = canvasCompositeOp(blendMode);
+      if (tree.clipBase(item) || outerMasks.length || hasActiveLayerEffects(item.layer.meta?.effects)) {
+        const local = scratchCanvas(width, height);
+        const localCtx = local.getContext('2d')!;
+        drawTransformed(localCtx, tree, item, colored);
+        applyMasks(localCtx, outerMasks);
+        applyClip(localCtx, tree, item, samples, boundary);
+        const styled = applyEffects(local, item);
+        ctx.drawImage(styled, 0, 0);
+        styled.width = styled.height = 0;
+      } else {
+        drawTransformed(ctx, tree, item, colored);
+      }
+      ctx.restore();
+      if (colored !== item.canvas) colored.width = colored.height = 0;
     }
-
-    idx++;
-    if (isAdjustmentItem(item)) {
-      applyAdjustmentItem(ctx, tree, item, all, width, height);
-      continue;
-    }
-    ctx.save();
-    let op = tree.opacity(item);
-    if (activeGroupScopeId) {
-      const groupItem = tree.byId.get(activeGroupScopeId);
-      const groupOp = groupItem ? Math.max(0.0001, groupItem.layer.opacity) : 1;
-      op = Math.min(1, op / groupOp);
-    }
-    ctx.globalAlpha = Math.max(0, Math.min(1, op));
-    ctx.globalCompositeOperation = canvasCompositeOp(item.layer.blendMode);
-    const m = tree.transformMatrix(item, width, height);
-    if (!m.isIdentity) ctx.transform(m.a, m.b, m.c, m.d, m.tx, m.ty);
-    ctx.drawImage(tree.flattened(item, clipBase, { skipGroupMasks: Boolean(activeGroupScopeId) }), 0, 0);
-    ctx.restore();
+  } finally {
+    if (ownsSamples) for (const sample of samples.values()) sample.width = sample.height = 0;
   }
 }
 
-/**
- * An adjustment layer recolours what is already drawn: everything below it (root), only its
- * clip stack (clip to below) or only its group's layers below it (group) — those scopes are
- * composited alone first, and their change is added to the picture (shared applyAdjustmentStep).
- */
 function applyAdjustmentItem(
-  ctx: CanvasRenderingContext2D,
-  tree: LayerTree,
-  item: LayerCanvasItem,
-  all: readonly DrawableEntry[],
-  width: number,
-  height: number
+  ctx: CanvasRenderingContext2D, tree: LayerTree, item: LayerCanvasItem, width: number, height: number, boundary?: string,
 ) {
   const adjustment = normalizeAdjustment(item.layer.meta?.adjustment);
-  if (!adjustment) return;
+  if (!adjustment || width <= 0 || height <= 0) return;
   const compiled = compileAdjustment(adjustment);
-  const opacity = tree.opacity(item);
-  if (compiled.identity || !(opacity > 0) || width <= 0 || height <= 0) return;
-  // Groups are needed too: they decide the group scope
-  const scope = resolveAdjustmentScope(tree.items.map((i) => i.layer), item.layer.id);
+  const opacity = tree.opacity(item, 0, boundary);
+  if (compiled.identity || !(opacity > 0)) return;
+  const scope = tree.hierarchy.adjustmentScope(item.layer);
   if (scope.kind === 'none') return;
 
   let scopePixels: Uint8ClampedArray | null = null;
-  if (scope.kind !== 'root') {
-    const members = new Set(scope.memberIds);
-    const subset = all.filter((entry) => members.has(entry.item.layer.id));
-    if (subset.length === 0) return;
-    const scratch = document.createElement('canvas');
-    scratch.width = width;
-    scratch.height = height;
-    const sctx = scratch.getContext('2d', { willReadFrequently: true });
-    if (!sctx) return;
-    drawLayerList(sctx, tree, subset, all, width, height);
+  if (scope.kind !== 'root' && !(scope.kind === 'group' && scope.groupId === boundary)) {
+    if (scope.memberIds.length === 0) return;
+    const scratch = scratchCanvas(width, height);
+    const sctx = scratch.getContext('2d', { willReadFrequently: true })!;
+    drawLayerList(sctx, tree, boundary ?? null, width, height, boundary, new Set(scope.memberIds));
     scopePixels = sctx.getImageData(0, 0, width, height).data;
-    scratch.width = 0;
-    scratch.height = 0;
+    scratch.width = scratch.height = 0;
   }
 
   const image = ctx.getImageData(0, 0, width, height);
   applyAdjustmentStep({
-    width,
-    height,
-    target: image.data,
-    scope: scopePixels,
-    coverage: tree.adjustmentCoverage(item, width, height),
-    opacity,
-    compiled,
-    blendMode: item.layer.blendMode,
+    width, height, target: image.data, scope: scopePixels,
+    coverage: tree.adjustmentCoverage(item, width, height, boundary),
+    opacity, compiled, blendMode: item.layer.blendMode,
   });
   ctx.putImageData(image, 0, 0);
 }

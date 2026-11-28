@@ -37,6 +37,7 @@ import {
   GripVertical,
   HandMetal,
   Layers,
+  Lightbulb,
   Lock,
   Plus,
   Scissors,
@@ -77,6 +78,7 @@ import { ADJUSTMENT_KIND_ICONS, mergeIncludesAdjustment } from './adjustmentLaye
 import { LayerPaletteColorControl, LayerPaperRow, LayerTintControls, LayerTintSwatch, type ColorScope } from './LayerColorControls';
 import { LayerEffectsPopover } from './LayerEffectsPopover';
 import { getPaletteContrastColor } from '../utils/layerColorDisplay';
+import { resolveLayerClipBases } from '../engine/layerHierarchy';
 
 /** Public / ownerless layers: neutral, so they never look like one painter's (every user colour is saturated) */
 const PUBLIC_COLOR = '#9CA3AF';
@@ -170,7 +172,11 @@ const LayerOpacityRange: React.FC<{
 
 interface LayerPanelProps {
   layers: LayerModel[];
+  canvasWidth?: number;
+  canvasHeight?: number;
   activeLayerId: string | null;
+  referenceLayerId?: string | null;
+  onToggleReferenceLayer?: (layerId: string) => void;
   thumbnails?: Record<string, string>;
   subscribeThumbnails?: (cb: () => void) => () => void;
   getThumbnailsSnapshot?: () => Record<string, string>;
@@ -424,25 +430,55 @@ const EMPTY_THUMBS: Record<string, string> = {};
 const noopSubscribe = () => () => {};
 const LayerThumbImg: React.FC<{
   layerId: string;
+  aspectRatio: number;
   thumbnails: Record<string, string>;
   subscribeThumbnails?: (cb: () => void) => () => void;
   getThumbnailsSnapshot?: () => Record<string, string>;
   onRequestThumbnail?: (layerId: string) => void;
   className: string;
-}> = ({ layerId, thumbnails, subscribeThumbnails, getThumbnailsSnapshot, onRequestThumbnail, className }) => {
+}> = ({ layerId, aspectRatio, thumbnails, subscribeThumbnails, getThumbnailsSnapshot, onRequestThumbnail, className }) => {
+  const frameRef = useRef<HTMLSpanElement>(null);
   const url = useSyncExternalStore(
     subscribeThumbnails ?? noopSubscribe,
     () => (getThumbnailsSnapshot ? getThumbnailsSnapshot()[layerId] : thumbnails[layerId]),
   );
-  React.useEffect(() => {
-    if (!url) onRequestThumbnail?.(layerId);
+  useEffect(() => {
+    if (url !== undefined || !onRequestThumbnail || !frameRef.current) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      onRequestThumbnail(layerId);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      observer.disconnect();
+      onRequestThumbnail(layerId);
+    });
+    observer.observe(frameRef.current);
+    return () => observer.disconnect();
   }, [layerId, url, onRequestThumbnail]);
-  return url ? <img src={url} alt="" className={className} /> : null;
+  return (
+    <span
+      ref={frameRef}
+      className="pointer-events-none block overflow-hidden"
+      style={{
+        width: `${100 * Math.min(1, aspectRatio)}%`,
+        height: `${100 * Math.min(1, 1 / aspectRatio)}%`,
+        backgroundImage: 'repeating-conic-gradient(#3a3a3a 0% 25%, #4a4a4a 0% 50%)',
+        backgroundSize: '6px 6px',
+      }}
+    >
+      {url && <img src={url} alt="" className={className} />}
+    </span>
+  );
 };
 
 export const LayerPanel: React.FC<LayerPanelProps> = ({
   layers: allLayers,
+  canvasWidth = 1,
+  canvasHeight = 1,
   activeLayerId,
+  referenceLayerId,
+  onToggleReferenceLayer,
   thumbnails = EMPTY_THUMBS,
   subscribeThumbnails,
   getThumbnailsSnapshot,
@@ -501,6 +537,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   onOpenRulerModal,
 }) => {
   const { t } = useI18n();
+  const thumbAspectRatio = Math.min(3, Math.max(1 / 3, canvasWidth / canvasHeight));
   const { isGuest, user } = useAuth();
   const readOnly = (!isOfflineCanvas && isGuest) || Boolean(isReadOnly);
   // Masks are not rows: each shows as a second thumbnail on the layer it belongs to
@@ -737,14 +774,7 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   // Stable tree-coherent descending sort (display: top-to-bottom, each group sits directly above its children)
   const getSortedDescending = () => [...tidyLayerModels(layers).layers].reverse();
 
-  // Find clipping base layers (layers that have another layer immediately above them with clipToBelow=true)
-  const baseClippingIds = new Set<string>();
-  const descLayers = getSortedDescending();
-  for (let i = 0; i < descLayers.length - 1; i++) {
-    if (descLayers[i].clipToBelow) {
-      baseClippingIds.add(descLayers[i + 1].id);
-    }
-  }
+  const baseClippingIds = new Set(resolveLayerClipBases(layers).values());
 
   /** The layer itself or anything inside it (a group's content, nested groups too) */
   const isWithin = (l: LayerModel, rootId: string) => l.id === rootId || ancestorsOf(l).some((a) => a.id === rootId);
@@ -1216,6 +1246,16 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
             title={t.layers.clippingMaskTooltip} aria-label={t.layers.clippingMask} className={iconBtn(Boolean(active?.clipToBelow))}>
             <CornerDownRight className="h-3.5 w-3.5" />
           </button>
+          {onToggleReferenceLayer && (
+            <button type="button" disabled={!active || activeIsAdjustment}
+              aria-pressed={Boolean(active && active.id === referenceLayerId)}
+              onClick={() => active && onToggleReferenceLayer(active.id)}
+              title={active?.id === referenceLayerId ? t.layers.clearReferenceLayer : t.layers.setReferenceLayer}
+              aria-label={active?.id === referenceLayerId ? t.layers.clearReferenceLayer : t.layers.setReferenceLayer}
+              className={iconBtn(Boolean(active && active.id === referenceLayerId))}>
+              <Lightbulb className="h-3.5 w-3.5" />
+            </button>
+          )}
           <button type="button" disabled={!canEditActive || activeIsGroup || activeIsAdjustment} aria-pressed={!activeIsAdjustment && Boolean(active?.alphaLocked)}
             onClick={() => active && !activeIsAdjustment && onUpdateLayerProps?.(active.id, { alphaLocked: !active.alphaLocked })}
             title={t.layers.lockAlphaTooltip} aria-label={t.layers.lockAlpha} className={iconBtn(!activeIsAdjustment && Boolean(active?.alphaLocked))}>
@@ -1802,9 +1842,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                         }}
                         aria-label={`${layer.name} (${t.layers.loadSelection})`}
                         title={t.layers.loadSelection}
-                        className={`relative h-7 w-9 overflow-hidden rounded border ${isActive ? 'border-indigo-400 ring-1 ring-indigo-400/60' : 'border-neutral-700'}`}
-                        style={{ backgroundImage: 'repeating-conic-gradient(#3a3a3a 0% 25%, #4a4a4a 0% 50%)', backgroundSize: '6px 6px' }}>
-                        <LayerThumbImg layerId={layer.id} thumbnails={thumbnails} subscribeThumbnails={subscribeThumbnails} getThumbnailsSnapshot={getThumbnailsSnapshot} onRequestThumbnail={onRequestThumbnail} className="pointer-events-none h-full w-full object-contain" />
+                        className={`relative flex h-8 w-8 items-center justify-center overflow-hidden rounded border bg-neutral-900/90 ${isActive ? 'border-indigo-400 ring-1 ring-indigo-400/60' : 'border-neutral-700'}`}>
+                        <LayerThumbImg layerId={layer.id} aspectRatio={thumbAspectRatio} thumbnails={thumbnails} subscribeThumbnails={subscribeThumbnails} getThumbnailsSnapshot={getThumbnailsSnapshot} onRequestThumbnail={onRequestThumbnail} className="pointer-events-none h-full w-full object-contain" />
                         {layer.layerType === 'text' && <TypeIcon className="absolute bottom-0 right-0 h-3 w-3 rounded-sm bg-black/60 text-white" />}
                       </button>
                     )}
@@ -1813,8 +1852,8 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                         onClick={(e) => { e.stopPropagation(); onSelectLayer(activeLayerId === layerMask.id ? layer.id : layerMask.id); }}
                         aria-label={`${layer.name} ${t.layers.mask}`}
                         title={activeLayerId === layerMask.id ? t.layers.maskEditLayerTooltip : t.layers.maskEditMaskTooltip}
-                        className={`relative ml-0.5 h-7 w-6 overflow-hidden rounded border bg-black ${activeLayerId === layerMask.id ? 'border-indigo-400 ring-1 ring-indigo-400' : 'border-neutral-700'}`}>
-                        <LayerThumbImg layerId={layerMask.id} thumbnails={thumbnails} subscribeThumbnails={subscribeThumbnails} getThumbnailsSnapshot={getThumbnailsSnapshot} onRequestThumbnail={onRequestThumbnail} className={`pointer-events-none h-full w-full object-contain ${layerMask.meta?.maskInverted ? 'invert' : ''}`} />
+                        className={`relative ml-0.5 flex h-8 w-8 items-center justify-center overflow-hidden rounded border bg-neutral-900/90 ${activeLayerId === layerMask.id ? 'border-indigo-400 ring-1 ring-indigo-400' : 'border-neutral-700'}`}>
+                        <LayerThumbImg layerId={layerMask.id} aspectRatio={thumbAspectRatio} thumbnails={thumbnails} subscribeThumbnails={subscribeThumbnails} getThumbnailsSnapshot={getThumbnailsSnapshot} onRequestThumbnail={onRequestThumbnail} className={`pointer-events-none h-full w-full object-contain ${layerMask.meta?.maskInverted ? 'invert' : ''}`} />
                         {!layerMask.isVisible && <span className="absolute inset-0 flex items-center justify-center bg-black/50 text-xs font-bold text-rose-400">X</span>}
                       </button>
                     )}
@@ -1907,6 +1946,9 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                   <div className="flex shrink-0 items-center gap-1 pr-1 text-neutral-400">
                     {isClipped && <span title={t.layers.clippingMaskTooltip}><CornerDownRight className="h-3 w-3 text-pink-400" /></span>}
                     {isClippingBase && <span className="h-2 w-0.5 rounded bg-pink-400/70" title={t.layers.clippingBaseTooltip} />}
+                    {layer.id === referenceLayerId && (
+                      <span title={t.layers.referenceLayer}><Lightbulb aria-label={t.layers.referenceLayer} className="h-3 w-3 text-amber-400" /></span>
+                    )}
                     {!isAdjustment && hasActiveLayerEffects(layer.meta?.effects) && (
                       <button
                         type="button"
@@ -1982,6 +2024,10 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
           <div data-layer-menu role="menu" aria-label={t.layers.menuAria.replace('{name}', layer.name)} style={{ left: x, width: menuWidth, ...place }}
             className="fixed z-[90] overflow-y-auto overscroll-contain atelier-popover atelier-menu-in p-1">
             <div className="truncate px-2 py-1 text-[10px] text-neutral-500">{ids.length > 1 ? t.layers.selectedCountLayers.replace('{count}', String(ids.length)) : layer.name}</div>
+            {onToggleReferenceLayer && layer.layerType !== 'adjustment' && layer.layerType !== 'mask' && (
+              <MenuItem label={layer.id === referenceLayerId ? t.layers.clearReferenceLayer : t.layers.setReferenceLayer}
+                onClick={close(() => onToggleReferenceLayer(layer.id))} />
+            )}
             {layer.layerType === 'adjustment' && onEditAdjustmentLayer && (
               <MenuItem testId="layer-menu-edit-adjustment" label={t.layers.adjustment.edit} onClick={close(() => onEditAdjustmentLayer(layer.id))} />
             )}

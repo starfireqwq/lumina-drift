@@ -778,8 +778,8 @@ export const ToolOptionsBar: React.FC<ToolOptionsBarProps> = (p) => {
               className="atelier-field h-6 max-w-[132px] px-1.5 text-[11px]"
             >
               <option value="">{tr.toolOptions.selectLayer}</option>
-              {p.layers.filter((l) => !isPaintUnfilled || l.layerType !== 'group').map((l) => (
-                <option key={l.id} value={l.id}>{l.name}</option>
+              {p.layers.map((l) => (
+                <option key={l.id} value={l.id}>{l.layerType === 'group' ? '📁 ' : ''}{l.name}</option>
               ))}
             </select>
           )}

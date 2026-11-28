@@ -1006,7 +1006,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const onCanvasThumbnailRef = useRef(onCanvasThumbnail);
   onCanvasThumbnailRef.current = onCanvasThumbnail;
   // Whole-canvas preview for the canvas switcher, debounced and deferred while actively drawing
-  const scheduleCanvasThumbnail = () => {
+  const scheduleCanvasThumbnail = useCallback(() => {
     const lm = layerManagerRef.current;
     const canvasId = canvas?.id;
     if (!lm || !canvasId) return;
@@ -1021,10 +1021,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         if (url && layerManagerRef.current === lm) onCanvasThumbnailRef.current?.(canvasId, url);
       });
     }, 1200);
-  };
+  }, [canvas?.id]);
 
   const remoteThumbAtRef = useRef(new Map<string, number>());
-  const refreshLayerThumbnail = (layerId: string, fromRemote = false) => {
+  const refreshLayerThumbnail = useCallback((layerId: string, fromRemote = false) => {
     if (!layerManagerRef.current) return;
     if (fromRemote) {
       const now = performance.now();
@@ -1032,10 +1032,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       if (last !== undefined && now - last < 4000) return;
       remoteThumbAtRef.current.set(layerId, now);
     }
-    const thumb = layerManagerRef.current.getLayerThumbnail(layerId, 48, 48, fromRemote);
+    const thumb = layerManagerRef.current.getLayerThumbnail(layerId, 64, fromRemote);
     if (thumb) publishThumbnail(layerId, thumb);
     if (!fromRemote) scheduleCanvasThumbnail();
-  };
+  }, [publishThumbnail, scheduleCanvasThumbnail]);
+  const requestLayerPanelThumbnail = useCallback((id: string) => {
+    if (!isReplayingRef.current) refreshLayerThumbnail(id, false);
+  }, [refreshLayerThumbnail]);
 
   type LocalTileCommit = {
     clientOpId: string;
@@ -1610,6 +1613,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   const toolCtx: ToolContext = {
     canvas,
     layers,
+    layersRef,
     activeLayer,
     user,
     isAdmin,
@@ -1686,10 +1690,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
   // The stroke pipeline is built once per canvas: it reaches the latest commit handler through this
   const brushCommitRef = useRef(brush.commitStroke);
   brushCommitRef.current = brush.commitStroke;
-  const transform = useTransformTool(toolCtx);
+  const transform = useTransformTool(toolCtx, selection.refreshSelection, applyVectorPayload);
   const {
     isTransformActive, transformPreviewUrl, transformBox, setTransformBox, distortMode, setDistortMode, isMeshWarpActive, isPuppetWarpActive,
-    transformLayerIdRef, transformSourceCanvasRef, meshWarpInitialBoundsRef, startTransformMode, startFloatingPaste, applyTransform, cancelTransform, applyMeshWarp,
+    transformLayerIdRef, transformTargetIdsRef, transformSourceCanvasRef, meshWarpInitialBoundsRef, startTransformMode, startFloatingPaste, applyTransform, cancelTransform, applyMeshWarp,
   } = transform;
   // 對齊・均分: layers/groups, vector strokes, text bounds, and canvas guides
   const { alignTargets, distributeTargets } = useLayerAlign(toolCtx, {
@@ -1913,7 +1917,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       } else {
         scheduleCanvasThumbnail();
       }
-      for (const l of visibleLayers) if (l.id !== activeLayerId) refreshLayerThumbnail(l.id, true);
+      for (const l of visibleLayers) if (l.id !== activeLayerId) refreshLayerThumbnail(l.id, false);
 
       if (vectorEngineRef.current && activeLayerRef.current) {
         setVectorStrokesList(vectorEngineRef.current.getStrokes(activeLayerRef.current.id));
@@ -1998,6 +2002,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     let handleKeyDown: ((ev: KeyboardEvent) => void) | null = null;
     let handleKeyUp: ((ev: KeyboardEvent) => void) | null = null;
     let handleWindowBlur: (() => void) | null = null;
+    let handleWorkspaceResume: (() => void) | null = null;
     let activeFlipKeyCode: string | null = null;
     let vpSyncRaf = 0;
     const invalidateContainerRect = () => { containerRectRef.current = null; };
@@ -2155,7 +2160,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       layerManager.setWrapAround(wrapAroundRef.current);
       prepareLayerView = () => {
         const deviceScale = viewport.getState().zoom * app.renderer.resolution;
-        layerManager.setPixelated(deviceScale >= 1 - 1e-6);
+        layerManager.setPixelated(deviceScale >= 1 - 1e-6, false);
         layerManager.prepareView(deviceScale);
         layerManager.refreshWrapAroundView();
       };
@@ -2226,6 +2231,15 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       vpBoundsDirty = true;
       flushViewportBoundsAndZoom();
       layerManager.onStageChange = scheduleRender;
+      handleWorkspaceResume = () => {
+        if (destroyed || document.hidden) return;
+        layerManager.resumeViewHydration();
+        vpBoundsDirty = true;
+        flushViewportBoundsAndZoom();
+        scheduleRender();
+      };
+      document.addEventListener('visibilitychange', handleWorkspaceResume);
+      window.addEventListener('focus', handleWorkspaceResume);
       layerManager.setActiveLayer(activeLayerRef.current?.id ?? null);
       // Thumbnails of parked layers are decoded when the page is idle
       layerManager.onThumbnail = (layerId, url) => {
@@ -2453,7 +2467,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         if (transformLayerIdRef.current) {
           if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z' && !ev.shiftKey) {
             ev.preventDefault();
-            cancelTransform();
+            if (transform.applyingGroupRef.current) shortcutActionsRef.current.undo();
+            else cancelTransform();
+          } else if (transform.applyingGroupRef.current &&
+              (hit('action_redo') || ((ev.ctrlKey || ev.metaKey) &&
+                (ev.key.toLowerCase() === 'y' || (ev.key.toLowerCase() === 'z' && ev.shiftKey))))) {
+            ev.preventDefault();
+            shortcutActionsRef.current.redo();
           } else if (hit('action_filter_puppet_warp')) {
             ev.preventDefault();
             if (!ev.repeat) shortcutActionsRef.current.transform('puppet');
@@ -2461,6 +2481,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
             ev.preventDefault();
             if (!ev.repeat) shortcutActionsRef.current.activateCategoryShortcut('transform');
           }
+          return;
+        }
+        if (ev.key === 'Escape' && transform.cancelPendingTransform()) {
+          ev.preventDefault();
           return;
         }
         // Pen path in progress / selected vector node: Enter, Esc, Backspace, Delete belong to them
@@ -2871,6 +2895,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
       if (handleKeyDown) window.removeEventListener('keydown', handleKeyDown);
       if (handleKeyUp) window.removeEventListener('keyup', handleKeyUp);
       if (handleWindowBlur) window.removeEventListener('blur', handleWindowBlur);
+      if (handleWorkspaceResume) {
+        document.removeEventListener('visibilitychange', handleWorkspaceResume);
+        window.removeEventListener('focus', handleWorkspaceResume);
+      }
       activeFlipKeyCode = null;
       animEngineRef.current?.endFlip();
       pointer.reset();
@@ -2937,7 +2965,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         lastReplayedCanvasIdRef.current = canvas.id;
         loadCheckpointAndReplay(canvas.id, layerManagerRef.current, tileEngineRef.current);
       } else if (!isReplayingRef.current) {
-        for (const l of layers) refreshLayerThumbnail(l.id, l.id !== activeLayerRef.current?.id);
+        for (const l of layers) refreshLayerThumbnail(l.id, false);
       }
     }
   }, [isEngineReady, layers, canvas?.id]);
@@ -3083,6 +3111,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
     }
     if (isBrushTool(previousTool)) saveBrushTool(previousTool, brushProps);
     if (transformLayerIdRef.current) cancelTransform();
+    else if (tool !== previousTool) transform.cancelPendingTransform();
     vector.onToolChange(tool);
     setCurrentTool(tool);
     currentToolRef.current = tool;
@@ -4100,8 +4129,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
 
   useEffect(() => {
     closeFilters();
-    if (transformLayerIdRef.current && transformLayerIdRef.current !== activeLayer?.id) cancelTransform();
   }, [activeLayer?.id, canvas?.id]);
+  useEffect(() => {
+    transform.cancelStaleTransform();
+  }, [activeLayer?.id, canvas?.id, layers]);
 
   // Pixels other painters touched after my ops: changed bytes, plus their brush footprint (paint in
   // exactly my colour changes no bytes but is still theirs). Marked on the ops that were in my
@@ -5127,13 +5158,6 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         waiting.set(latestBroadcastOp.layerId, list);
         return;
       }
-      if (transformLayerIdRef.current === latestBroadcastOp.layerId) {
-        // Restore the lifted pixels before applying a patch based on the committed layer.
-        cancelTransform();
-        setPermissionWarning('其他裝置更新了此圖層，已取消變形。');
-        setTimeout(() => setPermissionWarning(null), 3000);
-      }
-
       const payload = latestBroadcastOp.payload as any;
       const clientOpId = typeof payload?.clientOpId === 'string' ? payload.clientOpId : null;
       const incomingSeq = latestBroadcastOp.seq || 0;
@@ -5151,6 +5175,13 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
           }
         }
         return;
+      }
+      if (transformLayerIdRef.current === latestBroadcastOp.layerId ||
+          transformTargetIdsRef.current.includes(latestBroadcastOp.layerId)) {
+        // Restore the lifted pixels before applying a patch based on the committed layer.
+        cancelTransform();
+        setPermissionWarning('其他裝置更新了此圖層，已取消變形。');
+        setTimeout(() => setPermissionWarning(null), 3000);
       }
       const hasVectorDelta = Boolean(
         payload && (Array.isArray(payload.vectorAdded) || Array.isArray(payload.vectorRemovedIds) || payload.vectorStroke)
@@ -8445,12 +8476,20 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
         <LayerPanel
           key={canvas.id}
           layers={layers}
+          canvasWidth={canvas.width}
+          canvasHeight={canvas.height}
           activeLayerId={activeLayer?.id || null}
+          referenceLayerId={referenceLayerId ?? (bucketReference === 'specific' ? bucketRefLayerId : null)}
+          onToggleReferenceLayer={(id) => {
+            const selected = referenceLayerId ?? (bucketReference === 'specific' ? bucketRefLayerId : null);
+            const next = selected === id ? null : id;
+            setBucketReference(next ? 'specific' : 'all');
+            setBucketRefLayerId(next);
+            setReferenceLayerId(next);
+          }}
           subscribeThumbnails={subscribeThumbnails}
           getThumbnailsSnapshot={getThumbnailsSnapshot}
-          onRequestThumbnail={(id) => {
-            if (!isReplayingRef.current) refreshLayerThumbnail(id, id !== activeLayerRef.current?.id);
-          }}
+          onRequestThumbnail={isEngineReady && isCanvasPresented ? requestLayerPanelThumbnail : undefined}
           onSelectLayer={(id) => { if (!autoActionBusyRef.current) onSelectLayer?.(id); }}
           onCreateLayer={onCreateLayer ? createLayerFromUser : (() => {})}
           onCreateRaster={() => createLayerFromDock('raster')}
@@ -8982,7 +9021,7 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                         <PuppetWarpOverlay
                           isActive
                           onChangeMode={setDistortMode}
-                          sourceCanvas={transformSourceCanvasRef.current}
+                          sourceCanvas={transform.puppetSourceCanvas}
                           initialBounds={meshWarpInitialBoundsRef.current}
                           canvasWidth={canvas.width}
                           canvasHeight={canvas.height}
@@ -9172,7 +9211,10 @@ export const CanvasWorkspace: React.FC<CanvasWorkspaceProps> = ({
                     canvasWidth={canvas.width}
                     canvasHeight={canvas.height}
                     initialBounds={meshWarpInitialBoundsRef.current}
-                    onApply={(warped, bounds) => { applyMeshWarp(warped, bounds); selection.refreshSelection(); }}
+                    onApply={(warped, bounds, warpSource) => {
+                      applyMeshWarp(warped, bounds, undefined, warpSource);
+                      selection.refreshSelection();
+                    }}
                     onCancel={cancelTransform}
                     canvasToScreen={(cx, cy) => (viewportRef.current ? viewportRef.current.canvasToScreen(cx, cy) : { x: cx, y: cy })}
                     screenToCanvas={(sx, sy) => (viewportRef.current ? viewportRef.current.screenToCanvas(sx, sy) : { x: sx, y: sy })}
