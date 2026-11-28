@@ -47,6 +47,8 @@ export interface UnpackedLuminaProject {
   layers: LayerModel[];
   /** layerId -> PNG data URL */
   layerPngDataUrls: Record<string, string>;
+  /** layerId -> deferred tile decode */
+  layerTileProviders?: Record<string, () => Promise<TileData[]>>;
   vectorStrokes: Record<string, VectorStroke[]>;
   previewDataUrl: string | null;
   filePath?: string;
@@ -365,7 +367,7 @@ export class LuminaProjectEngine {
     onProgress?: (done: number, total: number) => void,
     { shareEditableLayers = false, groupId }: { shareEditableLayers?: boolean; groupId?: string } = {},
   ): Promise<CanvasModel> {
-    const { meta, layerPngDataUrls, vectorStrokes, filePath } = unpacked;
+    const { meta, layerPngDataUrls, layerTileProviders, vectorStrokes, filePath } = unpacked;
     const layers = normalizeLuminaLayers(unpacked.layers);
     const src = meta.canvas;
     const offline = OfflineSessionStore.isOfflineMode();
@@ -390,14 +392,15 @@ export class LuminaProjectEngine {
 
       const ordered = [...layers].sort((a, b) => depth(a) - depth(b) || a.sortOrder - b.sortOrder);
       const idMap = new Map<string, string>();
-      const snapshots = Object.entries(layerPngDataUrls).filter(([id]) => {
+      const pixelIds = new Set([...Object.keys(layerPngDataUrls), ...Object.keys(layerTileProviders ?? {})]);
+      const pixelEntries = [...pixelIds].filter((id) => {
         const layer = byId.get(id);
         return layer && layer.layerType !== 'adjustment';
       });
       const vectors = ordered.filter(
         (layer) => layer.layerType === 'vector' && vectorStrokes?.[layer.id]?.length
       );
-      const total = ordered.length + snapshots.length + vectors.length;
+      const total = ordered.length + pixelEntries.length + vectors.length;
       let done = 0;
 
       for (const l of ordered) {
@@ -435,8 +438,13 @@ export class LuminaProjectEngine {
         }
       }
 
-      for (const [oldId, url] of snapshots) {
-        const tiles = await pngDataUrlToTiles(url, src.width, src.height);
+      for (const oldId of pixelEntries) {
+        const provider = layerTileProviders && Object.hasOwn(layerTileProviders, oldId)
+          ? layerTileProviders[oldId]
+          : undefined;
+        const tiles = provider
+          ? await provider()
+          : await pngDataUrlToTiles(layerPngDataUrls[oldId], src.width, src.height);
         const targetLayerId = idMap.get(oldId)!;
         for (let i = 0; i < tiles.length; i += 48) {
           await ApiService.writeLayerTiles(
@@ -447,6 +455,7 @@ export class LuminaProjectEngine {
           );
         }
         onProgress?.(++done, total);
+        if (provider) await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
 
       for (const layer of vectors) {

@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import { initializeCanvas, writePsdBuffer, readPsd } from 'ag-psd';
+import { createRequire } from 'node:module';
+import { after, mock, test } from 'node:test';
+import { decompressTileBuffer, type TileData } from '@atelier/shared';
+import type { PixelData } from 'ag-psd';
 import JSZip from 'jszip';
-import { unpackKraProject } from '../src/engine/ExternalProjectImporter.ts';
 import {
   clampImportedCanvasDimensions,
   convertKraTileToRgba8,
@@ -15,6 +16,22 @@ import {
   mapPsdBlendMode,
   parseKraTileStream,
 } from '../src/engine/kraDecoder.ts';
+import {
+  extractPsdLayerTiles,
+  extractPsdMaskTiles,
+  pixelDataToRgba8Byte,
+  renderPsdPreviewDataUrl,
+} from '../src/engine/psdTileDecoder.ts';
+import { LuminaProjectEngine } from '../src/engine/LuminaProjectEngine.ts';
+import { ApiService } from '../src/services/api.ts';
+import { OfflineSessionStore } from '../src/services/offlineStore.ts';
+
+// Keep the real parser and observe its output before the importer consumes it.
+const agPsd = createRequire(import.meta.url)('ag-psd') as typeof import('ag-psd');
+const { initializeCanvas, writePsdBuffer, readPsd } = agPsd;
+const trackedReadPsd = mock.method(agPsd, 'readPsd');
+after(() => trackedReadPsd.mock.restore());
+const { unpackKraProject, unpackPsdProject } = await import('../src/engine/ExternalProjectImporter.ts');
 
 function encodeAscii(str: string): Uint8Array {
   return new TextEncoder().encode(str);
@@ -29,6 +46,16 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
     off += c.length;
   }
   return out;
+}
+
+function tilePixel(tile: TileData, x: number, y: number): number[] {
+  const pixels = decompressTileBuffer(tile.data as Uint8Array, tile.compression, tile.width * tile.height * 4);
+  const index = (y * tile.width + x) * 4;
+  return Array.from(pixels.subarray(index, index + 4));
+}
+
+function imageBytes(width: number, height: number): PixelData & { data: Uint8ClampedArray } {
+  return { width, height, data: new Uint8ClampedArray(width * height * 4) };
 }
 
 test('project format detection accepts .lumina, .psd, and .kra case-insensitively', () => {
@@ -257,4 +284,255 @@ test('ag-psd round-trips layered PSD with group, blend mode, clipping, and opaci
   assert.equal(folder?.children?.[0].name, 'Multiply Shade');
   assert.equal(mapPsdBlendMode(folder?.children?.[0].blendMode), 'multiply');
   assert.equal(Boolean(folder?.children?.[0].clipping), true);
+});
+
+test('PSD raster tiles clip oversized bounds, retain edge dimensions, and skip transparent tiles', async () => {
+  const pixels = imageBytes(8, 8);
+  const setPixel = (x: number, y: number, rgba: number[]) => pixels.data.set(rgba, (y * pixels.width + x) * 4);
+  setPixel(1, 2, [255, 255, 255, 255]); // Left of the canvas
+  setPixel(2, 2, [201, 151, 51, 128]);
+  setPixel(6, 4, [40, 20, 10, 255]);
+  setPixel(7, 4, [255, 255, 255, 255]); // Right of the canvas
+  setPixel(2, 7, [255, 255, 255, 255]); // Below the canvas
+  const opts = { left: -2, top: -2, canvasWidth: 5, canvasHeight: 3, scale: 1, tileSize: 2 };
+
+  const tiles = await extractPsdLayerTiles(pixels, opts);
+  assert.deepEqual(tiles.map(({ col, row, width, height }) => [col, row, width, height]), [
+    [0, 0, 2, 2], [2, 1, 1, 1],
+  ]);
+  assert.equal(tiles[0].compression, 'lz4');
+  assert.deepEqual(tilePixel(tiles[0], 0, 0), [101, 76, 26, 128]);
+  assert.deepEqual(tilePixel(tiles[0], 1, 1), [0, 0, 0, 0]);
+  assert.deepEqual(tilePixel(tiles[1], 0, 0), [40, 20, 10, 255]);
+  assert.deepEqual(await extractPsdLayerTiles(pixels, { ...opts, left: -8 }), []);
+});
+
+test('PSD raster tiles convert 8-, 16-, and 32-bit samples before premultiplying', async () => {
+  const opts = { left: 0, top: 0, canvasWidth: 1, canvasHeight: 1, scale: 1 };
+  const integer = new Uint16Array([0xffff, 0x8001, 0x01ff, 0x80ff]);
+  const linear = new Float32Array([0.25, 2, -1, 0.5]);
+  const [tile16] = await extractPsdLayerTiles({ width: 1, height: 1, data: integer }, opts);
+  const [tile32] = await extractPsdLayerTiles({ width: 1, height: 1, data: linear }, opts);
+  assert.deepEqual(tilePixel(tile16, 0, 0), [128, 64, 1, 128]);
+  assert.deepEqual(tilePixel(tile32, 0, 0), [68, 128, 0, 128]);
+  assert.equal(pixelDataToRgba8Byte(Uint8Array.of(173), 0, false), 173);
+  assert.equal(pixelDataToRgba8Byte(Uint8ClampedArray.of(190), 0, true), 190);
+});
+
+test('PSD raster tiles bilinearly sample all four premultiplied pixels when scaling down', async () => {
+  const pixels = {
+    width: 2, height: 2,
+    data: Uint8Array.of(255, 0, 0, 255, 0, 255, 0, 0, 0, 0, 255, 255, 255, 255, 255, 0),
+  };
+  const [tile] = await extractPsdLayerTiles(pixels, {
+    left: 2, top: 0, canvasWidth: 2, canvasHeight: 1, scale: 0.5,
+  });
+  assert.deepEqual(tilePixel(tile, 0, 0), [0, 0, 0, 0]);
+  assert.deepEqual(tilePixel(tile, 1, 0), [64, 0, 64, 128]);
+});
+
+test('PSD mask tiles fill their background and store opaque premultiplied luminance in the mask region', async () => {
+  const pixels = { width: 1, height: 1, data: Uint8Array.of(200, 100, 50, 128) };
+  const opts = { canvasWidth: 6, canvasHeight: 2, scale: 1, tileSize: 2 };
+  for (const bg of [0, 255]) {
+    const tiles = await extractPsdMaskTiles({ left: 1, top: 1, defaultColor: bg }, pixels, opts);
+    assert.deepEqual(tiles.map(({ col, row }) => [col, row]), [[0, 0], [1, 0], [2, 0]]);
+    assert.deepEqual(tilePixel(tiles[0], 0, 0), [bg, bg, bg, 255]);
+    assert.deepEqual(tilePixel(tiles[0], 1, 1), [62, 62, 62, 255]);
+    assert.deepEqual(tilePixel(tiles[1], 1, 1), [bg, bg, bg, 255]);
+    assert.equal(tiles[1].data, tiles[2].data);
+  }
+  const [solid] = await extractPsdMaskTiles({ defaultColor: 255 }, undefined, opts);
+  assert.deepEqual(tilePixel(solid, 1, 1), [255, 255, 255, 255]);
+  assert.deepEqual(await extractPsdMaskTiles({}, undefined, opts), []);
+});
+
+test('PSD preview creates one bounded canvas and composites sampled pixels over white', (t) => {
+  const pixels = { width: 2, height: 2, data: Uint8Array.of(
+    255, 0, 0, 255, 0, 255, 0, 0, 0, 0, 255, 255, 255, 255, 255, 0,
+  ) };
+  assert.equal(renderPsdPreviewDataUrl(pixels), null);
+  const context = {
+    createImageData: imageBytes,
+    putImageData(preview: PixelData, x: number, y: number) {
+      assert.deepEqual([x, y, preview.width, preview.height], [0, 0, 1, 1]);
+      assert.deepEqual(Array.from(preview.data), [191, 128, 191, 255]);
+    },
+  };
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext: () => context,
+    toDataURL(type: string) {
+      assert.equal(type, 'image/png');
+      assert.deepEqual([this.width, this.height], [1, 1]);
+      return 'data:image/png;base64,preview';
+    },
+  };
+  const createElement = t.mock.fn((tag: string) => {
+    assert.equal(tag, 'canvas');
+    return canvas;
+  });
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement } });
+  t.after(() => Reflect.deleteProperty(globalThis, 'document'));
+  assert.equal(renderPsdPreviewDataUrl(pixels, 1), 'data:image/png;base64,preview');
+  assert.equal(createElement.mock.callCount(), 1);
+});
+
+test('layered PSD imports deferred raster and mask tiles, releasing shared raw data after both providers', async () => {
+  initializeCanvas(
+    () => { throw new Error('PSD tiles must not create a canvas'); },
+    (width, height) => imageBytes(width, height) as ImageData,
+  );
+  const oversize = imageBytes(70, 70);
+  oversize.data.set([255, 255, 255, 255], 0);
+  oversize.data.set([200, 100, 50, 128], (3 * 70 + 2) * 4);
+  oversize.data.set([10, 20, 30, 255], (66 * 70 + 65) * 4);
+  const image = (rgba: number[]) => ({ width: 1, height: 1, data: Uint8ClampedArray.from(rgba) });
+  const buf = writePsdBuffer({
+    width: 64,
+    height: 64,
+    children: [{
+      name: 'Group',
+      blendMode: 'pass through',
+      mask: { left: 2, top: 0, defaultColor: 0, imageData: image([190, 190, 190, 255]) },
+      children: [
+        { name: 'Base', imageData: image([80, 90, 100, 255]) },
+        {
+          name: 'Overflow',
+          left: -2, top: -3,
+          imageData: oversize,
+          blendMode: 'multiply',
+          opacity: 0.5, hidden: true, clipping: true,
+          protected: { composite: true, transparency: true },
+          mask: { left: 1, top: 1, defaultColor: 255, disabled: true, imageData: image([72, 72, 72, 255]) },
+        },
+        { name: 'Legacy Brightness', adjustment: { type: 'brightness/contrast', brightness: 12, useLegacy: true } },
+        { name: 'Unsupported', adjustment: { type: 'invert' } },
+      ],
+    }],
+  });
+  const view = Buffer.concat([Buffer.alloc(9), buf, Buffer.alloc(7)]).subarray(9, 9 + buf.length);
+  const project = await unpackPsdProject(view, 'large.psd');
+  const parse = trackedReadPsd.mock.calls.at(-1)!;
+  assert.equal(parse.arguments[0], view);
+  assert.deepEqual(parse.arguments[1], { useRawData: true, skipThumbnail: true, skipLinkedFilesData: true });
+  const parsed = parse.result!;
+  assert.equal(parsed.rawCompositeData, undefined);
+  assert.equal(parsed.rawCompositeDataInfo, undefined);
+
+  const byName = new Map(project.layers.map((layer) => [layer.name, layer]));
+  const group = byName.get('Group')!;
+  const overflow = byName.get('Overflow')!;
+  const base = byName.get('Base')!;
+  const adjustment = byName.get('Legacy Brightness')!;
+  const groupMask = project.layers.find((layer) => layer.parentId === group.id && layer.layerType === 'mask')!;
+  const overflowMask = project.layers.find((layer) => layer.parentId === overflow.id && layer.layerType === 'mask')!;
+  assert.equal(group.layerType, 'group');
+  assert.equal(overflow.parentId, group.id);
+  assert.equal(overflow.blendMode, 'multiply');
+  assert.equal(overflow.opacity, 128 / 255);
+  assert.equal(overflow.clipToBelow, true);
+  assert.equal(overflow.isVisible, false);
+  assert.equal(overflow.isLocked, true);
+  assert.equal(overflow.alphaLocked, true);
+  assert.equal(overflowMask.isVisible, false);
+  assert.equal(adjustment.meta?.adjustment?.kind, 'brightness_contrast');
+  assert.equal(byName.has('Unsupported'), false);
+  assert.match(project.adjustmentNotes!.skipped[0], /^Unsupported/);
+  assert.match(project.adjustmentNotes!.partial[0], /^Legacy Brightness/);
+  assert.deepEqual(project.layerPngDataUrls, {});
+
+  const providers = project.layerTileProviders!;
+  assert.deepEqual(new Set(Object.keys(providers)), new Set([base.id, overflow.id, overflowMask.id, groupMask.id]));
+  const rawGroup = parsed.children![0];
+  const rawBase = rawGroup.children!.find((layer) => layer.name === 'Base')!;
+  const rawOverflow = rawGroup.children!.find((layer) => layer.name === 'Overflow')!;
+  assert.ok(rawOverflow.rawData);
+  assert.ok(rawBase.rawData);
+  assert.ok(rawGroup.rawData);
+  assert.ok(rawGroup.children!.filter((layer) => layer.adjustment).every((layer) => !layer.rawData));
+
+  const overflowDecode = providers[overflow.id]();
+  assert.equal(providers[overflow.id](), overflowDecode);
+  const [overflowTile] = await overflowDecode;
+  assert.deepEqual(tilePixel(overflowTile, 0, 0), [100, 50, 25, 128]);
+  assert.deepEqual(tilePixel(overflowTile, 63, 63), [10, 20, 30, 255]);
+  assert.ok(rawOverflow.rawData);
+  const [maskTile] = await providers[overflowMask.id]();
+  assert.deepEqual(tilePixel(maskTile, 0, 0), [255, 255, 255, 255]);
+  assert.deepEqual(tilePixel(maskTile, 1, 1), [72, 72, 72, 255]);
+  assert.equal(rawOverflow.rawData, undefined);
+  await assert.rejects(providers[overflow.id](), /已解碼/);
+
+  const [baseTile] = await providers[base.id]();
+  const [groupMaskTile] = await providers[groupMask.id]();
+  assert.deepEqual(tilePixel(baseTile, 0, 0), [80, 90, 100, 255]);
+  assert.deepEqual(tilePixel(groupMaskTile, 2, 0), [190, 190, 190, 255]);
+  assert.deepEqual(tilePixel(groupMaskTile, 3, 0), [0, 0, 0, 255]);
+  assert.equal(rawBase.rawData, undefined);
+  assert.equal(rawGroup.rawData, undefined);
+});
+
+test('flattened PSD exposes its composite as a deferred background layer and releases it after decoding', async () => {
+  const buf = writePsdBuffer({
+    width: 1,
+    height: 1,
+    colorMode: 2, // Indexed PSD files have no layer records.
+    palette: [{ r: 30, g: 80, b: 140 }],
+    imageData: { width: 1, height: 1, data: Uint8ClampedArray.of(30, 80, 140, 255) },
+  });
+  const project = await unpackPsdProject(buf, 'flat.psd');
+  const parsed = trackedReadPsd.mock.calls.at(-1)!.result!;
+  assert.ok(!parsed.children?.length);
+  assert.ok(parsed.rawCompositeData);
+  assert.deepEqual(project.layerPngDataUrls, {});
+  assert.equal(project.layers.length, 1);
+  const [background] = project.layers;
+  assert.equal(background.name, '背景');
+  const [tile] = await project.layerTileProviders![background.id]();
+  assert.deepEqual(tilePixel(tile, 0, 0), [30, 80, 140, 255]);
+  assert.deepEqual(tilePixel(tile, 1, 0), [0, 0, 0, 0]);
+  assert.equal(parsed.rawCompositeData, undefined);
+  assert.equal(parsed.rawCompositeDataInfo, undefined);
+});
+
+test('project restore prefers tile providers, writes 48 tiles per batch, and reports empty providers', async (t) => {
+  const buf = writePsdBuffer({
+    width: 64,
+    height: 64,
+    children: [{ name: 'Pixels' }, { name: 'Empty' }],
+  });
+  const project = await unpackPsdProject(buf);
+  const [pixels, empty] = project.layers;
+  const tiles = Array.from({ length: 49 }, (_, col): TileData => ({
+    col, row: 0, width: 1, height: 1, compression: 'raw', data: Uint8Array.of(0, 0, 0, 255),
+  }));
+  let yielded = false;
+  project.layerPngDataUrls[pixels.id] = 'unused when the tile provider is present';
+  project.layerTileProviders = {
+    [pixels.id]: async () => {
+      setTimeout(() => { yielded = true; }, 0);
+      return tiles;
+    },
+    [empty.id]: async () => {
+      assert.equal(yielded, true);
+      return [];
+    },
+  };
+
+  t.mock.method(OfflineSessionStore, 'persistRecordNow', async () => {});
+  const created = await OfflineSessionStore.createCanvas(project.meta.canvas);
+  t.after(() => OfflineSessionStore.deleteCanvas(created.canvas.id));
+  t.mock.method(ApiService, 'createCanvas', async () => created);
+  const write = t.mock.method(ApiService, 'writeLayerTiles', async () => 0);
+  const progress = t.mock.fn();
+
+  await LuminaProjectEngine.restoreToCanvas(project, progress);
+  const target = (await OfflineSessionStore.listLayers(created.canvas.id)).find((layer) => layer.name === pixels.name)!;
+  assert.deepEqual(write.mock.calls.map(({ arguments: args }) => args.slice(0, 3)), [
+    [created.canvas.id, target.id, tiles.slice(0, 48)],
+    [created.canvas.id, target.id, tiles.slice(48)],
+  ]);
+  assert.deepEqual(progress.mock.calls.map(({ arguments: args }) => args), [[1, 4], [2, 4], [3, 4], [4, 4]]);
 });

@@ -1,6 +1,14 @@
 import JSZip from 'jszip';
-import { readPsd, type Layer as PsdLayer, type Psd } from 'ag-psd';
+import {
+  getCompositeImageData,
+  getLayerImageData,
+  getLayerMaskImageData,
+  readPsd,
+  type Layer as PsdLayer,
+  type Psd,
+} from 'ag-psd';
 import { psdToLuminaAdjustment } from './psdAdjustmentMapping';
+import { extractPsdLayerTiles, extractPsdMaskTiles, renderPsdPreviewDataUrl } from './psdTileDecoder';
 import { clampDpi, tidyLayerModels, type BlendMode, type LayerModel } from '@atelier/shared';
 import {
   LuminaProjectEngine,
@@ -99,42 +107,6 @@ function canvasHasNonZeroAlpha(canvas: HTMLCanvasElement): boolean {
   return false;
 }
 
-function renderPsdMaskCanvas(
-  mask: NonNullable<PsdLayer['mask']>,
-  targetWidth: number,
-  targetHeight: number,
-  scale: number
-): HTMLCanvasElement | null {
-  if (!mask.canvas && mask.defaultColor === undefined) return null;
-  const c = document.createElement('canvas');
-  c.width = targetWidth;
-  c.height = targetHeight;
-  const ctx = c.getContext('2d', { willReadFrequently: true });
-  if (!ctx) return null;
-  const bg = mask.defaultColor === 255 ? 255 : 0;
-  ctx.fillStyle = `rgb(${bg},${bg},${bg})`;
-  ctx.fillRect(0, 0, targetWidth, targetHeight);
-  if (mask.canvas && mask.canvas.width > 0 && mask.canvas.height > 0) {
-    const dx = Math.round((mask.left ?? 0) * scale);
-    const dy = Math.round((mask.top ?? 0) * scale);
-    const dw = Math.max(1, Math.round(mask.canvas.width * scale));
-    const dh = Math.max(1, Math.round(mask.canvas.height * scale));
-    ctx.drawImage(mask.canvas, dx, dy, dw, dh);
-  }
-  // Ensure opaque greyscale RGBA so maskCoverage reads red * alpha cleanly
-  const img = ctx.getImageData(0, 0, targetWidth, targetHeight);
-  const d = img.data;
-  for (let i = 0; i < d.length; i += 4) {
-    const lum = Math.round((d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) * (d[i + 3] / 255));
-    d[i] = lum;
-    d[i + 1] = lum;
-    d[i + 2] = lum;
-    d[i + 3] = 255;
-  }
-  ctx.putImageData(img, 0, 0);
-  return c;
-}
-
 function buildCompositePreview(
   layers: LayerModel[],
   canvasesById: Map<string, HTMLCanvasElement>,
@@ -197,9 +169,7 @@ export async function unpackPsdProject(
 
   let psd: Psd;
   try {
-    const copy = new Uint8Array(bytes.byteLength);
-    copy.set(bytes);
-    psd = readPsd(copy.buffer, { skipThumbnail: true });
+    psd = readPsd(bytes, { useRawData: true, skipThumbnail: true, skipLinkedFilesData: true });
   } catch (err: any) {
     throw new Error(`無法解析 PSD 檔案：${err?.message || String(err)}`);
   }
@@ -212,8 +182,9 @@ export async function unpackPsdProject(
   const title = stripTitleFromFileName(fileName, '匯入的 PSD');
 
   const layers: LayerModel[] = [];
-  const layerPngDataUrls: Record<string, string> = {};
-  const canvasesById = new Map<string, HTMLCanvasElement>();
+  const layerTileProviders: NonNullable<UnpackedLuminaProject['layerTileProviders']> = {};
+  const tileOptions = { canvasWidth: width, canvasHeight: height, scale };
+  const rawDataRefs = new WeakMap<PsdLayer, number>();
   let seq = 0;
   let sortCounter = 10;
 
@@ -222,10 +193,42 @@ export async function unpackPsdProject(
   const importNotes: string[] = [];
   const partialNotes: string[] = [];
 
-  const addMaskIfPresent = (ownerId: string, mask: PsdLayer['mask'] | undefined) => {
+  const addTileProvider = (
+    id: string,
+    decode: (typeof layerTileProviders)[string],
+    release: () => void,
+  ) => {
+    let pending: ReturnType<typeof decode> | undefined;
+    let consumed = false;
+    layerTileProviders[id] = () => {
+      if (consumed) return Promise.reject(new Error('PSD 圖層像素已解碼，請重新開啟 PSD 檔案。'));
+      return pending ??= decode().finally(() => {
+        consumed = true;
+        pending = undefined;
+        release();
+      });
+    };
+  };
+
+  const retainRawData = (node: PsdLayer) => {
+    rawDataRefs.set(node, (rawDataRefs.get(node) ?? 0) + 1);
+    return () => {
+      const remaining = (rawDataRefs.get(node) ?? 1) - 1;
+      if (remaining) {
+        rawDataRefs.set(node, remaining);
+      } else {
+        rawDataRefs.delete(node);
+        delete node.rawData;
+      }
+    };
+  };
+
+  const addMaskIfPresent = (ownerId: string, node: PsdLayer) => {
+    const { mask } = node;
     if (!mask) return;
-    const maskCanvas = renderPsdMaskCanvas(mask, width, height, scale);
-    if (!maskCanvas) return;
+    // PSD channel -2 stores the user mask. Constant masks can omit that channel.
+    const hasMaskPixels = node.rawData?.channels.some(({ id, data }) => id === -2 && data?.byteLength);
+    if (!hasMaskPixels && mask.defaultColor === undefined) return;
     const maskId = nextId('psd_mask');
     layers.push(
       makeLayerModel({
@@ -242,8 +245,9 @@ export async function unpackPsdProject(
       })
     );
     sortCounter += 10;
-    canvasesById.set(maskId, maskCanvas);
-    layerPngDataUrls[maskId] = maskCanvas.toDataURL('image/png');
+    addTileProvider(maskId, async () => (
+      extractPsdMaskTiles(mask, hasMaskPixels ? getLayerMaskImageData(node) : undefined, tileOptions)
+    ), retainRawData(node));
   };
 
   // ag-psd stores `children` bottom-to-top (index 0 = bottommost)
@@ -277,13 +281,14 @@ export async function unpackPsdProject(
           })
         );
         sortCounter += 10;
-        addMaskIfPresent(id, node.mask);
+        addMaskIfPresent(id, node);
       } else if (node.adjustment) {
         // Photoshop adjustment layers: six kinds become Lumina adjustment layers, the rest are left out
         const mapped = psdToLuminaAdjustment(node.adjustment);
         const label = node.name || mapped.kindLabel;
         if (!mapped.adjustment) {
           importNotes.push(`${label}（${mapped.kindLabel}）`);
+          delete node.rawData;
           continue;
         }
         if (mapped.partial) partialNotes.push(`${label}（${mapped.kindLabel}）`);
@@ -305,7 +310,7 @@ export async function unpackPsdProject(
           meta: { adjustment: mapped.adjustment },
         });
         sortCounter += 10;
-        addMaskIfPresent(id, node.mask);
+        addMaskIfPresent(id, node);
       } else {
         layers.push(
           makeLayerModel({
@@ -326,32 +331,41 @@ export async function unpackPsdProject(
         );
         sortCounter += 10;
 
-        if (node.canvas && node.canvas.width > 0 && node.canvas.height > 0) {
-          const full = document.createElement('canvas');
-          full.width = width;
-          full.height = height;
-          const ctx = full.getContext('2d', { willReadFrequently: true });
-          if (ctx) {
-            const dx = Math.round((node.left ?? 0) * scale);
-            const dy = Math.round((node.top ?? 0) * scale);
-            const dw = Math.max(1, Math.round(node.canvas.width * scale));
-            const dh = Math.max(1, Math.round(node.canvas.height * scale));
-            ctx.drawImage(node.canvas, dx, dy, dw, dh);
-            if (canvasHasNonZeroAlpha(full)) {
-              canvasesById.set(id, full);
-              layerPngDataUrls[id] = full.toDataURL('image/png');
-            }
-          }
+        const left = node.left ?? 0;
+        const top = node.top ?? 0;
+        if (node.rawData && (node.right ?? 0) > left && (node.bottom ?? 0) > top) {
+          addTileProvider(id, async () => {
+            const pixels = getLayerImageData(node);
+            return pixels ? extractPsdLayerTiles(pixels, { ...tileOptions, left, top }) : [];
+          }, retainRawData(node));
         }
 
-        addMaskIfPresent(id, node.mask);
+        addMaskIfPresent(id, node);
       }
+      if (!rawDataRefs.has(node)) delete node.rawData;
     }
   };
 
-  if (psd.children && psd.children.length > 0) {
+  const releaseComposite = () => {
+    delete psd.rawCompositeData;
+    delete psd.rawCompositeDataInfo;
+  };
+  const hasLayers = !!psd.children?.length;
+  let previewDataUrl: string | null = null;
+  if (psd.rawCompositeData) {
+    try {
+      if (typeof document !== 'undefined') {
+        const pixels = getCompositeImageData(psd);
+        if (pixels) previewDataUrl = renderPsdPreviewDataUrl(pixels, 512);
+      }
+    } finally {
+      if (hasLayers) releaseComposite();
+    }
+  }
+
+  if (psd.children?.length) {
     walk(psd.children, null);
-  } else if (psd.canvas && psd.canvas.width > 0 && psd.canvas.height > 0) {
+  } else if (psd.rawCompositeData) {
     // Flattened PSD fallback
     const id = nextId('psd_bg');
     layers.push(
@@ -368,21 +382,10 @@ export async function unpackPsdProject(
         now,
       })
     );
-    const full = document.createElement('canvas');
-    full.width = width;
-    full.height = height;
-    const ctx = full.getContext('2d');
-    if (ctx) {
-      ctx.drawImage(
-        psd.canvas,
-        0,
-        0,
-        Math.max(1, Math.round(psd.canvas.width * scale)),
-        Math.max(1, Math.round(psd.canvas.height * scale))
-      );
-      canvasesById.set(id, full);
-      layerPngDataUrls[id] = full.toDataURL('image/png');
-    }
+    addTileProvider(id, async () => {
+      const pixels = getCompositeImageData(psd);
+      return pixels ? extractPsdLayerTiles(pixels, { ...tileOptions, left: 0, top: 0 }) : [];
+    }, releaseComposite);
   }
 
   if (layers.length === 0) {
@@ -403,9 +406,6 @@ export async function unpackPsdProject(
   }
 
   const tidied = tidyLayerModels(layers).layers;
-  const previewDataUrl =
-    (psd.canvas ? createPreviewDataUrlFromSource(psd.canvas, 512) : null) ||
-    buildCompositePreview(tidied, canvasesById, width, height);
 
   return {
     meta: {
@@ -426,7 +426,8 @@ export async function unpackPsdProject(
       checksum: '',
     },
     layers: tidied,
-    layerPngDataUrls,
+    layerPngDataUrls: {},
+    layerTileProviders,
     vectorStrokes: {},
     previewDataUrl,
     ...(importNotes.length || partialNotes.length ? { adjustmentNotes: { skipped: importNotes, partial: partialNotes } } : {}),
